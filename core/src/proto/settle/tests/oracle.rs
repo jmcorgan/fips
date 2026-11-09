@@ -70,10 +70,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use super::super::model::history::Hs;
 use super::explore::{Check, Stats, explore, replay};
 use super::shadow;
 use super::starts::Start;
-use super::world::{Dir, Kind, Ms, State, View, World};
+use super::world::{Dir, Kind, Left, Ms, Shape, State, View, World, ends};
 
 /// How long a heal runs.
 pub const HEAL: Ms = 60_000;
@@ -120,11 +121,37 @@ pub struct Breach {
     pub node: usize,
     /// What was found.
     pub what: String,
+    /// The handshakes the clause that fired is about, where a known shape
+    /// can have left them: for a split, a frame that would not open or a
+    /// pair's machines not converged, each end's session of the other by
+    /// its origin and its current handshake, the lower-numbered node's
+    /// first; for a pending, its holder's session the same way and the
+    /// pending's own handshake. Empty for any other clause.
+    pub about: Vec<Hs>,
 }
 
 fn breach(oracle: Oracle, node: usize, what: String) -> Breach {
-    Breach { oracle, node, what }
+    Breach {
+        oracle,
+        node,
+        what,
+        about: Vec::new(),
+    }
 }
+
+/// A breach of a clause about `about`.
+fn tied(oracle: Oracle, node: usize, what: String, about: &[Hs]) -> Breach {
+    Breach {
+        about: about.to_vec(),
+        ..breach(oracle, node, what)
+    }
+}
+
+/// The start of a split's text, at both of its clauses.
+const SPLIT: &str = "split:";
+
+/// The start of a pending's text.
+const PENDING: &str = "pending:";
 
 /// The properties that hold at every step.
 pub fn every_step(w: &World) -> Vec<Breach> {
@@ -224,21 +251,25 @@ pub fn healed(w: &World) -> Vec<Breach> {
             let Some(q) = views[y].peers.iter().find(|q| q.peer == v.me) else {
                 continue;
             };
+            let (m, n) = ends(x, [p.origin, p.cur], y, [q.origin, q.cur]);
+            let pair = [m, n].concat();
             if x < y && !fault!(OneSessionNoSplit) && p.cur != q.cur {
-                out.push(breach(
+                out.push(tied(
                     Oracle::OneSession,
                     x,
-                    format!("split: {:?}: {:?} here, {:?} there", p.peer, p.cur, q.cur),
+                    format!("{SPLIT} {:?}: {:?} here, {:?} there", p.peer, p.cur, q.cur),
+                    &pair,
                 ));
             }
             if !fault!(OneSessionNoFresh) && !w.parties[y].holds(v.me, p.cur) {
-                out.push(breach(
+                out.push(tied(
                     Oracle::OneSession,
                     x,
                     format!(
                         "fresh: {:?}: a frame under {:?} would not open there",
                         p.peer, p.cur
                     ),
+                    &pair,
                 ));
             }
             if x < y
@@ -246,7 +277,12 @@ pub fn healed(w: &World) -> Vec<Breach> {
                 && let Err(m) =
                     crate::proto::rekey::tests::oracles::converged(Some(a), Some(b), w.net.now)
             {
-                out.push(breach(Oracle::Machine, x, format!("{m} ({:?})", p.peer)));
+                out.push(tied(
+                    Oracle::Machine,
+                    x,
+                    format!("{m} ({:?})", p.peer),
+                    &pair,
+                ));
             }
             if let Some((hs, false)) = p.pending
                 && !fault!(OneSessionNoPending)
@@ -255,22 +291,27 @@ pub fn healed(w: &World) -> Vec<Breach> {
                 && q.cur != hs
                 && !q.dials.contains(&hs)
             {
-                out.push(breach(
+                out.push(tied(
                     Oracle::OneSession,
                     x,
-                    format!("pending: {:?}: {hs:?}, which the peer cannot adopt", p.peer),
+                    format!(
+                        "{PENDING} {:?}: {hs:?}, which the peer cannot adopt",
+                        p.peer
+                    ),
+                    &[p.origin, p.cur, hs],
                 ));
             }
         }
     }
     if !fault!(OneSessionNoSplit) {
-        for &(x, peer) in &w.ended {
-            out.push(breach(
+        for &(x, peer, pair) in &w.ended {
+            out.push(tied(
                 Oracle::OneSession,
                 x,
                 format!(
-                    "split: {peer:?}: held there on another session, removed here by the link-dead timer"
+                    "{SPLIT} {peer:?}: held there on another session, removed here by the link-dead timer"
                 ),
+                &pair,
             ));
         }
     }
@@ -328,15 +369,54 @@ pub fn heal(w: &mut World) {
     super::starts::settle(w);
 }
 
-/// Whether a breach at a healed world is exempt: a split on a path that
-/// showed one of the known shapes.
+/// Whether a breach at a healed world is exempt: a split a known shape
+/// left.
 pub type Exempt<'a> = &'a (dyn Fn(&World, &Breach) -> bool + Sync);
 
-/// The exemption of the model's convergence with itself: a `OneSession`
-/// breach on a path where a known shape other than the two defects left
-/// for later was seen. Nothing else is exempt.
+/// The exemption of the model's convergence with itself: a breach of
+/// convergence that a known shape other than the two defects left for
+/// later left ([`left`]). Nothing else is exempt.
 pub fn by_shape(w: &World, b: &Breach) -> bool {
-    converging(b) && w.shapes.iter().any(|s| !s.pinned())
+    left(w, b, |s| !s.pinned())
+}
+
+/// Whether a shape `take` admits left what `b` is about, by a handshake
+/// they share: one of the two origins a split shape left
+/// ([`Left::Split`]), or the pending a dial on an aged link left
+/// ([`Left::Pending`]), among the sessions and pending the breach names.
+/// Origins kept and not current sessions only, since a heal may rekey
+/// both ends after the shape; a shared handshake and not all of them,
+/// since a shape's split often forms after the delivery that showed it,
+/// as when a late crossing dial parts a restarted node installed from its
+/// peer's rekey, and either end can be the one that moved.
+///
+/// Each shape spares its own clauses only: a split shape a split; the dial
+/// on an aged link its pending, and a split once one end has taken that
+/// pending's handshake. A frame that would not open, or a pair's machines
+/// not converged, is spared only beside a spared split of the same two
+/// sessions, since under one session of a split a frame cannot open at
+/// the other end. With `ExemptByPath`, the old rule: any breach of
+/// convergence on a path that showed such a shape.
+fn left(w: &World, b: &Breach, take: fn(Shape) -> bool) -> bool {
+    if !converging(b) {
+        return false;
+    }
+    if fault!(ExemptByPath) {
+        return w.shapes.iter().any(|&(s, _)| take(s));
+    }
+    let pending = b.what.starts_with(PENDING);
+    let named = |l: Left| match l {
+        Left::Split(m, n) => !pending && [m, n].iter().flatten().any(|h| b.about.contains(h)),
+        Left::Pending(h) => b.about.contains(&h),
+    };
+    if !w.shapes.iter().any(|&(s, l)| take(s) && named(l)) {
+        return false;
+    }
+    pending
+        || b.what.starts_with(SPLIT)
+        || healed(w)
+            .iter()
+            .any(|d| d.what.starts_with(SPLIT) && d.about == b.about)
 }
 
 /// Whether `b` is a breach of convergence: a split or another clause of
@@ -347,11 +427,11 @@ fn converging(b: &Breach) -> bool {
 }
 
 /// The exemption of the runs against the models of deployed nodes: a
-/// `OneSession` breach on a path where any known shape was seen, the two
+/// breach of convergence that any known shape left ([`left`]), the two
 /// defects left for later included.
 #[cfg(feature = "slow-explorers")]
 pub fn by_any_shape(w: &World, b: &Breach) -> bool {
-    converging(b) && !w.shapes.is_empty()
+    left(w, b, |_| true)
 }
 
 /// What a sweep found: the explorer's statistics, the first breach of each
@@ -413,9 +493,10 @@ pub fn sweep(st: &Start, depth: usize, exempt: Exempt<'_>) -> Swept {
             }
         }
         if spared {
-            match exempted.iter_mut().find(|(s, _)| *s == w.shapes) {
+            let kinds = w.kinds();
+            match exempted.iter_mut().find(|(s, _)| *s == kinds) {
                 Some((_, n)) => *n += 1,
-                None => exempted.push((w.shapes.clone(), 1)),
+                None => exempted.push((kinds, 1)),
             }
         }
     }
@@ -730,5 +811,202 @@ mod checks {
             found.iter().any(|b| b.oracle == Oracle::Classified),
             "a refusal the model does not make is a difference of class: {found:?}"
         );
+    }
+
+    /// Node A holding B on `a` descended from `oa`, and B holding A on
+    /// `b` descended from `ob`, each with only its own session's keys, and
+    /// the world having seen `shapes`.
+    fn shaped(
+        a: u32,
+        oa: u32,
+        b: u32,
+        ob: u32,
+        shapes: Vec<(super::super::world::Shape, Left)>,
+    ) -> World {
+        let mut pa = peer(B, a, oa, Dir::Outbound, true);
+        pa.origin = Hs(oa);
+        let mut pb = peer(A, b, ob, Dir::Inbound, false);
+        pb.origin = Hs(ob);
+        let mut w = planted(pa, pb, [alloc::vec![(B, Hs(a))], alloc::vec![(A, Hs(b))]]);
+        w.shapes = shapes;
+        w
+    }
+
+    /// The breaches of convergence a healed `w` shows, each with whether
+    /// the shape exemption spares it; where no shape seen is a defect left
+    /// for later, the runs against the deployed models spare the same.
+    fn spared(w: &World) -> Vec<(Breach, bool)> {
+        healed(w)
+            .into_iter()
+            .filter(converging)
+            .map(|b| {
+                let s = by_shape(w, &b);
+                #[cfg(feature = "slow-explorers")]
+                if w.shapes.iter().all(|(k, _)| !k.pinned()) {
+                    assert_eq!(s, by_any_shape(w, &b), "{b:?}");
+                }
+                (b, s)
+            })
+            .collect()
+    }
+
+    /// Node A's view of `w` with its peer's pending set to `hs`, A
+    /// holding the keys of `cur`.
+    fn arm(w: &mut World, hs: u32, cur: u32) {
+        let mut v = w.parties[0].view();
+        v.peers[0].pending = Some((Hs(hs), false));
+        w.parties[0] = Box::new(Planted {
+            view: v,
+            keys: alloc::vec![(B, Hs(cur))],
+        });
+    }
+
+    /// The breaches of convergence a healed `w` shows, each with whether
+    /// the runs against the deployed models spare it.
+    #[cfg(feature = "slow-explorers")]
+    fn spared_any(w: &World) -> Vec<(Breach, bool)> {
+        healed(w)
+            .into_iter()
+            .filter(converging)
+            .map(|b| {
+                let s = by_any_shape(w, &b);
+                (b, s)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_split_of_another_cause_on_a_shaped_path_is_not_exempt() {
+        use super::super::world::Shape;
+        let one = Left::Split(Some(Hs(1)), Some(Hs(2)));
+        // The control: the split the shape left, sessions from handshakes 1
+        // and 2, is spared, so the cases below are refused by what they are
+        // about and not by an exemption that spares nothing.
+        let w = shaped(1, 1, 2, 2, alloc::vec![(Shape::StaleFrame, one)]);
+        let all = spared(&w);
+        assert!(
+            all.iter().any(|(b, _)| b.what.starts_with(SPLIT)) && all.iter().all(|(_, s)| *s),
+            "the split the shape left is spared: {all:?}"
+        );
+        // A split of sessions from handshakes 5 and 6, on a path where a
+        // stale frame left a split of 1 and 2, and a dial a pending of 9.
+        let shapes = alloc::vec![
+            (Shape::StaleFrame, one),
+            (Shape::DialAsRekey, Left::Pending(Hs(9)))
+        ];
+        let w = shaped(5, 5, 6, 6, shapes.clone());
+        let all = spared(&w);
+        assert!(
+            all.iter().any(|(b, _)| b.what.starts_with(SPLIT)),
+            "precondition: the two ends split: {all:?}"
+        );
+        assert!(
+            all.iter().all(|(_, s)| !s),
+            "a split the shape did not leave is not spared: {all:?}"
+        );
+        // Both ends on one session, descended from the shape's two
+        // sessions, which the other end cannot open: no split, so a frame
+        // that would not open is not the split's.
+        let mut w = shaped(3, 1, 3, 2, shapes);
+        w.parties[1] = Box::new(Planted {
+            view: w.parties[1].view(),
+            keys: Vec::new(),
+        });
+        let all = spared(&w);
+        assert!(
+            all.iter().any(|(b, _)| b.what.starts_with("fresh:"))
+                && !all.iter().any(|(b, _)| b.what.starts_with(SPLIT)),
+            "precondition: a frame that would not open, and no split: {all:?}"
+        );
+        assert!(
+            all.iter().all(|(_, s)| !s),
+            "a frame that would not open beside no split is not spared: {all:?}"
+        );
+        // A pending held on a session the split shape left, the two ends
+        // on one session: a split shape spares no pending.
+        let mut w = shaped(3, 1, 3, 2, alloc::vec![(Shape::RekeyInstall, one)]);
+        arm(&mut w, 8, 3);
+        let all = spared(&w);
+        assert!(
+            all.len() == 1 && all[0].0.what.starts_with(PENDING) && !all[0].1,
+            "a pending on the shape's sessions is not the shape's: {all:?}"
+        );
+        // A pending of another handshake than the one a dial left, on
+        // sessions the dial did not leave either.
+        #[cfg(feature = "slow-explorers")]
+        {
+            let mut w = shaped(
+                5,
+                5,
+                5,
+                5,
+                alloc::vec![(Shape::DialAsRekey, Left::Pending(Hs(9)))],
+            );
+            arm(&mut w, 8, 5);
+            let all = spared_any(&w);
+            assert!(
+                all.len() == 1 && all[0].0.what.starts_with(PENDING) && !all[0].1,
+                "a pending the dial did not leave is not spared: {all:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_split_a_shape_left_is_exempt_after_both_ends_rekey() {
+        use super::super::world::Shape;
+        // The shape left a split of sessions from handshakes 1 and 2, and
+        // each end has rekeyed its own since: A is on 7, B on 8.
+        let one = Left::Split(Some(Hs(1)), Some(Hs(2)));
+        let w = shaped(7, 1, 8, 2, alloc::vec![(Shape::RekeyInstall, one)]);
+        let all = spared(&w);
+        assert!(
+            all.iter().any(|(b, _)| b.what.starts_with(SPLIT))
+                && all.iter().any(|(b, _)| b.what.starts_with("fresh:")),
+            "precondition: the ends split, and neither opens the other's frames: {all:?}"
+        );
+        assert!(
+            all.iter().all(|(_, s)| *s),
+            "the split the shape left, and its frames, are spared: {all:?}"
+        );
+        // The same split ended by one end's liveness timer.
+        let mut w = shaped(7, 1, 8, 2, alloc::vec![(Shape::RekeyInstall, one)]);
+        w.parties[0] = Box::new(Planted {
+            view: View::empty(A),
+            keys: Vec::new(),
+        });
+        w.ended.push((0, B, [Hs(1), Hs(7), Hs(2), Hs(8)]));
+        let all = spared(&w);
+        assert!(
+            all.len() == 1 && all[0].0.what.starts_with(SPLIT) && all[0].1,
+            "a split the timer ended is spared as the split it was: {all:?}"
+        );
+        // The dial on an aged link: its pending, after its holder rekeyed;
+        // a later rekey's pending on the session that pending became; and
+        // a split once one end has taken it. The runs against the deployed
+        // models spare each, and the others none.
+        let dial = alloc::vec![(Shape::DialAsRekey, Left::Pending(Hs(9)))];
+        let mut cases = Vec::new();
+        let mut w = shaped(7, 1, 7, 1, dial.clone());
+        arm(&mut w, 9, 7);
+        cases.push(w);
+        let mut w = shaped(7, 9, 7, 1, dial.clone());
+        arm(&mut w, 8, 7);
+        cases.push(w);
+        cases.push(shaped(7, 9, 8, 2, dial));
+        for w in &cases {
+            let all = spared(w);
+            assert!(
+                !all.is_empty() && all.iter().all(|(_, s)| !s),
+                "the dial's is a defect left for later: {all:?}"
+            );
+            #[cfg(feature = "slow-explorers")]
+            {
+                let all = spared_any(w);
+                assert!(
+                    all.iter().all(|(_, s)| *s),
+                    "what the dial left is spared against the deployed models: {all:?}"
+                );
+            }
+        }
     }
 }

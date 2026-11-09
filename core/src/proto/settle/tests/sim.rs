@@ -185,6 +185,26 @@ fn failure(b: super::oracle::Breach) -> Failure {
     }
 }
 
+/// Whether `b` is a responder pending of the peer's own rekey that the
+/// peer has since given up unanswered: it sent the msg1 in this life and
+/// holds no rekey of it, so nothing will adopt the pending before its hold
+/// clears it, past the heal. The one breach of another cause the shape
+/// exemption had spared in these runs (seed 29 of the two-transport set,
+/// on a path that had shown `RekeyInstall` long before), so its own
+/// exemption, which a test below holds.
+fn abandoned(w: &World, b: &super::oracle::Breach) -> bool {
+    let Some(&hs) = b.about.last().filter(|_| b.what.starts_with("pending:")) else {
+        return false;
+    };
+    let me = w.ids[b.node];
+    w.parties.iter().enumerate().any(|(y, p)| {
+        let v = p.view();
+        y != b.node
+            && v.rekeys.contains(&(me, hs))
+            && v.peers.iter().any(|q| q.peer == me && q.rekey != Some(hs))
+    })
+}
+
 /// The world of a run: two nodes on `cfg`'s transports, in the address
 /// order and dialing as the seed draws, with their first dials made.
 pub fn world(seed: u64, cfg: &Cfg, mk: Maker) -> World {
@@ -405,7 +425,7 @@ pub fn run(
                 .chain(
                     healed(&w)
                         .into_iter()
-                        .filter(|b| !by_shape(&w, b))
+                        .filter(|b| !by_shape(&w, b) && !abandoned(&w, b))
                         .map(failure),
                 )
                 .next();
@@ -635,4 +655,39 @@ fn a_planted_failing_run_shrinks_to_its_cause() {
         min.len(),
         r.acts.len()
     );
+}
+
+#[test]
+fn a_seeded_run_holds_a_pending_of_a_rekey_its_initiator_gave_up_and_only_that_is_spared() {
+    // Seed 29 of the two-transport set: long after a restart left a node
+    // installed from its peer's rekey, the two ends hold one session, and
+    // the other node's own rekey, its msg2s lost, is given up while the
+    // pending its last msg1 armed is held. Before the shape exemption was
+    // narrowed, the shape spared it.
+    use super::world::Shape;
+    let cfg = Cfg::faulty(Model::Mixed);
+    let r = run(29, &cfg, core, None, properties, false);
+    let mut w = world(29, &cfg, core);
+    for &a in &r.acts {
+        if valid(&w, a) {
+            apply(&mut w, a);
+        }
+    }
+    heal(&mut w);
+    assert!(
+        w.kinds().contains(&Shape::RekeyInstall),
+        "precondition: the path showed the shape"
+    );
+    let found = healed(&w);
+    assert!(
+        found
+            .iter()
+            .any(|b| b.what.starts_with("pending:") && !by_shape(&w, b) && abandoned(&w, b)),
+        "the pending of the given-up rekey is found, and spared by its own cause: {found:?}"
+    );
+    assert!(
+        found.iter().all(|b| by_shape(&w, b) || abandoned(&w, b)),
+        "nothing else is: {found:?}"
+    );
+    assert!(r.failure.is_none(), "so the run passes: {:?}", r.failure);
 }

@@ -292,8 +292,8 @@ builds, and changes no line of the core, the machine or the bundle.
   minute of probes and each sweep takes tens of minutes; they run one test
   per start, the two-path starts one test together and the two mixed
   pairings' sweeps one test each, in the slow explorers' build only. It
-  exempts a split on a path that showed a known shape, as the stand-in
-  core's sweep does, and the breach `pins.rs` holds of a connection-closed
+  exempts a split a known shape left, as the stand-in core's sweep does
+  (`oracle::by_shape`), and the breach `pins.rs` holds of a connection-closed
   pair the node's bundle holds as an acknowledged path that is not Live
   (`lapsed`). Each sweep's line counts its exempted breaches by cause and
   the explored states showing each pinned clause of the joint world's

@@ -183,9 +183,10 @@ struct State {
     /// done, and at the next wake for a renewal's.
     closing: Vec<Addr>,
     /// The peers the liveness timer removed in this step, each with the
-    /// handshake of the session it was held on, which the world takes after
-    /// it. Empty between steps, so the key leaves it out.
-    expired: Vec<(Node, Hs)>,
+    /// handshake of the session it was held on and that session's origin,
+    /// which the world takes after it. Empty between steps, so the key
+    /// leaves it out.
+    expired: Vec<(Node, Hs, Hs)>,
 }
 
 /// The current node.
@@ -1728,10 +1729,14 @@ impl MasterParty {
                 .and_then(|p| deadline(&p.machines))
                 .is_some_and(|d| d <= now)
             {
-                let held = self.s.peers.get(&k).and_then(|p| self.current(&p.machines));
+                let held = self
+                    .s
+                    .peers
+                    .get(&k)
+                    .and_then(|p| self.current(&p.machines).map(|hs| (hs, p.origin)));
                 self.lost(net, peer);
-                if let Some(hs) = held {
-                    self.s.expired.push((peer, hs));
+                if let Some((hs, origin)) = held {
+                    self.s.expired.push((peer, hs, origin));
                 }
                 continue;
             }
@@ -2052,7 +2057,7 @@ impl Party for MasterParty {
         self.due(false)
     }
 
-    fn expired(&mut self) -> Vec<(Node, Hs)> {
+    fn expired(&mut self) -> Vec<(Node, Hs, Hs)> {
         core::mem::take(&mut self.s.expired)
     }
 

@@ -142,6 +142,9 @@ pub(crate) enum Fault {
     /// The world records a known shape at any frame or msg1 that moves or
     /// installs its receiver, stale, old or not.
     ShapeLoose,
+    /// A known shape exempts any breach of convergence on its path, as the
+    /// shape exemption once did, not only the split or pending it left.
+    ExemptByPath,
     /// The right-link oracle checks nothing.
     RightLinkOff,
     /// The right-link oracle compares only the link's address with the
@@ -306,6 +309,7 @@ impl Fault {
         Self::ReplacedConnKept,
         Self::ShapeBlind,
         Self::ShapeLoose,
+        Self::ExemptByPath,
         Self::RightLinkOff,
         Self::RightLinkPairOnly,
         Self::RightLinkNoDirection,

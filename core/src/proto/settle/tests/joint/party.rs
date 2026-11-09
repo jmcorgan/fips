@@ -231,9 +231,10 @@ struct State {
     /// the key leaves it out.
     copy: bool,
     /// The peers the liveness timer removed in this step, each with the
-    /// handshake of the session it was held on, which the world takes
-    /// after it. Empty between steps, so the key leaves it out.
-    expired: Vec<(Node, Hs)>,
+    /// handshake of the session it was held on and that session's origin,
+    /// which the world takes after it. Empty between steps, so the key
+    /// leaves it out.
+    expired: Vec<(Node, Hs, Hs)>,
     /// The rekey machines' deadlines their checks read.
     limits: Limits,
 }
@@ -2108,10 +2109,14 @@ impl JointParty {
                 .and_then(|p| deadline(&p.machines))
                 .is_some_and(|d| d <= now)
             {
-                let held = self.s.peers.get(&k).and_then(|p| self.current(&p.machines));
+                let held = self
+                    .s
+                    .peers
+                    .get(&k)
+                    .and_then(|p| self.current(&p.machines).map(|hs| (hs, p.origin)));
                 self.dead(net, peer, None);
-                if let Some(hs) = held {
-                    self.s.expired.push((peer, hs));
+                if let Some((hs, origin)) = held {
+                    self.s.expired.push((peer, hs, origin));
                 }
                 continue;
             }
@@ -2631,7 +2636,7 @@ impl Party for JointParty {
         self.s.peers.get(&peer.0).map(|p| p.machines.rekey())
     }
 
-    fn expired(&mut self) -> Vec<(Node, Hs)> {
+    fn expired(&mut self) -> Vec<(Node, Hs, Hs)> {
         core::mem::take(&mut self.s.expired)
     }
 

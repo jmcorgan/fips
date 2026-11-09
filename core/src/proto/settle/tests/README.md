@@ -275,14 +275,27 @@ can rebuild any state by replaying the path that reached it.
   its rekeys: the model and the model of `master` name the rekey in
   flight, the core every rekey sent in its life, since a replacement ends
   the core's rekey side while the msg1 it sent is still the peer's rekey.
-- Exemption by shape. `oracle::by_shape` exempts a split on a path that
-  showed `StaleFrame`, `RekeyInstall` or `OldLife`. The two defects left
-  for later have shapes too, `LaterDialFirst` and `DialAsRekey`
-  (`Shape::pinned`), which only the runs against the models of deployed
-  nodes exempt (`oracle::by_any_shape`): the model's convergence with
-  itself and the core explorer exclude the starts that carry them
-  instead. Every shape is part of the world's digest, so a shaped path is
-  never folded into an unshaped one.
+- Exemption by shape. Each shape is kept with what it left
+  (`world::Left`): for `StaleFrame`, `RekeyInstall`, `OldLife` and
+  `LaterDialFirst`, the origins of the two ends' sessions of each other
+  just after the delivery that showed it; for `DialAsRekey`, the
+  pending's handshake. Each breach of convergence carries the handshakes
+  its clause is about (`Breach.about`): each end's session by its origin
+  and its current handshake, and a pending's own. `oracle::by_shape`
+  exempts a split that shares one of those with what a split shape left,
+  and a frame that would not open or a pair's machines not converged only
+  beside such a split of the same sessions; nothing else on the path is
+  exempt: a split of other sessions, a pending, a configured peer not
+  held. The two defects left for later, `LaterDialFirst` and `DialAsRekey`
+  (`Shape::pinned`), only the runs against the models of deployed nodes
+  exempt (`oracle::by_any_shape`), where a dial on an aged link also
+  spares a pending, or a split, that names the pending it left: the
+  model's convergence with itself and the core explorer exclude the
+  starts that carry them instead. Switch
+  `ExemptByPath` puts back the old rule, any breach of convergence on a
+  shaped path. Every shape and what it left is part of the world's
+  digest, so a shaped path is never folded into an unshaped one, nor two
+  that left different sessions.
 - The world's delivery delay is bounded: what is in flight is lost when the
   clock moves and when a node restarts (switch `DelayUnbounded`), and a
   restart drops what is addressed to the restarting node.

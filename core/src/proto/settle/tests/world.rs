@@ -474,6 +474,36 @@ impl Shape {
     }
 }
 
+/// What a known shape left where it was seen, which a breach must be
+/// about for the shape to exempt it (`oracle::by_shape`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Left {
+    /// The two ends of the pair, by the handshake each end's session of
+    /// the other descends from, as [`ends`] orders them, `None` for an end
+    /// holding no session of the other. A rekey keeps a session's origin,
+    /// so a heal that rekeys both ends leaves them as they were.
+    Split(Option<Hs>, Option<Hs>),
+    /// A responder pending, by its handshake.
+    Pending(Hs),
+}
+
+impl Left {
+    /// An order for the world's digest, which must not depend on the order
+    /// two shapes were seen in.
+    fn rank(self) -> (u8, Option<u32>, Option<u32>) {
+        match self {
+            Self::Split(a, b) => (0, a.map(|h| h.0), b.map(|h| h.0)),
+            Self::Pending(h) => (1, Some(h.0), None),
+        }
+    }
+}
+
+/// The two ends of a pair by the origins of their sessions of each other:
+/// node `x`'s, `a`, and node `y`'s, `b`, the lower-numbered node's first.
+pub fn ends<T>(x: usize, a: T, y: usize, b: T) -> (T, T) {
+    if x < y { (a, b) } else { (b, a) }
+}
+
 /// A node, as the world drives it.
 pub trait Party {
     /// Take one input, acting on the world through `net`.
@@ -516,9 +546,10 @@ pub trait Party {
         None
     }
     /// The peers this party's liveness timer removed in the input it just
-    /// took, each with the handshake of the session it held the peer on,
-    /// taken from it; empty for a party with no such timer.
-    fn expired(&mut self) -> Vec<(Node, Hs)> {
+    /// took, each with the handshake of the session it held the peer on
+    /// and the handshake that session descends from, taken from it; empty
+    /// for a party with no such timer.
+    fn expired(&mut self) -> Vec<(Node, Hs, Hs)> {
         Vec::new()
     }
 }
@@ -889,14 +920,16 @@ pub struct World {
     pub paths: Vec<(usize, PathEv)>,
     /// Which of them have been used.
     pub used: Vec<bool>,
-    /// The known shapes seen so far, each once.
-    pub shapes: Vec<Shape>,
+    /// The known shapes seen so far, each with what it left, each once.
+    pub shapes: Vec<(Shape, Left)>,
     /// Each peer a node's liveness timer removed while the peer held that
-    /// node on another session: the node and the peer. Two ends that held
-    /// each other on different sessions heard nothing from each other, and
-    /// only the timer ended the split. A removal at a session both ends
-    /// hold is not one: what was lost in flight silenced the link.
-    pub ended: Vec<(usize, Node)>,
+    /// node on another session: the node, the peer, and each end's session
+    /// at the removal by its origin and its current handshake, as [`ends`]
+    /// orders the ends. Two ends that held each
+    /// other on different sessions heard nothing from each other, and only
+    /// the timer ended the split. A removal at a session both ends hold is
+    /// not one: what was lost in flight silenced the link.
+    pub ended: Vec<(usize, Node, [Hs; 4])>,
 }
 
 impl World {
@@ -921,6 +954,25 @@ impl World {
             .iter()
             .find(|p| p.peer == id)
             .map(|p| p.cur)
+    }
+
+    /// The handshake node `x`'s session of peer `id` descends from, if it
+    /// holds it.
+    fn origin(&self, x: usize, id: Node) -> Option<Hs> {
+        self.parties[x]
+            .view()
+            .peers
+            .iter()
+            .find(|p| p.peer == id)
+            .map(|p| p.origin)
+    }
+
+    /// The names of the known shapes seen so far, each once, in order.
+    pub fn kinds(&self) -> Vec<Shape> {
+        let mut out: Vec<Shape> = self.shapes.iter().map(|&(s, _)| s).collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// What node `x`'s delivery of `pkt` could turn out to be, judged
@@ -982,7 +1034,8 @@ impl World {
     /// on; a rekey msg1, a msg1 of a previous life, or the msg2 of an
     /// earlier own dial, left it holding the sender on that handshake as
     /// its session, which `before` was not; a dial left a responder
-    /// pending on its handshake.
+    /// pending on its handshake. Each is kept with what it left, read just
+    /// after the delivery ([`Left`]).
     fn witness(&mut self, x: usize, pkt: Pkt, shape: Shape, hs: Hs, before: Option<Hs>) {
         let (Pkt::Frame { id, .. } | Pkt::Msg1 { id, .. } | Pkt::Msg2 { id, .. }) = pkt else {
             return;
@@ -1001,10 +1054,19 @@ impl World {
         if fault!(ShapeBlind) || !shown {
             return;
         }
-        if !self.shapes.contains(&shape) {
-            self.shapes.push(shape);
-            self.shapes.sort_unstable();
-            self.net.note(|| format!("n{x} shows {shape:?}"));
+        let left = match (shape, self.index(id)) {
+            (Shape::DialAsRekey, _) => Left::Pending(hs),
+            (_, Some(y)) => {
+                let (a, b) = ends(x, self.origin(x, id), y, self.origin(y, self.ids[x]));
+                Left::Split(a, b)
+            }
+            (_, None) => Left::Split(None, None),
+        };
+        if !self.shapes.contains(&(shape, left)) {
+            self.shapes.push((shape, left));
+            self.shapes.sort_unstable_by_key(|&(s, l)| (s, l.rank()));
+            self.net
+                .note(|| format!("n{x} shows {shape:?}, leaving {left:?}"));
         }
     }
 
@@ -1020,20 +1082,26 @@ impl World {
         } = self;
         net.note(|| format!("n{x} <- {inp:?}"));
         parties[x].input(net, inp);
-        for (peer, mine) in parties[x].expired() {
+        for (peer, mine, from) in parties[x].expired() {
             let theirs = ids.iter().position(|&n| n == peer).and_then(|y| {
                 parties[y]
                     .view()
                     .peers
                     .into_iter()
                     .find(|p| p.peer == ids[x])
-                    .map(|p| p.cur)
+                    .map(|p| (y, p.cur, p.origin))
             });
-            if theirs.is_some_and(|c| c != mine) && !ended.contains(&(x, peer)) {
-                ended.push((x, peer));
+            let Some((y, theirs, origin)) = theirs.filter(|t| t.1 != mine) else {
+                continue;
+            };
+            let (m, n) = ends(x, [from, mine], y, [origin, theirs]);
+            let pair = [m[0], m[1], n[0], n[1]];
+            if !ended.contains(&(x, peer, pair)) {
+                ended.push((x, peer, pair));
                 net.note(|| {
                     format!(
-                        "n{x}'s timer removed {peer:?} at {mine:?}, which held it at {theirs:?}"
+                        "n{x}'s timer removed {peer:?} at {mine:?}, which held it at {:?}",
+                        Some(theirs)
                     )
                 });
             }

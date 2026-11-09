@@ -23,7 +23,8 @@ properties can be checked on it.
   included, at each pairing: a setting at the joint node with `master.rs`
   at each setting and with `maint.rs`, which has none. The joint node runs
   at node 0 and at node 1, in both address orders. One session must hold at
-  every node except on a path that showed a known shape; every other
+  every node except for what a known shape left (`oracle::by_any_shape`):
+  a split sharing a session with it, or the pending a dial left; every other
   property must hold at the joint node, a proven path left with no
   connection aside, which `../joint/pins.rs` holds; the legacy nodes' other
   breaches are counted by property and printed.

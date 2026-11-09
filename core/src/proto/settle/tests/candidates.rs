@@ -247,7 +247,7 @@ impl Run {
     fn sweep_of(&self, st: &Start) -> Swept {
         let (_, shapes) = addresses(self.cand);
         let exempt = |w: &World, b: &Breach| {
-            (b.oracle == Oracle::OneSession && w.shapes.iter().any(|s| !shapes.contains(s)))
+            (b.oracle == Oracle::OneSession && w.kinds().iter().any(|s| !shapes.contains(s)))
                 || unseen_path(w, b)
         };
         let go = || sweep(st, st.depth, &exempt);

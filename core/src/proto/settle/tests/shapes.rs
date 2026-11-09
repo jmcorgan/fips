@@ -72,7 +72,7 @@ fn splits(w: &World) -> Vec<String> {
 fn observe(number: u8, name: &str, path: &[Act], unbounded: bool, shape: Shape) {
     let w = after(number, name, model, path, unbounded);
     assert_eq!(
-        w.shapes,
+        w.kinds(),
         [shape],
         "start {number} {name}: the model shows the shape"
     );
@@ -138,7 +138,7 @@ fn scripted(st: &Start, mk: Maker) -> Vec<Shape> {
     let mut w = (st.build)(mk);
     (st.script)(&mut w);
     heal(&mut w);
-    w.shapes
+    w.kinds()
 }
 
 /// The shape a start carries by design: the late second dial answered in

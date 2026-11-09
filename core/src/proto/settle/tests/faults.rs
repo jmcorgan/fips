@@ -722,6 +722,13 @@ pub const ROWS: &[Row] = &[
         )],
     ),
     (
+        Fault::ExemptByPath,
+        &[(
+            ORACLE,
+            "a_split_of_another_cause_on_a_shaped_path_is_not_exempt",
+        )],
+    ),
+    (
         Fault::RightLinkOff,
         &[
             (
@@ -1045,6 +1052,14 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     ),
     (
         "an_abstract_far_ends_frame_opens_at_the_machine_holding_its_session",
+        HAND,
+    ),
+    (
+        "the_split_a_shape_left_is_exempt_after_both_ends_rekey",
+        HAND,
+    ),
+    (
+        "a_seeded_run_holds_a_pending_of_a_rekey_its_initiator_gave_up_and_only_that_is_spared",
         HAND,
     ),
     (
