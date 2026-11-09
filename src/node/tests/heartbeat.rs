@@ -109,6 +109,10 @@ async fn a_silent_peers_link_rekey_ends_30_s_after_its_first_msg1_backs_off_and_
  {
     use super::rekey_parity::{age_link, linked_pair, rekey_config, trigger_age};
 
+    // The ladder and the reap are read one 1 s step at a time. With the
+    // clock running, the real time each step takes adds to it, and on a
+    // loaded host enough of it brings the 15 s rung due at 14 s.
+    crate::time::freeze();
     let mut nodes = linked_pair(rekey_config(60), crate::config::Config::new()).await;
     let peer = *nodes[1].node.node_addr();
     age_link(&mut nodes, 0, 1, trigger_age());

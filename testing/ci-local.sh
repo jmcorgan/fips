@@ -939,22 +939,45 @@ run_cross_check() {
 
 # ── Stage 2: Unit Tests ───────────────────────────────────────────────────
 
+# The open-file soft limit every command in the unit-test stage runs under.
+# The root lib suite, the heaviest, holds at most about 110 descriptors at
+# once as threads in one process on a 12-CPU host, and none after its tests
+# end. 512 leaves four times that, and sits under the 1024 that Linux gives a
+# service or login by default, the internal builder's included. Without one
+# bound, a leak or a test that needs far more descriptors than the rest reds
+# only on the runner whose limit happens to be lowest. Mirrored in
+# .github/workflows/ci.yml.
+UNIT_FD_LIMIT=512
+
+# Run a command in a subshell held to UNIT_FD_LIMIT open files.
+with_fd_limit() {
+    (
+        if ! ulimit -Sn "$UNIT_FD_LIMIT"; then
+            fail "cannot set the open-file soft limit to $UNIT_FD_LIMIT"
+            exit 1
+        fi
+        "$@"
+    )
+}
+
 run_tests() {
     stage "Stage 2: Unit Tests"
 
-    local cmd
+    # fd-peak.py reports the most descriptors each test binary held, so a
+    # run that reaches the limit says what filled it.
+    local cmd peak="$SCRIPT_DIR/fd-peak.py"
     if command -v cargo-nextest &>/dev/null; then
-        cmd="cargo nextest run --all"
-        info "$cmd"
-        if $cmd 2>&1; then
+        cmd=(cargo nextest run --all)
+        info "${cmd[*]}"
+        if with_fd_limit python3 "$peak" "${cmd[@]}" 2>&1; then
             record "unit-tests" 0
         else
             record "unit-tests" 1
         fi
     else
-        cmd="cargo test --all"
-        info "$cmd (nextest not found, using cargo test)"
-        if $cmd 2>&1; then
+        cmd=(cargo test --all)
+        info "${cmd[*]} (nextest not found, using cargo test)"
+        if with_fd_limit python3 "$peak" "${cmd[@]}" 2>&1; then
             record "unit-tests" 0
         else
             record "unit-tests" 1
@@ -974,7 +997,7 @@ run_tests() {
         core_test+=(--features slow-explorers)
     fi
     info "${core_test[*]}"
-    if "${core_test[@]}" 2>&1; then
+    if with_fd_limit "${core_test[@]}" 2>&1; then
         record "core-fence-tests" 0
     else
         record "core-fence-tests" 1
@@ -985,7 +1008,7 @@ run_tests() {
     # it. Also checks the full test path of every ignored test the host
     # compiles. Mirrored in .github/workflows/ci.yml.
     info "testing/known-defect-lane.sh"
-    if bash "$SCRIPT_DIR/known-defect-lane.sh" 2>&1; then
+    if with_fd_limit bash "$SCRIPT_DIR/known-defect-lane.sh" 2>&1; then
         record "known-defect" 0
     else
         record "known-defect" 1
@@ -998,7 +1021,7 @@ run_tests() {
     # also checks that no switch reaches a normal build of fips. Mirrored in
     # .github/workflows/ci.yml.
     info "testing/mutations/run.sh"
-    if bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
+    if with_fd_limit bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
         record "mutations" 0
     else
         record "mutations" 1
@@ -1022,7 +1045,7 @@ run_tests() {
     local reach_rows
     reach_rows=$(mktemp "/tmp/ci-audit-reach.XXXXXX")
     info "cargo test -p fips-mesh --lib --features profiling,test-overrides"
-    if FIPS_AUDIT_REACH="$reach_rows" \
+    if FIPS_AUDIT_REACH="$reach_rows" with_fd_limit python3 "$peak" \
         cargo test -p fips-mesh --lib --features profiling,test-overrides 2>&1; then
         record "unit-tests-profiling" 0
     else
@@ -1050,7 +1073,7 @@ run_tests() {
     local release_log
     release_log=$(mktemp "/tmp/ci-release-lib-tests.XXXXXX")
     info "cargo test --release --lib -- --exact $residue_test"
-    if cargo test --release --lib -- --exact "$residue_test" 2>&1 | tee "$release_log" \
+    if with_fd_limit cargo test --release --lib -- --exact "$residue_test" 2>&1 | tee "$release_log" \
         && grep -q '^test result: ok\. 1 passed;' "$release_log"; then
         record "release-test-compile" 0
     else

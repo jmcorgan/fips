@@ -364,6 +364,27 @@ an empty or unreadable file. The floors are constants at the top of the
 script; lowering one is an edit a review sees. Under nextest a test's thread
 does not name it, so the check does not read nextest runs.
 
+### The open-file limit and `fd-peak.py`
+
+Every command in the unit-test stage runs under an open-file soft limit of
+512 (`UNIT_FD_LIMIT` in `ci-local.sh`; each unprivileged test step of GitHub
+CI's Linux job sets the same). The root lib suite holds at most about 110
+descriptors at once as threads in one process, so the limit leaves four times
+that, and it sits under the 1024 a Linux service or login gets by default.
+With one bound on every runner, a leak, or a test that needs far more
+descriptors than the rest, reds everywhere rather than only on the host whose
+limit is lowest.
+
+[`fd-peak.py`](fd-peak.py) wraps the stage's whole-workspace test run and
+its optional-features run. It runs the command unchanged and passes its exit
+status on, and while it runs it counts the open descriptors of each test
+binary the command starts. At the end it prints, on `fd-peak:` lines, each
+binary's highest count, when it was reached, and what the descriptors were
+then: by kind, sockets by protocol, and the most frequent file paths. A run
+that hits the limit then says what filled it, and a green run says how close
+it came. It is a measurement, not a check: it samples every 2 ms, so a
+shorter burst can be missed, though the limit itself still catches one.
+
 ### Root-only tests (`root-tests.sh`)
 
 The unit tests that need root and network namespaces are `#[ignore]`d, so the
