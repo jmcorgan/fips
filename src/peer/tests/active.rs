@@ -380,8 +380,8 @@ impl End {
     /// Carry out the shell's part of `out`.
     fn carry(&mut self, out: &LinkOutputs) {
         for o in out {
-            if matches!(o, LinkOutput::Installed { .. }) {
-                self.peer.after_cutover();
+            if let LinkOutput::Installed { role, .. } = o {
+                self.peer.after_cutover(*role);
             }
         }
     }
@@ -573,9 +573,15 @@ fn every_session_change_carries_the_withheld_handshake_lines_and_restarts_the_co
         workers: false,
         path: crate::peer::test_caps(),
     };
-    let _ = b
-        .peer
-        .move_session(next_recv, lease(7), SessionIndex::new(8), to, &mut caps);
+    let _ = b.peer.move_session(
+        next_recv,
+        lease(7),
+        SessionIndex::new(8),
+        to,
+        LinkId::new(9),
+        false,
+        &mut caps,
+    );
 
     // 2 from the first session, 1 from the second, 3 from the third.
     let carried = b
@@ -867,9 +873,15 @@ fn cross_move(end: &mut End) {
         workers: false,
         path: crate::peer::test_caps(),
     };
-    let (out, _) = end
-        .peer
-        .move_session(next_recv, lease(7), SessionIndex::new(8), to, &mut caps);
+    let (out, _) = end.peer.move_session(
+        next_recv,
+        lease(7),
+        SessionIndex::new(8),
+        to,
+        LinkId::new(9),
+        false,
+        &mut caps,
+    );
     end.carry(&out);
     assert_eq!(
         end.peer.our_index(),
@@ -1013,4 +1025,89 @@ fn dead_times_are_stamped_on_the_peer_clock_that_moves_the_rekey_timers() {
         }) => assert_eq!(evicted.addr(), &addr(1), "the path Dead longest goes first"),
         other => panic!("expected an eviction, got {other:?}"),
     }
+}
+
+/// A session for `b`'s end of [`ends`] from a third identity: authenticated,
+/// but not by the key `b` holds its peer under.
+fn session_of_another_key() -> NoiseSession {
+    let other = Identity::generate();
+    let mut initiator =
+        crate::noise::HandshakeState::new_initiator(other.keypair(), PAIR.1.pubkey_full());
+    initiator.set_local_epoch(EPOCH_A);
+    let mut responder = crate::noise::HandshakeState::new_responder(PAIR.1.keypair());
+    responder.set_local_epoch(EPOCH_B);
+    let msg1 = initiator.write_message_1().unwrap();
+    responder.read_message_1(&msg1).unwrap();
+    let _msg2 = responder.write_message_2().unwrap();
+    responder.into_session().unwrap()
+}
+
+/// A move onto a session that authenticated another key than the peer's is
+/// refused, and does what the old code did before it could refuse: the
+/// replay base moves to the total and the handshake line counts roll. MMP
+/// is not reset, since the link did not move, the machine stays at the
+/// index it had, the lease comes back in a release and the bundle is not
+/// renewed.
+#[test]
+fn a_move_refused_for_a_session_of_another_key_rolls_the_counts_and_changes_nothing_else() {
+    let (_a, mut b) = ends();
+    record_frames(&mut b.peer, 0, 200);
+    b.peer.increment_replay_suppressed();
+    count_pending_lines(&mut b.peer, 3);
+    assert_eq!(
+        b.peer.replay_suppressed_count(),
+        1,
+        "precondition: one replay refused on this session"
+    );
+    let before = b.peer.our_index();
+    assert!(before.is_some(), "precondition: the machine holds an index");
+
+    let to = here(&b.peer);
+    let mut caps = crate::peer::LinkCaps {
+        indices: &mut b.alloc,
+        local: &b.keys,
+        me: *PeerIdentity::from_pubkey_full(PAIR.1.pubkey_full()).node_addr(),
+        params: crate::peer::test_link_params(),
+        record: Record::new(),
+        workers: false,
+        path: crate::peer::test_caps(),
+    };
+    let (out, paths) = b.peer.move_session(
+        session_of_another_key(),
+        lease(7),
+        SessionIndex::new(8),
+        to,
+        LinkId::new(9),
+        false,
+        &mut caps,
+    );
+
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, LinkOutput::Release(l) if l.index() == 7)),
+        "defect: a refused move hands the lease back: {out:?}"
+    );
+    assert!(paths.is_empty(), "defect: a refused move renews no path");
+    assert_eq!(
+        b.peer.our_index(),
+        before,
+        "defect: a refused move keeps the machine at its index"
+    );
+    assert_eq!(
+        b.peer.replay_suppressed_count(),
+        0,
+        "defect: a refused move still moves the replay base to the total"
+    );
+    assert_eq!(
+        b.peer.hs_lines_mut().count(HsLine::Pending),
+        1,
+        "defect: a refused move still rolls the handshake line counts"
+    );
+    let highest = b
+        .peer
+        .mmp_mut()
+        .expect("link MMP state")
+        .receiver
+        .highest_counter();
+    assert_eq!(highest, 199, "defect: a refused move keeps MMP");
 }

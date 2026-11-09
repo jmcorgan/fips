@@ -24,6 +24,9 @@ tests.
   that `ActivePeer` has no setter but the listed ones; and that every field of
   the peer's record is `pub(super)`. Each scan finds a planted line. The
   census cannot tell a field put on the exempt list wrongly.
+- `plan.rs`: a restart's plan against the statements it ran before, in their
+  order; that every other transition's plan is empty; and the scan that
+  `../plan.rs` denies wildcard arms and holds none, through `table.rs`'s.
 
 ## Rules for this level
 

@@ -13,6 +13,7 @@ use crate::NodeAddr;
 use crate::node::diag::{self, OrNone};
 use crate::node::reject::{RejectReason, SessionReject};
 use crate::node::session::{SessionInstant, SessionOutput, SessionOutputs};
+use crate::node::settle::table::{Cell, Row, Transition, cell};
 use crate::node::{Node, TICK};
 use crate::peer::{LinkOutput, LinkOutputs, LinkProfile, peer_now};
 use crate::proto::fsp::{SessionAck, SessionMsg3, SessionSetup};
@@ -322,16 +323,14 @@ impl Node {
                 // dropped the old peering and this node's filter with it,
                 // which the record of the filter last sent cannot show, so
                 // the filter goes again on the session the peer now holds.
-                LinkOutput::Rekeyed {
-                    role: Role::Responder,
-                } => {
-                    if !node_fault!(ResponderCutoverSkipsFilterMark) {
+                // The table marks it at a cutover this node answered.
+                LinkOutput::Rekeyed { role } => {
+                    if cell(Row::FilterSend, &Transition::Cutover { role }) == Cell::Marked
+                        && !node_fault!(ResponderCutoverSkipsFilterMark)
+                    {
                         self.bloom_state.mark_update_needed(*node_addr);
                     }
                 }
-                LinkOutput::Rekeyed {
-                    role: Role::Initiator,
-                } => {}
                 LinkOutput::Reverted { .. } => {}
                 LinkOutput::Bind { purpose, .. } => {
                     report.pending |= purpose == Purpose::Pending;
@@ -360,45 +359,15 @@ impl Node {
     /// this node's tree and filter are announced to it again, since it holds
     /// neither; and the operator's pin on the link ends, as it does when a
     /// restart or replacement builds a new link. The link's MMP was reset by
-    /// the cutover that reported the restart, as at every cutover.
+    /// the cutover that reported the restart, as at every cutover. These are
+    /// the steps of the restart's plan, run in its order.
     async fn reset_restarted(&mut self, node_addr: &NodeAddr, epoch: [u8; 8]) {
         info!(
             peer = %self.peer_display_name(node_addr),
             epoch = %hex::encode(epoch),
             "Peer restart detected during FMP rekey, resetting what was held for its previous run"
         );
-        if self.close_session(node_addr) {
-            debug!(
-                peer = %self.peer_display_name(node_addr),
-                "Closed stale FSP session after peer restart during FMP rekey"
-            );
-        }
-        if let Some(peer) = self.peers.get_mut(node_addr) {
-            peer.clear_tree_position();
-            peer.clear_filter();
-        }
-        if self.handle_peer_removal_tree_cleanup(node_addr) {
-            for (addr, peer) in self.peers.iter_mut() {
-                if addr != node_addr {
-                    peer.mark_tree_announce_pending();
-                }
-            }
-        }
-        // The forgotten filter may have been part of what this node
-        // announces to every peer, and the restarted peer holds none of
-        // its filters.
-        self.bloom_state.forget_sent(node_addr);
-        let peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
-        self.bloom_state.mark_all_updates_needed(peers);
-        if let Err(e) = self.send_tree_announce_to_peer(node_addr).await {
-            debug!(
-                peer = %self.peer_display_name(node_addr),
-                error = %e,
-                "Failed to send TreeAnnounce after peer restart"
-            );
-        }
-        self.step_path(node_addr, fips_core::proto::path::Input::Unpin)
-            .await;
+        self.run_plan(node_addr, &Transition::Restarted).await;
     }
 
     /// Close the end-to-end session with `addr` and what describes it: the
@@ -521,7 +490,7 @@ impl Node {
         let Some(peer) = self.peers.get_mut(node_addr) else {
             return;
         };
-        peer.after_cutover();
+        peer.after_cutover(role);
         let epoch = OrNone(peer.noise_session().map(diag::epoch_tag));
         let kbit_ours = peer.current_k_bit();
         match role {

@@ -122,6 +122,66 @@ impl MmpPeerState {
     }
 }
 
+/// What a link's MMP state still carries, for tests. A reset is complete when
+/// what it leaves different from a new state's is exactly what it means to
+/// carry; these two let a test state that, with every field taking a side.
+#[cfg(any(test, feature = "test-hooks"))]
+impl MmpPeerState {
+    /// The fields of `self` that differ from `fresh`'s, by name: a nested
+    /// state's own field as `sender.<field>`, `receiver.<field>` or
+    /// `metrics.<field>`, and an estimator or the spin bit state once, by
+    /// its name. Each type compares its own fields, naming every one, since
+    /// none of them derives `PartialEq`.
+    pub fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        use super::algorithms::note;
+        let Self {
+            sender,
+            receiver,
+            metrics,
+            spin_bit,
+            mode,
+            log_interval_ms,
+            last_log_ms,
+        } = self;
+        let mut out = sender.fresh_diff(&fresh.sender);
+        out.extend(receiver.fresh_diff(&fresh.receiver));
+        out.extend(metrics.fresh_diff(&fresh.metrics));
+        note(
+            &mut out,
+            "spin_bit",
+            spin_bit.fresh_diff(&fresh.spin_bit).is_empty(),
+        );
+        note(&mut out, "mode", *mode == fresh.mode);
+        note(
+            &mut out,
+            "log_interval_ms",
+            *log_interval_ms == fresh.log_interval_ms,
+        );
+        note(&mut out, "last_log_ms", *last_log_ms == fresh.last_log_ms);
+        out
+    }
+
+    /// A state built from what `new` takes, with every other field away
+    /// from a new state's: frames sent and received, reports processed, the
+    /// spin bit moved and a log emitted.
+    pub fn dirtied(
+        mode: MmpMode,
+        log_interval_secs: u64,
+        owd_window_size: usize,
+        is_initiator: bool,
+    ) -> Self {
+        Self {
+            sender: SenderState::dirtied(),
+            receiver: ReceiverState::dirtied(owd_window_size),
+            metrics: MmpMetrics::dirtied(),
+            spin_bit: SpinBitState::dirtied(is_initiator),
+            mode,
+            log_interval_ms: log_interval_secs * 1000,
+            last_log_ms: Some(6_200),
+        }
+    }
+}
+
 impl Debug for MmpPeerState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MmpPeerState")

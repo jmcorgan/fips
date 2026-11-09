@@ -53,7 +53,13 @@ field, at once.
   each piece of what the node holds per peer, with `DataRow` for the peer's
   record; `Cell` and `DataCell`, what a transition does to a row; `Owner` and
   `Facet`, who holds a row; and `cell`, `data_cell` and `owner`, the rule as
-  nested total matches. Nothing outside its tests consults it yet.
+  nested total matches. The peer's record settles by `data_cell`, and the
+  rekey handler marks the filter at a cutover by `cell`; the other rows wait
+  for their sites to be routed.
+- `plan.rs`: `Effect`, one step the node takes for a transition, `plan`, the
+  effects of each transition in their order, and `Node::run_plan`, which runs
+  them on a held peer. A restart found at a rekey runs from here; a
+  transition whose list is empty runs its own statements at its site.
 - `tests/`: the unit tests of this level; its own README names each file.
 
 ## Rules for this level
@@ -83,4 +89,7 @@ field, at once.
   Its rule states what the code does today; a cell the code does not match is
   a wrong cell or a wrong site, and a change of what a transition does changes
   the cell and its golden line in the same commit.
+- `plan.rs` denies wildcard arms as `table.rs` does, and a plan lists the
+  statements it stands for in their old order: a reordering is a change of
+  behaviour.
 - Keep the file list in step with the directory.

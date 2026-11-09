@@ -4,9 +4,10 @@ use crate::proto::mmp::receiver::ReceiverState;
 use crate::proto::mmp::sender::SenderState;
 use crate::proto::mmp::{
     COLD_START_SAMPLES, DEFAULT_LOG_INTERVAL_SECS, DEFAULT_OWD_WINDOW_SIZE, MAX_REPORT_INTERVAL_MS,
-    MIN_REPORT_INTERVAL_MS, MmpMetrics, MmpMode, ReceiverReport,
+    MIN_REPORT_INTERVAL_MS, MmpMetrics, MmpMode, MmpPeerState, ReceiverReport,
 };
 use alloc::string::ToString;
+use alloc::vec::Vec;
 
 // ===========================================================================
 // MmpMode
@@ -966,4 +967,221 @@ fn a_report_about_the_old_session_after_a_rekey_reset_rejects_the_new_sessions_r
     m.reset_for_rekey();
     m.process_receiver_report(&make_rr(10, 10, 1_000, 1_200, 0, 0), 1_250, 2_000);
     assert_eq!(m.rr_counters().map(|(h, _, _)| h), Some(10));
+}
+
+// ===========================================================================
+// What a link's rekey reset carries
+// ===========================================================================
+
+/// Every field of a link's MMP state that `new` does not take as an
+/// argument, by `MmpPeerState::fresh_diff`'s names.
+const RUNTIME: &[&str] = &[
+    "sender.cumulative_packets_sent",
+    "sender.cumulative_bytes_sent",
+    "sender.interval_start_counter",
+    "sender.interval_start_timestamp",
+    "sender.interval_bytes_sent",
+    "sender.last_counter",
+    "sender.last_timestamp",
+    "sender.interval_has_data",
+    "sender.last_report_ms",
+    "sender.report_interval_ms",
+    "sender.consecutive_send_failures",
+    "sender.srtt_sample_count",
+    "receiver.cumulative_packets_recv",
+    "receiver.cumulative_bytes_recv",
+    "receiver.cumulative_reorder_count",
+    "receiver.highest_counter",
+    "receiver.interval_packets_recv",
+    "receiver.interval_bytes_recv",
+    "receiver.jitter",
+    "receiver.owd_trend",
+    "receiver.owd_seq",
+    "receiver.gap_tracker",
+    "receiver.ecn_ce_count",
+    "receiver.last_sender_timestamp",
+    "receiver.last_recv_ms",
+    "receiver.rekey_jitter_grace_until_ms",
+    "receiver.last_report_ms",
+    "receiver.report_interval_ms",
+    "receiver.interval_has_data",
+    "receiver.srtt_sample_count",
+    "metrics.srtt",
+    "metrics.rtt_trend",
+    "metrics.loss_trend",
+    "metrics.goodput_trend",
+    "metrics.jitter_trend",
+    "metrics.etx_trend",
+    "metrics.delivery_ratio_forward",
+    "metrics.delivery_ratio_reverse",
+    "metrics.etx",
+    "metrics.goodput_bps",
+    "metrics.prev_rr_cum_packets",
+    "metrics.prev_rr_cum_bytes",
+    "metrics.prev_rr_highest_counter",
+    "metrics.prev_rr_ecn_ce",
+    "metrics.prev_rr_reorder",
+    "metrics.prev_rr_ms",
+    "metrics.has_prev_rr",
+    "metrics.prev_reverse_packets",
+    "metrics.prev_reverse_highest",
+    "metrics.has_prev_reverse",
+    "metrics.reports_seen",
+    "metrics.rtt_samples",
+    "metrics.rtt_zero",
+    "metrics.rtt_arith_fail",
+    "metrics.last_rtt_ms",
+    "spin_bit",
+    "last_log_ms",
+];
+
+/// What a link's rekey reset leaves different from a new state of the same
+/// arguments: the sender whole; the receiver's lifetime totals, its report
+/// schedule and SRTT sample count, and the jitter grace the reset sets; the
+/// metrics' SRTT, trends, reverse delivery ratio, ETX, goodput, report and
+/// RTT sample counters and last RTT sample; and the log timing. The mode,
+/// the log interval, the one-way-delay window and the spin role are `new`'s
+/// arguments, so they match by construction.
+const CARRIES: &[&str] = &[
+    "sender.cumulative_packets_sent",
+    "sender.cumulative_bytes_sent",
+    "sender.interval_start_counter",
+    "sender.interval_start_timestamp",
+    "sender.interval_bytes_sent",
+    "sender.last_counter",
+    "sender.last_timestamp",
+    "sender.interval_has_data",
+    "sender.last_report_ms",
+    "sender.report_interval_ms",
+    "sender.consecutive_send_failures",
+    "sender.srtt_sample_count",
+    "receiver.cumulative_packets_recv",
+    "receiver.cumulative_bytes_recv",
+    "receiver.rekey_jitter_grace_until_ms",
+    "receiver.last_report_ms",
+    "receiver.report_interval_ms",
+    "receiver.srtt_sample_count",
+    "metrics.srtt",
+    "metrics.rtt_trend",
+    "metrics.loss_trend",
+    "metrics.goodput_trend",
+    "metrics.jitter_trend",
+    "metrics.etx_trend",
+    "metrics.delivery_ratio_reverse",
+    "metrics.etx",
+    "metrics.goodput_bps",
+    "metrics.reports_seen",
+    "metrics.rtt_samples",
+    "metrics.rtt_zero",
+    "metrics.rtt_arith_fail",
+    "metrics.last_rtt_ms",
+    "last_log_ms",
+];
+
+/// A new link state of spin role `is_initiator`, at the defaults.
+fn fresh_link(is_initiator: bool) -> MmpPeerState {
+    MmpPeerState::new(
+        MmpMode::Full,
+        DEFAULT_LOG_INTERVAL_SECS,
+        DEFAULT_OWD_WINDOW_SIZE,
+        is_initiator,
+    )
+}
+
+/// A dirtied link state of spin role `is_initiator`, at the defaults.
+fn dirtied_link(is_initiator: bool) -> MmpPeerState {
+    MmpPeerState::dirtied(
+        MmpMode::Full,
+        DEFAULT_LOG_INTERVAL_SECS,
+        DEFAULT_OWD_WINDOW_SIZE,
+        is_initiator,
+    )
+}
+
+#[test]
+fn a_reset_leaves_only_the_listed_carries_different_from_fresh() {
+    for is_initiator in [true, false] {
+        let fresh = fresh_link(is_initiator);
+        assert_eq!(
+            fresh_link(is_initiator).fresh_diff(&fresh),
+            Vec::<&str>::new(),
+            "precondition: two new states compare the same"
+        );
+        let mut state = dirtied_link(is_initiator);
+        assert_eq!(
+            state.fresh_diff(&fresh),
+            RUNTIME,
+            "precondition: the dirtied state differs from a new one in every \
+             field new does not take"
+        );
+
+        state.reset_for_rekey(100_000);
+
+        assert_eq!(
+            state.fresh_diff(&fresh),
+            CARRIES,
+            "defect: a reset of an initiator {is_initiator} left a field \
+             other than its carries different from a new state's"
+        );
+    }
+}
+
+#[test]
+fn every_nested_mmp_state_is_dirtied_in_every_field_new_does_not_take() {
+    use crate::proto::mmp::algorithms::{
+        DualEwma, JitterEstimator, OwdTrendDetector, SpinBitState, SrttEstimator,
+    };
+    assert_eq!(
+        JitterEstimator::dirtied().fresh_diff(&JitterEstimator::new()),
+        ["jitter_q4"]
+    );
+    assert_eq!(
+        SrttEstimator::dirtied().fresh_diff(&SrttEstimator::new()),
+        ["srtt_us", "rttvar_us", "initialized"]
+    );
+    assert_eq!(
+        DualEwma::dirtied().fresh_diff(&DualEwma::new()),
+        ["short", "long", "initialized"]
+    );
+    assert_eq!(
+        OwdTrendDetector::dirtied(DEFAULT_OWD_WINDOW_SIZE)
+            .fresh_diff(&OwdTrendDetector::new(DEFAULT_OWD_WINDOW_SIZE)),
+        ["samples"]
+    );
+    for is_initiator in [true, false] {
+        assert_eq!(
+            SpinBitState::dirtied(is_initiator).fresh_diff(&SpinBitState::new(is_initiator)),
+            ["current_value", "highest_counter_for_spin", "last_edge_ms"]
+        );
+    }
+    assert_eq!(
+        ReceiverState::dirtied(DEFAULT_OWD_WINDOW_SIZE).gaps_fresh_diff(),
+        [
+            "expected_next",
+            "in_burst",
+            "current_burst_len",
+            "burst_count",
+            "max_burst_len",
+            "total_burst_len",
+        ]
+    );
+    // Each comparison can tell a difference in the field a new one sets.
+    assert_eq!(
+        SpinBitState::new(true).fresh_diff(&SpinBitState::new(false)),
+        ["is_initiator"]
+    );
+    assert_eq!(
+        OwdTrendDetector::new(4).fresh_diff(&OwdTrendDetector::new(8)),
+        ["capacity"]
+    );
+    let other_mode = MmpPeerState::new(
+        MmpMode::Minimal,
+        DEFAULT_LOG_INTERVAL_SECS + 1,
+        DEFAULT_OWD_WINDOW_SIZE,
+        true,
+    );
+    assert_eq!(
+        other_mode.fresh_diff(&fresh_link(true)),
+        ["mode", "log_interval_ms"]
+    );
 }

@@ -9,7 +9,9 @@ Unit tests for the metrics protocol, declared from `mmp/mod.rs` as
 - `path_mtu.rs`: the path-MTU state machine.
 - `state.rs`: the aggregates, the sampled and unsampled halves of a
   received frame, and `MmpMode`'s configuration spelling through
-  `serde_yaml`.
+  `serde_yaml`; and that a link's rekey reset leaves exactly its listed
+  carries different from a new state, by `MmpPeerState::fresh_diff` over a
+  state `MmpPeerState::dirtied` built away from new in every field.
 - `wire.rs`: the report codecs.
 - `spin_rekey.rs`: the spin bit across a rekey cutover whose counters start
   again, for the link state and the session state.

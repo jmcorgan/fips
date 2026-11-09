@@ -357,3 +357,160 @@ impl SpinBitState {
         }
     }
 }
+
+// ============================================================================
+// What a state still carries, for tests
+// ============================================================================
+
+/// Add `name` to `out` unless `same`: one step of a `fresh_diff`.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(super) fn note(out: &mut alloc::vec::Vec<&'static str>, name: &'static str, same: bool) {
+    if !same {
+        out.push(name);
+    }
+}
+
+/// Whether two floats hold the same value, bit for bit.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(super) fn same_float(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits()
+}
+
+// Each `fresh_diff` below names the fields of `self` that differ from
+// `fresh`'s, and each `dirtied` builds a state whose every field is away from
+// a new one's but those `new` takes as arguments. Both name every field with
+// no `..`, so a new field does not compile until it takes a side.
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl JitterEstimator {
+    /// The fields of `self` that differ from `fresh`'s.
+    pub(super) fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        let Self { jitter_q4 } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(&mut out, "jitter_q4", *jitter_q4 == fresh.jitter_q4);
+        out
+    }
+
+    /// An estimator with every field away from a new one's.
+    pub(super) fn dirtied() -> Self {
+        Self { jitter_q4: 1600 }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl SrttEstimator {
+    /// The fields of `self` that differ from `fresh`'s.
+    pub(super) fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        let Self {
+            srtt_us,
+            rttvar_us,
+            initialized,
+        } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(&mut out, "srtt_us", *srtt_us == fresh.srtt_us);
+        note(&mut out, "rttvar_us", *rttvar_us == fresh.rttvar_us);
+        note(&mut out, "initialized", *initialized == fresh.initialized);
+        out
+    }
+
+    /// An estimator with every field away from a new one's.
+    pub(super) fn dirtied() -> Self {
+        Self {
+            srtt_us: 40_000,
+            rttvar_us: 5_000,
+            initialized: true,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl DualEwma {
+    /// The fields of `self` that differ from `fresh`'s.
+    pub(super) fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        let Self {
+            short,
+            long,
+            initialized,
+        } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(&mut out, "short", same_float(*short, fresh.short));
+        note(&mut out, "long", same_float(*long, fresh.long));
+        note(&mut out, "initialized", *initialized == fresh.initialized);
+        out
+    }
+
+    /// A detector with every field away from a new one's.
+    pub(super) fn dirtied() -> Self {
+        Self {
+            short: 3.5,
+            long: 2.5,
+            initialized: true,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl OwdTrendDetector {
+    /// The fields of `self` that differ from `fresh`'s.
+    pub(super) fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        let Self { samples, capacity } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(&mut out, "samples", *samples == fresh.samples);
+        note(&mut out, "capacity", *capacity == fresh.capacity);
+        out
+    }
+
+    /// A detector of `capacity` holding samples, which a new one does not.
+    pub(super) fn dirtied(capacity: usize) -> Self {
+        let mut detector = Self::new(capacity);
+        detector.push(7, 1_200);
+        detector.push(8, 1_350);
+        detector
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl SpinBitState {
+    /// The fields of `self` that differ from `fresh`'s.
+    pub(super) fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        let Self {
+            is_initiator,
+            current_value,
+            highest_counter_for_spin,
+            last_edge_ms,
+        } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(
+            &mut out,
+            "is_initiator",
+            *is_initiator == fresh.is_initiator,
+        );
+        note(
+            &mut out,
+            "current_value",
+            *current_value == fresh.current_value,
+        );
+        note(
+            &mut out,
+            "highest_counter_for_spin",
+            *highest_counter_for_spin == fresh.highest_counter_for_spin,
+        );
+        note(
+            &mut out,
+            "last_edge_ms",
+            *last_edge_ms == fresh.last_edge_ms,
+        );
+        out
+    }
+
+    /// A spin state of the role `is_initiator` with every other field away
+    /// from a new one's.
+    pub(super) fn dirtied(is_initiator: bool) -> Self {
+        Self {
+            is_initiator,
+            current_value: true,
+            highest_counter_for_spin: 4_000,
+            last_edge_ms: Some(9_000),
+        }
+    }
+}

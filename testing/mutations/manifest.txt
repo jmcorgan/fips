@@ -32,6 +32,7 @@ ResponderCutoverSkipsFilterMark	red	fips-mesh	node::tests::settle::carry::redial
 ResponderCutoverSkipsFilterMark	red	fips-mesh	node::tests::settle::carry::redial_from_the_larger_node_answered_as_a_rekey_resends_the_filter
 ClampEntryKept	red	fips-mesh	node::tests::probe::probe_teardown_releases_the_clamp_entry_the_probes_session_tightened	must not outlive the session
 ClampEntryKept	red	fips-mesh	node::tests::peer_restart::restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions	the clamp entry the ended session tightened goes with it
+RestartSkipsTreeReset	red	fips-mesh	node::tests::peer_restart::restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions	the cutover a revealed restart caused drops B's previous tree declaration
 RestartKeepsClamp	red	fips-mesh	node::tests::settle::carry::a_restart_msg1_releases_the_clamp_entry_of_the_session_it_clears
 SessionSpinKept	red	fips-core	proto::mmp::tests::spin_rekey::session_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
 SessionSpinKept	red	fips-core	proto::mmp::tests::rekey_reset::a_session_initiators_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
@@ -42,9 +43,19 @@ SessionSpinKept	pass	fips-core	proto::mmp::tests::rekey_reset::a_link_responders
 LinkSpinKept	red	fips-core	proto::mmp::tests::spin_rekey::link_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
 LinkSpinKept	red	fips-core	proto::mmp::tests::rekey_reset::a_link_initiators_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
 LinkSpinKept	red	fips-core	proto::mmp::tests::rekey_reset::a_link_responders_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
+LinkSpinKept	red	fips-core	proto::mmp::tests::state::a_reset_leaves_only_the_listed_carries_different_from_fresh
 LinkSpinKept	pass	fips-core	proto::mmp::tests::spin_rekey::session_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
 LinkSpinKept	pass	fips-core	proto::mmp::tests::rekey_reset::a_session_initiators_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
 LinkSpinKept	pass	fips-core	proto::mmp::tests::rekey_reset::a_session_responders_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
+CutoverSkipsMmpReset	red	fips-mesh	peer::data::tests::a_cutover_resets_what_its_cells_say_and_carries_the_rest
+CutoverSkipsMmpReset	red	fips-mesh	node::tests::session::frames_on_the_previous_link_session_do_not_feed_the_new_sessions_mmp	the cutover resets MMP
+CutoverSkipsMmpReset	red	fips-mesh	node::tests::session::a_worker_decrypted_frame_on_the_previous_link_session_does_not_feed_mmp	a previous-session frame's counter must not be counted
+CutoverSkipsMmpReset	red	fips-mesh	node::tests::bloom::test_bloom_reports_from_the_previous_session_do_not_trigger_resends	M must not take P's report about M's previous session
+CutoverSkipsMmpReset	pass	fips-mesh	peer::data::tests::a_move_resets_what_its_cells_say_and_carries_the_rest
+MoveSkipsMmpReset	red	fips-mesh	peer::data::tests::a_move_resets_what_its_cells_say_and_carries_the_rest
+MoveSkipsMmpReset	red	fips-mesh	peer::active::tests::a_cross_connection_move_resets_the_link_mmp_observer_as_a_cutover_does	highest_counter counts from the new session
+MoveSkipsMmpReset	red	fips-mesh	peer::active::tests::a_cross_connection_move_accepts_the_peers_receiver_reports_on_the_new_session	is not dropped as stale
+MoveSkipsMmpReset	pass	fips-mesh	peer::data::tests::a_cutover_resets_what_its_cells_say_and_carries_the_rest
 TreeCarryAcrossRestart	red	fips-mesh	node::tests::settle::carry::a_peer_replaced_by_a_restart_after_an_announce_just_now_is_sent_a_tree_announce_at_once
 NewPeerStartsRateLimited	red	fips-mesh	node::tests::settle::carry::a_peer_promoted_for_an_identity_announced_to_just_now_is_sent_a_tree_announce_at_once
 NewPeerStartsRateLimited	red	fips-mesh	node::tests::settle::carry::a_peer_replaced_by_a_restart_after_an_announce_just_now_is_sent_a_tree_announce_at_once

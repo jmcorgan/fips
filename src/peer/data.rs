@@ -7,16 +7,26 @@
 //!
 //! The fields are plain members with no pointer between them and the peer, so
 //! a per-frame write reaches them as it would a field of `ActivePeer`.
+//!
+//! [`PeerData::settle`] applies the transition table's cell for a transition
+//! to each of the record's rows; between transitions the per-event methods on
+//! `ActivePeer` write it. [`PeerData::depart`] ends the record at a removal
+//! and hands over what the removal reads of it, as a [`Departed`]. Both
+//! destructure the record with no rest pattern, so a field added here does
+//! not compile until it takes a side in each.
+
+#![deny(clippy::wildcard_enum_match_arm)]
 
 use super::PeerInstant;
-use crate::node::diag::HsLineCounts;
+use crate::node::diag::{HsLineCounts, Withheld};
+use crate::node::settle::table::{DataCell, DataRow, Transition, data_cell};
 use crate::proto::bloom::BloomFilter;
 use crate::proto::fmp::EphemeralDigest;
 use crate::proto::mmp::MmpPeerState;
 use crate::proto::stp::{ParentDeclaration, TreeCoordinate};
 use crate::transport::LinkStats;
 use crate::utils::index::SessionIndex;
-use portable_atomic::AtomicU64;
+use portable_atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -149,6 +159,271 @@ impl PeerData {
             failed_idx: None,
             mmp: None,
         }
+    }
+
+    /// Apply `t`'s cell to every row of the record, `now_ms` being the
+    /// monotonic reading an MMP reset starts its jitter grace from. Names
+    /// every field: a new one does not compile. A new record comes from
+    /// [`PeerData::new`], so a transition whose cell is a new record or the
+    /// record's end is not one to settle.
+    pub(super) fn settle(&mut self, t: &Transition, now_ms: u64) {
+        let PeerData {
+            declaration,
+            ancestry,
+            tree_announce_min_interval_ms: _,
+            last_tree_announce_sent_ms: _,
+            pending_tree_announce: _,
+            inbound_filter,
+            filter_sequence,
+            filter_received_at,
+            pending_filter_update: _,
+            authenticated_at: _,
+            link_stats: _,
+            last_seen: _,
+            last_heartbeat_sent: _,
+            last_heartbeat_attempt: _,
+            promoted_at: _,
+            heard_at: _,
+            heard: _,
+            frame_heard: _,
+            handshake_msg2: _,
+            setup_ephemeral: _,
+            hs_lines,
+            replay_total,
+            replay_base,
+            prev_frames,
+            failed_idx: _,
+            mmp,
+        } = self;
+
+        for row in ROWS {
+            let cell = data_cell(row, t);
+            match row {
+                DataRow::Mmp => match cell {
+                    DataCell::Keep => {}
+                    // Which fields a reset keeps is MMP's business: its own
+                    // test lists them.
+                    DataCell::Reset => {
+                        if let Some(mmp) = mmp.as_mut()
+                            && !skips_mmp_reset(t)
+                        {
+                            mmp.reset_for_rekey(now_ms);
+                        }
+                    }
+                    DataCell::Roll
+                    | DataCell::Base
+                    | DataCell::Clear
+                    | DataCell::New
+                    | DataCell::Drop => unsettled(row, t),
+                },
+                DataRow::Spin => match cell {
+                    DataCell::Keep => {}
+                    // The spin bit is part of MMP's state and restarts in
+                    // its reset.
+                    DataCell::Reset => debug_assert_eq!(
+                        data_cell(DataRow::Mmp, t),
+                        DataCell::Reset,
+                        "the spin bit restarts only with the MMP reset, at {t:?}"
+                    ),
+                    DataCell::Roll
+                    | DataCell::Base
+                    | DataCell::Clear
+                    | DataCell::New
+                    | DataCell::Drop => unsettled(row, t),
+                },
+                DataRow::PeerFilter => match cell {
+                    DataCell::Keep => {}
+                    DataCell::Clear => {
+                        *inbound_filter = None;
+                        *filter_sequence = 0;
+                        *filter_received_at = 0;
+                    }
+                    DataCell::Reset
+                    | DataCell::Roll
+                    | DataCell::Base
+                    | DataCell::New
+                    | DataCell::Drop => unsettled(row, t),
+                },
+                DataRow::TreePosition => match cell {
+                    DataCell::Keep => {}
+                    DataCell::Clear => {
+                        *declaration = None;
+                        *ancestry = None;
+                    }
+                    DataCell::Reset
+                    | DataCell::Roll
+                    | DataCell::Base
+                    | DataCell::New
+                    | DataCell::Drop => unsettled(row, t),
+                },
+                DataRow::PrevFrames => match cell {
+                    DataCell::Keep => {}
+                    DataCell::Reset => *prev_frames = 0,
+                    DataCell::Roll
+                    | DataCell::Base
+                    | DataCell::Clear
+                    | DataCell::New
+                    | DataCell::Drop => unsettled(row, t),
+                },
+                DataRow::HsLines => match cell {
+                    DataCell::Keep => {}
+                    DataCell::Roll => hs_lines.roll(),
+                    DataCell::Reset
+                    | DataCell::Base
+                    | DataCell::Clear
+                    | DataCell::New
+                    | DataCell::Drop => unsettled(row, t),
+                },
+                DataRow::ReplayBase => match cell {
+                    DataCell::Keep => {}
+                    // The total stays, and with it the clone each decrypt
+                    // worker holds: only the base moves.
+                    DataCell::Base => *replay_base = replay_total.load(Ordering::Relaxed),
+                    DataCell::Reset
+                    | DataCell::Roll
+                    | DataCell::Clear
+                    | DataCell::New
+                    | DataCell::Drop => unsettled(row, t),
+                },
+                // Rows only a new record or the record's end changes.
+                DataRow::FilterPending
+                | DataRow::TreePending
+                | DataRow::TreeStamp
+                | DataRow::TreeInterval
+                | DataRow::Heard
+                | DataRow::StoredSetup
+                | DataRow::Stats
+                | DataRow::ReplayTotal => match cell {
+                    DataCell::Keep => {}
+                    DataCell::Reset
+                    | DataCell::Roll
+                    | DataCell::Base
+                    | DataCell::Clear
+                    | DataCell::New
+                    | DataCell::Drop => unsettled(row, t),
+                },
+            }
+        }
+    }
+}
+
+/// What a removal reads of a peer's record, and nothing else, handed over as
+/// the record ends: whether the peering was heard from and whether a frame
+/// arrived, the setup's ephemeral, the replays refused since the last session
+/// reset, the handshake lines withheld, and the MMP state its teardown logs.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug)]
+pub(crate) struct Departed {
+    /// Whether the peering was heard from: a frame arrived, or this node
+    /// initiated it (`ActivePeer::is_heard`).
+    pub heard: bool,
+    /// Whether an authenticated frame arrived since the promotion
+    /// (`ActivePeer::heard`).
+    pub frame_heard: bool,
+    /// The digest of the ephemeral the peering was promoted from.
+    pub ephemeral: Option<EphemeralDigest>,
+    /// Replays refused since the last session reset
+    /// (`ActivePeer::replay_suppressed_count`).
+    pub suppressed: u32,
+    /// The handshake lines withheld and not yet reported.
+    pub withheld: Option<Withheld>,
+    /// The link's MMP state.
+    pub mmp: Option<MmpPeerState>,
+}
+
+impl PeerData {
+    /// End the record at a removal, handing over what the removal reads of
+    /// it. Names every field: a new one does not compile until it is read or
+    /// dropped here. A decrypt worker's clone of the replay total lives on
+    /// until the worker is revoked; this record's is dropped.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn depart(self) -> Departed {
+        let PeerData {
+            declaration: _,
+            ancestry: _,
+            tree_announce_min_interval_ms: _,
+            last_tree_announce_sent_ms: _,
+            pending_tree_announce: _,
+            inbound_filter: _,
+            filter_sequence: _,
+            filter_received_at: _,
+            pending_filter_update: _,
+            authenticated_at: _,
+            link_stats: _,
+            last_seen: _,
+            last_heartbeat_sent: _,
+            last_heartbeat_attempt: _,
+            promoted_at: _,
+            heard_at: _,
+            heard,
+            frame_heard,
+            handshake_msg2: _,
+            setup_ephemeral,
+            hs_lines,
+            replay_total,
+            replay_base,
+            prev_frames: _,
+            failed_idx: _,
+            mmp,
+        } = self;
+        let total = replay_total.load(Ordering::Relaxed);
+        Departed {
+            heard,
+            frame_heard,
+            ephemeral: setup_ephemeral,
+            suppressed: u32::try_from(total.saturating_sub(replay_base)).unwrap_or(u32::MAX),
+            withheld: hs_lines.unreported(),
+            mmp,
+        }
+    }
+}
+
+/// Every row of the record, in the order `settle` applies them. A test holds
+/// it to the table's own list.
+const ROWS: [DataRow; 15] = [
+    DataRow::Mmp,
+    DataRow::Spin,
+    DataRow::PeerFilter,
+    DataRow::FilterPending,
+    DataRow::TreePosition,
+    DataRow::TreePending,
+    DataRow::TreeStamp,
+    DataRow::TreeInterval,
+    DataRow::Heard,
+    DataRow::StoredSetup,
+    DataRow::Stats,
+    DataRow::PrevFrames,
+    DataRow::HsLines,
+    DataRow::ReplayBase,
+    DataRow::ReplayTotal,
+];
+
+/// A cell `settle` has no way to apply: a new record, the record's end, or a
+/// value the row never takes. A debug build stops; a release build leaves the
+/// row as it was.
+fn unsettled(row: DataRow, t: &Transition) {
+    debug_assert!(
+        false,
+        "{row:?} has no change to settle at {t:?}: {:?}",
+        data_cell(row, t)
+    );
+}
+
+/// Whether the mutation lane's break for `t` skips the MMP reset: at a
+/// cutover, or at a move.
+fn skips_mmp_reset(t: &Transition) -> bool {
+    match t {
+        Transition::Cutover { .. } => node_fault!(CutoverSkipsMmpReset),
+        Transition::Move { .. } => node_fault!(MoveSkipsMmpReset),
+        Transition::Promote { .. }
+        | Transition::Replace { .. }
+        | Transition::Keep { .. }
+        | Transition::Restarted
+        | Transition::Roam
+        | Transition::Follow
+        | Transition::Switch
+        | Transition::Release { .. }
+        | Transition::Remove { .. } => false,
     }
 }
 

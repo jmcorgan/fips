@@ -24,7 +24,16 @@ items.
   file as `#[cfg(test)] #[path = "tests/data.rs"] mod tests;`. They cover what
   a new record holds, read through `ActivePeer`, which is the only way in to a
   peer's record, for each of its constructors, and read from the record itself
-  for the fields no accessor tells apart.
+  for the fields no accessor tells apart. They also cover `settle`: for each
+  transition it applies, a record dirtied in every row, and a new one, hold
+  afterwards what the transition table's cell says, row by row, from the
+  value before or from the row's own reset, with the replay total the same
+  allocation the decrypt workers hold; MMP is compared field by field through
+  the core's `fresh_diff`. They cover `depart`, which hands a removal what
+  it reads of the record, the same values the accessors give; and two source
+  scans of `data.rs`, each with a planted line: it denies wildcard arms, and
+  `settle` and `depart` each destructure the record naming every field the
+  struct declares, with no rest pattern.
 - `machine.rs`: tests for `PeerMachine` (`src/peer/machine.rs`), declared as
   `mod msg2_tests` because `machine.rs` already has an inline `tests` module.
   They cover an initial (IK) dial receiving a msg2 that does not authenticate:

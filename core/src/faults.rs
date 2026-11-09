@@ -81,6 +81,12 @@ faults! {
     /// A session's MMP state keeps its spin bit through a rekey cutover,
     /// whose counters start again at zero.
     SessionSpinKept,
+    /// A peer's record keeps its link's MMP counters through a rekey
+    /// cutover, whose frame counter starts again at zero.
+    CutoverSkipsMmpReset,
+    /// A peer's record keeps its link's MMP counters through a move onto
+    /// a new session, whose frame counter starts again at zero.
+    MoveSkipsMmpReset,
     /// A rekey machine that yields to a peer's completed attempt keeps its
     /// own attempt instead of abandoning it.
     YieldKeepsOwnAttempt,
@@ -129,6 +135,9 @@ faults! {
     /// A rekey this node answered as responder does not mark its filter to
     /// be sent again.
     ResponderCutoverSkipsFilterMark,
+    /// A peer restart found at a rekey leaves the peer in the spanning
+    /// tree's state, so the declaration its previous run sent stays held.
+    RestartSkipsTreeReset,
     /// A stream transport's close aborts the connection's writer at once
     /// instead of letting it write what was queued.
     DrainAbortsAtOnce,

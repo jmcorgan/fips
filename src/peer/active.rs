@@ -3,7 +3,7 @@
 //! Represents a fully authenticated peer after successful Noise handshake.
 //! ActivePeer holds tree state, Bloom filter, and routing information.
 
-use super::data::PeerData;
+use super::data::{Departed, PeerData};
 use super::{
     LinkCaps, LinkOutput, LinkOutputs, LinkProfile, LinkRekey, Match, PathCaps, PeerBundle,
     PeerInstant, PeerPath, Roam, UdpSlot, peer_now, since,
@@ -13,6 +13,7 @@ use super::{Medium, PathSet, Rebind};
 use crate::config::MmpConfig;
 use crate::node::diag::HsLineCounts;
 use crate::node::session::{ThreadJitter, with_tags};
+use crate::node::settle::table::Transition;
 use crate::noise::NoiseSession;
 use crate::proto::bloom::BloomFilter;
 use crate::proto::fmp::{EphemeralDigest, Msg1Digest};
@@ -599,36 +600,61 @@ impl ActivePeer {
     /// built with and whether a decrypt-worker pool runs, to which the new
     /// session is offered at once; its record is not read.
     ///
+    /// `dial` is the link of the dial whose session the peer moves onto, and
+    /// `own` says the dial answered was this node's own or a later one
+    /// rather than a crossing won on the tie-break.
+    ///
     /// Returns the outputs that unbind, revoke and release what the closed
     /// machine held and bind (and offer) the new session, and the outputs of
-    /// the path machine's renewal. Hands `ours` back in a release, changing
-    /// nothing (the peer's pair included), when `session` authenticated
-    /// another key than the peer's; the path outputs are then empty. Also
-    /// resets the replay suppression counter and the repeated handshake line
-    /// counts since the session changed, and, once the link has moved, the
-    /// link's counter-derived MMP state, as a cutover does, since the new
-    /// session's frame counter starts again at 0, and starts the path
-    /// machine again at `to`, as a new link (multipath v1 draft, Sections
-    /// 5.2 and 5.4): a path already held at `to`, active or not, stays
-    /// with its connected socket and its count of failed frames, every
-    /// other path is released, and when none is held there `to` becomes
-    /// the new link's original path ([`PeerBundle::renew`]); `caps.path`
-    /// gives the facts it reads.
+    /// the path machine's renewal. Hands `ours` back in a release, leaving the
+    /// machine and the peer's pair as they were, when `session` authenticated
+    /// another key than the peer's; the path outputs are then empty. The
+    /// peer's record is then reset by the transition table's cells for a
+    /// move, whether or not the move was refused: the replay suppression
+    /// counter and the repeated handshake line counts always, since the
+    /// session changed, and, once the link has moved, the link's
+    /// counter-derived MMP state, as a cutover does, since the new session's
+    /// frame counter starts again at 0. The move starts the path machine
+    /// again at `to`, as a new link (multipath v1 draft, Sections 5.2 and
+    /// 5.4): a path already held at `to`, active or not, stays with its
+    /// connected socket and its count of failed frames, every other path is
+    /// released, and when none is held there `to` becomes the new link's
+    /// original path ([`PeerBundle::renew`]); `caps.path` gives the facts it
+    /// reads.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn move_session(
         &mut self,
         session: NoiseSession,
         ours: IndexLease,
         theirs: SessionIndex,
         to: (TransportId, TransportAddr),
+        dial: LinkId,
+        own: bool,
         caps: &mut LinkCaps<'_>,
     ) -> (LinkOutputs, Outputs<UdpSlot>) {
-        self.reset_replay_suppressed();
-        self.data.hs_lines.roll();
+        let (out, paths, built) = self.rebuild(session, ours, theirs, to, caps);
+        self.settle(&Transition::Move { dial, own, built });
+        (out, paths)
+    }
+
+    /// The machine part of [`move_session`](Self::move_session): close the
+    /// rekey machine, build it again on `session`, and renew the bundle at
+    /// `to`. Returns the outputs, the path outputs, and whether the machine
+    /// was rebuilt; on every early return it was not, and the record is left
+    /// to the caller.
+    fn rebuild(
+        &mut self,
+        session: NoiseSession,
+        ours: IndexLease,
+        theirs: SessionIndex,
+        to: (TransportId, TransportAddr),
+        caps: &mut LinkCaps<'_>,
+    ) -> (LinkOutputs, Outputs<UdpSlot>, bool) {
         // The mutation lane's break: the link stays on its old transport and
         // its bundle is not renewed.
         let kept = node_fault!(MoveKeepsOldPair).then(|| self.bound_transport());
         let Some(old) = self.rekey.take() else {
-            return (vec![LinkOutput::Release(ours)], Vec::new());
+            return (vec![LinkOutput::Release(ours)], Vec::new(), false);
         };
         let remote = PeerKey::from_xonly(&session.remote_static_xonly());
         let view = old.view();
@@ -638,20 +664,19 @@ impl ActivePeer {
         };
         let Some(bond) = held else {
             self.rekey = Some(old);
-            return (vec![LinkOutput::Release(ours)], Vec::new());
+            return (vec![LinkOutput::Release(ours)], Vec::new(), false);
         };
         let (mut out, carry) = old.close(Close::CrossConnectionMove);
         let Some(carry) = carry else {
             out.push(LinkOutput::Release(ours));
-            return (out, Vec::new());
+            return (out, Vec::new(), false);
         };
         let mut paths = Vec::new();
         let transport = kept.unwrap_or(to.0);
         match link_machine(bond, session, ours, theirs, transport, carry.into(), caps) {
-            Ok((rekey, built)) => {
-                out.extend(built);
+            Ok((rekey, bound)) => {
+                out.extend(bound);
                 self.rekey = Some(rekey);
-                self.reset_mmp();
                 let env = fips_core::proto::path::Env {
                     facts: caps.path.facts,
                     cost: self.live_cost(),
@@ -661,10 +686,13 @@ impl ActivePeer {
                 {
                     paths = bundle.renew(peer_now(), &env, to);
                 }
+                (out, paths, true)
             }
-            Err(lease) => out.push(LinkOutput::Release(lease)),
+            Err(lease) => {
+                out.push(LinkOutput::Release(lease));
+                (out, paths, false)
+            }
         }
-        (out, paths)
     }
 
     /// The transport our frames to this peer go out on: the active path's.
@@ -1784,24 +1812,13 @@ impl ActivePeer {
         }
     }
 
-    /// Reset what a cutover resets beside the machine: the replay
-    /// suppression and handshake line counts, the frames counted on the
-    /// previous session, and the link MMP counters. The node runs it for
-    /// each cutover the link machine reports.
-    pub(crate) fn after_cutover(&mut self) {
-        self.data.prev_frames = 0;
-        self.reset_replay_suppressed();
-        self.data.hs_lines.roll();
-        self.reset_mmp();
-    }
-
-    /// Reset the link's counter-derived MMP state for a session whose frame
-    /// counter starts again at 0, as at a cutover or a cross-connection
-    /// move.
-    fn reset_mmp(&mut self) {
-        if let Some(mmp) = &mut self.data.mmp {
-            mmp.reset_for_rekey(crate::time::mono_ms());
-        }
+    /// Reset what a cutover this node made as `role` resets beside the
+    /// machine, by the transition table: the replay suppression and
+    /// handshake line counts, the frames counted on the previous session,
+    /// and the link MMP counters. The node runs it for each cutover the link
+    /// machine reports.
+    pub(crate) fn after_cutover(&mut self, role: Role) {
+        self.settle(&Transition::Cutover { role });
     }
 
     /// Whether a drain is in progress.
@@ -1844,6 +1861,22 @@ impl ActivePeer {
             out,
             carry.map(|c| (c.peer_epoch.unwrap_or_default(), c.record)),
         )
+    }
+
+    /// Apply `t`'s cells to the peer's record, reading the monotonic clock
+    /// once for an MMP reset's jitter grace. The peer's identity, its
+    /// machines and the node's state are not the record's, and `t` does not
+    /// reach them here.
+    pub(crate) fn settle(&mut self, t: &Transition) {
+        self.data.settle(t, crate::time::mono_ms());
+    }
+
+    /// End the peer's record as the peer is removed, handing over what the
+    /// removal reads of it. The peer's identity and machines go with it; a
+    /// caller closes the machines and the paths first.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn depart(self) -> Departed {
+        self.data.depart()
     }
 }
 

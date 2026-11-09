@@ -2330,6 +2330,8 @@ impl Node {
                         outbound_lease,
                         header.sender_idx,
                         (packet.transport_id, packet.remote_addr.clone()),
+                        link_id,
+                        own_dial || later_dial,
                         &mut caps,
                     );
                     self.run_link_outputs(&peer_node_addr, out);
