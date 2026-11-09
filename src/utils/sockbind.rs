@@ -168,16 +168,13 @@ fn chown_to_fips_group(path: &Path) {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let group_name = CString::new("fips").unwrap();
-    let grp = unsafe { libc::getgrnam(group_name.as_ptr()) };
-    if grp.is_null() {
+    let Some(gid) = fips_group_id() else {
         debug!(
             "'fips' group not found, skipping chown for {}",
             path.display()
         );
         return;
-    }
-    let gid = unsafe { (*grp).gr_gid };
+    };
 
     let c_path = match CString::new(path.as_os_str().as_bytes()) {
         Ok(p) => p,
@@ -190,6 +187,49 @@ fn chown_to_fips_group(path: &Path) {
             error = %std::io::Error::last_os_error(),
             "Failed to chown socket to 'fips' group"
         );
+    }
+}
+
+/// The largest buffer [`fips_group_id`] grows to for one group entry.
+#[cfg(unix)]
+const GROUP_BUF_MAX: usize = 1 << 20;
+
+/// The `fips` group's id, or `None` when the host has no such group or the
+/// lookup fails.
+///
+/// Looked up with `getgrnam_r` into a buffer of this call's own, never with
+/// `getgrnam`. Every socket bind asks, and binds run on as many threads as
+/// there are nodes in the process. `getgrnam` keeps its result in static
+/// storage, and musl also reads `/etc/group` into static line and member
+/// buffers that it reallocates with no lock, so two lookups at once can free
+/// one buffer twice and corrupt the heap.
+#[cfg(unix)]
+fn fips_group_id() -> Option<libc::gid_t> {
+    let mut buf: Vec<libc::c_char> = vec![0; 1024];
+    loop {
+        // SAFETY: `group` is a plain C struct of integers and pointers, for
+        // which all zeros is a valid value.
+        let mut group: libc::group = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::group = std::ptr::null_mut();
+        // SAFETY: the name is a NUL-terminated literal, `group` and `found`
+        // are live locals, and `buf` is `buf.len()` writable bytes. The
+        // entry's strings point into `buf`, and only `gr_gid`, a plain
+        // integer, is read from it.
+        let rc = unsafe {
+            libc::getgrnam_r(
+                c"fips".as_ptr(),
+                &mut group,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut found,
+            )
+        };
+        match rc {
+            0 if found.is_null() => return None,
+            0 => return Some(group.gr_gid),
+            libc::ERANGE if buf.len() < GROUP_BUF_MAX => buf.resize(buf.len() * 2, 0),
+            _ => return None,
+        }
     }
 }
 
@@ -206,6 +246,10 @@ pub fn cleanup(path: &PathBuf, what: &str) {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "tests/sockbind.rs"]
+mod lookup_tests;
 
 #[cfg(all(test, unix))]
 mod tests {
