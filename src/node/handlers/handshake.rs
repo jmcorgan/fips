@@ -2730,8 +2730,13 @@ impl Node {
             new_peer.set_last_tree_announce_sent_ms(Some(crate::time::mono_ms()));
         }
 
-        self.peers.install(peer_node_addr, new_peer);
-        self.run_link_outputs(&peer_node_addr, out);
+        if node_fault!(OutputsBeforeInstall) {
+            self.run_link_outputs(&peer_node_addr, out);
+            self.peers.install(peer_node_addr, new_peer);
+        } else {
+            self.peers.install(peer_node_addr, new_peer);
+            self.run_link_outputs(&peer_node_addr, out);
+        }
         self.peering
             .reconciler
             .retry_pending

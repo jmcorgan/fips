@@ -441,6 +441,30 @@ impl ActivePeer {
         }
     }
 
+    /// Whether the path at `index` holds a connected socket, active or not.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn socket_at(&self, index: usize) -> bool {
+        self.send
+            .bundle
+            .as_ref()
+            .and_then(|b| b.paths().get(index))
+            .is_some_and(|p| p.driver().connected_udp().is_some())
+    }
+
+    /// Seat a connected socket with its recv drain on the path at `index`,
+    /// active or not. A no-op where no path is at `index`.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn seat_socket(
+        &mut self,
+        index: usize,
+        socket: std::sync::Arc<crate::transport::udp::ConnectedPeerSocket>,
+        drain: crate::transport::udp::PeerRecvDrain,
+    ) {
+        if let Some(slot) = self.send.bundle.as_mut().and_then(|b| b.driver_mut(index)) {
+            slot.set_connected_udp(socket, drain);
+        }
+    }
+
     /// The driver slot of the path our frames go out on.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn active_slot(&mut self) -> Option<&mut UdpSlot> {
@@ -968,6 +992,12 @@ impl ActivePeer {
         u32::try_from(total.saturating_sub(self.data.replay_base)).unwrap_or(u32::MAX)
     }
 
+    /// The total at the last session reset, which the count is taken from.
+    #[cfg(test)]
+    pub(crate) fn replay_base(&self) -> u64 {
+        self.data.replay_base
+    }
+
     /// Refused replays since this peer was promoted. No session reset clears
     /// the total; a connection that replaces the peer starts a new one.
     pub fn replay_suppressed_total(&self) -> u64 {
@@ -1092,6 +1122,13 @@ impl ActivePeer {
     /// Get the filter sequence number.
     pub fn filter_sequence(&self) -> u64 {
         self.data.filter_sequence
+    }
+
+    /// When the peer's filter was received, in the milliseconds `update_filter`
+    /// was given.
+    #[cfg(test)]
+    pub(crate) fn filter_received_at(&self) -> u64 {
+        self.data.filter_received_at
     }
 
     /// Check if this peer's filter is stale.
@@ -1365,6 +1402,12 @@ impl ActivePeer {
     /// Set the minimum interval between TreeAnnounce messages (milliseconds).
     pub fn set_tree_announce_min_interval_ms(&mut self, ms: u64) {
         self.data.tree_announce_min_interval_ms = ms;
+    }
+
+    /// The minimum interval between TreeAnnounce messages (milliseconds).
+    #[cfg(test)]
+    pub(crate) fn tree_announce_min_interval_ms(&self) -> u64 {
+        self.data.tree_announce_min_interval_ms
     }
 
     /// When this peer was last sent a TreeAnnounce, in the monotonic

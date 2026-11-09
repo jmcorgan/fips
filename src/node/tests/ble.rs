@@ -33,7 +33,7 @@ pub(super) fn ble_addr(n: u8) -> BleAddr {
 /// When a connect handler fires, it looks up the target address in this
 /// bank and returns the pre-created stream. The peer end should be
 /// injected into the target node's acceptor separately.
-type StreamBank = Arc<StdMutex<HashMap<String, MockBleStream>>>;
+pub(super) type StreamBank = Arc<StdMutex<HashMap<String, MockBleStream>>>;
 
 /// Create a test node with a BLE transport backed by MockBleIo.
 ///
@@ -831,7 +831,7 @@ async fn a_verified_link_stops_being_protected_when_its_peer_is_reaped() {
 /// Node 1's view of two links from node 0, both dialled by node 0: L1 at
 /// node 1's address (seen from node 0's) and L2 at an alias (seen from
 /// node 0's alias). Returns `(a0, a1, a0x, a1x)`.
-async fn two_links(nodes: &[TestNode]) -> (BleAddr, BleAddr, BleAddr, BleAddr) {
+pub(super) async fn two_links(nodes: &[TestNode]) -> (BleAddr, BleAddr, BleAddr, BleAddr) {
     let a0 = node_ble_addr(&nodes[0]);
     let a1 = node_ble_addr(&nodes[1]);
     let a0x = ble_addr(100);

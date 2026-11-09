@@ -239,6 +239,8 @@ impl Node {
                 Self::log_session_mmp_teardown(&peer_name, mmp);
             }
             None
+        } else if node_fault!(KeptSessionNotSetAside) {
+            None
         } else {
             self.sessions.remove(node_addr)
         };

@@ -119,13 +119,24 @@ faults! {
     /// Removing a peer at a restart keeps the path MTU clamp entry its
     /// promotion seeded.
     RestartKeepsClamp,
+    /// Removing an unheard peering keeps its end-to-end session but leaves
+    /// it in place while the path MTU state is released, so the release
+    /// resets the estimate the session made of its own path.
+    KeptSessionNotSetAside,
     /// An initiator's promotion does not tell the transport which link the
     /// new peer uses, so on BLE the link stays unverified until the
     /// responder's first frame.
     DropInitiatorMark,
+    /// Telling the transports a peer moved links clears the old link before
+    /// marking the new one, so for a moment the peer has no verified link.
+    RelinkClearsFirst,
     /// A msg2 that does not authenticate ends the pending dial instead of
     /// keeping the attempt for the genuine msg2.
     ForgetDialOnRefusedMsg2,
+    /// A promotion runs the link machine's outputs before the peer is in
+    /// the table, so its session finds no peer's total to hand the decrypt
+    /// workers and is not delegated.
+    OutputsBeforeInstall,
     /// A newly promoted peer starts as if a tree announce had just been
     /// sent to it, so the rate limit holds back its first one.
     NewPeerStartsRateLimited,

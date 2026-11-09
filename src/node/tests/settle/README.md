@@ -11,11 +11,12 @@ real TCP sockets.
 
 Every test here states `node.path.enabled` and takes nothing from the daemon's
 default, so a change of default changes none of them. The tests of
-`crossing.rs` and `audit.rs` run both ways: a test's plain name runs multipath
-off, and its `_with_multipath_on` sibling runs it on. They are two tests and
-not one loop, since a pin that fails in a loop's first pass would never reach
-the second, and each pin has a line of its own in
-`testing/ignored-tests.txt`. The other files run off, which is what they test.
+`crossing.rs`, `audit.rs` and `table/` run both ways: a test's plain name
+runs multipath off, and its `_with_multipath_on` sibling runs it on. They are
+two tests and not one loop, since a pin that fails in a loop's first pass
+would never reach the second, and each pin has a line of its own in
+`testing/ignored-tests.txt`. `readings.rs` runs on, but for its one test named
+for off. The other files run off, which is what they test.
 
 ## Files
 
@@ -91,6 +92,15 @@ the second, and each pin has a line of its own in
   initiator's msg3 resends end and the repair rekey it then starts
   completes, an accepted ceiling the test asserts (32 s at the defaults,
   counted on a frozen clock); a sooner recovery passes too.
+- `readings.rs`: what a move or a restart does with multipath on to state
+  outside the peer's record. A connect still out when a move releases its path
+  stays open with no path naming it, and a close queued at a restart's teardown
+  is drained at the pair the new link runs on (both known defects), with the
+  control that with multipath off the teardown queues none. A no-carrier
+  reading stays across a move and goes with the peer. A characterisation test
+  (`chartest_`, as in `cells.rs`) holds what a restart found at a rekey keeps of
+  the bundle, and that the pin ends. Its `own_dial` and `restart_dial` also
+  serve the replay tests of `decrypt_replay.rs`.
 - `restart.rs`: a restarted node that reads a late rekey msg1 of its
   peer's previous run, past the unheard floor, after the peer has moved
   onto its new run: one session in every placement of the peer (a known
@@ -115,6 +125,14 @@ the second, and each pin has a line of its own in
   records none; a session a degraded decrypt-worker pool refused, and two
   started nodes on real pools, pass. Tests that need the audit to run carry
   `#[cfg(debug_assertions)]`.
+- `table/`: the transition table checked on real nodes. Its `mod.rs` is
+  the harness: a reading of every row of a peer's state on one node
+  (`Seen`), a writer that makes every row it can reach differ from a fresh
+  peering's (`dirty`), the check of each row of a before and an after
+  reading against the row's cell at the transition the test ran
+  (`assert_cells`), and two BLE mock pairs for the BLE mark. Its other files
+  check one column group each; `src/node/tests/settle/table/README.md` says
+  what a test there must do.
 
 ## Markers: `defect:` and `precondition:`
 

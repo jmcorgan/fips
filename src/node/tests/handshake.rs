@@ -3463,6 +3463,56 @@ async fn removing_an_unheard_peering_keeps_the_end_to_end_session() {
     );
 }
 
+/// The session an unheard peering's removal keeps also keeps what it measured:
+/// the removal releases the path MTU state of the peer, and the session is set
+/// aside around that release, so its own estimate of its path is not reset.
+#[tokio::test]
+async fn removing_an_unheard_peering_keeps_the_estimate_its_session_made() {
+    let mut node = make_node();
+    let initiator = make_node();
+    let initiator_addr = node_addr_of(&initiator);
+    let capture = genuine_msg1(&initiator, &node);
+
+    assert!(
+        promotes(
+            &mut node,
+            &initiator_addr,
+            &replayer_addr(),
+            capture,
+            Node::now_ms(),
+        )
+        .await,
+        "precondition: the capture promoted a phantom"
+    );
+    install_end_to_end_session(&mut node, &initiator);
+    let session_mmp = node.config().node.session_mmp.clone();
+    let entry = node.sessions.get_mut(&initiator_addr).unwrap();
+    entry.init_mmp(&session_mmp);
+    entry
+        .mmp_mut()
+        .expect("precondition: the session holds MMP state")
+        .path_mtu
+        .seed_source_mtu(1200);
+
+    node.remove_active_peer(&initiator_addr);
+
+    assert!(
+        node.get_peer(&initiator_addr).is_none(),
+        "precondition: the peering was removed"
+    );
+    let mtu = node
+        .get_session(&initiator_addr)
+        .expect("precondition: the session stayed")
+        .mmp()
+        .expect("precondition: the session holds MMP state")
+        .path_mtu
+        .current_mtu();
+    assert_eq!(
+        mtu, 1200,
+        "defect: removing an unheard peering reset the estimate its kept session made"
+    );
+}
+
 #[tokio::test]
 async fn a_restart_of_a_heard_peering_still_ends_the_end_to_end_session() {
     let transport_id = TransportId::new(1);

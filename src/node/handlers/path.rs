@@ -297,6 +297,54 @@ impl PathDriver {
         self.carrier.len()
     }
 
+    /// The connections waited for on `node`'s behalf, for tests that read a
+    /// peer's state whole.
+    #[cfg(test)]
+    pub(in crate::node) fn connects(&self, node: &NodeAddr) -> Vec<PathRef> {
+        self.connecting
+            .iter()
+            .filter(|(n, _)| n == node)
+            .map(|(_, to)| to.clone())
+            .collect()
+    }
+
+    /// The closes queued for `node`, each as its pair and whether the peer
+    /// was removed, for tests that read a peer's state whole.
+    #[cfg(test)]
+    pub(in crate::node) fn closes(&self, node: &NodeAddr) -> Vec<(PathRef, bool)> {
+        self.closing
+            .iter()
+            .filter(|c| c.node == *node)
+            .map(|c| {
+                let to = PathRef {
+                    transport: c.transport,
+                    addr: c.addr.clone(),
+                };
+                (to, c.removed)
+            })
+            .collect()
+    }
+
+    /// The transports `link` has a carrier reading kept for.
+    #[cfg(test)]
+    pub(in crate::node) fn carried(&self, link: LinkId) -> Vec<TransportId> {
+        let mut kept: Vec<TransportId> = self
+            .carrier
+            .keys()
+            .filter(|(l, _)| *l == link)
+            .map(|(_, t)| *t)
+            .collect();
+        kept.sort_by_key(TransportId::as_u32);
+        kept
+    }
+
+    /// Keep a no-carrier reading for `link` on `transport`, as a read that
+    /// found the carrier gone would, for tests that plant a reading.
+    #[cfg(test)]
+    pub(in crate::node) fn plant_reading(&mut self, link: LinkId, transport: TransportId) {
+        self.carrier.insert((link, transport), Carrier::Down);
+    }
+
     /// Lower the wake to `at`, a machine's next wake, if that is earlier.
     pub(in crate::node) fn fold(&mut self, at: Option<PeerInstant>) {
         if let Some(at) = at {

@@ -497,6 +497,21 @@ impl Node {
         old: Option<(TransportId, TransportAddr)>,
         new: Option<(TransportId, TransportAddr)>,
     ) {
+        // The mutation lane's break: the old link is cleared first.
+        if node_fault!(RelinkClearsFirst) {
+            if let Some((tid, addr)) = &old
+                && old != new
+                && let Some(transport) = self.transports.get(tid)
+            {
+                transport.clear_verified(addr, node, new.is_none()).await;
+            }
+            if let Some((tid, addr)) = &new
+                && let Some(transport) = self.transports.get(tid)
+            {
+                transport.mark_verified(addr, node).await;
+            }
+            return;
+        }
         if let Some((tid, addr)) = &new
             && let Some(transport) = self.transports.get(tid)
         {
