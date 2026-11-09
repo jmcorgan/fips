@@ -1,4 +1,5 @@
-//! One owner for each of the node's per-peer maps.
+//! One owner for each of the node's per-peer maps, and in [`table`] what each
+//! change to a held peer does to each piece of its state.
 //!
 //! Each map is a field of `Node` whose type is a wrapper with a private
 //! inner map. The wrapper derefs to the map for every read, and `&wrapper`
@@ -55,6 +56,7 @@ macro_rules! reads {
 pub(in crate::node) mod audit;
 mod links;
 mod maps;
+pub(crate) mod table;
 #[cfg(test)]
 mod tests;
 
