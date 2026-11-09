@@ -124,9 +124,21 @@ jobs:
             # refused connect on the host, which other tests need. So the
             # first pass skips them and the second runs only them, with the
             # settings on.
+            #
+            # The joint-world settlement tests (fips-core's
+            # `proto::settle::tests::joint`) are skipped here and run in
+            # neither pass. They are in-process logic with no OS or platform
+            # calls, and they run on every Linux push in CI's Linux unit-test
+            # job. This VM is several times slower than that runner: in
+            # November 2026 fips-core's tests took 408 s here with them,
+            # against 94 s before they were added, which left the root
+            # crate's tests too little of the 900 s bound to finish. Run here
+            # they would take most of the bound and cover nothing
+            # platform-specific.
             BLACKHOLE_TESTS="node::tests::rx_stall:: transport::tcp::tests::background_connect_timeout_is_counted"
+            JOINT_TESTS="proto::settle::tests::joint::"
             skips=""
-            for t in $BLACKHOLE_TESTS; do skips="$skips --skip $t"; done
+            for t in $BLACKHOLE_TESTS $JOINT_TESTS; do skips="$skips --skip $t"; done
             if ! timeout -s KILL 900 cargo test -- $skips; then
               echo "FAIL: cargo test failed, or did not finish within its 900s bound." >&2
               echo "      If the output above stops mid-run, look for libtest's" >&2
