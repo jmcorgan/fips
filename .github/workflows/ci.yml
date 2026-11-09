@@ -533,8 +533,15 @@ jobs:
         shell: bash
         run: rm -f target/nextest/ci/junit.xml
 
+      # Each unprivileged test step below runs under an open-file soft limit
+      # of 512: the root lib suite holds about 110 descriptors at most, so a
+      # leak reds here as it would under the internal builder's lower limit.
+      # Mirrored in testing/ci-local.sh (UNIT_FD_LIMIT), which gives the
+      # reason in full.
       - name: Run unit tests
-        run: cargo nextest run --all --profile ci
+        run: |
+          ulimit -Sn 512
+          cargo nextest run --all --profile ci
 
       # The unit tests that need root and network namespaces, which are
       # `#[ignore]`d so the run above skips them: the start-up warning for
@@ -589,13 +596,17 @@ jobs:
       # sets FIPS_CI_SLOW_TESTS=1); the --all-features clippy step lints
       # them.
       - name: Run the no_std core's tests on their own, with its slow suites
-        run: cargo test -p fips-core --features slow-tests
+        run: |
+          ulimit -Sn 512
+          cargo test -p fips-core --features slow-tests
 
       # Every known-defect test in testing/ignored-tests.txt must still fail,
       # so the change that fixes one has to un-ignore it. Mirrored in
       # testing/ci-local.sh.
       - name: Run the known-defect lane
-        run: bash testing/known-defect-lane.sh
+        run: |
+          ulimit -Sn 512
+          bash testing/known-defect-lane.sh
 
       # Each switch in core/src/faults.rs, turned on in a test process of its
       # own, must turn red the tests testing/mutations/manifest.txt names for
@@ -603,7 +614,9 @@ jobs:
       # must pass with no switch; no switch may reach a normal build of fips.
       # Mirrored in testing/ci-local.sh.
       - name: Run the mutation lane
-        run: bash testing/mutations/run.sh
+        run: |
+          ulimit -Sn 512
+          bash testing/mutations/run.sh
 
       # The bind-success half. Every other unit-test leg runs unprivileged, so
       # `PacketSocket::open` cannot succeed on any of them and everything past
@@ -677,7 +690,9 @@ jobs:
       - name: Run library tests with the optional root features enabled
         env:
           FIPS_AUDIT_REACH: ${{ runner.temp }}/audit-reach.txt
-        run: cargo test -p fips-mesh --lib --features profiling,test-overrides
+        run: |
+          ulimit -Sn 512
+          cargo test -p fips-mesh --lib --features profiling,test-overrides
 
       - name: Check the reach of the live map audit
         run: python3 testing/check-audit-reach.py "${{ runner.temp }}/audit-reach.txt"
