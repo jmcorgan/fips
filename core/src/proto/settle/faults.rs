@@ -160,8 +160,6 @@ pub(crate) enum Fault {
     OneSessionNoFresh,
     /// The classification oracle compares the class and not the refusal.
     ClassifiedNoRefusal,
-    /// The rekey side answers any msg1 while a pending is held.
-    PendingAnswers,
     /// The close computed at a late second dial's resync is always empty.
     ResyncKeepsAll,
     /// The model party keeps nothing of the session a late dial moved off.
@@ -317,7 +315,6 @@ impl Fault {
         Self::OneSessionNoPending,
         Self::OneSessionNoFresh,
         Self::ClassifiedNoRefusal,
-        Self::PendingAnswers,
         Self::ResyncKeepsAll,
         Self::ModelDropsFallback,
         Self::PacketStamp,

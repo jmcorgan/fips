@@ -8,9 +8,9 @@
 //! both ends and asserts that they do not split, which is where the FRC's
 //! rules and the current node differ. A further test shows that each
 //! start's own script shows only the shape that start carries by design,
-//! so an exemption is spent on its shape alone, and another that the two
-//! defects left for later show their shapes in the models of the current
-//! and the deployed node.
+//! with the model and with joint nodes, so an exemption is spent on its
+//! shape alone, and another that the two defects left for later show their
+//! shapes in the models of the current and the deployed node.
 //!
 //! - [`Shape::StaleFrame`]: a counterexample to the operator's late-dial
 //!   rule, as the model encodes it. The responder replaces the first
@@ -35,6 +35,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::explore::{Act, apply};
+use super::joint::off;
 use super::legacy::maint::maint;
 use super::legacy::master::master;
 use super::oracle::{Oracle, every_step, heal, healed};
@@ -158,6 +159,12 @@ fn each_starts_own_script_shows_only_the_shape_it_carries() {
             scripted(&st, st.maker),
             carried(st.number),
             "{}: its script's shapes",
+            st.name
+        );
+        assert_eq!(
+            scripted(&st, off),
+            carried(st.number),
+            "{}: its script's shapes on joint nodes",
             st.name
         );
     }

@@ -211,8 +211,9 @@ fn against_a_model_of_master_a_forward_wall_step_does_not_let_a_msg1_replace_a_p
     }
 }
 
-/// The starts `chosen` admits but the two paths, which `starts()` writes as
-/// the stand-in's abstract events, explored to their depths with the model
+/// The starts `chosen` admits but the two paths, which `starts()` writes
+/// with no paths and the joint world rebuilds on real bundles, explored to
+/// their depths with the model
 /// of `master` made by `mk` at both ends and no exemption. Every breach is
 /// printed with its path; a breach other than the three defects and the
 /// named differences is a lead, to be reproduced on real nodes before it is

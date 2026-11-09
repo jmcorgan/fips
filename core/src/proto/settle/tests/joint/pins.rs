@@ -18,16 +18,15 @@ use super::super::world::{Dir, State, World};
 #[test]
 #[ignore = "known defect: a crossing whose own dial is answered over the peer's dial connection moves the peering onto that connection's pair and closes the connection in the same step, so both ends then lose the link"]
 fn a_crossing_moved_onto_the_pair_of_the_peers_dial_keeps_that_connection_open() {
-    // The stand-in's start with two paths, its nodes joint nodes at Off at
-    // both ends: node 0 dials node 1 on BLE, and node 1 dials node 0 from
-    // its second BLE address; the start's abstract path events reach no
-    // joint node. Its first three script steps: node 1 reads node 0's msg1
+    // The named start with two paths as `../starts.rs` writes it, with no
+    // paths, its nodes joint nodes at Off at both ends: node 0 dials node 1
+    // on BLE, and node 1 dials node 0 from its second BLE address. Its first three script steps: node 1 reads node 0's msg1
     // and answers, node 0 reads node 1's msg1 and answers, and node 0 reads
     // the answer to its own dial, which came over node 1's dial connection.
     let mut st = super::super::starts::starts()
         .into_iter()
         .find(|s| s.number == 12)
-        .expect("the stand-in's start with two paths");
+        .expect("the named start with two paths");
     st.maker = super::off;
     let mut scratch = replay(&st, &[]);
     let script = (st.script)(&mut scratch);

@@ -21,19 +21,23 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::identity::NodeAddr;
+use crate::proto::fmp::EphemeralDigest;
 use crate::proto::path::tests::shell::Out;
 use crate::proto::path::{Output as PathOutput, PathRef, PathState};
 use crate::proto::rekey::tests::stub::{Ik, Kid, Msg1};
 use crate::proto::rekey::{
-    Abandon, Authentic, EpochTag, MsgKind, Output, Reason, Replayable, Route, Wire,
+    Abandon, Authentic, Completed, EpochTag, Msg1Read, MsgKind, Output, Reason, Record, Replayable,
+    Route, Wire, allocate,
 };
-use crate::proto::settle::input::Input as In;
+use crate::proto::settle::input::{Hello, Input as In};
 use crate::proto::settle::links::{LinkNo, Pair, Proven};
+use crate::proto::settle::output::Output as CoreOutput;
 
-use super::super::super::model::history::{Addr, Node};
+use super::super::super::model::history::{Addr, Hs, Node};
 use super::super::super::model::judge::Class;
 use super::super::drive;
-use super::machines::{Event, Machines};
+use super::machines::{Event, Kit, Machines};
+use super::names;
 
 /// A message the shell is to send for a peer's machines.
 #[derive(Debug)]
@@ -144,10 +148,68 @@ pub fn proven(m: &Machines, p: &PathRef) -> Proven {
     }
 }
 
-/// The model's class for what a peer's machine did with a msg1, from what
-/// the call routed: `before` and `after` are the pending session around the
-/// call, `eligible` whether the link was past its floors. `Err` names a
-/// refusal no msg1 can draw, a broken promise.
+/// A msg1's answer built before the core decides on it: the completed
+/// handshake, the setup record it would note, and the index of the lease
+/// the answer's leg would hold.
+pub type Built = (Completed<Ik>, Record, u32);
+
+/// The ephemeral digest the core keeps for a msg1, from the stub's.
+fn ephemeral(tok: &Msg1) -> EphemeralDigest {
+    let mut b = [0u8; 33];
+    b[..32].copy_from_slice(&tok.ephemeral().0);
+    EphemeralDigest::of_noise_msg1(&b).expect("33 bytes carry an ephemeral")
+}
+
+/// The answer to the msg1 `tok` of handshake `hs`, its bytes `bytes`, from
+/// `from`, built before the core decides on it: the `Hello` with a fresh
+/// lease, and what an install would take from it.
+pub fn answer(kit: &mut Kit, tok: &Msg1, hs: Hs, bytes: &[u8], from: Addr) -> (Hello, Built) {
+    let lease = allocate(&mut kit.pool).expect("the node's pool has an index");
+    let index = lease.index();
+    kit.local.name(names::answerer(hs));
+    let (done, msg2) = tok
+        .answer(&kit.local, Some(lease.index()))
+        .expect("the stub IK msg2 always writes");
+    let record = Record::setup(tok.digest(), tok.ephemeral(), Some(msg2.clone()));
+    let hello = Hello {
+        peer: tok.remote().addr(),
+        from: drive::pair(from),
+        bytes: bytes.to_vec(),
+        ephemeral: ephemeral(tok),
+        epoch: tok.epoch(),
+        msg2,
+        lease,
+    };
+    (hello, (done, record, index))
+}
+
+/// Give every lease in `out` back to `kit`'s pool and drop the rest.
+pub fn discard(kit: &mut Kit, out: Vec<CoreOutput>) {
+    for o in out {
+        match o {
+            CoreOutput::Free { lease } => kit.pool.free(lease.release()),
+            CoreOutput::Install(i) => kit.pool.free(i.lease.release()),
+            CoreOutput::Opened { .. }
+            | CoreOutput::Answer { .. }
+            | CoreOutput::Resend { .. }
+            | CoreOutput::Rekey { .. }
+            | CoreOutput::Reset { .. }
+            | CoreOutput::Remove { .. }
+            | CoreOutput::Retire { .. }
+            | CoreOutput::Release { .. }
+            | CoreOutput::Close { .. }
+            | CoreOutput::Retry { .. }
+            | CoreOutput::Reject { .. }
+            | CoreOutput::Hold { .. }
+            | CoreOutput::Settle { .. } => {}
+        }
+    }
+}
+
+/// The model's class for what a machine did with a msg1, from what the call
+/// routed: `before` and `after` are its pending session around the call,
+/// `eligible` whether the link was eligible to rekey. `Err` names a refusal
+/// no msg1 can draw, a broken promise of the machine.
 pub fn class(
     r: &Routed,
     before: Option<Kid>,
@@ -178,7 +240,7 @@ pub fn class(
         Reason::AnsweredBefore if eligible => Ok(Some(Class::Recorded)),
         Reason::AnsweredBefore => Ok(Some(Class::Copy)),
         Reason::EpochChanged => Ok(None),
-        why @ (Reason::IndexExhausted
+        Reason::IndexExhausted
         | Reason::HandshakeWrite
         | Reason::ReplyUnauthenticated
         | Reason::LateReply
@@ -203,7 +265,7 @@ pub fn class(
         | Reason::AttemptInFlight
         | Reason::AlreadyEstablished
         | Reason::CandidateExpired
-        | Reason::NotRekey) => Err(why),
+        | Reason::NotRekey => Err(why),
     }
 }
 

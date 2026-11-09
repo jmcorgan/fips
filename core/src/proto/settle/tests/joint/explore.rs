@@ -2,7 +2,7 @@
 //! checks that the explorer's key of a joint node is sound, and the sweeps
 //! of every start's interleavings against the settlement properties.
 //!
-//! The explorer is the stand-in's (`../explore.rs`), run on starts whose
+//! The explorer is the settlement world's (`../explore.rs`), run on starts whose
 //! nodes are joint nodes (`starts.rs`), at each pairing of the two
 //! multipath settings. A run names its pairing, the mode at each end, in
 //! every line it prints.
@@ -26,6 +26,7 @@
 //! must hold every field of a machine that a successor reads, not only
 //! what the machine shows.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -34,11 +35,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::proto::path::{Input as PathInput, Source};
 use crate::proto::rekey::Close;
 
-use super::super::super::model::history::Hs;
+use super::super::super::model::history::{Hs, Node};
 use super::super::explore::{Act, apply, explore, explore_within, none, reached, replay};
 use super::super::oracle::{Breach, Oracle, by_shape};
-use super::super::starts::{A, B, Start, TCP, UDP, dial_home, home, settle, world_of};
-use super::super::world::{Pkt, World};
+use super::super::party::Configured;
+use super::super::starts::{A, B, Start, TCP, UDP, dial_home, home, model, settle, world_of};
+use super::super::world::{Party, Pkt, World};
 use super::Mode;
 use super::facts::pair;
 use super::machines::{Kit, Machines, exchange, kits, unused};
@@ -321,22 +323,53 @@ enum Spared {
     Shape,
     /// [`lapsed`].
     Lapsed,
+    /// [`untimed`].
+    Untimed,
 }
 
 impl Spared {
     /// Every cause, in the order a sweep's line counts them.
-    const ALL: [Self; 2] = [Self::Shape, Self::Lapsed];
+    const ALL: [Self; 3] = [Self::Shape, Self::Lapsed, Self::Untimed];
 }
 
 /// The exemption of the joint party's sweeps, and its cause: the first of
-/// `by_shape` and [`lapsed`] that names `b`.
+/// `by_shape`, [`lapsed`] and [`untimed`] that names `b`.
 fn spared(w: &World, b: &Breach) -> Option<Spared> {
     if by_shape(w, b) {
         Some(Spared::Shape)
     } else if lapsed(w, b) {
         Some(Spared::Lapsed)
+    } else if untimed(w, b) {
+        Some(Spared::Untimed)
     } else {
         None
+    }
+}
+
+/// What a node of the model, which runs no link-dead timer, leaves once
+/// healed beside a joint node, which runs the node's: the model still
+/// holds the joint node on a link whose frames were lost in flight, the
+/// joint node's timer removed it, and the model refuses each redial, so
+/// the joint node holds a configured peer it cannot reach and the model
+/// keeps open the connection a refused redial came on. A node would have
+/// removed the silent peer too and taken the redial. Only a pairing of a
+/// joint node with the model reaches it: two joint nodes both run the
+/// timer.
+pub fn untimed(w: &World, b: &Breach) -> bool {
+    let stale = |x: usize, y: usize| {
+        x != y
+            && w.parties[x].joint().is_none()
+            && w.parties[y].joint().is_some()
+            && w.parties[x].held().contains(&w.ids[y])
+            && !w.parties[y].held().contains(&w.ids[x])
+    };
+    let n = w.parties.len();
+    if b.oracle == Oracle::OneSession && b.what.ends_with("is configured and not held") {
+        (0..n).any(|x| stale(x, b.node))
+    } else if b.oracle == Oracle::ConnectionsInUse && b.what.ends_with("open, no link uses it") {
+        (0..n).any(|y| stale(b.node, y))
+    } else {
+        false
     }
 }
 
@@ -390,6 +423,34 @@ fn each_breach_the_pins_hold_is_exempted_by_its_own_cause_and_a_settled_pair_by_
                 "start {n}, {path:?}: {b:?} is exempted by its own cause"
             );
         }
+    }
+    // Start 2 with the model at node 0 and a joint node at node 1: the
+    // model's dial completes, the frames are lost for the link-dead
+    // timeout, the joint node's timer removes the model, and the model,
+    // which runs no timer, refuses every redial.
+    let st = chosen(super::starts::uncapped(model_off), |s| s.number == 2).remove(0);
+    let path = [
+        Act::Dup(0),
+        Connect(0, false),
+        Deliver(0),
+        Deliver(2),
+        Act::Advance,
+        Act::Advance,
+        Act::Advance,
+    ];
+    let mut w = replay(&st, &path);
+    heal(&mut w);
+    let found = healed(&w);
+    assert!(
+        found.len() == 2,
+        "precondition: the model's stale peering leaves two breaches: {found:?}"
+    );
+    for b in &found {
+        assert_eq!(
+            spared(&w, b),
+            Some(Spared::Untimed),
+            "{b:?} is exempted as the model's missing timer"
+        );
     }
     // Start 2's script settles both ends, capable, and then holds for a
     // heal: the cause names nothing there.
@@ -572,5 +633,46 @@ fn every_explored_interleaving_of_the_joint_party_keeps_the_properties_off_again
         &chosen(super::starts::off_on(), |_| true),
         &pairing(Mode::Off, Mode::On),
     );
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A joint node at multipath off at node 0, and the model elsewhere.
+#[cfg(feature = "slow-explorers")]
+fn off_model(ix: usize, me: Node, configured: Vec<Configured>) -> Box<dyn Party> {
+    if ix == 0 {
+        super::off(ix, me, configured)
+    } else {
+        model(ix, me, configured)
+    }
+}
+
+/// The model at node 0, and a joint node at multipath off elsewhere.
+fn model_off(ix: usize, me: Node, configured: Vec<Configured>) -> Box<dyn Party> {
+    if ix == 0 {
+        model(ix, me, configured)
+    } else {
+        super::off(ix, me, configured)
+    }
+}
+
+#[cfg(feature = "slow-explorers")]
+#[test]
+fn every_explored_interleaving_of_the_core_keeps_the_properties_and_heals() {
+    // The core's own explorer, on joint nodes at multipath off: every
+    // named start but the two late-dial cases left
+    // for later, the one with two paths on real bundles, with the core at
+    // both ends and at either end against the model. Minutes on twelve
+    // cores, and past nextest's limit on two, so it runs in the slow
+    // explorers' build.
+    let makers: [(super::super::starts::Maker, &str); 3] = [
+        (super::off, " (core and core)"),
+        (off_model, " (core and model)"),
+        (model_off, " (model and core)"),
+    ];
+    let mut wrong = Vec::new();
+    for (mk, label) in makers {
+        let runs = chosen(super::starts::uncapped(mk), |s| s.number <= 14);
+        wrong.extend(swept(&runs, label));
+    }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

@@ -28,12 +28,50 @@ use alloc::vec::Vec;
 use super::super::super::model::history::{Addr, Bytes, Epoch, Event, Hs, LinkId, Node};
 use super::super::super::model::judge::{Class, Gate, Transition};
 use super::super::party::{Configured, binding};
-use super::super::rekeyside::{Answer, Out};
 use super::super::shadow::{Entry, Rec, Refusal};
 use super::super::world::{
     CHECK, Dir, HANDSHAKE, HEARTBEAT, Input, Kind, Ms, Net, Party, PeerView, Pkt, RESEND, RESENDS,
     RETRY, View,
 };
+
+/// What the deployed node's rekey answers a msg1 with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// A fresh msg2 for handshake `hs`; a pending is armed.
+    Msg2(Hs),
+    /// The msg2 already sent for handshake `hs`, again.
+    Stored(Hs),
+    /// Nothing.
+    Silent,
+    /// The replacement request: the shell runs the restart gates.
+    Replace,
+}
+
+/// What a poll or a frame did to the deployed node's rekey.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Out {
+    /// Send this node's own rekey msg1 of `hs`, again.
+    Send(Hs),
+    /// Cut over to `hs`.
+    Rekeyed {
+        /// The new session.
+        hs: Hs,
+        /// This node started the rekey.
+        initiator: bool,
+    },
+    /// Cut over to `hs`, whose msg2 revealed the peer's restart to
+    /// `epoch`; the link is kept.
+    Restarted {
+        /// The new session.
+        hs: Hs,
+        /// The peer's new epoch.
+        epoch: Epoch,
+    },
+    /// This node's own rekey reached its deadline unanswered.
+    Abandoned,
+    /// The responder's pending was never adopted and is dropped.
+    Unadopted,
+}
 
 /// `EPOCH_RESTART_MIN_INTERVAL_SECS` (`handshake.rs:52`), in ms.
 const INTERVAL: Ms = 15_000;

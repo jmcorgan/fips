@@ -538,6 +538,67 @@ mod checks {
         }
     }
 
+    #[test]
+    fn a_frame_under_the_drained_session_counts_as_heard_at_the_next_gate() {
+        // Node 2 is held, unheard, from its msg1; its frame under a session
+        // the model holds nothing of, the one a rekey cut over from, then
+        // arrives; and half a second later its msg1 from another address is
+        // refused by the heard floor, as the node refuses it. Read as
+        // unheard, the model would let the replacement through.
+        let peer = Node(2);
+        let msg1 = |hs: u32, from: Addr| Event::Msg1 {
+            hs: Hs(hs),
+            bytes: Bytes(hs),
+            epoch: Epoch(1),
+            link: LinkId(hs),
+            from,
+            binding: Binding::Connectionless,
+            sent: true,
+        };
+        let log = [
+            Entry::Ev {
+                at: 0,
+                peer,
+                ev: msg1(1, at(1)),
+                rec: Rec {
+                    class: Some(Class::NotHeld),
+                    change: Some(Transition::Promote),
+                    ..Rec::default()
+                },
+            },
+            Entry::Ev {
+                at: 2_000,
+                peer,
+                ev: Event::Frame {
+                    hs: Hs(9),
+                    from: at(1),
+                },
+                rec: Rec::default(),
+            },
+            Entry::Ev {
+                at: 2_500,
+                peer,
+                ev: msg1(3, at(7)),
+                rec: Rec {
+                    class: Some(Class::Replacement),
+                    refused: Some(Refusal::Gate(Gate::Heard)),
+                    ..Rec::default()
+                },
+            },
+        ];
+        let found = compare(Node(1), &log);
+        assert!(
+            found.diffs.is_empty(),
+            "the refusal is the model's once the frame counts: {:?}",
+            found.diffs
+        );
+        assert!(
+            found.named.contains(&(peer, Named::HeardByPrevious)),
+            "and the difference is named: {:?}",
+            found.named
+        );
+    }
+
     fn at(port: u16) -> Addr {
         Addr {
             transport: 1,

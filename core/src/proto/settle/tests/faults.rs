@@ -45,7 +45,6 @@ const FINDINGS: &str = "proto::settle::tests::legacy::findings::";
 const LEGACY: &str = "proto::settle::tests::legacy::explore::";
 const ORACLE: &str = "proto::settle::tests::oracle::checks::";
 const REGRESS: &str = "proto::settle::tests::regress::";
-const REKEYSIDE: &str = "proto::settle::tests::rekeyside::checks::";
 const SHADOW: &str = "proto::settle::tests::shadow::checks::";
 const SHAPES: &str = "proto::settle::tests::shapes::";
 const SIM: &str = "proto::settle::tests::sim::";
@@ -799,13 +798,6 @@ pub const ROWS: &[Row] = &[
         )],
     ),
     (
-        Fault::PendingAnswers,
-        &[(
-            REKEYSIDE,
-            "the_rekey_side_agrees_with_the_model_on_every_rule_3_and_4_history",
-        )],
-    ),
-    (
         Fault::ResyncKeepsAll,
         &[(
             SHADOW,
@@ -833,10 +825,16 @@ pub const ROWS: &[Row] = &[
             ),
         ],
     ),
-    (Fault::YieldKept, &[SIM_REACHED, SIM_STREAM]),
+    (Fault::YieldKept, &[SIM_REACHED, SIM_DATAGRAM]),
     (Fault::RekeyOutlivesPeer, &[SIM_REACHED, SIM_STREAM]),
-    (Fault::PreviousUnheard, &[SIM_REACHED]),
-    (Fault::ReachablePeeks, &[SIM_REACHED, SIM_STREAM]),
+    (
+        Fault::PreviousUnheard,
+        &[(
+            SHADOW,
+            "a_frame_under_the_drained_session_counts_as_heard_at_the_next_gate",
+        )],
+    ),
+    (Fault::ReachablePeeks, &[SIM_REACHED]),
     (
         Fault::NoShrink,
         &[(SIM, "a_planted_failing_run_shrinks_to_its_cause")],
@@ -998,6 +996,7 @@ pub const SELF_CHECKED: &[&str] = &[
     "no_joint_source_defines_a_setter_and_the_scan_finds_a_planted_one",
     "no_joint_source_allows_a_wildcard_arm_and_the_scan_finds_a_planted_one",
     "the_cores_record_of_where_a_peer_is_is_read_only_for_the_oracles_and_the_scan_finds_a_planted_read",
+    "no_settlement_test_names_the_retired_rekey_transcription_and_the_scan_finds_a_planted_one",
 ];
 
 /// Why a sweep that only the slow explorers' build runs is characterisation.
@@ -1022,7 +1021,7 @@ const LEGACY_RUN: &str = "the same oracles and list as the run on `IgnoreOwnDial
 pub const CHARACTERISATION: &[(&str, &str)] = &[
     (
         "every_explored_interleaving_of_the_core_keeps_the_properties_and_heals",
-        "a whole sweep of 44 runs, over a minute a child on two cores and four rows of it past the meta-test's limit; each of its switches reds a cheaper test of its row",
+        "a whole sweep of joint nodes at multipath off and against the model on every start, minutes a child on two cores and past the meta-test's limit; each of its switches reds a cheaper test of its row",
     ),
     (
         "against_a_model_of_master_a_forward_wall_step_does_not_let_a_msg1_replace_a_peering_heard_just_now",
@@ -1056,10 +1055,6 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     ),
     (
         "the_split_a_shape_left_is_exempt_after_both_ends_rekey",
-        HAND,
-    ),
-    (
-        "a_seeded_run_holds_a_pending_of_a_rekey_its_initiator_gave_up_and_only_that_is_spared",
         HAND,
     ),
     (
@@ -1109,6 +1104,10 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     (
         "a_joint_node_on_against_a_model_of_master_on_converges_on_the_starts_on_real_bundles",
         LEGACY_RUN,
+    ),
+    (
+        "a_held_peers_reachability_reads_the_bundles_active_path_not_the_cores_record",
+        HAND,
     ),
     (
         "the_stub_keys_keep_the_worlds_address_order_in_both_flips",

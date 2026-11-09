@@ -31,9 +31,13 @@ use super::super::drive::epoch as wire;
 use super::super::explore::THIRD;
 use super::super::starts::{A, B, C};
 
+/// The larger node of the model's crossing table against another pair of
+/// identities (`cmp.rs`).
+pub const NINTH: Node = Node(9);
+
 /// The seed of each world identity's stub key, so that their node
-/// addresses order as the identities do: `A < B < C < THIRD`.
-const SEEDS: [(Node, u8); 4] = [(A, 2), (B, 4), (C, 9), (THIRD, 17)];
+/// addresses order as the identities do: `A < B < C < NINTH < THIRD`.
+const SEEDS: [(Node, u8); 5] = [(A, 2), (B, 4), (C, 9), (NINTH, 41), (THIRD, 17)];
 
 /// The seed of identity `n`'s stub key.
 fn seed(n: Node) -> u8 {
@@ -54,8 +58,8 @@ pub fn local(n: Node, epoch: Epoch) -> Local {
 
 /// Each world identity with its static key and node address, made once:
 /// both are hashes, and a shell asks for them at nearly every call.
-fn identities() -> &'static [(Node, PeerKey, NodeAddr); 4] {
-    static IDS: OnceLock<[(Node, PeerKey, NodeAddr); 4]> = OnceLock::new();
+fn identities() -> &'static [(Node, PeerKey, NodeAddr); 5] {
+    static IDS: OnceLock<[(Node, PeerKey, NodeAddr); 5]> = OnceLock::new();
     IDS.get_or_init(|| {
         SEEDS.map(|(n, _)| {
             let k = Local::new(seed(n), 0).key;
@@ -235,7 +239,7 @@ const DATA: &[u8] = &[0x10, 1, 2, 3, 4, 5, 6, 7];
 
 #[test]
 fn the_stub_keys_keep_the_worlds_address_order_in_both_flips() {
-    let ids = [A, B, C, THIRD];
+    let ids = [A, B, C, NINTH, THIRD];
     for x in ids {
         for y in ids {
             if x == y {

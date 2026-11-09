@@ -14,7 +14,11 @@
 //! - at a late second dial's move, the core is expected to close what
 //!   [`resync_close`] computes, and the judge's fallback is cleared;
 //! - where the core's replay memory or silent-session back-off refuses a
-//!   msg1 the model accepts, the history's comparison stops.
+//!   msg1 the model accepts, the history's comparison stops;
+//! - where the rekey machine names a msg1 a copy or recorded and leaves it
+//!   silent, since its record holds the ephemeral, and the model names it
+//!   otherwise, the comparison goes on if the model stays silent too and
+//!   stops if it answers. No history of the model's tables meets this one.
 
 use alloc::format;
 use alloc::string::String;
@@ -23,9 +27,10 @@ use alloc::vec::Vec;
 use crate::proto::settle::model::history::{
     Addr, Binding, Bytes, Epoch, Event, Hs, LinkId, Ms, Node,
 };
-use crate::proto::settle::model::judge::{Judge, LocalRule, Params, Transition};
+use crate::proto::settle::model::judge::{Class, Judge, LocalRule, Params, Reply, Transition};
 
 use super::drive::Drive;
+use super::joint::Mode;
 use super::shadow::{Named, Refusal, resync_close};
 
 const SMALL: Node = Node(1);
@@ -36,6 +41,9 @@ const CL: Binding = Binding::Connectionless;
 const CO: Binding = Binding::Connected;
 /// Long enough for the link and its session to be eligible to rekey.
 const AGED: Ms = 30_000;
+/// Long enough for the node to start its own rekey as well: the machine's
+/// start floors stand one check past the ages a msg1 is judged by.
+const STARTABLE: Ms = 31_000;
 
 fn at(port: u16) -> Addr {
     Addr {
@@ -243,7 +251,7 @@ fn histories() -> Vec<History> {
             with(
                 r(),
                 &[
-                    wait(AGED),
+                    wait(STARTABLE),
                     Event::RekeyStart { hs: Hs(20) },
                     msg1(11, 110, E1, 1, at(9), CL),
                 ],
@@ -256,7 +264,7 @@ fn histories() -> Vec<History> {
             with(
                 r(),
                 &[
-                    wait(AGED),
+                    wait(STARTABLE),
                     Event::RekeyStart { hs: Hs(20) },
                     msg1(11, 110, E1, 1, at(9), CL),
                 ],
@@ -537,7 +545,7 @@ fn histories() -> Vec<History> {
             with(
                 r(),
                 &[
-                    wait(30_000),
+                    wait(STARTABLE),
                     Event::RekeyStart { hs: Hs(20) },
                     Event::RekeyMsg2 {
                         hs: Hs(20),
@@ -559,10 +567,10 @@ struct Ran {
     named: Vec<(usize, Named)>,
 }
 
-/// Run `history` through a judge and a driver side by side.
-fn run(me: Node, peer: Node, history: &[Event]) -> Ran {
+/// Run `history` through a judge and a driver at `mode` side by side.
+fn run(mode: Mode, me: Node, peer: Node, history: &[Event]) -> Ran {
     let mut j = Judge::new(me, peer, Params::default());
-    let mut d = Drive::new(me, peer);
+    let mut d = Drive::new(me, peer, mode);
     let mut ran = Ran::default();
     let mut now: Ms = 0;
     for (i, ev) in history.iter().enumerate() {
@@ -597,6 +605,17 @@ fn run(me: Node, peer: Node, history: &[Event]) -> Ran {
             p.heard = did.heard;
             ran.named.push((i, Named::HeardAfterMove));
         }
+        if matches!(did.class, Some(Class::Copy | Class::Recorded))
+            && did.refused.is_none()
+            && did.change.is_none()
+            && s.class != did.class
+        {
+            ran.named.push((i, Named::RecordedRefusal));
+            if s.reply != Some(Reply::Silent) || s.change.is_some() {
+                break;
+            }
+            continue;
+        }
         if s.refused.is_none() {
             let named = match did.refused {
                 Some(Refusal::Replay) => Some(Named::Replay),
@@ -630,10 +649,22 @@ fn run(me: Node, peer: Node, history: &[Event]) -> Ran {
 fn the_core_agrees_with_the_model_on_every_model_table_history() {
     let mut failed = Vec::new();
     let all = histories();
-    for (name, me, peer, history) in &all {
-        let ran = run(*me, *peer, history);
-        for diff in ran.diffs {
-            failed.push(format!("{name}: {diff}"));
+    for mode in [Mode::Off, Mode::On] {
+        for (name, me, peer, history) in &all {
+            let ran = run(mode, *me, *peer, history);
+            for diff in ran.diffs {
+                failed.push(format!("{name} ({}): {diff}", mode.name()));
+            }
+            for (i, _) in ran
+                .named
+                .iter()
+                .filter(|(_, n)| *n == Named::RecordedRefusal)
+            {
+                failed.push(format!(
+                    "{name} ({}): event {i} met the record's named difference",
+                    mode.name()
+                ));
+            }
         }
     }
     assert!(all.len() >= 40, "precondition: every history is restated");
@@ -643,6 +674,37 @@ fn the_core_agrees_with_the_model_on_every_model_table_history() {
         failed.len(),
         failed.join("\n")
     );
+}
+
+#[test]
+fn a_held_peers_reachability_reads_the_bundles_active_path_not_the_cores_record() {
+    // A frame from another transport moves the core's record of the peer and
+    // leaves the link's one path where it was; then that path's connection
+    // closes. A rekey msg1 from elsewhere is answered, since the link cannot
+    // be reached, as the node reads it from the active path. The model reads
+    // its record of the peer here, so this is the driver's alone.
+    let other = Addr {
+        transport: 2,
+        at: 7,
+    };
+    let history = [
+        msg1(10, 100, E1, 1, at(9), CO),
+        frame(10, at(9)),
+        frame(10, other),
+        wait(AGED),
+        Event::Close { at: at(9) },
+        msg1(11, 110, E1, 1, at(8), CO),
+    ];
+    for mode in [Mode::Off, Mode::On] {
+        let mut d = Drive::new(SMALL, LARGE, mode);
+        let did = history.iter().map(|ev| d.step(*ev)).last();
+        assert_eq!(
+            did.and_then(|did| did.class),
+            Some(Class::Rekey),
+            "{}: the link is unreachable, so the msg1 is the peer's rekey",
+            mode.name()
+        );
+    }
 }
 
 /// A named difference's history, where it must be met, and what it is.
@@ -690,13 +752,29 @@ fn named() -> Vec<(History, usize, Named)> {
                 alloc::vec![
                     msg1(10, 100, E1, 1, at(9), CL),
                     wait(1_000),
-                    msg1(11, 110, E1, 2, at(8), CL),
+                    msg1(11, 110, E2, 2, at(8), CL),
                     wait(1_000),
                     msg1(10, 100, E1, 1, at(9), CL),
                 ],
             ),
             4,
             Named::Replay,
+        ),
+        (
+            (
+                "an ephemeral a replaced peering's record holds",
+                SMALL,
+                LARGE,
+                alloc::vec![
+                    msg1(10, 100, E1, 1, at(9), CL),
+                    wait(1_000),
+                    msg1(11, 110, E1, 2, at(8), CL),
+                    wait(1_000),
+                    msg1(10, 100, E1, 1, at(9), CL),
+                ],
+            ),
+            4,
+            Named::RecordedRefusal,
         ),
         (
             ("the replay memory full", SMALL, LARGE, restarts),
@@ -710,16 +788,23 @@ fn named() -> Vec<(History, usize, Named)> {
 #[test]
 fn every_named_difference_from_the_model_still_differs() {
     let mut failed = Vec::new();
-    for ((name, me, peer, history), index, expect) in named() {
-        let ran = run(me, peer, &history);
-        if !ran.diffs.is_empty() {
-            failed.push(format!("{name}: precondition: {:?}", ran.diffs));
-        }
-        if !ran.named.contains(&(index, expect)) {
-            failed.push(format!(
-                "{name}: {expect:?} not met at event {index}; met {:?}",
-                ran.named
-            ));
+    for mode in [Mode::Off, Mode::On] {
+        for ((name, me, peer, history), index, expect) in named() {
+            let ran = run(mode, me, peer, &history);
+            if !ran.diffs.is_empty() {
+                failed.push(format!(
+                    "{name} ({}): precondition: {:?}",
+                    mode.name(),
+                    ran.diffs
+                ));
+            }
+            if !ran.named.contains(&(index, expect)) {
+                failed.push(format!(
+                    "{name} ({}): {expect:?} not met at event {index}; met {:?}",
+                    mode.name(),
+                    ran.named
+                ));
+            }
         }
     }
     assert!(failed.is_empty(), "{}", failed.join("\n"));

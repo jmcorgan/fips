@@ -214,50 +214,15 @@ pub struct Flight {
     pub copy: bool,
 }
 
-/// A path event of a link's bundle, as stage A reports them, or a
-/// candidate a feed reports to it.
+/// An event at a node's paths that a start or the explorer gives it: a
+/// candidate a feed reports, a transport's carrier or removal, or a NAT's
+/// change of a source address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathEv {
-    /// The link's path at `from` moved to `to`.
-    Moved {
-        /// The peer whose link it is.
-        peer: Node,
-        /// The pair before.
-        from: Addr,
-        /// The pair after.
-        to: Addr,
-    },
-    /// The link's active path switched from `from` to `to`.
-    Switched {
-        /// The peer.
-        peer: Node,
-        /// The old active pair.
-        from: Addr,
-        /// The new active pair.
-        to: Addr,
-    },
-    /// The link's path at `at` was released.
-    Released {
-        /// The peer.
-        peer: Node,
-        /// The pair.
-        at: Addr,
-        /// The peer may still send there.
-        keep: bool,
-    },
-    /// The link's path at `at` became live (proven) or probing.
-    State {
-        /// The peer.
-        peer: Node,
-        /// The pair.
-        at: Addr,
-        /// Live or acked.
-        live: bool,
-    },
     /// A feed of the node's other than its configuration and the frames it
     /// hears (a beacon, a Nostr advert, an operator's request) reports that
     /// the peer may be reachable at `at`. Only a node with a real bundle
-    /// takes it; the stand-in's path events above are abstract.
+    /// takes it.
     Candidate {
         /// The peer.
         peer: Node,

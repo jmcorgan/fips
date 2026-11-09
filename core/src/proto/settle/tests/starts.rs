@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use super::super::model::history::{Addr, Node};
 use super::explore::{Act, Budget, SMALL};
 use super::party::{Configured, ModelParty};
-use super::world::{Input, Kind, Net, Party, PathEv, Pkt, State, World};
+use super::world::{Input, Kind, Net, Party, Pkt, State, World};
 
 /// The smaller and the larger node of a pair, and a third node.
 pub const A: Node = Node(1);
@@ -534,9 +534,10 @@ fn three_script(w: &mut World) -> Vec<Act> {
     )
 }
 
-/// Nodes 0 and 1 cross on BLE, node 1 dialing from its second address,
-/// which node 0's dialed link already holds as a second live path; the
-/// bundles' other path events are available.
+/// Nodes 0 and 1 cross on BLE, node 1 dialing from its second address.
+/// The joint world runs this start on real bundles, built in
+/// `joint/starts.rs`, where a link holds two paths; this one, which the
+/// model runs, has none.
 fn paths(mk: Maker) -> World {
     let mut w = pair(mk, A, &[&[(1, BLE)], &[(0, BLE)]]);
     dial_home(&mut w, 0, 1, BLE);
@@ -545,41 +546,6 @@ fn paths(mk: Maker) -> World {
     for c in ids {
         w.connected(c, true);
     }
-    w.input(
-        0,
-        Input::Path(PathEv::State {
-            peer: B,
-            at: second(1, BLE),
-            live: true,
-        }),
-    );
-    w.paths = alloc::vec![
-        (
-            0,
-            PathEv::Released {
-                peer: B,
-                at: second(1, BLE),
-                keep: false,
-            },
-        ),
-        (
-            1,
-            PathEv::Switched {
-                peer: A,
-                from: home(0, BLE),
-                to: second(0, BLE),
-            },
-        ),
-        (
-            1,
-            PathEv::Moved {
-                peer: A,
-                from: second(0, BLE),
-                to: at(BLE, 12),
-            },
-        ),
-    ];
-    w.used = alloc::vec![false; w.paths.len()];
     w
 }
 

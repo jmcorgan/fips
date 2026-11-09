@@ -18,12 +18,10 @@ mod legacy;
 mod oracle;
 mod party;
 mod regress;
-mod rekeyside;
 mod shadow;
 mod shapes;
 mod sim;
 mod starts;
-mod stub;
 mod world;
 
 use alloc::format;
@@ -565,4 +563,33 @@ fn the_cores_record_of_where_a_peer_is_is_read_only_for_the_oracles_and_the_scan
         .is_empty(),
         "and does not take another field for it"
     );
+}
+
+/// The names the deleted transcription of the rekey machine and the
+/// stand-in core's party went by.
+const RETIRED: &[&str] = &["RekeySide", "CoreParty", "TwinParty", "rekeyside"];
+
+/// The lines of `source` whose code names one of [`RETIRED`].
+fn retired(source: &str) -> Vec<usize> {
+    let mut out: Vec<usize> = code_idents(source)
+        .into_iter()
+        .filter(|(_, w)| RETIRED.contains(&w.as_str()))
+        .map(|(n, _)| n)
+        .collect();
+    out.dedup();
+    out
+}
+
+#[test]
+fn no_settlement_test_names_the_retired_rekey_transcription_and_the_scan_finds_a_planted_one() {
+    for source in files(&dir("tests"), true) {
+        let found = retired(&source);
+        let first = source.lines().next().unwrap_or_default();
+        assert!(
+            found.is_empty(),
+            "a settlement test names the retired rekey transcription at lines {found:?} (the file begins {first:?}); a joint node runs the real machine"
+        );
+    }
+    let planted = "// RekeySide in a comment is not code\nuse super::rekeyside::{RekeySide};\n";
+    assert_eq!(retired(planted), [2], "the scan finds a planted use");
 }

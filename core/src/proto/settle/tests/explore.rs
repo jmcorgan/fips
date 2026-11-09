@@ -146,13 +146,9 @@ pub fn apply(w: &mut World, a: Act) {
                 match ev {
                     // A NAT's change is the world's, not the node's.
                     PathEv::Rebound { from, to } => w.net.rebind(x, from, to),
-                    PathEv::Moved { .. }
-                    | PathEv::Switched { .. }
-                    | PathEv::Released { .. }
-                    | PathEv::State { .. }
-                    | PathEv::Candidate { .. }
-                    | PathEv::Carrier { .. }
-                    | PathEv::Gone { .. } => w.input(x, super::world::Input::Path(ev)),
+                    PathEv::Candidate { .. } | PathEv::Carrier { .. } | PathEv::Gone { .. } => {
+                        w.input(x, super::world::Input::Path(ev))
+                    }
                 }
             }
         }

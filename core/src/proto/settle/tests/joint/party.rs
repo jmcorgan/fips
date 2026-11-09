@@ -1,15 +1,15 @@
 //! A joint node: the settlement core, with a real rekey machine and a real
 //! path bundle per held peer, as a node of the world.
 //!
-//! [`JointParty`] has the stand-in core party's structure (`../stub.rs`):
-//! one core [`Table`] and a stub shell that carries out its outputs front
+//! [`JointParty`] is one core [`Table`] and a stub shell that carries out
+//! its outputs front
 //! to back, sends the handshake messages and frames, closes what the core
 //! closes on transports that hold connections, and supplies what the core
 //! leaves to the node (the heartbeat, the reconnect, the close of an
 //! inbound connection whose msg1 left nothing that uses it, and the
-//! world's adapter close of a replaced link's connection). In place of the
-//! stand-in's transcribed rekey side, each held peer has a [`Machines`]:
-//! its `Rekey<Ik>` and its `Bundle`, built at an install, rebuilt and
+//! world's adapter close of a replaced link's connection). Each held peer
+//! has a [`Machines`]: its `Rekey<Ik>` and its `Bundle`, built at an
+//! install, rebuilt and
 //! renewed at a move and closed at a removal as the node does.
 //!
 //! The handshake messages and frames are real stub IK messages, carried as
@@ -31,7 +31,7 @@
 //! recomputation, a poll before the core's next wake does nothing, every
 //! frame the world let through opens or is refused only as a replay, and
 //! the index map equals what the machines bind. It logs every history event and what the core and the
-//! machine decided, as the stand-in does, for the shadow.
+//! machine decided, for the shadow.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
@@ -40,13 +40,13 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use crate::identity::NodeAddr;
-use crate::proto::fmp::EphemeralDigest;
 use crate::proto::path::{Input as PathInput, PathState, Source};
 use crate::proto::rekey::tests::stub::{Hs as Attempt, Ik, Kid, Msg1, hint, kid, read_msg1};
 use crate::proto::rekey::{
     self, Authentic, Completed, CycleView, EpochTag, Msg1Read, Profile, Record, RecordStore,
     Replayable, Role as Side, Route, allocate, leaked,
 };
+use crate::proto::settle::faults::{Candidate, candidate};
 use crate::proto::settle::input::{Dial as Dialed, Hello, Input as In};
 use crate::proto::settle::links::{Dir as LinkDir, Holder, LinkNo, Proven};
 use crate::proto::settle::output::{Build, Install, Output, Why};
@@ -71,7 +71,7 @@ use super::feeds::{self, Listings};
 use super::machines::{Event as Ev, Kit, Machines, Setup, messaged};
 use super::names::{self, Names};
 use super::oracle::{Ledger, Limits, Pin, Told};
-use super::route::{self, Ctx, Routed, Send, route};
+use super::route::{self, Built, Ctx, Routed, Send, discard, route};
 use crate::proto::rekey::tests::oracles::{Before, Owed};
 use crate::transport::TransportId;
 
@@ -144,11 +144,6 @@ struct Held {
     /// When this node's own rekey of the peer in flight started.
     started: Option<Ms>,
 }
-
-/// A msg1's answer built before the core decides on it: the completed
-/// handshake, the setup record it would note, and the index of the lease
-/// the answer's leg would hold.
-type Built = (Completed<Ik>, Record, u32);
 
 /// What one call's outputs did, in the model step's fields.
 #[derive(Debug, Default)]
@@ -237,12 +232,22 @@ struct State {
     expired: Vec<(Node, Hs, Hs)>,
     /// The rekey machines' deadlines their checks read.
     limits: Limits,
+    /// The candidate rule the core runs, if any.
+    cand: Option<Candidate>,
+    /// The sessions a candidate rule keeps, by peer: the peer as the shell
+    /// held it on the kept link, its machines receive-only (never polled
+    /// and never sent on) until the core settles the peer back onto it or
+    /// drops it.
+    kept: BTreeMap<u8, Held>,
 }
 
 /// One node, judged by the settlement core with real machines.
 pub struct JointParty {
     s: State,
     log: Vec<Entry>,
+    /// Whether the oracles compare it with the model: under its own rules
+    /// and the dialer's candidate, which the model encodes.
+    shadow: bool,
 }
 
 /// The node address the core and the machine name identity `n` by.
@@ -265,29 +270,6 @@ pub fn store() -> RecordStore {
     RecordStore::new(256)
 }
 
-/// Give every lease in `out` back to `kit`'s pool and drop the rest.
-fn discard(kit: &mut Kit, out: Vec<Output>) {
-    for o in out {
-        match o {
-            Output::Free { lease } => kit.pool.free(lease.release()),
-            Output::Install(i) => kit.pool.free(i.lease.release()),
-            Output::Opened { .. }
-            | Output::Answer { .. }
-            | Output::Resend { .. }
-            | Output::Rekey { .. }
-            | Output::Reset { .. }
-            | Output::Remove { .. }
-            | Output::Retire { .. }
-            | Output::Release { .. }
-            | Output::Close { .. }
-            | Output::Retry { .. }
-            | Output::Reject { .. }
-            | Output::Hold { .. }
-            | Output::Settle { .. } => {}
-        }
-    }
-}
-
 /// The session the epoch `tag` of `m` holds.
 pub fn session(m: &Machines, tag: EpochTag) -> Option<Kid> {
     let (v, p) = (m.rekey().view(), m.rekey().peek());
@@ -299,6 +281,16 @@ pub fn session(m: &Machines, tag: EpochTag) -> Option<Kid> {
     .into_iter()
     .find(|(t, _)| *t == Some(tag))
     .and_then(|(_, e)| e.map(|e| kid(e.session)))
+}
+
+/// Whether the rekey machine of `m` holds the session `want`, current,
+/// pending or previous.
+fn keeps(m: &Machines, want: Kid) -> bool {
+    let pk = m.rekey().peek();
+    [pk.current, pk.pending, pk.previous]
+        .into_iter()
+        .flatten()
+        .any(|e| kid(e.session) == want)
 }
 
 /// When the node's liveness timer removes the peer `m` is for, if
@@ -320,17 +312,23 @@ pub fn deadline(m: &Machines) -> Option<Ms> {
     Some(base.max(heard) + feeds::LIVE)
 }
 
-/// The ephemeral digest the core keeps for a msg1, from the stub's.
-fn ephemeral(tok: &Msg1) -> EphemeralDigest {
-    let mut b = [0u8; 33];
-    b[..32].copy_from_slice(&tok.ephemeral().0);
-    EphemeralDigest::of_noise_msg1(&b).expect("33 bytes carry an ephemeral")
-}
-
 impl JointParty {
     /// Node `ix` with identity `me` and multipath setting `mode`,
-    /// redialing `configured`.
+    /// redialing `configured`, running the candidate rule the process or
+    /// the test names, if any (`faults::candidate`).
     pub fn new(ix: usize, me: Node, configured: Vec<Configured>, mode: Mode) -> Self {
+        Self::under(ix, me, configured, mode, candidate())
+    }
+
+    /// Node `ix` as [`Self::new`] makes it, running the candidate rule
+    /// `cand`, or the core's own rules with none.
+    pub fn under(
+        ix: usize,
+        me: Node,
+        configured: Vec<Configured>,
+        mode: Mode,
+        cand: Option<Candidate>,
+    ) -> Self {
         let cfg = mode.rekey();
         let ms = |d: crate::time::Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let floors = (ms(cfg.config().floor_link), ms(cfg.config().floor_session));
@@ -350,7 +348,7 @@ impl JointParty {
                 configured,
                 retry: BTreeMap::new(),
                 idle: BTreeMap::new(),
-                table: Table::new(key(me), Params::default()),
+                table: Table::new(key(me), Params::default()).under(cand),
                 runs: BTreeMap::new(),
                 peers: BTreeMap::new(),
                 kit: Kit::new(me, Epoch(u32::from(me.0) << 8), &super::kinds()),
@@ -370,8 +368,15 @@ impl JointParty {
                 copy: false,
                 expired: Vec::new(),
                 limits,
+                cand,
+                kept: BTreeMap::new(),
             },
-            log: Vec::new(),
+            log: if cand == Some(Candidate::DialerSettle) {
+                alloc::vec![Entry::Fallback]
+            } else {
+                Vec::new()
+            },
+            shadow: matches!(cand, None | Some(Candidate::DialerSettle)),
         }
     }
 
@@ -982,10 +987,15 @@ impl JointParty {
                         fx.class = source.and_then(class);
                     }
                 }
-                Output::Hold { peer, link } | Output::Settle { peer, link, .. } => {
-                    self.s.audit.push(format!(
-                        "a candidate rule's hold of {link:?} for {peer:?}, which no joint node runs"
-                    ));
+                Output::Hold { peer, link } => {
+                    if let Some(n) = who(&peer) {
+                        self.hold(net.now, n, link);
+                    }
+                }
+                Output::Settle { peer, link, back } => {
+                    if let Some(n) = who(&peer) {
+                        self.settle(net.now, n, link, back);
+                    }
                 }
             }
         }
@@ -1002,8 +1012,68 @@ impl JointParty {
         };
         self.s.connecting.retain(|(k, _)| *k != peer.0);
         let now = net.now;
-        // The machine of a removed peer: what the bundle releases goes with
-        // the link, whose closes the core's retire holds.
+        self.dropped(now, peer, p);
+    }
+
+    /// A candidate rule keeps the session of `link`, the one `peer` is held
+    /// on now: the peer's machines, its lease and what the shell holds for
+    /// it go to the kept slot, so the install or removal that follows
+    /// leaves them, and frames under that session still open. The install
+    /// that follows a move builds the peer's next machines beside the kept
+    /// ones ([`Machines::beside`]).
+    fn hold(&mut self, now: Ms, peer: Node, link: LinkNo) {
+        if fault!(CandidateHoldsNothing) {
+            return;
+        }
+        let Some(p) = self.s.peers.remove(&peer.0) else {
+            self.s.audit.push(format!(
+                "a hold of {link:?} for {peer:?}, which has no machines"
+            ));
+            return;
+        };
+        if p.link != link {
+            self.s.audit.push(format!(
+                "a hold of {link:?} for {peer:?}, held on {:?}",
+                p.link
+            ));
+        }
+        if let Some(old) = self.s.kept.insert(peer.0, p) {
+            // The core settles a kept session before it keeps another.
+            self.s.audit.push(format!(
+                "a hold of {link:?} for {peer:?} over the kept {:?}",
+                old.link
+            ));
+            self.dropped(now, peer, old);
+        }
+    }
+
+    /// The session kept for `link` of `peer` is kept no longer: with `back`
+    /// the peer is on it again and the machines it was held on instead are
+    /// closed; otherwise the kept machines are closed.
+    fn settle(&mut self, now: Ms, peer: Node, link: LinkNo, back: bool) {
+        let Some(k) = self.s.kept.remove(&peer.0) else {
+            return;
+        };
+        if k.link != link {
+            self.s
+                .audit
+                .push(format!("{peer:?}: settled {link:?}, kept {:?}", k.link));
+        }
+        if back {
+            if let Some(cur) = self.s.peers.remove(&peer.0) {
+                self.dropped(now, peer, cur);
+            }
+            self.s.peers.insert(peer.0, k);
+        } else {
+            self.dropped(now, peer, k);
+        }
+    }
+
+    /// Close the machines of `p`, which the shell held for `peer`, as at a
+    /// removal: what the bundle releases goes with the link, whose closes
+    /// the core's retire holds; the indices are unbound and the record is
+    /// filed.
+    fn dropped(&mut self, now: Ms, peer: Node, p: Held) {
         let (events, carry) = p.machines.close(&mut self.s.kit, now, rekey::Close::Admin);
         for e in events {
             if let Ev::Rekey(rekey::Output::Unbind { index, .. }) = e
@@ -1052,7 +1122,9 @@ impl JointParty {
             theirs,
         };
         let old = self.s.peers.remove(&peer.0);
-        let moved = matches!((i.rekey, &old), (Build::FromCarry, Some(_)));
+        let renewed = matches!((i.rekey, &old), (Build::FromCarry, Some(_)));
+        let beside =
+            i.rekey == Build::FromCarry && old.is_none() && self.s.kept.contains_key(&peer.0);
         // The record a move carries keeps what it owes.
         let mut owed = Owed::default();
         let (machines, events, answered, beat, heard, off) = match (i.rekey, old) {
@@ -1066,6 +1138,16 @@ impl JointParty {
                 owed = old.owed;
                 let (m, ev) = old.machines.moved(&mut self.s.kit, now, setup, to, local);
                 (m, ev, old.answered, old.beat, old.heard, Some(old.link))
+            }
+            (Build::FromCarry, None) if beside => {
+                // A candidate rule kept the session moved off: its machines
+                // stay as they are, and the moved session's are built
+                // beside them from what they show.
+                let State { kept, kit, .. } = &mut self.s;
+                let k = kept.get(&peer.0).expect("a kept session, checked above");
+                owed = k.owed.clone();
+                let (m, ev) = k.machines.beside(kit, now, setup, to, local);
+                (m, ev, k.answered, k.beat, k.heard, None)
             }
             (rebuilt, old) => {
                 if let Some(old) = old {
@@ -1116,7 +1198,7 @@ impl JointParty {
         self.s.retry.remove(&peer.0);
         self.named(peer, Some(hs));
         let mut r = self.route(peer, Some(i.link), off, events);
-        if !moved {
+        if !renewed {
             // A new bundle reports nothing: its original path is Live.
             r.inputs.push(In::State {
                 link: i.link,
@@ -1169,27 +1251,9 @@ impl JointParty {
         self.cut(net, peer, r, fx);
     }
 
-    /// A msg1's answer, built before the core decides on it: the `Hello`
-    /// with a fresh lease, and what an install would take from it.
+    /// A msg1's answer, built before the core decides on it.
     fn hello(&mut self, tok: &Msg1, hs: Hs, bytes: &[u8], from: Addr) -> (Hello, Built) {
-        let kit = &mut self.s.kit;
-        let lease = allocate(&mut kit.pool).expect("the node's pool has an index");
-        let index = lease.index();
-        kit.local.name(names::answerer(hs));
-        let (done, msg2) = tok
-            .answer(&kit.local, Some(lease.index()))
-            .expect("the stub IK msg2 always writes");
-        let record = Record::setup(tok.digest(), tok.ephemeral(), Some(msg2.clone()));
-        let hello = Hello {
-            peer: tok.remote().addr(),
-            from: pair(from),
-            bytes: bytes.to_vec(),
-            ephemeral: ephemeral(tok),
-            epoch: tok.epoch(),
-            msg2,
-            lease,
-        };
-        (hello, (done, record, index))
+        route::answer(&mut self.s.kit, tok, hs, bytes, from)
     }
 
     fn dial(&mut self, net: &mut Net, peer: Node, to: Addr, from: Option<Addr>) {
@@ -1265,7 +1329,8 @@ impl JointParty {
 
     /// The model's class for what the peer's machine did with a msg1:
     /// `pending` is the pending session before the call, `eligible`
-    /// whether the link was past its floors.
+    /// whether the link was past its floors. A refusal no msg1 can draw is
+    /// a broken promise.
     fn classify(
         &mut self,
         peer: Node,
@@ -1760,10 +1825,14 @@ impl JointParty {
     /// What an abstract far end's frame under the session of `hs` is on the
     /// wire (a model of a deployed node sends no bytes), so that its frames
     /// open at the machine as any other's do.
+    /// A session a candidate rule kept is written by the kept machines.
     fn sealed(&mut self, id: Node, hs: Hs) -> Option<Vec<u8>> {
         let want = self.s.names.kid(hs)?;
         let copy = self.s.copy;
-        let p = self.s.peers.get(&id.0)?;
+        let p = match self.s.kept.get(&id.0) {
+            Some(k) if keeps(&k.machines, want) => k,
+            Some(_) | None => self.s.peers.get(&id.0)?,
+        };
         p.machines
             .written(&mut self.s.counters, (hs, want), copy, BEAT)
     }
@@ -1809,6 +1878,32 @@ impl JointParty {
                 return;
             }
         }
+        let mut fx = Fx::default();
+        let binds = |m: &Machines| m.rekey().bindings().iter().any(|b| b.index == index);
+        let held = self.s.kept.get(&id.0).is_some_and(|k| binds(&k.machines));
+        if held {
+            // A frame under a session a candidate rule kept: the core hears
+            // it as such and says whether the peer is back on that session,
+            // whose machines then take the frame as the peer's own.
+            let out = self.core(
+                In::HeldFrame {
+                    peer: key(id),
+                    from: pair(src),
+                },
+                at,
+            );
+            self.effects(net, out, &mut fx);
+            if !self.s.peers.get(&id.0).is_some_and(|p| binds(&p.machines)) {
+                // Every session the core keeps is one a frame under it puts
+                // the peer back on, so a kept session the frame left kept is
+                // one the core and the shell disagree on.
+                self.s.audit.push(format!(
+                    "a frame from {id:?} under the kept {hs:?} did not settle the peer back on it"
+                ));
+                self.closes(now, &fx.closes);
+                return;
+            }
+        }
         let Some(p) = self.s.peers.get_mut(&id.0) else {
             return;
         };
@@ -1837,15 +1932,16 @@ impl JointParty {
         let (roamed, unpathed) =
             p.machines
                 .account(&mut self.s.kit, now, src, local, bytes.len(), kind);
-        let mut fx = Fx::default();
-        let out = self.core(
-            In::Heard {
-                peer: key(id),
-                from: pair(src),
-            },
-            at,
-        );
-        self.effects(net, out, &mut fx);
+        if !held {
+            let out = self.core(
+                In::Heard {
+                    peer: key(id),
+                    from: pair(src),
+                },
+                at,
+            );
+            self.effects(net, out, &mut fx);
+        }
         let link = self.link(id);
         let moved = self.route(id, link, None, roamed);
         self.inputs(net, moved.inputs, &mut fx);
@@ -1931,6 +2027,27 @@ impl JointParty {
     fn closed(&mut self, net: &mut Net, at: Addr) {
         let now = net.now;
         self.closes(now, &[at]);
+        if net.kind(at.transport) != Kind::Datagram {
+            // The kept sessions whose link's connection this was are lost.
+            let lost: Vec<Node> = self
+                .s
+                .kept
+                .iter()
+                .filter(|(_, k)| {
+                    self.s
+                        .table
+                        .links()
+                        .get(k.link)
+                        .is_some_and(|r| addr(&r.setup) == at)
+                })
+                .map(|(k, _)| Node(*k))
+                .collect();
+            for p in lost {
+                let out = self.core(In::HoldLost { peer: key(p) }, TestInstant(now));
+                let mut fx = Fx::default();
+                self.effects(net, out, &mut fx);
+            }
+        }
         let gone: Vec<(LinkNo, (Hs, Node, Role))> = self
             .s
             .runs
@@ -2059,8 +2176,20 @@ impl JointParty {
         self.check();
         let mut fx = Fx::default();
         let mut reaped = Vec::new();
+        // A kept session's link retired as its time ran out is no dial.
+        let settled: Vec<LinkNo> = polled
+            .iter()
+            .filter_map(|o| {
+                if let Output::Settle { link, .. } = o {
+                    Some(*link)
+                } else {
+                    None
+                }
+            })
+            .collect();
         for o in &polled {
             if let Output::Retire { link, .. } = o
+                && !settled.contains(link)
                 && let Some(r) = self.s.runs.get(link)
             {
                 reaped.push((r.hs, r.peer, r.role));
@@ -2214,7 +2343,7 @@ impl JointParty {
         let s = &mut self.s;
         s.life += 1;
         s.count = 0;
-        s.table = Table::new(key(s.me), Params::default());
+        s.table = Table::new(key(s.me), Params::default()).under(s.cand);
         s.runs.clear();
         s.rekeys.clear();
         s.connecting.clear();
@@ -2235,7 +2364,8 @@ impl JointParty {
     fn wipe(&mut self, now: Ms) {
         let out = self.s.table.close(TestInstant(now));
         discard(&mut self.s.kit, out);
-        for (_, p) in core::mem::take(&mut self.s.peers) {
+        let kept = core::mem::take(&mut self.s.kept);
+        for (_, p) in core::mem::take(&mut self.s.peers).into_iter().chain(kept) {
             let (events, _) = p
                 .machines
                 .close(&mut self.s.kit, now, rekey::Close::Shutdown);
@@ -2283,11 +2413,14 @@ impl JointParty {
             copy: _,
             expired: _,
             limits,
+            cand,
+            kept,
         } = &self.s;
         let mut out = format!(
-            "{ix} {now} {polled:?} {me:?} {mode:?} {life} {count} {configured:?} {retry:?} {idle:?} {table:?} {runs:?} "
+            "{ix} {now} {polled:?} {me:?} {mode:?} {life} {count} {configured:?} {retry:?} {idle:?} {table:?} {runs:?} {cand:?} "
         );
-        for (k, p) in peers {
+        let kept = kept.iter().map(|(k, p)| (k, p, " kept"));
+        for (k, p, slot) in peers.iter().map(|(k, p)| (k, p, "")).chain(kept) {
             let Held {
                 machines,
                 link,
@@ -2304,7 +2437,7 @@ impl JointParty {
             } = p;
             let _ = write!(
                 out,
-                "{k}: {link:?} {origin:?} {answered} {beat} {own:?} {heard} {listed:?} {gated} {cut} {owed:?} {started:?} "
+                "{k}{slot}: {link:?} {origin:?} {answered} {beat} {own:?} {heard} {listed:?} {gated} {cut} {owed:?} {started:?} "
             );
             machines.key(*now, &mut out);
         }
@@ -2349,6 +2482,11 @@ impl JointParty {
             ));
             failed.extend(p.machines.failures());
         }
+        bound += s
+            .kept
+            .values()
+            .map(|p| p.machines.rekey().bindings().len())
+            .sum::<usize>();
         bound += s
             .runs
             .keys()
@@ -2440,6 +2578,7 @@ impl JointParty {
             bound: s
                 .peers
                 .values()
+                .chain(s.kept.values())
                 .flat_map(|p| {
                     p.machines
                         .rekey()
@@ -2554,14 +2693,6 @@ impl Party for JointParty {
                 let transport = TransportId::new(u32::from(transport));
                 self.transported(net, PathInput::Removed { transport });
             }
-            // The stand-in's abstract path events: a joint node's bundle
-            // writes the core's mirror, and nothing else may.
-            Input::Path(
-                PathEv::Moved { .. }
-                | PathEv::Switched { .. }
-                | PathEv::Released { .. }
-                | PathEv::State { .. },
-            ) => {}
             // The world applies a NAT's change; no node is told of it.
             Input::Path(PathEv::Rebound { .. }) => {}
         }
@@ -2603,13 +2734,8 @@ impl Party for JointParty {
         let Some(want) = self.s.names.kid(hs) else {
             return false;
         };
-        self.s.peers.get(&peer.0).is_some_and(|p| {
-            let pk = p.machines.rekey().peek();
-            [pk.current, pk.pending, pk.previous]
-                .into_iter()
-                .flatten()
-                .any(|e| kid(e.session) == want)
-        })
+        let holds = |p: &Held| keeps(&p.machines, want);
+        self.s.peers.get(&peer.0).is_some_and(holds) || self.s.kept.get(&peer.0).is_some_and(holds)
     }
 
     fn held(&self) -> Vec<Node> {
@@ -2652,7 +2778,9 @@ impl Party for JointParty {
         let s = &self.s;
         let mut v = View::empty(s.me);
         v.configured = s.configured.iter().map(|c| c.peer).collect();
-        v.log = self.log.clone();
+        if self.shadow {
+            v.log = self.log.clone();
+        }
         v.audit = s.audit.clone();
         v.rekeys = s.rekeys.clone();
         v.needs = self.needs();
@@ -2721,6 +2849,9 @@ impl Party for JointParty {
                     .map(|(_, r)| r.hs)
                     .collect(),
             });
+        }
+        for (k, p) in &s.kept {
+            bound.extend(p.machines.rekey().bindings().iter().map(|b| (b.index, *k)));
         }
         bound.sort_unstable();
         let mut map: Vec<(u32, u8)> = s.bound.iter().map(|(i, k)| (*i, *k)).collect();

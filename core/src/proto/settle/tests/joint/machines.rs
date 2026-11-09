@@ -214,6 +214,55 @@ impl Machines {
             last_rx: None,
             record,
         };
+        Self::founded(kit, now, peer, mode, setup, facts, at, from)
+    }
+
+    /// The machines of the session a candidate rule moves the peer onto at
+    /// `now` while it keeps this one: a rekey machine built on `setup` from
+    /// what this one shows (the peer's epoch, the link's age, the current
+    /// session's start and key-epoch bit, the last frame heard, the bit
+    /// last seen from the peer) and a copy of its replay record, which is
+    /// what a cross-connection move would carry, and a new bundle whose
+    /// original path is the peer's pair `to`, reached from `from`. This
+    /// one stays as it is, to open frames under the session kept. A test's
+    /// choice: the node has no second machine for one peer.
+    pub fn beside(
+        &self,
+        kit: &mut Kit,
+        now: Ms,
+        setup: Setup,
+        to: Addr,
+        from: Addr,
+    ) -> (Self, Vec<Event>) {
+        let v = self.rekey.view();
+        let (peer_k, record) = self.rekey.memory();
+        let cur = v.current.as_ref();
+        let facts = SetupFacts {
+            peer_epoch: v.peer_epoch,
+            k: cur.is_some_and(|e| e.k),
+            link_since: v.link_since,
+            started: cur.map_or(TestInstant(now), |e| e.started),
+            peer_k,
+            last_rx: v.last_rx,
+            record: record.clone(),
+        };
+        Self::founded(kit, now, self.peer, self.mode, setup, facts, to, from)
+    }
+
+    /// The machines of a link to `peer` set up at `now` on `setup` with
+    /// the rekey facts `facts`, and a bundle whose original path is the
+    /// peer's pair `at`, reached from `from`, Live, acked and active.
+    #[allow(clippy::too_many_arguments)]
+    fn founded(
+        kit: &mut Kit,
+        now: Ms,
+        peer: Node,
+        mode: Mode,
+        setup: Setup,
+        facts: SetupFacts<TestInstant>,
+        at: Addr,
+        from: Addr,
+    ) -> (Self, Vec<Event>) {
         let (rekey, out) = build(kit, now, peer, mode, setup, facts, at.transport);
         let params = if fault!(ModeIgnored) {
             // The defect's shape: the bundle built enabled whatever the
@@ -720,6 +769,13 @@ impl Machines {
             *next - 1
         };
         self.sealed(want, counter, plaintext)
+    }
+
+    /// Quiet the rekey machine's own time and message triggers, for the
+    /// driver (`../drive.rs`), whose histories say when a rekey starts. A
+    /// rekey the shell fires through the trigger hook still starts.
+    pub fn quiet(&mut self) {
+        self.rekey.quiet();
     }
 
     /// The bundle.

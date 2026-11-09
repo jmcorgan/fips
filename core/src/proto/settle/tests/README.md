@@ -15,9 +15,10 @@ can rebuild any state by replaying the path that reached it.
   line may) and no model file naming a core module through `super` or
   `settle`, every core and model file in the scans' lists, every test
   under this directory named by a switch's row in `faults.rs` (either
-  table) or listed there, and every rekey row naming a switch of the
-  rekey machine. Each scan also plants its own break and shows it is
-  found.
+  table) or listed there, every rekey row naming a switch of the
+  rekey machine, and no test naming the rekey machine's transcription or
+  the stand-in core's party, both retired once a joint node ran the real
+  machine. Each scan also plants its own break and shows it is found.
 - `faults.rs`: the table of every switch in `../faults.rs` and the tests
   it must turn red, a second table of the rekey machine's switches that
   a joint node's tests red, by their variants' names, the tests that
@@ -41,8 +42,7 @@ can rebuild any state by replaying the path that reached it.
   its abstract fields, as an index into `Net.wires`, where equal bytes
   take one index (0 for none, which every party here sends), so a resend
   equals its original; the digest prints the bytes, never the index
-  (switch `WireByNumber`). Besides the stand-in's abstract path events, a
-  start may hold a candidate act, a feed's report of a peer's address
+  (switch `WireByNumber`). A start may hold a candidate act, a feed's report of a peer's address
   with the node's own address it is reached from, and the acts of a
   node's transport losing or regaining carrier and being removed, which
   only a node with a real bundle takes; and a NAT's rebinding of a node's
@@ -73,7 +73,9 @@ can rebuild any state by replaying the path that reached it.
   session, as the node's tree announce does.
 - `starts.rs`: the named starts, each with the scripted schedule that
   reaches its target state, the depth it is explored to and the most
-  states that depth may reach; `flipped` builds a thread's two-node
+  states that depth may reach (the start with two paths is written here
+  with no paths, for the model, and rebuilt on real bundles in
+  `joint/starts.rs`); `flipped` builds a thread's two-node
   starts with their identities exchanged, for the other address order.
 - `explore.rs`: the breadth-first explorer, its events (the leap over the
   bundles' wakes offered only where a bundle wakes first, and a node's
@@ -115,54 +117,36 @@ can rebuild any state by replaying the path that reached it.
   `resync_close` gives the close a node with no fallback makes at a late
   second dial's move. Its tests show the late dial's close and the
   proven-path comparison on planted logs.
-- `rekeyside.rs`: `RekeySide`, the rekey machine's decisions transcribed
-  from `master` at `2ba790b2`: `judge_msg1` and `apply`
-  (`rekey/machine.rs:853-951`, `:1123-1135`), `respond` (from `:1380`), the
-  pending cutover by frame (from `:1790`), the initiator's msg2 and cutover
-  one check later (or at once, for the model's explicit cutover event), the drain, and `poll`'s resends, deadline and hold expiry
-  (from `:2161`), with `rekey/params.rs:113-129` (link age 30 s, session age
-  10 s, hold 120 s, drain 10 s). Its test runs the model's rule 3 and 4
-  histories through it.
 - `shapes.rs`: the shapes the model's convergence with itself exempts,
   each shown once on the schedule that found it, with the model of
-  `master` converging on the same schedule; a control that each start's
-  own script shows only the shape it carries by design (none, except the
-  late second dial answered in the other order and the dial on the
-  peer's aged link); and a test that those two show their shapes with the
+  `master` converging on the same schedule, which stay on those models,
+  since the shape is the model's; a control that each start's own script
+  shows only the shape it carries by design, with the model and with joint
+  nodes (none, except the late second dial answered in the other order and
+  the dial on the peer's aged link); and a test that those two show their shapes with the
   models of the current and the deployed node.
-- `drive.rs`: the one-node driver: one core and the rekey side of the
-  peer it holds, fed a model history event by event. It maps each event
-  to the core's inputs, hands a same-epoch msg1 to the rekey side with the
-  core's arrival, routes the side's replacement request and restart report
-  back to the core, and reports each step in the model step's fields.
-- `cmp.rs`: the core through the driver against a model `Judge` on every
-  history of the model's table tests (restated, since those tests are
-  private to the model), the gates' own-msg2 history one second after a
-  frame, and two histories the model's tests lack (a move's new address,
-  a roamed address). Class, refusal, reply, change and closes are compared
-  with the named differences applied; a second test asserts each named
-  difference is still met where it should be.
-- `stub.rs`: `CoreParty`, the core as a node of the world: one `Table`
-  and a rekey side per held peer, with a stub shell that carries out the
-  core's outputs, keeps each installed session's lease until removal, and
-  supplies the timers, reconnects and announces the core leaves to the
-  node. Under a candidate rule it keeps a held session's rekey side and
-  lease beside the peer's own, so frames under it still open, hands such
-  a frame to the core as `HeldFrame` and the loss of its connection as
-  `HoldLost`, and swaps or drops it at `Settle` (switch
-  `CandidateHoldsNothing` drops it at `Hold`). On every call it checks
-  that no lease is dropped unreleased, that the index equals its
-  recomputation from the records, and that a poll
-  before the next wake does nothing, and reports a broken promise as an
-  incoherence. It holds the `PacketStamp` switch (the core called at a
-  packet's wall stamp). Its explorer test runs every start but 6 and 7
-  with the core at both ends and the core at either end against the
-  model, and start 12 with the core at both ends and no shadow; a split on
-  a path that showed a known shape is counted, not failed, and so is, on
-  start 12, an address only a path event names, since the world opens no
-  connection for a path its events report.
+- `drive.rs`: the one-node driver: one core and the real rekey machine
+  and bundle of the peer it holds, at a multipath setting it is given, fed
+  a model history event by event. Each message a history names is written
+  as that peer writes it from the handshake's name (`joint/names.rs`), a
+  history's exact msg1 bytes being the sender's index, which a copy with a
+  rewritten header changes and the msg1's tag does not cover. It maps each
+  event to the core's inputs, hands a same-epoch msg1 to the machine with
+  the core's arrival, routes what the machines ask back to the core by the
+  joint world's routing, starts an own rekey through the machine's trigger
+  and reports each step in the model step's fields. A held peer's
+  reachability reads the bundle's active path, as a joint node's does.
+- `cmp.rs`: the core and the machines through the driver against a model
+  `Judge` on every history of the model's table tests (restated, since
+  those tests are private to the model), the gates' own-msg2 history one
+  second after a frame, and two histories the model's tests lack (a move's
+  new address, a roamed address), at both multipath settings. Class,
+  refusal, reply, change and closes are compared with the named
+  differences applied; a second test asserts each named difference is
+  still met where it should be. An own rekey in a history starts past the
+  machine's start floors, one check beyond the ages a msg1 is judged by.
 - `regress.rs`: the two late-dial cases left for later, pinned as known
-  defects with the core at both ends (a late second dial whose msg2s are
+  defects with joint nodes at both ends, multipath off (a late second dial whose msg2s are
   read in the other order, both dialers; the larger node's dial on the
   smaller node's aged link, then its own rekey), each with a control that
   passes (the same dials answered in order; the dial on a link too young
@@ -174,14 +158,16 @@ can rebuild any state by replaying the path that reached it.
   clock across a wall step, a replayed msg1 that promoted an unheard
   peering, an own dial answered by a restarted peer, and a second restart
   inside the dampener's interval.
-- `sim.rs`: seeded long runs of the core at both ends from a cold start on
-  each transport model (connectionless, connection-oriented, BLE, one of
-  each), with loss, duplication, a heavy-tailed delay (one past the next
+- `sim.rs`: seeded long runs of joint nodes at both ends, multipath off,
+  from a cold start on each transport model (connectionless,
+  connection-oriented, BLE, one of each), with loss, duplication, a heavy-tailed delay (one past the next
   wake is a loss), a partition window, restarts, rekeys, frames,
   connection faults and wall steps, each decision a function of the seed
-  and a stable key; clean runs with no fault; runs that once reached a
-  difference the comparison now resyncs; a byte-identical replay check;
-  and a planted failure shrunk to its cause. A run is recorded as the
+  and a stable key; clean runs with no fault; runs outside the sets that
+  each reach a difference the comparison resyncs; a byte-identical replay
+  check; and a planted failure shrunk to its cause. A split a liveness
+  timer ended during the fault phase is what the faults did, and is not
+  held against the run; one it ends in the heal is. A run is recorded as the
   explorer's events, so a failure shrinks by removing events while it
   fails with the same property at the same node (`FIPS_SETTLE_SIM_NOSHRINK`
   reports it unshrunk).
@@ -212,13 +198,15 @@ can rebuild any state by replaying the path that reached it.
   See its README.
 - `candidates.rs` (under `slow-tests`, its explored runs under
   `slow-explorers`): the candidate rules for the two cases left for
-  later, explored. Each candidate runs on the start it
+  later, explored on joint nodes at multipath off, which keep a session
+  the core holds as the peer's machines left receive-only beside the ones
+  built for its next session. Each candidate runs on the start it
   addresses (6 for the two late-dial rules, 7 for the aged-link rule) and
-  every start the core's own rules pass, at both ends and at either end
-  against the core's own rules, the model and both deployed models, in
-  both address orders; only the dialer's rule is compared with the model
-  step by step. The splits of the shapes a candidate addresses are not
-  exempt. Every breach found is recorded in `candidates.txt` as new, or
+  every named start the core's own rules pass, the start with two paths
+  on real bundles, at both ends and at either end against the core's own
+  rules, the model and both deployed models, in both address orders;
+  only the dialer's rule is compared with the model step by step. The
+  splits of the shapes a candidate addresses are not exempt. Every breach found is recorded in `candidates.txt` as new, or
   kept when the same pairing with the core's own rules in the
   candidate's place shows it too, and every pairing in
   `legacy/not-converging.txt` the candidate no longer breaks as gone; the
@@ -252,12 +240,12 @@ can rebuild any state by replaying the path that reached it.
   replacement or restart over another connection closes the replaced
   link's connection when no link uses it (switch `ReplacedConnKept`). The
   model of `master` keeps `master`'s behaviour there. The core keeps it
-  too, and the core's stub shell makes the same close, and at a dead
+  too, and a joint node's shell makes the same close, and at a dead
   link's removal closes the link's other paths' connections no link uses,
   under the same switch.
 - A BLE connection is shared by dials between one pair of addresses, the
   local address included.
-- The core's stub shell knows only its own end of a connection: one the
+- A joint node's shell knows only its own end of a connection: one the
   far end closed is reachable until its end-of-stream arrives (switch
   `ReachablePeeks`).
 - A node running the dialer's late-dial rule opens its log with
@@ -273,8 +261,8 @@ can rebuild any state by replaying the path that reached it.
   the peer at a frame of either slot (`PreviousUnheard`).
 - The shape that names a peer's own rekey msg1 asks the sender's view for
   its rekeys: the model and the model of `master` name the rekey in
-  flight, the core every rekey sent in its life, since a replacement ends
-  the core's rekey side while the msg1 it sent is still the peer's rekey.
+  flight, a joint node every rekey sent in its life, since a replacement
+  ends its rekey machine while the msg1 it sent is still the peer's rekey.
 - Exemption by shape. Each shape is kept with what it left
   (`world::Left`): for `StaleFrame`, `RekeyInstall`, `OldLife` and
   `LaterDialFirst`, the origins of the two ends' sessions of each other
@@ -307,14 +295,14 @@ can rebuild any state by replaying the path that reached it.
   feature, which turns `slow-tests` on too, also gates a joint node explored
   against the models of `master` and `maint` (`legacy/explore.rs`) and
   the candidate rules explored (`candidates.rs`), and in the joint world
-  the sweeps that take tens of minutes (`joint/explore.rs`); only local
-  CI with `--slow-tests` and the internal builder run those. Every other
-  test here runs in every build, on every platform: among them the reach
-  tests at each pairing, the cold start's reach, the model's reach and
-  the sweeps of the joint world at Off with Off and at On with On of the
-  starts that stay cheap there, each named in `.config/nextest.toml`'s
-  list of known-slow tests, whose limit is 480 s. A test that passes that
-  limit on two cores moves to the slow explorers' build. The suites
-  `slow-tests` gates are listed here as they arrive, since
-  `core/Cargo.toml`'s comment on that feature is left to multipath stage
-  A's rebase.
+  the core's own explorer on joint nodes and the sweeps that take tens of
+  minutes (`joint/explore.rs`); only local CI with `--slow-tests` and the
+  internal builder run those. Every other test here runs in every build,
+  on every platform: among them the reach tests at each pairing, the
+  cold start's reach, the model's reach and the sweeps of the joint world
+  at Off with Off and at On with On of the starts that stay cheap there,
+  each named in `.config/nextest.toml`'s list of known-slow tests, whose
+  limit is 480 s. A test that passes that limit on two cores moves to the
+  slow explorers' build, as the core's own explorer did (more than 480 s
+  on two cores under nextest), and `core/Cargo.toml`'s comment on the two
+  features names it.

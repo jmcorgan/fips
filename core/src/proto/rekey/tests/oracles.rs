@@ -188,7 +188,7 @@ pub(crate) struct Seen<O> {
 /// hold. Kept from the machine's outputs, never from its record, so a lost
 /// replay defence fails O5 instead of passing as the residual, and cleared
 /// when the shell drops the machine and the record with it.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Owed(Vec<Digest>);
 
 impl Owed {

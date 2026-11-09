@@ -2,8 +2,9 @@
 //!
 //! The explorer covers every short schedule from a named start; these runs
 //! cover long ones from a cold start, drawn from a seed. Two nodes, each
-//! made by a maker (the core at both ends by default), are configured to
-//! dial one another, or one dials and the other waits, on one of four
+//! made by a maker (joint nodes at both ends with multipath off by default,
+//! the core with a real rekey machine and bundle per held peer), are
+//! configured to dial one another, or one dials and the other waits, on one of four
 //! transport models: connectionless, connection-oriented, BLE, or one of
 //! each direction. A run then takes one event per step until its fault
 //! phase ends, heals, and checks the properties:
@@ -30,8 +31,12 @@
 //! `FIPS_SETTLE_SIM_NOSHRINK` to report the full schedule instead.
 //!
 //! The properties are the explorer's: those of every step after every
-//! event, and those of a healed world at the end, with a split exempt on a
-//! run that showed a known shape.
+//! event, and those of a healed world at the end, with a split exempt where
+//! a known shape the run showed left it. A joint node's liveness timer may remove
+//! a peer during the fault phase, with what was lost keeping the two ends
+//! from hearing each other. That is what the faults did, and what it leaves
+//! is judged at the heal; so only a split the timer ends once the faults
+//! have stopped is a breach.
 
 use alloc::collections::BTreeSet;
 use alloc::format;
@@ -40,9 +45,9 @@ use alloc::vec::Vec;
 
 use super::super::model::history::Epoch;
 use super::explore::{Act, apply};
+use super::joint::off;
 use super::oracle::{by_shape, every_step, heal, healed};
 use super::starts::{A, B, BLE, Maker, TCP, UDP, dial_home, world_of};
-use super::stub::core;
 use super::world::{Ms, Pkt, State, World};
 use crate::testutil::SplitMix64;
 
@@ -183,26 +188,6 @@ fn failure(b: super::oracle::Breach) -> Failure {
         label: format!("{:?} at n{}", b.oracle, b.node),
         what: b.what,
     }
-}
-
-/// Whether `b` is a responder pending of the peer's own rekey that the
-/// peer has since given up unanswered: it sent the msg1 in this life and
-/// holds no rekey of it, so nothing will adopt the pending before its hold
-/// clears it, past the heal. The one breach of another cause the shape
-/// exemption had spared in these runs (seed 29 of the two-transport set,
-/// on a path that had shown `RekeyInstall` long before), so its own
-/// exemption, which a test below holds.
-fn abandoned(w: &World, b: &super::oracle::Breach) -> bool {
-    let Some(&hs) = b.about.last().filter(|_| b.what.starts_with("pending:")) else {
-        return false;
-    };
-    let me = w.ids[b.node];
-    w.parties.iter().enumerate().any(|(y, p)| {
-        let v = p.view();
-        y != b.node
-            && v.rekeys.contains(&(me, hs))
-            && v.peers.iter().any(|q| q.peer == me && q.rekey != Some(hs))
-    })
 }
 
 /// The world of a run: two nodes on `cfg`'s transports, in the address
@@ -419,13 +404,14 @@ pub fn run(
             });
         }
         if found.is_none() {
+            w.ended.clear();
             heal(&mut w);
             found = check(&w, &init)
                 .into_iter()
                 .chain(
                     healed(&w)
                         .into_iter()
-                        .filter(|b| !by_shape(&w, b) && !abandoned(&w, b))
+                        .filter(|b| !by_shape(&w, b))
                         .map(failure),
                 )
                 .next();
@@ -497,17 +483,17 @@ pub fn shrink(
     cur
 }
 
-/// Run `cfg` from every seed of `seeds` with the core at both ends, and
-/// panic with the first failure's seed, its shrunk schedule and the log of
+/// Run `cfg` from every seed of `seeds` with joint nodes at both ends,
+/// multipath off, and panic with the first failure's seed, its shrunk schedule and the log of
 /// that schedule.
 pub fn runs(name: &str, seeds: core::ops::Range<u64>, cfg: &Cfg) {
     for seed in seeds {
-        let r = run(seed, cfg, core, None, properties, false);
+        let r = run(seed, cfg, off, None, properties, false);
         let Some(f) = r.failure else {
             continue;
         };
         if std::env::var_os("FIPS_SETTLE_SIM_NOSHRINK").is_some() {
-            let again = run(seed, cfg, core, Some(&r.acts), properties, true);
+            let again = run(seed, cfg, off, Some(&r.acts), properties, true);
             panic!(
                 "{name} seed {seed}: {}: {}\nschedule {:?}\nlog:\n{}",
                 f.label,
@@ -516,8 +502,8 @@ pub fn runs(name: &str, seeds: core::ops::Range<u64>, cfg: &Cfg) {
                 again.log.join("\n")
             );
         }
-        let min = shrink(seed, cfg, core, &r.acts, &f.label, properties);
-        let again = run(seed, cfg, core, Some(&min), properties, true);
+        let min = shrink(seed, cfg, off, &r.acts, &f.label, properties);
+        let again = run(seed, cfg, off, Some(&min), properties, true);
         panic!(
             "{name} seed {seed}: {}: {}\nshortest schedule ({} of {} events) {min:?} fails with {:?}\nlog:\n{}",
             f.label,
@@ -558,14 +544,17 @@ fn seeded_faulty_runs_on_two_transports_keep_the_properties_and_heal() {
     faulty(Model::Mixed);
 }
 
-/// Runs outside the seed sets that each reached a difference between the
+/// Runs outside the seed sets that each reach a difference between the
 /// rekey machine's decisions and the model's that the comparison resyncs
-/// by name, before that resync existed.
+/// by name, or a far-end close the shell has not seen yet, and that fail
+/// without its resync or its reading, but for the last: no run of the first
+/// 3,000 seeds of any transport model turns on that one's resync, so a
+/// planted log in `shadow.rs` shows it, and this run only reaches it.
 const REACHED: [(Model, u64, &str); 4] = [
-    (Model::Stream, 8, "the larger node yields its own rekey"),
-    (Model::Stream, 34, "an own rekey ends with its peering"),
-    (Model::Stream, 53, "a far-end close not yet seen here"),
-    (Model::Stream, 80, "a frame under the drained session"),
+    (Model::Stream, 144, "the larger node yields its own rekey"),
+    (Model::Stream, 72, "an own rekey ends with its peering"),
+    (Model::Stream, 106, "a far-end close not yet seen here"),
+    (Model::Datagram, 69, "a frame under the drained session"),
 ];
 
 #[test]
@@ -587,13 +576,13 @@ fn a_seeded_run_replays_byte_identically_from_its_seed_and_from_its_schedule() {
     for model in [Model::Stream, Model::Mixed] {
         for seed in 0..4 {
             let cfg = Cfg::faulty(model);
-            let a = run(seed, &cfg, core, None, properties, true);
-            let b = run(seed, &cfg, core, None, properties, true);
+            let a = run(seed, &cfg, off, None, properties, true);
+            let b = run(seed, &cfg, off, None, properties, true);
             assert!(a.acts.len() > 50, "{model:?} seed {seed}: a long run");
             assert_eq!(a.acts, b.acts, "{model:?} seed {seed}: the same events");
             assert_eq!(a.log, b.log, "{model:?} seed {seed}: the same log");
             assert_eq!(a.digest, b.digest, "{model:?} seed {seed}: the same world");
-            let c = run(seed, &cfg, core, Some(&a.acts), properties, true);
+            let c = run(seed, &cfg, off, Some(&a.acts), properties, true);
             assert_eq!(a.log, c.log, "{model:?} seed {seed}: the schedule's log");
             assert_eq!(
                 a.digest, c.digest,
@@ -630,7 +619,7 @@ fn a_planted_failing_run_shrinks_to_its_cause() {
     cfg.restart = 20;
     cfg.restarts = 1;
     let (seed, r) = (0..64)
-        .map(|seed| (seed, run(seed, &cfg, core, None, planted, false)))
+        .map(|seed| (seed, run(seed, &cfg, off, None, planted, false)))
         .find(|(_, r)| {
             r.failure.is_some()
                 && r.acts
@@ -639,8 +628,8 @@ fn a_planted_failing_run_shrinks_to_its_cause() {
                     .is_some_and(|i| i > 20)
         })
         .expect("a seed restarts node 0 after twenty events and fails");
-    let min = shrink(seed, &cfg, core, &r.acts, "planted", planted);
-    let again = run(seed, &cfg, core, Some(&min), planted, false);
+    let min = shrink(seed, &cfg, off, &r.acts, "planted", planted);
+    let again = run(seed, &cfg, off, Some(&min), planted, false);
     assert!(
         again.failure.is_some(),
         "seed {seed}: the shrunk schedule still fails"
@@ -655,39 +644,4 @@ fn a_planted_failing_run_shrinks_to_its_cause() {
         min.len(),
         r.acts.len()
     );
-}
-
-#[test]
-fn a_seeded_run_holds_a_pending_of_a_rekey_its_initiator_gave_up_and_only_that_is_spared() {
-    // Seed 29 of the two-transport set: long after a restart left a node
-    // installed from its peer's rekey, the two ends hold one session, and
-    // the other node's own rekey, its msg2s lost, is given up while the
-    // pending its last msg1 armed is held. Before the shape exemption was
-    // narrowed, the shape spared it.
-    use super::world::Shape;
-    let cfg = Cfg::faulty(Model::Mixed);
-    let r = run(29, &cfg, core, None, properties, false);
-    let mut w = world(29, &cfg, core);
-    for &a in &r.acts {
-        if valid(&w, a) {
-            apply(&mut w, a);
-        }
-    }
-    heal(&mut w);
-    assert!(
-        w.kinds().contains(&Shape::RekeyInstall),
-        "precondition: the path showed the shape"
-    );
-    let found = healed(&w);
-    assert!(
-        found
-            .iter()
-            .any(|b| b.what.starts_with("pending:") && !by_shape(&w, b) && abandoned(&w, b)),
-        "the pending of the given-up rekey is found, and spared by its own cause: {found:?}"
-    );
-    assert!(
-        found.iter().all(|b| by_shape(&w, b) || abandoned(&w, b)),
-        "nothing else is: {found:?}"
-    );
-    assert!(r.failure.is_none(), "so the run passes: {:?}", r.failure);
 }

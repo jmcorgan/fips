@@ -17,11 +17,16 @@ use alloc::vec::Vec;
 
 use super::super::model::history::{Addr, Binding, Bytes, Epoch, Event, Hs, LinkId, Node};
 use super::super::model::judge::{Judge, LocalRule, Params, Reply, Step, Transition};
-use super::rekeyside::{LINKAGE, SESSIONAGE};
 use super::world::{
     CHECK, Dir, HANDSHAKE, HEARTBEAT, Input, Kind, Ms, Net, Party, PeerView, Pkt, RESEND, RESENDS,
     RETRY, View,
 };
+
+/// The link age before a rekey, `Config::fmp().link_age`
+/// (`rekey/params.rs`), which the model's own rekey waits for.
+const LINKAGE: Ms = 30_000;
+/// The session age before a rekey, `Config::fmp().session_age`.
+const SESSIONAGE: Ms = 10_000;
 
 /// One of this node's own initial dials in flight.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -2030,14 +2030,6 @@ impl Party for MasterParty {
                 let transport = TransportId::new(u32::from(transport));
                 self.transported(net, PathInput::Removed { transport });
             }
-            // The stand-in's abstract path events: a bundle writes what the
-            // node holds of its paths, and nothing else may.
-            Input::Path(
-                PathEv::Moved { .. }
-                | PathEv::Switched { .. }
-                | PathEv::Released { .. }
-                | PathEv::State { .. },
-            ) => {}
             // The world applies a NAT's change; no node is told of it.
             Input::Path(PathEv::Rebound { .. }) => {}
         }

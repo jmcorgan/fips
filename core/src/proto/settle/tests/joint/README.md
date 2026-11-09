@@ -2,8 +2,8 @@
 
 The joint world: nodes of the settlement world that run the settlement
 core, a real rekey machine (`Rekey<Ik, TestClock>`, on the stub IK
-profile) and a real path bundle per held peer, in place of the stand-in
-core's `RekeySide`. Everything here is test code, compiled only in test
+profile) and a real path bundle per held peer. Everything here is test
+code, compiled only in test
 builds, and changes no line of the core, the machine or the bundle.
 
 ## Files
@@ -16,9 +16,10 @@ builds, and changes no line of the core, the machine or the bundle.
   default's. It also holds the makers of a start's joint nodes (all at
   `Off`, all at `On`, and node 0 at one setting with the rest at the
   other), and the world's transports a node's facts are built over.
-- `names.rs`: the world's identities on stub keys, chosen so that `A < B
-  < C < THIRD` holds for the keys' node addresses as for the world's
-  numbers, each node's epoch written as the world's drivers write it;
+- `names.rs`: the world's identities on stub keys, and `NINTH`, the larger
+  node of one of the driver's histories, chosen so that `A < B < C < NINTH
+  < THIRD` holds for the keys' node addresses as for the world's numbers,
+  each node's epoch written as the world's drivers write it;
   the names the ephemerals are drawn from (a msg1's from its handshake,
   a msg2's from the handshake it answers), so every ephemeral is a
   function of a world name; what an abstract far end (the model, the
@@ -47,7 +48,10 @@ builds, and changes no line of the core, the machine or the bundle.
   facts). `fresh` builds both at a link's setup, as the node does at
   promotion; `moved` closes the rekey machine, builds it again from what
   it carried and starts the bundle again at the pair moved to, as a
-  cross-connection move does; `close` closes both at removal; `msg1`,
+  cross-connection move does; `beside` builds the machines of a session a
+  candidate rule moves the peer onto while it keeps this one, from what
+  this one's rekey machine shows and a copy of its record, leaving it as
+  it is; `close` closes both at removal; `msg1`,
   `reply`, `frame`, `poll`, `trigger`, `account` and `path` step them,
   and `message` decodes a path message the peer sent, after its frame was
   accounted, and steps it into the bundle;
@@ -65,7 +69,9 @@ builds, and changes no line of the core, the machine or the bundle.
   the machines' part of the explorer's key: every field of the rekey
   machine that can change (`Rekey::state`) and every field of the bundle
   (its `Debug`), since `view` and `bindings` leave out fields a
-  successor reads (switches `KeyFromView`, `KeyOmitsBundle`). Each bundle
+  successor reads (switches `KeyFromView`, `KeyOmitsBundle`). `quiet`
+  turns off the rekey machine's own triggers for the driver
+  (`../drive.rs`). Each bundle
   step runs the path shell's checks (`Checks`, from `../../path/tests/`),
   whose failures the shell takes (`failures`), and a test may plant a
   step's outputs for them (`plant`); a bundle output reaches the shell
@@ -101,8 +107,7 @@ builds, and changes no line of the core, the machine or the bundle.
   the link (by hand), and a path message roaming a one-path link at `Off`
   and not at `On` (by hand).
 - `party.rs`: `JointParty`, a node of the world that runs the settlement
-  core with a `Machines` per held peer, in the stand-in core party's
-  structure (`../stub.rs`). Its shell dials and answers with real stub IK
+  core with a `Machines` per held peer. Its shell dials and answers with real stub IK
   messages carried beside the packets' abstract fields, keeps each
   link's handshake until the core installs it, builds the peer's
   machines at an install (the record taken from the node's record store,
@@ -153,10 +158,22 @@ builds, and changes no line of the core, the machine or the bundle.
   every held peer's bundle.
   It names, for the sweeps' exemption, the pairs its bundles hold as
   acknowledged paths that are not Live (`Party::lapsed`).
+  Under a candidate rule (`../candidates.rs`) the core may keep the
+  session a peer is held on beside its next one: the shell then keeps
+  that peer's machines and what it holds for it in a kept slot,
+  receive-only (never polled and never sent on), builds the machines of
+  the session a move goes to beside them (`Machines::beside`), hands a
+  frame under the kept session to the core as a held frame and then to
+  the machines the core settles the peer on, tells the core when the
+  kept link's connection closes, and closes the kept machines or the
+  ones held instead when the core settles. A kept session counts in the
+  node's indices, its frames pass the world's gate, and its machines are
+  keyed; it is compared with the model only under the dialer's rule,
+  which the model encodes.
   Its digest, the explorer's key, names every field of the node's state
   one by one, keys each peer's machines by `Machines::key`, and leaves
   out only the kit's scratch buffer, which a machine writes before it
-  reads.
+  reads, and the per-step lists drained before the next step.
   Its tests show a connection-oriented crossing leaving the smaller node
   at its dial's pair (switch `MoveKeepsOldPair`), a crossing settling on
   one session (`MoveNoReset`, `IndexStale`), a rekey cutting over at both
@@ -220,14 +237,14 @@ builds, and changes no line of the core, the machine or the bundle.
   settlement oracles' `healed`. Its planted tests show each predicate
   firing on a planted reading, delivery or output through these
   wrappers.
-- `starts.rs`: the stand-in's named starts with joint nodes at both
+- `starts.rs`: the named starts (`../starts.rs`) with joint nodes at both
   ends, at each of the four pairings of the two settings (a mixed pairing
   puts node 0 at the first and every other node at the second), each with
   its state cap measured on the joint world at that pairing (the count
   its depth reached, times 1.5, rounded up to a hundred). A start keeps
-  its stand-in script and depth, but for the start with two paths, whose
-  abstract path events no joint node takes: it is rebuilt on real
-  bundles. Beside them, the starts only joint nodes run, each built
+  its script and depth, but for the start with two paths, which
+  `../starts.rs` writes with no paths, for the model: it is rebuilt on
+  real bundles. Beside them, the starts only joint nodes run, each built
   mid-history on real bundles and explored to its script plus two:
   rebuilt start 12, node 1's second dial opened before the capability
   exchange, its connection the one its bundle's second path then uses,
@@ -264,7 +281,7 @@ builds, and changes no line of the core, the machine or the bundle.
   cold start is explored to within the reach budget, measured at Off with
   Off and at On with On, and its cap is the count at that depth, times
   1.5, at each. None of the four pairings' lists holds it.
-- `explore.rs`: the stand-in's explorer over the joint starts: each
+- `explore.rs`: the settlement world's explorer over the joint starts: each
   start's reach at each of the four pairings, one test per pairing
   (switch `ReachOneMore`, shown on one start's reach in `runs.rs`), with every line naming its pairing; that two worlds stepped in turn along one path have
   one digest, so no node's path identifiers move another's (by hand:
@@ -282,7 +299,7 @@ builds, and changes no line of the core, the machine or the bundle.
   how far into the next depth the limit came.
   Its sweeps check every start's explored states and healed leaves, every
   start but the two late-dial cases left for later: at Off with Off, and
-  at On with On every start but the three of the stand-in's whose links
+  at On with On every start but the three named starts whose links
   turn capable there and the two-path starts whose sweeps take minutes
   (`OutboundGated` for both, shown on one start's sweep in `runs.rs`). A
   whole reach or sweep at one pairing takes minutes, so the switches' rows
@@ -292,19 +309,32 @@ builds, and changes no line of the core, the machine or the bundle.
   minute of probes and each sweep takes tens of minutes; they run one test
   per start, the two-path starts one test together and the two mixed
   pairings' sweeps one test each, in the slow explorers' build only. It
-  exempts a split a known shape left, as the stand-in core's sweep does
-  (`oracle::by_shape`), and the breach `pins.rs` holds of a connection-closed
+  exempts a split a known shape left (`oracle::by_shape`), and the breach `pins.rs` holds of a connection-closed
   pair the node's bundle holds as an acknowledged path that is not Live
   (`lapsed`). Each sweep's line counts its exempted breaches by cause and
   the explored states showing each pinned clause of the joint world's
   oracles, and a test shows the pinned breach exempted by its cause and a
   settled, capable pair not.
+  The core's own explorer runs here too, in the slow explorers' build
+  only (it took more than nextest's 480 s on two cores), on joint nodes at Off: every
+  named start but the two late-dial cases, the one with two paths on
+  real bundles, with joint nodes at both ends and with one at either end
+  against the model, under the same exemption and one more, for what the
+  model's missing link-dead timer leaves beside a joint node (`untimed`):
+  the model still holds a joint node whose timer removed it after the
+  link's frames were lost, and refuses every redial, so the joint node
+  holds a configured peer it cannot reach and the model keeps the refused
+  redial's connection open. A node runs the timer too; two joint nodes
+  never reach it. The exemption test shows it spares that path's two
+  breaches and nothing else on it (by hand: sparing nothing reds the
+  explorer on start 2).
 - `pins.rs`: known-defect pins of what the joint world found, each
   ignored, listed in `testing/ignored-tests.txt` and run by the
   known-defect lane, which reds when one passes. Today eight. A crossing
   in which the smaller node's own dial is answered over the larger node's
-  dial connection, from the larger node's second address (the stand-in's
-  start with two paths, its nodes joint nodes); the core moves the
+  dial connection, from the larger node's second address (the named
+  start with two paths as `../starts.rs` writes it, its nodes joint
+  nodes); the core moves the
   peering onto that pair and, in the same step, retires the inbound link
   and closes the pair, since the moved link's record does not yet hold
   it, so both ends then lose the link and redial. A proven second path
@@ -356,7 +386,11 @@ builds, and changes no line of the core, the machine or the bundle.
   replacement asked for, a cutover, a refusal, a yield, a frame's
   plaintext); it keeps the node's index map as `Bind` and `Unbind` say,
   and holds no party state. An orphaned bundle becomes `Orphaned` (switch
-  `OrphanKept` drops it).
+  `OrphanKept` drops it). Beside it are what the driver (`../drive.rs`)
+  shares with a joint node: a msg1's answer built before the core decides
+  (`answer`), a msg1's class in the model's names from what its call routed
+  (`class`, which the model of `master` reads too), and the leases of
+  outputs nobody carries out (`discard`).
 
 ## Rules for changing it
 
@@ -385,8 +419,7 @@ builds, and changes no line of the core, the machine or the bundle.
   site of switch `SendsByHeld`). A new reader goes on that list with its
   reason, or reads the bundle's active path instead.
 - The core's record of a link's paths is written only by the bundle's
-  outputs and the roam, through `route`; the stand-in's abstract path
-  events are ignored.
+  outputs and the roam, through `route`.
 - A frame the world let through because `holds` said so and that the
   machine then refuses is a broken promise, reported as an incoherence
   of the maps, as is an index map that differs from what the machines
@@ -418,7 +451,7 @@ builds, and changes no line of the core, the machine or the bundle.
   start's two reach tests, and the sweeps at Off with Off and at On with
   On of the starts that stay cheap there (on two cores under nextest,
   366 s for the slowest, the sweep at Off). In the slow explorers' build
-  only: the sweeps at On with On
+  only: the core's own explorer on joint nodes, the sweeps at On with On
   of the three named starts whose links turn capable and of the two-path
   starts, and the two mixed pairings' sweeps. The cold start's
   measurement is ignored and run by hand. A test that passes 480 s on two

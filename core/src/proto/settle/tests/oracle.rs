@@ -21,8 +21,8 @@
 //!   says.
 //! - [`Oracle::Bounded`]: what a party keeps stays within its bounds.
 //!
-//! A joint node (`joint/`) is held to more, which the stand-in core's
-//! party holds by construction or does not model, each checked at every
+//! A joint node (`joint/`) is held to more, about its core, its machines
+//! and its shell, each checked at every
 //! step over what the node gives in [`super::world::Party::joint`]
 //! (`joint/oracle.rs`):
 //!
@@ -58,8 +58,8 @@
 //! healed ([`heal`]): every connect window opened, everything in flight
 //! delivered, and the clocks run wake by wake for [`HEAL`] with no fault.
 //! The horizon is shorter than the rekey machine's pending hold, so a
-//! pending left for its hold to clear is still seen. The model and the
-//! stand-in core's party run no link-dead timer, so there two ends left on
+//! pending left for its hold to clear is still seen. The model runs no
+//! link-dead timer, so there two ends left on
 //! different sessions stay that way, and a node holding a peer the other
 //! end has forgotten is left to that timer and is not a breach. A joint
 //! node runs the node's liveness timer (`joint/party.rs`), so a peer whose
@@ -700,10 +700,11 @@ mod checks {
         // 1 replaces with that redial. Node 1's end of node 0's first
         // connection then carries no link, and the replacement closes it.
         use super::super::explore::Act;
-        let st = starts()
+        let mut st = starts()
             .into_iter()
             .find(|s| s.number == 3)
             .expect("start 3");
+        st.maker = super::super::joint::off;
         let mut path = alloc::vec![Act::Deliver(0), Act::Deliver(1)];
         path.extend([Act::Advance; 5]);
         let mut w = replay(&st, &path);

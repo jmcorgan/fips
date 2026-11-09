@@ -1,6 +1,5 @@
 //! The joint world's own oracles: what a joint node's core, its machines
-//! and its shell must agree on, which the stand-in core's party holds by
-//! construction or does not model.
+//! and its shell must agree on.
 //!
 //! A joint node gives the oracles its [`Facts`] (`Party::joint`): for each
 //! peer its core holds, what the core records and what the shell holds for

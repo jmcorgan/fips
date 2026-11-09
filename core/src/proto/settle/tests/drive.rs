@@ -1,44 +1,55 @@
-//! The one-node driver: one settlement core, and the rekey side of the
-//! peer it holds, fed a reference-model history event by event.
+//! The one-node driver: one settlement core, and the real rekey machine and
+//! path bundle of the peer it holds, fed a reference-model history event by
+//! event.
 //!
-//! [`Drive`] faces one peer identity, as one model `Judge` does. It maps
-//! each `history::Event` to the core's inputs (a msg1 to `Msg1`, with
+//! [`Drive`] faces one peer identity, as one model `Judge` does, on the stub
+//! IK profile, at the multipath setting it is built with. It maps each
+//! `history::Event` to what the node does: a msg1, written as that peer
+//! writes it from the handshake's name (`joint/names.rs`), to `Msg1`, with
 //! `Sent` or `SendFailed` after an answer by the event's `sent`; a msg2 to
-//! `Msg2`; a frame to `Heard`; an own dial's timeout to `ConnectFailed`; a
-//! lost peer to `Dead`), hands a same-epoch msg1 to the [`RekeySide`] with
-//! the core's arrival, and routes that side's replacement request and
-//! restart report back to the core as `Replace` and `Restarted`. Each step
-//! comes back as a [`Did`], in the model `Step`'s fields: the class, a
-//! refusal, the reply, the peer change, the connections closed and whether
-//! the peering is heard afterwards. Closes on a connectionless binding,
-//! and of a connection already closed, are dropped, as the shell drops
-//! them. Every lease the core hands out is released at once, since the
-//! driver keeps no sessions.
+//! `Msg2`; a frame, sealed as the peer seals it under the session it names,
+//! to the machine, the bundle and `Heard`; an own dial's timeout to
+//! `ConnectFailed`; a lost peer to `Dead`. A same-epoch msg1 goes to the
+//! [`Machines`] with the core's arrival, and what they ask of the core comes
+//! back by the joint world's routing (`joint/route.rs`), so a replacement
+//! request is `Replace` and a restart report `Restarted`. An own rekey starts
+//! through the machine's trigger, so it starts only where the node's would,
+//! and its msg2 and cutover are the machine's: each is what the machine did,
+//! not what the history says it should. Each step comes back as a [`Did`], in
+//! the model `Step`'s fields: the class, a refusal, the reply, the peer
+//! change, the connections closed and whether the peering is heard
+//! afterwards. Closes on a connectionless binding, and of a connection
+//! already closed, are dropped, as the shell drops them. Its rekey machines'
+//! own triggers are quieted, since a history says when a rekey starts.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::vec::Vec;
 
 use crate::identity::NodeAddr;
-use crate::proto::fmp::EphemeralDigest;
-use crate::proto::rekey::IndexLease;
+use crate::proto::rekey::tests::stub::{Hs as Attempt, Ik, Kid, kid, read_msg1};
+use crate::proto::rekey::{
+    self, Completed, Profile, Record, RecordStore, Role as Side, Wire, allocate,
+};
 use crate::proto::settle::gates::{Refusal as Gated, Source};
-use crate::proto::settle::input::{Dial, Hello, Input};
-use crate::proto::settle::links::{LinkNo, Pair};
+use crate::proto::settle::input::{Dial, Input};
+use crate::proto::settle::links::{LinkNo, Pair, Proven};
 use crate::proto::settle::model::history::{Addr, Binding, Bytes, Epoch, Event, Hs, Ms, Node};
 use crate::proto::settle::model::judge::{Class, Gate, Reply, Transition as M};
-use crate::proto::settle::output::{Denial, Output, Transition, Why};
+use crate::proto::settle::output::{Build, Denial, Install, Output, Transition, Why};
 use crate::proto::settle::params::Params;
 use crate::proto::settle::table::Table;
 use crate::testutil::TestInstant;
 use crate::transport::{TransportAddr, TransportId};
 
-use super::rekeyside::{Answer, Out, RekeySide};
+use super::joint::Mode;
+use super::joint::facts::Transports;
+use super::joint::machines::{Event as Ev, Kit, Machines, Setup};
+use super::joint::names;
+use super::joint::party::BEAT;
+use super::joint::route::{self, Built, Ctx, Routed, Send, route};
 use super::shadow::Refusal;
-
-/// The node address of model node `n`.
-pub fn node(n: Node) -> NodeAddr {
-    NodeAddr::from_bytes([n.0; 16])
-}
+use super::world::Kind;
 
 /// The pair of model address `a`.
 pub fn pair(a: Addr) -> Pair {
@@ -46,13 +57,6 @@ pub fn pair(a: Addr) -> Pair {
         transport: TransportId::new(u32::from(a.transport)),
         addr: TransportAddr::from_string(&format!("10.0.0.1:{}", a.at)),
     }
-}
-
-/// The ephemeral digest of handshake `h`.
-pub fn eph(h: Hs) -> EphemeralDigest {
-    let mut key = [0u8; 33];
-    key[..4].copy_from_slice(&h.0.to_be_bytes());
-    EphemeralDigest::of_noise_msg1(&key).expect("33 bytes carry an ephemeral")
 }
 
 /// The wire epoch of model epoch `e`.
@@ -76,11 +80,6 @@ pub fn addr(p: &Pair) -> Addr {
     }
 }
 
-/// The exact bytes of model msg1 bytes `b`.
-pub fn bytes(b: Bytes) -> Vec<u8> {
-    b.0.to_be_bytes().to_vec()
-}
-
 /// What the driver did with one event, in the model's step fields.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Did {
@@ -99,49 +98,109 @@ pub struct Did {
 }
 
 /// A handshake the core runs on one of its links.
-#[derive(Clone, Copy, Debug)]
 struct Run {
     hs: Hs,
     link: LinkNo,
-    /// The msg1's bytes, for an answer.
-    bytes: Option<Bytes>,
-    /// The epoch its msg1 or msg2 carried.
-    epoch: Option<Epoch>,
+    /// The msg1 on the wire.
+    msg1: Wire,
+    /// This node's handshake state, for a dial.
+    state: Option<Attempt>,
+    /// The completed handshake, until an install takes it.
+    done: Option<Completed<Ik>>,
+    /// The setup record a responder notes at its install.
+    record: Option<Record>,
 }
 
-/// One node's core and the rekey side of the peer it holds.
+/// What the peer seals a session's frames from: the messages of the
+/// handshake that made it, and this node's index for it.
+struct Exchange {
+    hs: Hs,
+    msg1: Wire,
+    msg2: Wire,
+    ours: u32,
+    /// The side the peer took.
+    sealer: Side,
+    /// The next counter the peer seals at.
+    counter: u64,
+}
+
+/// The sender's index in a handshake message: the four bytes after its
+/// type, in both of the stub IK's messages.
+fn sender(msg: &[u8]) -> u32 {
+    let mut b = [0u8; 4];
+    b.copy_from_slice(&msg[1..5]);
+    u32::from_le_bytes(b)
+}
+
+/// This node's own address on the transport of the peer's pair `a`, which
+/// the world behind a history never reads.
+fn home(a: Addr) -> Addr {
+    Addr {
+        transport: a.transport,
+        at: 0,
+    }
+}
+
+/// One node's core and the machines of the peer it holds.
 pub struct Drive {
     me: Node,
     peer: Node,
+    mode: Mode,
     now: Ms,
+    /// How many times this node has restarted.
+    life: u32,
     table: Table<TestInstant>,
-    side: Option<RekeySide>,
+    machines: Option<Machines>,
+    /// The link the peer was installed or moved onto.
+    link: Option<LinkNo>,
+    /// The node's capabilities its machines borrow.
+    kit: Kit,
+    /// The replay records of closed links.
+    store: RecordStore,
+    /// Handshake names and the sessions they made.
+    names: names::Names,
+    /// Which peer each bound index routes to.
+    bound: BTreeMap<u32, u8>,
     runs: Vec<Run>,
+    exchanges: Vec<Exchange>,
+    /// This node's own rekey msg1: its name and its bytes.
+    own: Option<(Hs, Wire)>,
     /// Each address seen, and its binding.
     addrs: Vec<(Addr, Binding)>,
     closed: Vec<Addr>,
-    leases: u32,
+}
+
+/// The node's record store, as a joint node sizes it.
+fn store() -> RecordStore {
+    RecordStore::new(256)
 }
 
 impl Drive {
-    /// Node `me` facing `peer`, at time 0.
-    pub fn new(me: Node, peer: Node) -> Self {
+    /// Node `me` facing `peer`, at time 0, with multipath setting `mode`.
+    pub fn new(me: Node, peer: Node, mode: Mode) -> Self {
         Self {
             me,
             peer,
+            mode,
             now: 0,
-            table: Table::new(node(me), Params::default()),
-            side: None,
+            life: 0,
+            table: Table::new(names::addr(me), Params::default()),
+            machines: None,
+            link: None,
+            kit: Kit::new(me, Epoch(0), &BTreeMap::new()),
+            store: store(),
+            names: names::Names::default(),
+            bound: BTreeMap::new(),
             runs: Vec::new(),
+            exchanges: Vec::new(),
+            own: None,
             addrs: Vec::new(),
             closed: Vec::new(),
-            leases: 0,
         }
     }
 
-    fn lease(&mut self) -> IndexLease {
-        self.leases += 1;
-        IndexLease::for_test(self.leases)
+    fn key(&self) -> NodeAddr {
+        names::addr(self.peer)
     }
 
     fn core(&mut self, input: Input) -> Vec<Output> {
@@ -151,10 +210,22 @@ impl Drive {
     fn saw(&mut self, a: Addr, b: Binding) {
         if !self.addrs.iter().any(|(x, _)| *x == a) {
             self.addrs.push((a, b));
+            let kinds = self
+                .addrs
+                .iter()
+                .map(|(x, b)| {
+                    let kind = match b {
+                        Binding::Connected => Kind::Stream,
+                        Binding::Connectionless => Kind::Datagram,
+                    };
+                    (x.transport, kind)
+                })
+                .collect();
+            self.kit.facts = Transports::new(&kinds);
         }
     }
 
-    fn link(&self, hs: Hs) -> Option<LinkNo> {
+    fn opened(&self, hs: Hs) -> Option<LinkNo> {
         self.runs.iter().rev().find(|r| r.hs == hs).map(|r| r.link)
     }
 
@@ -167,24 +238,7 @@ impl Drive {
                 hs, to, binding, ..
             } => {
                 self.saw(to, binding);
-                let d = Dial {
-                    peer: node(self.peer),
-                    to: pair(to),
-                    msg1: bytes(Bytes(hs.0)),
-                    lease: self.lease(),
-                };
-                let out = self.core(Input::Dial(d));
-                for o in &out {
-                    if let Output::Opened { link } = o {
-                        self.runs.push(Run {
-                            hs,
-                            link: *link,
-                            bytes: None,
-                            epoch: None,
-                        });
-                    }
-                }
-                self.effects(out, &mut did);
+                self.dial(hs, to, &mut did);
             }
             Event::Msg1 {
                 hs,
@@ -199,71 +253,155 @@ impl Drive {
                 self.msg1(hs, b, e, from, sent, &mut did);
             }
             Event::Msg2Sent { hs } => {
-                if let Some(link) = self.link(hs) {
+                if let Some(link) = self.opened(hs) {
                     let out = self.core(Input::Sent { link });
                     self.effects(out, &mut did);
                     did.reply = Some(Reply::Stored);
                 }
             }
-            Event::Msg2 { hs, epoch: e, from } => {
-                if let Some(i) = self.runs.iter().rposition(|r| r.hs == hs) {
-                    self.runs[i].epoch = Some(e);
-                    let binding = self.binding_of_run(i);
-                    self.saw(from, binding);
-                    let link = self.runs[i].link;
-                    let out = self.core(Input::Msg2 {
-                        link,
-                        epoch: epoch(e),
-                        from: pair(from),
-                    });
-                    self.effects(out, &mut did);
-                }
-            }
+            Event::Msg2 { hs, epoch: e, from } => self.msg2(hs, e, from, &mut did),
             Event::Timeout { hs } => {
-                if let Some(link) = self.link(hs) {
+                if let Some(link) = self.opened(hs) {
                     let out = self.core(Input::ConnectFailed { link });
                     self.effects(out, &mut did);
                 }
             }
             Event::Frame { hs, from } => self.frame(hs, from, &mut did),
-            Event::RekeyStart { hs } => {
-                let now = self.now;
-                if let Some(s) = self.side.as_mut() {
-                    s.start(now, hs);
-                }
-            }
-            Event::RekeyMsg2 { hs, epoch: e } => {
-                let now = self.now;
-                if let Some(s) = self.side.as_mut() {
-                    s.msg2(now, hs, e);
-                }
-            }
-            Event::RekeyCutover => {
-                let now = self.now;
-                let out = self.side.as_mut().and_then(|s| s.cutover(now));
-                self.rekeyed(out, &mut did);
-            }
+            Event::RekeyStart { hs } => self.start(hs, &mut did),
+            Event::RekeyMsg2 { hs, epoch: e } => self.reply(hs, e, &mut did),
+            Event::RekeyCutover => self.cutover(&mut did),
             Event::Close { at } => self.closed.push(at),
             Event::Lost => {
-                let out = self.core(Input::Dead {
-                    peer: node(self.peer),
-                });
+                let peer = self.key();
+                let out = self.core(Input::Dead { peer });
                 self.effects(out, &mut did);
             }
-            Event::Restart => {
-                let out = self.table.close(TestInstant(self.now));
-                self.effects(out, &mut Did::default());
-                self.table = Table::new(node(self.me), Params::default());
-                self.side = None;
-                self.runs.clear();
-            }
+            Event::Restart => self.restart(),
         }
-        did.heard = self.table.held(&node(self.peer)).is_some_and(|h| h.heard);
+        did.heard = self.table.held(&self.key()).is_some_and(|h| h.heard);
         did
     }
 
+    /// The node's process restarts: everything but the world's connections
+    /// is forgotten.
+    fn restart(&mut self) {
+        let out = self.table.close(TestInstant(self.now));
+        self.effects(out, &mut Did::default());
+        self.close(rekey::Close::Shutdown);
+        self.life += 1;
+        self.table = Table::new(names::addr(self.me), Params::default());
+        self.kit = Kit::new(self.me, Epoch(self.life), &BTreeMap::new());
+        for (a, b) in core::mem::take(&mut self.addrs) {
+            self.saw(a, b);
+        }
+        self.store = store();
+        self.names = names::Names::default();
+        self.bound.clear();
+        self.runs.clear();
+        self.exchanges.clear();
+        self.own = None;
+        self.link = None;
+    }
+
+    /// Close the peer's machines, if any are held, and file their record.
+    fn close(&mut self, why: rekey::Close) {
+        let Some(m) = self.machines.take() else {
+            return;
+        };
+        let (events, carry) = m.close(&mut self.kit, self.now, why);
+        for e in events {
+            if let Ev::Rekey(rekey::Output::Unbind { index, .. }) = e {
+                self.bound.remove(&index);
+            }
+        }
+        if let Some(c) = carry {
+            self.store
+                .file(self.key(), c.peer_epoch.unwrap_or_default(), c.record);
+        }
+        self.own = None;
+    }
+
+    /// An own dial of the peer at `to`.
+    fn dial(&mut self, hs: Hs, to: Addr, did: &mut Did) {
+        let lease = allocate(&mut self.kit.pool).expect("the node's pool has an index");
+        self.kit.local.name(names::opener(hs));
+        let (state, msg1) =
+            Ik::initiate(&self.kit.local, &names::key(self.peer), Some(lease.index()))
+                .expect("the stub IK msg1 always writes");
+        let d = Dial {
+            peer: self.key(),
+            to: pair(to),
+            msg1: msg1.clone(),
+            lease,
+        };
+        let out = self.core(Input::Dial(d));
+        for o in &out {
+            if let Output::Opened { link } = o {
+                self.runs.push(Run {
+                    hs,
+                    link: *link,
+                    msg1: msg1.clone(),
+                    state: Some(state.clone()),
+                    done: None,
+                    record: None,
+                });
+            }
+        }
+        self.effects(out, did);
+    }
+
+    /// The msg2 of an own dial `hs`, written as the peer at epoch `e` writes
+    /// it.
+    fn msg2(&mut self, hs: Hs, e: Epoch, from: Addr, did: &mut Did) {
+        let Some(i) = self.runs.iter().rposition(|r| r.hs == hs) else {
+            return;
+        };
+        let binding = self.bound_at(i);
+        self.saw(from, binding);
+        let run = &mut self.runs[i];
+        let link = run.link;
+        let (wire, _) = names::msg2(self.peer, e, hs, &run.msg1, names::index(hs))
+            .expect("the msg1 of an own dial reads at the peer");
+        let state = run.state.as_ref().expect("a msg2 answers an own dial");
+        let read = Ik::reply(state, &self.kit.local, &wire).expect("the peer's msg2 reads");
+        let epoch = read.done.epoch;
+        let msg1 = run.msg1.clone();
+        run.done = Some(read.done);
+        self.exchanged(hs, msg1, wire, Side::Responder);
+        let out = self.core(Input::Msg2 {
+            link,
+            epoch,
+            from: pair(from),
+        });
+        self.effects(out, did);
+    }
+
+    /// Note the messages of handshake `hs`, which the peer took `sealer` in,
+    /// and this node's index for its session: the sender's in this node's
+    /// own message of the two.
+    fn exchanged(&mut self, hs: Hs, msg1: Wire, msg2: Wire, sealer: Side) {
+        let ours = sender(match sealer {
+            Side::Initiator => &msg2,
+            Side::Responder => &msg1,
+        });
+        let counter = self
+            .exchanges
+            .iter()
+            .find(|x| x.hs == hs)
+            .map_or(0, |x| x.counter);
+        self.exchanges.retain(|x| x.hs != hs);
+        self.exchanges.push(Exchange {
+            hs,
+            msg1,
+            msg2,
+            ours,
+            sealer,
+            counter,
+        });
+    }
+
     /// The binding of run `i`'s link, by its setup address.
-    fn binding_of_run(&self, i: usize) -> Binding {
+    fn bound_at(&self, i: usize) -> Binding {
         let link = self.runs[i].link;
         let setup = self.table.links().get(link).map(|r| r.setup.clone());
         self.addrs
@@ -272,31 +410,134 @@ impl Drive {
             .map_or(Binding::Connectionless, |(_, b)| *b)
     }
 
-    fn hello(&mut self, hs: Hs, b: Bytes, e: Epoch, from: Addr) -> Hello {
-        Hello {
-            peer: node(self.peer),
-            from: pair(from),
-            bytes: bytes(b),
-            ephemeral: eph(hs),
-            epoch: epoch(e),
-            msg2: [&[2u8][..], &hs.0.to_be_bytes()].concat(),
-            lease: self.lease(),
-        }
-    }
-
-    /// Whether the held peer's current connection is still open.
+    /// Whether the held peer's link is reachable: its active path's
+    /// connection is open, or the path is connectionless. A held peer with
+    /// no active path is not reachable, as the node's `link_reachable`.
     fn reachable(&self) -> bool {
-        let Some(h) = self.table.held(&node(self.peer)) else {
+        if self.table.held(&self.key()).is_none() {
             return true;
+        }
+        let Some(cur) = self.machines.as_ref().and_then(Machines::active) else {
+            return false;
         };
-        match self.addrs.iter().find(|(a, _)| pair(*a) == h.current) {
+        match self.addrs.iter().find(|(a, _)| *a == cur) {
             Some((a, Binding::Connected)) => !self.closed.contains(a),
             Some((_, Binding::Connectionless)) | None => true,
         }
     }
 
+    /// The session the peer's machine holds pending.
+    fn pending(&self) -> Option<Kid> {
+        let m = self.machines.as_ref()?;
+        m.rekey().peek().pending.map(|e| kid(e.session))
+    }
+
+    /// Whether the link and its session are old enough to rekey, as the
+    /// machine reads it at a msg1 (`judge_msg1`).
+    fn eligible(&self, m: &Machines) -> bool {
+        let params = self.mode.rekey();
+        let cfg = params.config();
+        let ms = |d: crate::time::Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        let v = m.rekey().view();
+        self.now.saturating_sub(v.link_since.0) >= ms(cfg.link_age)
+            && v.current
+                .is_some_and(|c| self.now.saturating_sub(c.started.0) >= ms(cfg.session_age))
+    }
+
+    /// Name each session the peer's machine holds that has no name yet,
+    /// with `hs`, the handshake the call that made it was about.
+    fn named(&mut self, hs: Hs) {
+        let Some(m) = self.machines.as_ref() else {
+            return;
+        };
+        let pk = m.rekey().peek();
+        for e in [pk.current, pk.pending, pk.previous].into_iter().flatten() {
+            let k = kid(e.session);
+            if self.names.name(k).is_none() {
+                self.names.note(hs, k);
+            }
+        }
+    }
+
+    /// Route `events` of the peer's machines, the bundle's about the link
+    /// the peer holds now, or `released` for a path it released at a move.
+    fn routed(&mut self, released: Option<LinkNo>, events: Vec<Ev>) -> Routed {
+        let link = self.table.held(&self.key()).map(|h| h.link);
+        let (peer, key) = (self.peer, self.key());
+        let Some(machines) = self.machines.as_ref() else {
+            return Routed::default();
+        };
+        let r = route(
+            events,
+            Ctx {
+                peer,
+                key,
+                link,
+                released,
+                machines,
+                bound: &mut self.bound,
+            },
+        );
+        assert!(
+            r.broken.is_empty(),
+            "the machines broke a promise: {:?}",
+            r.broken
+        );
+        r
+    }
+
+    /// Step the core with each of `inputs`, carrying out what it asks.
+    fn inputs(&mut self, inputs: Vec<Input>, did: &mut Did) {
+        for i in inputs {
+            let out = self.core(i);
+            self.effects(out, did);
+        }
+    }
+
+    /// A msg1's route through the machine: its class and reply, then what
+    /// the machine asks of the core. True when the machine asked for a
+    /// replacement, which goes through the gates next.
+    fn rekeyed(&mut self, hs: Hs, wire: &[u8], arrival: rekey::Arrival, did: &mut Did) -> bool {
+        let before = self.pending();
+        let now = self.now;
+        let Some(m) = self.machines.as_mut() else {
+            return false;
+        };
+        let events = m.msg1(&mut self.kit, now, hs, wire, arrival);
+        let eligible = self.machines.as_ref().is_some_and(|m| self.eligible(m));
+        self.named(hs);
+        let r = self.routed(None, events);
+        let after = self.pending();
+        did.class = route::class(&r, before, after, eligible)
+            .unwrap_or_else(|why| panic!("a msg1 refused {why:?}"));
+        let replace = r.replace.is_some();
+        if !replace {
+            let answered = r.sends.iter().find_map(|s| match s {
+                Send::Msg2 { msg, .. } => Some(msg.clone()),
+                Send::Msg1(_) | Send::Prompt { .. } | Send::Path { .. } | Send::Connect { .. } => {
+                    None
+                }
+            });
+            did.reply = Some(match (&answered, did.class) {
+                (None, _) => Reply::Silent,
+                (Some(_), Some(Class::Resend | Class::Pending)) => Reply::Stored,
+                (Some(_), _) => Reply::Msg2,
+            });
+            if let Some(msg2) = answered {
+                self.exchanged(hs, wire.to_vec(), msg2, Side::Initiator);
+            }
+        }
+        self.inputs(r.inputs, did);
+        replace
+    }
+
     fn msg1(&mut self, hs: Hs, b: Bytes, e: Epoch, from: Addr, sent: bool, did: &mut Did) {
-        let hello = self.hello(hs, b, e, from);
+        // A copy with a rewritten header differs only in the sender's index,
+        // which the msg1's tag does not cover, so a history's exact bytes are
+        // that index.
+        let wire = names::msg1(self.peer, e, self.me, hs, b.0);
+        let tok = read_msg1(&self.kit.local, &wire).expect("a msg1 to this node reads");
+        let (hello, mut built) = route::answer(&mut self.kit, tok.get(), hs, &wire, from);
         let reachable = self.reachable();
         let mut out = self.core(Input::Msg1 { hello, reachable });
         let arrival = out.iter().find_map(|o| {
@@ -308,20 +549,14 @@ impl Drive {
         });
         if let Some(arrival) = arrival {
             self.effects(out, did);
-            let now = self.now;
-            let Some(side) = self.side.as_mut() else {
-                return;
-            };
-            let (class, answer) = side.msg1(now, hs, b, arrival);
-            did.class = Some(class);
-            if answer != Answer::Replace {
-                did.reply = answer.reply();
+            if !self.rekeyed(hs, &wire, arrival, did) {
                 return;
             }
-            let hello = self.hello(hs, b, e, from);
+            let (hello, again) = route::answer(&mut self.kit, tok.get(), hs, &wire, from);
+            built = again;
             out = self.core(Input::Replace(hello));
         }
-        self.admitted(out, hs, b, e, sent, did);
+        self.admitted(out, hs, &wire, built, sent, did);
     }
 
     /// The outputs of an admission: a stored answer, a refusal, or a fresh
@@ -330,8 +565,8 @@ impl Drive {
         &mut self,
         out: Vec<Output>,
         hs: Hs,
-        b: Bytes,
-        e: Epoch,
+        wire: &[u8],
+        built: Built,
         sent: bool,
         did: &mut Did,
     ) {
@@ -342,8 +577,8 @@ impl Drive {
                 Output::Answer {
                     link,
                     stored: false,
-                    ..
-                } => fresh = Some(*link),
+                    msg2,
+                } => fresh = Some((*link, msg2.clone())),
                 Output::Reject { source, why, .. } => {
                     did.reply = Some(Reply::Silent);
                     did.refused = Some(refusal(*why));
@@ -374,18 +609,22 @@ impl Drive {
             }
         }
         self.effects(out, did);
-        let Some(link) = fresh else {
+        let Some((link, msg2)) = fresh else {
             return;
         };
         if did.class.is_none() {
             did.class = Some(Class::NotHeld);
         }
+        let (done, record, _) = built;
         self.runs.push(Run {
             hs,
             link,
-            bytes: Some(b),
-            epoch: Some(e),
+            msg1: wire.to_vec(),
+            state: None,
+            done: Some(done),
+            record: Some(record),
         });
+        self.exchanged(hs, wire.to_vec(), msg2, Side::Initiator);
         let (input, reply) = if sent {
             (Input::Sent { link }, Reply::Msg2)
         } else {
@@ -396,38 +635,138 @@ impl Drive {
         self.effects(out, did);
     }
 
+    /// A frame of the peer under the session of `hs`, if the machine holds
+    /// it: sealed as the peer seals it, opened by the machine, accounted to
+    /// the bundle and heard by the core from `from`; a one-path roam and a
+    /// cutover it caused go to the core after.
     fn frame(&mut self, hs: Hs, from: Addr, did: &mut Did) {
-        if !self.side.as_ref().is_some_and(|s| s.holds(hs)) {
+        let now = self.now;
+        let Some(wire) = self.sealed(hs) else {
             return;
-        }
+        };
+        let Some(m) = self.machines.as_mut() else {
+            return;
+        };
+        let (opened, buf) = m.frame(&mut self.kit, now, &wire);
+        let r = self.routed(None, opened);
+        let range = r.delivered.clone().unwrap_or_else(|| {
+            panic!("a frame under {hs:?}, which is held, opens: {:?}", r.reject)
+        });
+        let kind = buf.get(range.start).copied().unwrap_or(0);
+        let Some(m) = self.machines.as_mut() else {
+            return;
+        };
+        let (roamed, _) = m.account(&mut self.kit, now, from, home(from), wire.len(), kind);
+        let peer = self.key();
         let out = self.core(Input::Heard {
-            peer: node(self.peer),
+            peer,
             from: pair(from),
         });
         self.effects(out, did);
+        let moved = self.routed(None, roamed);
+        self.inputs(moved.inputs, did);
+        self.applied(r, did);
+    }
+
+    /// The peer's next frame under the session of `hs`, if the machine
+    /// holds it, with the key-epoch bit that session's frames carry: the
+    /// current or the previous epoch's, or the other for a pending one, which
+    /// the peer has cut over to.
+    fn sealed(&mut self, hs: Hs) -> Option<Wire> {
+        let want = self.names.kid(hs)?;
+        let m = self.machines.as_ref()?;
+        let (pk, v) = (m.rekey().peek(), m.rekey().view());
+        let held = |s: Option<Kid>| s == Some(want);
+        let cur = v.current.as_ref().map(|e| e.k);
+        let k = if held(pk.current.map(|e| kid(e.session))) {
+            cur?
+        } else if held(pk.previous.map(|e| kid(e.session))) {
+            v.previous.as_ref()?.k
+        } else if held(pk.pending.map(|e| kid(e.session))) {
+            !cur?
+        } else {
+            return None;
+        };
+        let x = self.exchanges.iter_mut().find(|x| x.hs == hs)?;
+        let counter = x.counter;
+        x.counter += 1;
+        Some(names::frame(
+            x.sealer,
+            (&x.msg1, &x.msg2),
+            x.ours,
+            counter,
+            k,
+            BEAT,
+        ))
+    }
+
+    /// An own rekey `hs`, through the machine's time trigger, which every
+    /// other start condition still decides.
+    fn start(&mut self, hs: Hs, did: &mut Did) {
         let now = self.now;
-        let out = self.side.as_mut().and_then(|s| s.frame(now, hs));
-        self.rekeyed(out, did);
-    }
-
-    /// The rekey side's cutover: a plain rekey is the driver's change, a
-    /// restart revealed goes to the core.
-    fn rekeyed(&mut self, out: Option<Out>, did: &mut Did) {
-        match out {
-            Some(Out::Rekeyed { .. }) => did.change = Some(M::RekeyCutover),
-            Some(Out::Restarted { epoch: e, .. }) => {
-                let out = self.core(Input::Restarted {
-                    peer: node(self.peer),
-                    epoch: epoch(e),
-                });
-                self.effects(out, did);
+        let Some(m) = self.machines.as_mut() else {
+            return;
+        };
+        let events = m.trigger(&mut self.kit, now, hs);
+        self.named(hs);
+        let r = self.routed(None, events);
+        for s in &r.sends {
+            if let Send::Msg1(msg) = s {
+                self.own = Some((hs, msg.clone()));
             }
-            Some(Out::Send(_) | Out::Abandoned | Out::Unadopted) | None => {}
         }
+        self.applied(r, did);
     }
 
-    /// Carry out the outputs: release leases, build or drop the rekey
-    /// side, and record the change and the closes.
+    /// The msg2 of this node's own rekey `hs`, written as the peer at epoch
+    /// `e` writes it; nothing when it answers nothing in flight.
+    fn reply(&mut self, hs: Hs, e: Epoch, did: &mut Did) {
+        let now = self.now;
+        let Some(msg1) = self
+            .own
+            .as_ref()
+            .filter(|(h, _)| *h == hs)
+            .map(|(_, m)| m.clone())
+        else {
+            return;
+        };
+        let Some((wire, _)) = names::msg2(self.peer, e, hs, &msg1, names::index(hs)) else {
+            return;
+        };
+        let Some(m) = self.machines.as_mut() else {
+            return;
+        };
+        let events = m.reply(&mut self.kit, now, &wire);
+        self.named(hs);
+        self.exchanged(hs, msg1, wire, Side::Responder);
+        let r = self.routed(None, events);
+        self.applied(r, did);
+    }
+
+    /// The machine's own answered rekey cuts over: a poll at the instant its
+    /// proof came.
+    fn cutover(&mut self, did: &mut Did) {
+        let now = self.now;
+        let Some(m) = self.machines.as_mut() else {
+            return;
+        };
+        // Quieted, the poll starts no rekey, so its name goes unused.
+        let events = m.poll(&mut self.kit, now, Hs(u32::MAX));
+        let r = self.routed(None, events);
+        self.applied(r, did);
+    }
+
+    /// A frame's or a poll's routed events: a cutover is the driver's change
+    /// unless the core names another (a restart revealed).
+    fn applied(&mut self, r: Routed, did: &mut Did) {
+        if r.cut {
+            did.change = Some(M::RekeyCutover);
+        }
+        self.inputs(r.inputs, did);
+    }
+
+    /// Carry out the outputs: give back leases, build or close the machines,
+    /// and record the change and the closes.
     fn effects(&mut self, out: Vec<Output>, did: &mut Did) {
         let reset = out.iter().rev().find_map(|o| {
             if let Output::Reset { transition, .. } = o {
@@ -439,22 +778,17 @@ impl Drive {
         let mut removed = false;
         for o in out {
             match o {
-                Output::Free { lease } => {
-                    lease.release();
-                }
-                Output::Install(i) => {
-                    i.lease.release();
-                    self.installed(i.link, reset);
-                }
+                Output::Free { lease } => self.kit.pool.free(lease.release()),
+                Output::Install(i) => self.install(i, did),
                 Output::Remove { .. } => {
                     removed = true;
-                    self.side = None;
+                    self.close(rekey::Close::Admin);
                 }
                 Output::Retire { closes, .. }
                 | Output::Release { closes, .. }
                 | Output::Close { closes } => {
                     for p in closes {
-                        self.close(&p, did);
+                        self.closing(&p, did);
                     }
                 }
                 Output::Opened { .. }
@@ -477,7 +811,7 @@ impl Drive {
 
     /// A close of `p`, as the shell makes it: only on a binding that holds
     /// a connection, and only once.
-    fn close(&mut self, p: &Pair, did: &mut Did) {
+    fn closing(&mut self, p: &Pair, did: &mut Did) {
         let Some((a, b)) = self.addrs.iter().find(|(a, _)| pair(*a) == *p).copied() else {
             return;
         };
@@ -487,19 +821,83 @@ impl Drive {
         }
     }
 
-    /// The peer was installed on `link`: build its rekey side, or carry it
-    /// across a move.
-    fn installed(&mut self, link: LinkNo, reset: Option<Transition>) {
-        let Some(run) = self.runs.iter().rev().find(|r| r.link == link).copied() else {
-            return;
+    /// The core installed the peer: build its machines on the completed
+    /// handshake, or move them onto it.
+    fn install(&mut self, i: Install, did: &mut Did) {
+        let now = self.now;
+        let run = self
+            .runs
+            .iter_mut()
+            .rev()
+            .find(|r| r.link == i.link)
+            .expect("an install is on a link a handshake opened");
+        let hs = run.hs;
+        let noted = run.record.take();
+        let done = run
+            .done
+            .take()
+            .expect("an install takes a finished handshake");
+        let (epoch, theirs) = (done.epoch, done.theirs.unwrap_or(0));
+        let to = addr(&i.pair);
+        let setup = Setup {
+            done,
+            lease: i.lease,
+            theirs,
         };
-        let e = run.epoch.unwrap_or(Epoch(0));
-        self.side = match (reset, self.side.take()) {
-            (Some(Transition::Move), Some(old)) => Some(old.moved(run.hs)),
-            (Some(_) | None, _) => Some(RekeySide::new(
-                self.me, self.peer, run.hs, e, self.now, run.bytes,
-            )),
+        let old = self.machines.take();
+        let moved = matches!((i.rekey, &old), (Build::FromCarry, Some(_)));
+        let (mut m, events) = match (i.rekey, old) {
+            (Build::FromCarry, Some(old)) => old.moved(&mut self.kit, now, setup, to, home(to)),
+            (rebuilt, old) => {
+                assert!(
+                    old.is_none(),
+                    "a {rebuilt:?} install over machines no removal closed"
+                );
+                let filed = self.store.take(&self.key(), epoch);
+                let record = match noted {
+                    Some(mut r) => {
+                        r.absorb(filed);
+                        r
+                    }
+                    None => filed,
+                };
+                Machines::fresh(
+                    &mut self.kit,
+                    now,
+                    self.peer,
+                    self.mode,
+                    setup,
+                    record,
+                    to,
+                    home(to),
+                )
+            }
         };
+        m.quiet();
+        self.machines = Some(m);
+        let off = self.link.filter(|_| moved);
+        self.link = Some(i.link);
+        self.own = None;
+        self.named(hs);
+        let r = self.routed(off, events);
+        let mut inputs = r.inputs;
+        if !moved {
+            // A new bundle reports nothing: its original path is Live.
+            inputs.push(Input::State {
+                link: i.link,
+                pair: i.pair,
+                proven: Proven::Live,
+            });
+        }
+        self.inputs(inputs, did);
+    }
+}
+
+impl Drop for Drive {
+    fn drop(&mut self) {
+        let out = self.table.close(TestInstant(self.now));
+        route::discard(&mut self.kit, out);
+        self.close(rekey::Close::Shutdown);
     }
 }
 
