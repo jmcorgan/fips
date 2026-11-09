@@ -8295,6 +8295,10 @@ async fn retried(nodes: &mut [TestNode], at: usize, peer: &NodeAddr, secs: u64) 
 #[tokio::test]
 async fn test_a_rekey_whose_session_acks_were_all_lost_resends_its_setup_until_its_deadline_and_is_retried()
  {
+    // The ladder is read one 1 s step at a time. With the clock running,
+    // the real time each step takes adds to it, and on a loaded host enough
+    // of it brings the 15 s rung due at 14 s.
+    crate::time::freeze();
     let mut nodes = rekey_pair([true, false], None).await;
     let node0_addr = *nodes[0].node.node_addr();
     let node1_addr = *nodes[1].node.node_addr();

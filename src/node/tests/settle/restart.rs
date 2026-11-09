@@ -110,6 +110,10 @@ async fn a_rekey_msg1_of_the_peers_previous_run_read_late_by_the_restarted_node_
 /// every placement: the assertion the pin makes can pass.
 #[tokio::test]
 async fn a_rekey_msg1_of_the_peers_previous_run_read_inside_the_unheard_floor_leaves_one_session() {
+    // The floor is 1 s. With the clock running, the real time from R's
+    // promotion to its read of the msg1 counts toward it, and on a loaded
+    // host enough of it reads the msg1 past the floor.
+    crate::time::freeze();
     let split = splits(Duration::ZERO).await;
     assert!(split.is_empty(), "defect: {split:#?}");
 }
