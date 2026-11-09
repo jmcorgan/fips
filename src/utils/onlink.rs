@@ -331,10 +331,11 @@ mod tests {
         assert!(!read_suspect(1, &healthy));
     }
 
-    #[test]
-    fn the_system_read_holds_every_up_non_loopback_ipv4_interface_prefix() {
+    /// The host's up, non-loopback IPv4 addresses and prefix lengths, sorted,
+    /// filtered as [`OnLinkPrefixes::read_system`] filters them.
+    fn up_v4() -> Vec<(std::net::Ipv4Addr, u8)> {
         let interfaces = if_addrs::get_if_addrs().expect("getifaddrs failed");
-        let up_v4: Vec<(std::net::Ipv4Addr, u8)> = interfaces
+        let mut up_v4: Vec<(std::net::Ipv4Addr, u8)> = interfaces
             .iter()
             .filter(|iface| !iface.is_loopback())
             .filter(|iface| {
@@ -350,7 +351,41 @@ mod tests {
                 if_addrs::IfAddr::V6(_) => None,
             })
             .collect();
-        let read = OnLinkPrefixes::read_system();
+        up_v4.sort_unstable();
+        up_v4
+    }
+
+    /// Attempts at a read the host's interfaces held still for. One interface
+    /// created or removed (a container network, a VPN) spoils at most the
+    /// attempt it lands in, and its address follows within milliseconds, so
+    /// ten attempts 50 ms apart ride out several such changes in half a
+    /// second. A host still changing on every attempt after that cannot be
+    /// judged, and the test fails saying so.
+    const SETTLE_ATTEMPTS: u32 = 10;
+
+    /// Check that what `reader` returns holds every up non-loopback IPv4
+    /// address of the host.
+    ///
+    /// Other processes create and remove interfaces while the test runs, so
+    /// the host is listed before and after the read, and the read is judged
+    /// only against a listing both sides agree on.
+    fn check_read(mut reader: impl FnMut() -> OnLinkPrefixes) {
+        let mut attempt = 0;
+        let (up_v4, read) = loop {
+            attempt += 1;
+            let before = up_v4();
+            let read = reader();
+            let after = up_v4();
+            if before == after {
+                break (before, read);
+            }
+            assert!(
+                attempt < SETTLE_ATTEMPTS,
+                "the host's interfaces changed during each of {SETTLE_ATTEMPTS} reads; \
+                 last before {before:?}, after {after:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
         assert!(!read.contains(ip("127.0.0.1")));
         if up_v4.is_empty() {
             // A loopback-only host has nothing to compare.
@@ -368,5 +403,10 @@ mod tests {
                 "{addr} missing from the read"
             );
         }
+    }
+
+    #[test]
+    fn the_system_read_holds_every_up_non_loopback_ipv4_interface_prefix() {
+        check_read(OnLinkPrefixes::read_system);
     }
 }
