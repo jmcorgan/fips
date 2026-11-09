@@ -19,6 +19,14 @@
 //! explorer reds most of the core's switches, at 20 to 50 s a run, so it is
 //! named only where it is the closest observation of the defect a switch
 //! stands for; the commit records list every test each switch reds.
+//!
+//! A second table, [`REKEY`], names switches of the rekey machine
+//! (`../../rekey/faults.rs`) by their variants' names, with the settlement
+//! tests that must fail with each: a joint node runs a real rekey machine,
+//! so a guard of the machine can be shown red in the settlement world too.
+//! Its children take the rekey machine's variable, `FIPS_REKEY_FAULTS`,
+//! where the first table's take `FIPS_SETTLE_FAULTS`. The rekey machine's
+//! own meta-test keeps its rows; these are rows beside them.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -37,21 +45,21 @@ const FINDINGS: &str = "proto::settle::tests::legacy::findings::";
 const LEGACY: &str = "proto::settle::tests::legacy::explore::";
 const ORACLE: &str = "proto::settle::tests::oracle::checks::";
 const REGRESS: &str = "proto::settle::tests::regress::";
-const REKEYSIDE: &str = "proto::settle::tests::rekeyside::checks::";
 const SHADOW: &str = "proto::settle::tests::shadow::checks::";
 const SHAPES: &str = "proto::settle::tests::shapes::";
 const SIM: &str = "proto::settle::tests::sim::";
-const STUB: &str = "proto::settle::tests::stub::";
 const WORLD: &str = "proto::settle::tests::world::checks::";
+const JOINT_MACHINES: &str = "proto::settle::tests::joint::machines::";
+const JOINT_PARTY: &str = "proto::settle::tests::joint::party::";
+const JOINT_EXPLORE: &str = "proto::settle::tests::joint::explore::";
+const JOINT_FEEDS: &str = "proto::settle::tests::joint::feeds::";
+const JOINT_ORACLE: &str = "proto::settle::tests::joint::oracle::";
+const JOINT_RUNS: &str = "proto::settle::tests::joint::runs::";
+const JOINT_STARTS: &str = "proto::settle::tests::joint::starts::";
 
 /// One test, by the prefix of its file and its name.
 type Test = (&'static str, &'static str);
 
-/// The core explored in the world, at both ends and against the model.
-const CORE_EXPLORED: Test = (
-    STUB,
-    "every_explored_interleaving_of_the_core_keeps_the_properties_and_heals",
-);
 /// The model explored as both ends of every start.
 const MODEL_SETTLES: Test = (ORACLE, "model_parties_settle_on_every_start");
 /// The model's histories through the core.
@@ -106,14 +114,86 @@ const YOUNG_LINK: Test = (
     REGRESS,
     "after_a_dial_on_the_peers_young_link_the_peer_answers_the_larger_nodes_rekey",
 );
-/// The model of `master`'s four defects, one finding test each.
+/// The aged-link defect of the model of `master`.
 const AGED: Test = (
     FINDINGS,
     "against_a_model_of_master_a_dial_on_the_peers_aged_link_leaves_a_pending_the_peer_cannot_adopt",
 );
 
+/// A joint node's machines carried across a cross-connection move.
+const MOVED: Test = (
+    JOINT_MACHINES,
+    "a_move_keeps_the_record_the_link_age_and_renews_the_bundle",
+);
+
+/// A crossing of joint nodes, settled on one session.
+const JOINT_CROSSING: Test = (
+    JOINT_PARTY,
+    "a_crossing_settles_on_one_session_on_real_machines",
+);
+
+/// One view of a restart at a joint node, found at a rekey and at a
+/// replacement.
+const JOINT_RESTART: Test = (
+    JOINT_ORACLE,
+    "one_view_reads_a_restart_on_both_sides_of_the_core",
+);
+
+/// Each machine output a joint node's core must hear of, matched to its
+/// input.
+const JOINT_DELIVERED: Test = (JOINT_ORACLE, "delivered_matches_each_output_to_its_input");
+
+/// A joint node's mirror of its bundles' paths, at a roam and at a second
+/// path.
+const JOINT_MIRRORED: Test = (
+    JOINT_ORACLE,
+    "mirrored_fires_on_a_path_the_core_did_not_take",
+);
+
+/// A joint node's key, which holds every field a successor reads.
+const JOINT_KEYED: Test = (
+    JOINT_EXPLORE,
+    "a_state_differing_only_inside_a_machine_has_its_own_key",
+);
+
+/// A rekey answer of a joint node, on the arrival path at On and the
+/// established link at Off.
+const JOINT_ARRIVAL: Test = (
+    JOINT_FEEDS,
+    "a_rekey_answer_goes_on_the_arrival_path_at_on_and_the_established_link_at_off",
+);
+
+/// The only path's transport removed, the peer orphaned and redialled.
+const JOINT_ORPHANED: Test = (
+    JOINT_STARTS,
+    "the_only_paths_transport_removed_orphans_the_peer_and_a_redial_settles",
+);
+
+/// The two pinned defects shown by joint nodes.
+const JOINT_DEFECTS: Test = (
+    JOINT_PARTY,
+    "starts_6_and_7_show_their_two_defects_on_real_machines",
+);
+
+/// Every start's script with its heal, joint nodes at Off at both ends.
+const SCRIPTED_OFF: Test = (JOINT_PARTY, "every_start_settles_scripted_off_with_off");
+
+/// Every start's script with its heal, joint nodes at On at both ends.
+const SCRIPTED_ON: Test = (JOINT_RUNS, "every_start_settles_scripted_on_with_on");
+
+/// The joint party explored on the wall step start alone, at Off with
+/// Off.
+const SWEPT_WALL: Test = (
+    JOINT_RUNS,
+    "the_sweep_of_start_14_keeps_the_properties_off_with_off",
+);
+
 /// One row: a switch, and the tests that must each fail with it on.
 pub type Row = (Fault, &'static [Test]);
+
+/// One row of the rekey machine's switches: a variant's name in
+/// `../../rekey/faults.rs`, and the tests that must each fail with it on.
+pub type RekeyRow = (&'static str, &'static [Test]);
 
 /// Every switch and the tests it must turn red.
 pub const ROWS: &[Row] = &[
@@ -130,14 +210,23 @@ pub const ROWS: &[Row] = &[
             ),
             SIM_DATAGRAM,
             SIM_BLE,
+            JOINT_CROSSING,
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
         ],
     ),
     (
         Fault::CloseByPeerAddress,
-        &[(
-            LINKS,
-            "retiring_a_link_closes_only_addresses_no_other_live_link_uses",
-        )],
+        &[
+            (
+                LINKS,
+                "retiring_a_link_closes_only_addresses_no_other_live_link_uses",
+            ),
+            (
+                JOINT_STARTS,
+                "a_link_retired_beside_a_dial_in_flight_keeps_the_connection_the_dial_uses",
+            ),
+        ],
     ),
     (
         Fault::CloseBySetupAddress,
@@ -163,6 +252,8 @@ pub const ROWS: &[Row] = &[
             ),
             IN_ORDER_LARGER,
             IN_ORDER_SMALLER,
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
         ],
     ),
     (
@@ -171,6 +262,8 @@ pub const ROWS: &[Row] = &[
             (GATES, "the_heard_floor_counts_from_the_last_frame"),
             GATE_HISTORIES,
             YOUNG_LINK,
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
         ],
     ),
     (
@@ -181,6 +274,10 @@ pub const ROWS: &[Row] = &[
                 "the_heard_floor_counts_from_installation_when_no_frame_has_arrived",
             ),
             GATE_HISTORIES,
+            (
+                JOINT_RUNS,
+                "the_sweep_of_the_drain_start_keeps_the_properties_off_with_off",
+            ),
         ],
     ),
     (
@@ -190,7 +287,8 @@ pub const ROWS: &[Row] = &[
                 GATES,
                 "the_dampener_refuses_until_its_ceiling_after_the_last_accepted_restart",
             ),
-            CORE_EXPLORED,
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
         ],
     ),
     (
@@ -206,6 +304,7 @@ pub const ROWS: &[Row] = &[
                 REGRESS,
                 "an_own_dial_answered_from_a_restarted_peer_replaces_the_stale_session",
             ),
+            SWEPT_WALL,
         ],
     ),
     (
@@ -265,6 +364,7 @@ pub const ROWS: &[Row] = &[
                 REGRESS,
                 "a_second_restart_inside_the_dampener_interval_is_refused",
             ),
+            SWEPT_WALL,
         ],
     ),
     (
@@ -278,6 +378,8 @@ pub const ROWS: &[Row] = &[
                 LEGS,
                 "a_responder_leg_answers_a_resend_with_its_stored_msg2_and_is_reclaimed",
             ),
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
         ],
     ),
     (
@@ -289,14 +391,22 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::AnswerFresh,
-        &[(
-            LEGS,
-            "a_responder_leg_answers_a_resend_with_its_stored_msg2_and_is_reclaimed",
-        )],
+        &[
+            (
+                LEGS,
+                "a_responder_leg_answers_a_resend_with_its_stored_msg2_and_is_reclaimed",
+            ),
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
+        ],
     ),
     (
         Fault::PollAhead,
-        &[(LEGS, "a_poll_before_the_next_wake_does_nothing")],
+        &[
+            (LEGS, "a_poll_before_the_next_wake_does_nothing"),
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
+        ],
     ),
     (
         Fault::DeadlineWraps,
@@ -304,9 +414,23 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::LeaseKept,
-        &[(LEGS, "close_returns_every_lease_and_retires_every_link")],
+        &[
+            (LEGS, "close_returns_every_lease_and_retires_every_link"),
+            SWEPT_WALL,
+        ],
     ),
-    (Fault::MoveKeepsOldPair, &[AGREES]),
+    (
+        Fault::MoveKeepsOldPair,
+        &[
+            AGREES,
+            (
+                JOINT_PARTY,
+                "a_crossing_on_a_connection_oriented_transport_leaves_the_smaller_node_at_its_dials_pair_on_real_machines",
+            ),
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
+        ],
+    ),
     (
         Fault::MoveKeepsInboundLink,
         &[
@@ -329,7 +453,8 @@ pub const ROWS: &[Row] = &[
                 SIM,
                 "seeded_clean_runs_on_every_transport_model_keep_the_properties_and_heal",
             ),
-            CORE_EXPLORED,
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
         ],
     ),
     (
@@ -341,6 +466,9 @@ pub const ROWS: &[Row] = &[
                 REGRESS,
                 "a_crossing_moves_the_smaller_node_with_a_reset_and_keeps_the_maps",
             ),
+            JOINT_CROSSING,
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
         ],
     ),
     (Fault::MoveSetsHeard, &[NAMED]),
@@ -351,26 +479,40 @@ pub const ROWS: &[Row] = &[
             IN_ORDER_LARGER,
             (
                 LEGACY,
-                "the_core_against_a_model_of_master_converges_on_every_start_in_both_address_orders",
+                "a_joint_node_off_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
             ),
-            (
-                LEGACY,
-                "the_core_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
-            ),
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
         ],
     ),
     (Fault::ModelFallbackInCore, &[NAMED]),
-    (Fault::ReplacementUngated, &[AGREES, YOUNG_LINK]),
+    (
+        Fault::ReplacementUngated,
+        &[AGREES, YOUNG_LINK, SCRIPTED_OFF, SCRIPTED_ON],
+    ),
     (
         Fault::AttributeBySetupOnly,
-        &[(TABLE, "a_msg1_from_a_proven_path_is_on_the_link"), AGREES],
+        &[
+            (TABLE, "a_msg1_from_a_proven_path_is_on_the_link"),
+            AGREES,
+            (
+                JOINT_ORACLE,
+                "attributed_reads_a_roamed_link_as_the_node_does",
+            ),
+        ],
     ),
     (
         Fault::PathMoveIgnored,
-        &[(
-            TABLE,
-            "a_path_moved_rekeys_the_links_index_entry_to_the_new_pair",
-        )],
+        &[
+            (
+                TABLE,
+                "a_path_moved_rekeys_the_links_index_entry_to_the_new_pair",
+            ),
+            (
+                JOINT_STARTS,
+                "a_nat_rebound_of_the_second_path_moves_it_in_the_link_record",
+            ),
+        ],
     ),
     (
         Fault::SwitchIgnored,
@@ -378,17 +520,34 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::ReleaseKeepsPair,
-        &[(
-            TABLE,
-            "a_path_released_drops_its_pair_and_closes_unless_in_use_or_kept",
-        )],
+        &[
+            (
+                TABLE,
+                "a_path_released_drops_its_pair_and_closes_unless_in_use_or_kept",
+            ),
+            (
+                JOINT_STARTS,
+                "a_path_removed_at_the_peer_leaves_the_link_record",
+            ),
+        ],
     ),
     (
         Fault::StateIgnored,
-        &[(
-            TABLE,
-            "a_path_state_change_to_probing_stops_it_counting_as_in_use",
-        )],
+        &[
+            (
+                TABLE,
+                "a_path_state_change_to_probing_stops_it_counting_as_in_use",
+            ),
+            JOINT_MIRRORED,
+            (
+                JOINT_RUNS,
+                "the_sweep_of_start_12_keeps_the_properties_on_with_on",
+            ),
+            (
+                JOINT_STARTS,
+                "a_carrier_loss_and_a_mandatory_switch_keep_both_ends_mirrored",
+            ),
+        ],
     ),
     (
         Fault::PunchedDropped,
@@ -408,14 +567,19 @@ pub const ROWS: &[Row] = &[
                 REGRESS,
                 "a_stored_answer_whose_send_failed_installs_at_the_resend",
             ),
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
         ],
     ),
     (
         Fault::OrphanedIgnored,
-        &[(
-            TABLE,
-            "an_orphaned_bundle_removes_the_peer_and_retires_its_link",
-        )],
+        &[
+            (
+                TABLE,
+                "an_orphaned_bundle_removes_the_peer_and_retires_its_link",
+            ),
+            JOINT_ORPHANED,
+        ],
     ),
     (
         Fault::CapLifted,
@@ -426,10 +590,28 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::ReachOneMore,
-        &[(
-            EXPLORE,
-            "every_named_start_reaches_its_target_depth_over_the_model",
-        )],
+        &[
+            (
+                EXPLORE,
+                "every_named_start_reaches_its_target_depth_over_the_model",
+            ),
+            (
+                JOINT_RUNS,
+                "the_reach_of_start_14_stays_within_its_cap_off_with_off",
+            ),
+            (
+                JOINT_RUNS,
+                "the_reach_of_start_14_stays_within_its_cap_on_with_on",
+            ),
+            (
+                JOINT_RUNS,
+                "the_reach_of_start_14_stays_within_its_cap_on_with_off",
+            ),
+            (
+                JOINT_RUNS,
+                "the_reach_of_start_14_stays_within_its_cap_off_with_on",
+            ),
+        ],
     ),
     (
         Fault::FlightByHash,
@@ -503,7 +685,6 @@ pub const ROWS: &[Row] = &[
                 "a_replacement_over_another_connection_closes_the_replaced_links_connection",
             ),
             MODEL_SETTLES,
-            CORE_EXPLORED,
         ],
     ),
     (
@@ -540,6 +721,13 @@ pub const ROWS: &[Row] = &[
         )],
     ),
     (
+        Fault::ExemptByPath,
+        &[(
+            ORACLE,
+            "a_split_of_another_cause_on_a_shaped_path_is_not_exempt",
+        )],
+    ),
+    (
         Fault::RightLinkOff,
         &[
             (
@@ -557,10 +745,6 @@ pub const ROWS: &[Row] = &[
             (
                 FINDINGS,
                 "against_a_model_of_master_crossed_dials_on_a_connection_oriented_transport_leave_the_smaller_node_on_the_wrong_link_larger_first",
-            ),
-            (
-                FINDINGS,
-                "the_model_of_master_against_itself_on_every_start_shows_the_four_defects",
             ),
         ],
     ),
@@ -595,9 +779,10 @@ pub const ROWS: &[Row] = &[
                 FINDINGS,
                 "against_a_model_of_master_a_late_second_dial_answered_in_the_other_order_splits_the_session_smaller_dialer",
             ),
+            JOINT_DEFECTS,
         ],
     ),
-    (Fault::OneSessionNoPending, &[AGED]),
+    (Fault::OneSessionNoPending, &[AGED, JOINT_DEFECTS]),
     (
         Fault::OneSessionNoFresh,
         &[(
@@ -608,19 +793,9 @@ pub const ROWS: &[Row] = &[
     (
         Fault::ClassifiedNoRefusal,
         &[(
-            FINDINGS,
-            "against_a_model_of_master_a_forward_wall_step_lets_a_msg1_replace_a_peering_heard_just_now",
+            ORACLE,
+            "classified_fires_on_a_refusal_the_model_does_not_make",
         )],
-    ),
-    (
-        Fault::PendingAnswers,
-        &[
-            (
-                REKEYSIDE,
-                "the_rekey_side_agrees_with_the_model_on_every_rule_3_and_4_history",
-            ),
-            AGED,
-        ],
     ),
     (
         Fault::ResyncKeepsAll,
@@ -632,25 +807,34 @@ pub const ROWS: &[Row] = &[
     (Fault::ModelDropsFallback, &[MODEL_SETTLES]),
     (
         Fault::PacketStamp,
-        &[
-            (
-                REGRESS,
-                "a_restart_dial_inside_the_heard_floor_is_judged_on_one_clock",
-            ),
-            CORE_EXPLORED,
-        ],
+        &[(
+            REGRESS,
+            "a_restart_dial_inside_the_heard_floor_is_judged_on_one_clock",
+        )],
     ),
     (
         Fault::StoredByBytes,
+        &[
+            (
+                TABLE,
+                "a_msg1_from_the_address_of_an_unsent_answer_draws_that_answer_whatever_its_bytes",
+            ),
+            (
+                JOINT_RUNS,
+                "the_sweep_of_start_10_keeps_the_properties_off_with_off",
+            ),
+        ],
+    ),
+    (Fault::YieldKept, &[SIM_REACHED, SIM_DATAGRAM]),
+    (Fault::RekeyOutlivesPeer, &[SIM_REACHED, SIM_STREAM]),
+    (
+        Fault::PreviousUnheard,
         &[(
-            TABLE,
-            "a_msg1_from_the_address_of_an_unsent_answer_draws_that_answer_whatever_its_bytes",
+            SHADOW,
+            "a_frame_under_the_drained_session_counts_as_heard_at_the_next_gate",
         )],
     ),
-    (Fault::YieldKept, &[SIM_REACHED, SIM_STREAM]),
-    (Fault::RekeyOutlivesPeer, &[SIM_REACHED, SIM_STREAM]),
-    (Fault::PreviousUnheard, &[SIM_REACHED]),
-    (Fault::ReachablePeeks, &[SIM_REACHED, SIM_STREAM]),
+    (Fault::ReachablePeeks, &[SIM_REACHED]),
     (
         Fault::NoShrink,
         &[(SIM, "a_planted_failing_run_shrinks_to_its_cause")],
@@ -671,6 +855,128 @@ pub const ROWS: &[Row] = &[
             "the_aged_move_candidate_answers_the_rekey_after_a_dial_on_the_aged_link_once_its_frame_arrives_first",
         )],
     ),
+    (
+        Fault::WireByNumber,
+        &[(WORLD, "two_orders_of_commuting_sends_reach_one_key")],
+    ),
+    (Fault::MoveBuildsFresh, &[MOVED]),
+    (
+        Fault::RenewSkipped,
+        &[
+            MOVED,
+            (
+                JOINT_STARTS,
+                "a_crossing_while_capability_probes_are_out_renews_the_bundle_and_keeps_both_ends_mirrored",
+            ),
+        ],
+    ),
+    (
+        Fault::ModeIgnored,
+        &[
+            (
+                JOINT_MACHINES,
+                "a_disabled_bundle_takes_a_candidate_as_a_poll_and_an_enabled_one_holds_it",
+            ),
+            (
+                JOINT_FEEDS,
+                "an_on_end_against_an_off_end_stays_not_capable_within_the_probe_budget",
+            ),
+        ],
+    ),
+    (
+        Fault::ReplaceDropped,
+        &[
+            (
+                JOINT_PARTY,
+                "a_fresh_msg1_on_a_young_link_reaches_the_gates",
+            ),
+            JOINT_DELIVERED,
+        ],
+    ),
+    (
+        Fault::PathsUnmirrored,
+        &[
+            (JOINT_PARTY, "a_one_path_roam_reaches_the_link_record"),
+            JOINT_MIRRORED,
+        ],
+    ),
+    (
+        Fault::RestartDropped,
+        &[
+            (
+                JOINT_PARTY,
+                "a_restart_revealed_in_a_rekey_msg2_reaches_the_core",
+            ),
+            JOINT_RESTART,
+            JOINT_DELIVERED,
+        ],
+    ),
+    (
+        Fault::SendsByHeld,
+        &[(
+            JOINT_PARTY,
+            "after_a_frame_from_another_transport_sends_stay_on_the_active_path",
+        )],
+    ),
+    (Fault::KeyFromView, &[JOINT_KEYED]),
+    (Fault::KeyOmitsBundle, &[JOINT_KEYED]),
+    (
+        Fault::HeardFeedDropped,
+        &[(
+            JOINT_FEEDS,
+            "an_on_pair_with_a_candidate_becomes_capable_and_holds_a_second_path",
+        )],
+    ),
+    (Fault::ArrivalIgnored, &[JOINT_ARRIVAL]),
+    (
+        Fault::ProvenCompared,
+        &[
+            JOINT_ARRIVAL,
+            (
+                SHADOW,
+                "a_msg1_on_a_proven_pair_is_compared_as_on_the_link_and_a_refusal_there_still_reds",
+            ),
+        ],
+    ),
+    (
+        Fault::MoveBuildsStale,
+        &[(JOINT_ORACLE, "one_view_reads_the_session_a_move_built_from")],
+    ),
+    (Fault::ReplaceKeepsMachine, &[JOINT_RESTART]),
+    (
+        Fault::LeaseForgotten,
+        &[(JOINT_ORACLE, "leases_fire_on_a_free_the_shell_lost")],
+    ),
+    (
+        Fault::CloseSkipped,
+        &[(JOINT_ORACLE, "no_orphan_fires_on_a_machine_past_its_peer")],
+    ),
+    (Fault::OrphanKept, &[JOINT_DELIVERED, JOINT_ORPHANED]),
+];
+
+/// The rekey machine's switches that a joint node's tests red, each by its
+/// variant's name, and the tests that must each fail with it on. A rekey
+/// switch is here only where a settlement test reaches its guard; the
+/// rekey machine's own table still names the tests that red it there.
+pub const REKEY: &[RekeyRow] = &[
+    (
+        "LargerKeepsOwn",
+        &[(JOINT_RUNS, "simultaneous_rekeys_settle_on_one_session")],
+    ),
+    (
+        "RefusalUnrecorded",
+        &[(
+            JOINT_RUNS,
+            "a_refused_rekey_msg1_stays_refused_when_it_comes_again",
+        )],
+    ),
+    (
+        "CloseSkipsRecord",
+        &[(
+            JOINT_RUNS,
+            "a_copy_of_an_answered_rekey_msg1_after_a_move_is_refused_as_answered_before",
+        )],
+    ),
 ];
 
 /// The tests that plant their own break and show it is found, so no
@@ -684,10 +990,211 @@ pub const SELF_CHECKED: &[&str] = &[
     "every_settlement_test_is_named_by_a_switch_or_listed_and_the_scan_finds_a_planted_one",
     "every_switch_has_a_row_and_the_scan_finds_a_row_removed",
     "every_guard_switch_turns_each_test_it_names_red_and_each_passes_with_none",
+    "one_view_fires_on_a_planted_identity",
+    "each_machine_predicate_fires_on_a_planted_state",
+    "each_path_check_fires_on_a_planted_output",
+    "no_joint_source_defines_a_setter_and_the_scan_finds_a_planted_one",
+    "no_joint_source_allows_a_wildcard_arm_and_the_scan_finds_a_planted_one",
+    "the_cores_record_of_where_a_peer_is_is_read_only_for_the_oracles_and_the_scan_finds_a_planted_read",
+    "no_settlement_test_names_the_retired_rekey_transcription_and_the_scan_finds_a_planted_one",
 ];
+
+/// Why a sweep that only the slow explorers' build runs is characterisation.
+const SWEPT_SLOW: &str = "a sweep of the joint party with the oracles of the sweep at On with On, whose rows show they can fail; it runs only in the slow explorers' build, and a row would rerun some minutes of exploration per child";
+
+/// Why a whole sweep or reach test of the joint party in the default build
+/// is characterisation.
+const WHOLE: &str = "a whole sweep or reach of the joint party at one pairing, whose body and checks the one-start runs' rows show can fail; a row would rerun minutes of exploration per child, which takes the meta-test past nextest's limit";
+
+/// Why the cold start's reach tests are characterisation.
+const COLD: &str = "the cold start's reach at its stated depth, through the reach check whose failing `ReachOneMore`'s row shows on start 14 at each pairing; with that switch on, a child explores past the stated depth and is the meta-test's longest, so the break is run by hand and logged with the commit";
+
+/// Why a test whose guard needs no switch of its own is characterisation.
+const HAND: &str =
+    "its break is a scratch edit with no switch of its own, run by hand and logged with the commit";
+
+/// Why a run of a joint node against a model of a deployed node beside the
+/// one on `IgnoreOwnDial`'s row is characterisation.
+const LEGACY_RUN: &str = "the same oracles and list as the run on `IgnoreOwnDial`'s row, a whole set of sweeps past a row's cost; the list's own check is run by hand and logged";
 
 /// The tests that characterise behaviour no switch breaks, each with why.
 pub const CHARACTERISATION: &[(&str, &str)] = &[
+    (
+        "every_explored_interleaving_of_the_core_keeps_the_properties_and_heals",
+        "a whole sweep of joint nodes at multipath off and against the model on every start, minutes a child on two cores and past the meta-test's limit; each of its switches reds a cheaper test of its row",
+    ),
+    (
+        "against_a_model_of_master_a_forward_wall_step_does_not_let_a_msg1_replace_a_peering_heard_just_now",
+        HAND,
+    ),
+    ("the_cold_start_reaches_its_stated_depth_off_with_off", COLD),
+    ("the_cold_start_reaches_its_stated_depth_on_with_on", COLD),
+    (
+        "the_cold_start_is_explored_as_deep_as_the_reach_budget_allows_at_off_and_at_on",
+        "a measurement run by hand and ignored, which asserts nothing: it prints how deep the cold start is explored within a time limit, and the depth it gives is asserted by the cold start's reach tests",
+    ),
+    (
+        "the_model_of_master_against_itself_on_every_start_shows_the_three_defects",
+        "a whole sweep of the model on machines at each setting, past a row's cost; the crossing tests carry `RightLinkOff`",
+    ),
+    (
+        "the_model_of_master_with_multipath_on_against_itself_on_a_crossing_of_two_transports",
+        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `RightLinkOff`",
+    ),
+    (
+        "the_model_of_master_with_multipath_on_shows_the_wrong_link_on_a_connection_oriented_crossing",
+        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `RightLinkOff`",
+    ),
+    (
+        "the_model_of_master_with_multipath_on_against_itself_on_a_crossing_during_a_rekey",
+        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `RightLinkOff`",
+    ),
+    (
+        "an_abstract_far_ends_frame_opens_at_the_machine_holding_its_session",
+        HAND,
+    ),
+    (
+        "the_split_a_shape_left_is_exempt_after_both_ends_rekey",
+        HAND,
+    ),
+    (
+        "a_path_message_reaches_the_model_as_a_frame_and_draws_no_answer",
+        HAND,
+    ),
+    (
+        "a_joint_node_holds_the_model_on_the_models_frames_alone",
+        HAND,
+    ),
+    (
+        "a_copy_of_the_models_msg2_to_a_dial_is_no_reply_to_an_own_rekey",
+        HAND,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_off_against_a_model_of_master_off_converges_on_every_start_in_both_address_orders",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_off_against_a_model_of_master_on_converges_on_every_start_in_both_address_orders",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_master_off_converges_on_every_start_in_both_address_orders",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_master_on_converges_on_the_quicker_starts",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_master_on_converges_on_a_crossing_of_two_transports",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_master_on_converges_on_a_connection_oriented_crossing",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_master_on_converges_on_a_crossing_during_a_rekey",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_master_on_converges_on_the_starts_on_real_bundles",
+        LEGACY_RUN,
+    ),
+    (
+        "a_held_peers_reachability_reads_the_bundles_active_path_not_the_cores_record",
+        HAND,
+    ),
+    (
+        "the_stub_keys_keep_the_worlds_address_order_in_both_flips",
+        HAND,
+    ),
+    (
+        "an_abstract_msg1_reads_as_the_ik_msg1_of_its_handshake",
+        HAND,
+    ),
+    (
+        "an_abstract_msg2_reads_as_the_ik_msg2_of_its_handshake",
+        HAND,
+    ),
+    ("an_abstract_frame_opens_only_under_its_handshake", HAND),
+    (
+        "the_stub_profile_selects_the_rows_the_link_profile_does_but_those_of_a_third_message",
+        HAND,
+    ),
+    (
+        "two_peers_machines_rekey_and_both_cut_over_on_one_session",
+        HAND,
+    ),
+    (
+        "a_rekey_cuts_over_at_both_ends_and_the_old_session_drains",
+        HAND,
+    ),
+    ("two_worlds_on_one_path_have_one_digest", HAND),
+    (
+        "every_named_start_reaches_its_target_depth_with_the_machines_off",
+        WHOLE,
+    ),
+    (
+        "every_named_start_reaches_its_target_depth_with_the_machines_on",
+        WHOLE,
+    ),
+    (
+        "every_named_start_reaches_its_target_depth_with_the_machines_on_against_off",
+        WHOLE,
+    ),
+    (
+        "every_named_start_reaches_its_target_depth_with_the_machines_off_against_on",
+        WHOLE,
+    ),
+    (
+        "every_explored_interleaving_of_the_joint_party_keeps_the_properties_off",
+        WHOLE,
+    ),
+    (
+        "every_explored_interleaving_of_the_joint_party_keeps_the_properties_on",
+        WHOLE,
+    ),
+    (
+        "the_sweep_of_start_2_keeps_the_properties_on_with_on",
+        SWEPT_SLOW,
+    ),
+    (
+        "the_sweep_of_start_3_keeps_the_properties_on_with_on",
+        SWEPT_SLOW,
+    ),
+    (
+        "the_sweep_of_start_9_keeps_the_properties_on_with_on",
+        SWEPT_SLOW,
+    ),
+    (
+        "the_sweeps_of_the_two_path_starts_keep_the_properties_on_with_on",
+        SWEPT_SLOW,
+    ),
+    (
+        "every_explored_interleaving_of_the_joint_party_keeps_the_properties_on_against_off",
+        SWEPT_SLOW,
+    ),
+    (
+        "every_explored_interleaving_of_the_joint_party_keeps_the_properties_off_against_on",
+        SWEPT_SLOW,
+    ),
+    (
+        "a_capable_live_peer_is_not_dialled_and_a_stale_or_not_capable_one_is",
+        HAND,
+    ),
+    (
+        "a_closed_connection_on_a_link_of_two_paths_fails_that_path_and_keeps_the_link",
+        HAND,
+    ),
+    (
+        "a_path_message_roams_a_one_path_link_at_off_and_not_at_on",
+        HAND,
+    ),
     (
         "after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_larger_dialer",
         "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
@@ -698,6 +1205,50 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     ),
     (
         "after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey",
+        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
+    ),
+    (
+        "a_crossing_moved_onto_the_pair_of_the_peers_dial_keeps_that_connection_open",
+        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
+    ),
+    (
+        "a_proven_path_whose_connection_failed_is_not_counted_in_use_without_a_connection",
+        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
+    ),
+    (
+        "a_peer_silent_for_the_link_dead_timeout_is_removed_then_and_redialled",
+        HAND,
+    ),
+    (
+        "a_peer_silent_past_the_link_dead_timeout_on_a_link_of_several_paths_is_removed_and_the_pair_heals",
+        HAND,
+    ),
+    (
+        "each_breach_the_pins_hold_is_exempted_by_its_own_cause_and_a_settled_pair_by_none",
+        HAND,
+    ),
+    (
+        "a_frame_from_another_transport_leaves_the_cores_record_of_the_peer_at_the_active_path",
+        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
+    ),
+    (
+        "a_switch_moves_the_cores_record_of_the_peer_to_the_new_active_path",
+        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
+    ),
+    (
+        "a_msg1_from_a_capable_peers_setup_pair_with_no_path_is_off_the_link",
+        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
+    ),
+    (
+        "a_switch_to_a_path_that_is_not_live_leaves_it_acknowledged_in_the_core",
+        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
+    ),
+    (
+        "a_msg1_from_the_pair_a_frame_from_another_transport_came_from_is_off_the_link",
+        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
+    ),
+    (
+        "a_msg1_from_the_pair_a_frame_moved_the_cores_record_to_whose_path_is_probing_is_off_the_link",
         "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
     ),
     (
@@ -722,22 +1273,23 @@ pub fn rowless(all: &[Fault], rows: &[Row]) -> Vec<Fault> {
         .collect()
 }
 
-/// The names in `tests` that no row of `rows` names and neither list
-/// holds.
+/// The names in `tests` that no row of `rows` or of `rekey` names and
+/// neither list holds.
 pub fn uncovered<'a>(
     tests: &'a [String],
     rows: &[Row],
+    rekey: &[RekeyRow],
     checked: &[&str],
     characterised: &[(&str, &str)],
 ) -> Vec<&'a str> {
+    let named = |t: &str| {
+        rows.iter().any(|(_, ts)| ts.iter().any(|(_, n)| *n == t))
+            || rekey.iter().any(|(_, ts)| ts.iter().any(|(_, n)| *n == t))
+    };
     tests
         .iter()
         .map(String::as_str)
-        .filter(|t| {
-            !rows.iter().any(|(_, ts)| ts.iter().any(|(_, n)| n == t))
-                && !checked.contains(t)
-                && !characterised.iter().any(|(n, _)| n == t)
-        })
+        .filter(|t| !named(t) && !checked.contains(t) && !characterised.iter().any(|(n, _)| n == t))
         .collect()
 }
 
@@ -750,7 +1302,11 @@ mod run {
     use alloc::vec::Vec;
 
     use super::super::super::faults::VAR;
-    use super::{LEGACY, ROWS};
+    use super::{LEGACY, REKEY, ROWS, Test};
+
+    /// The rekey machine's variable, which a child of a [`REKEY`] row takes
+    /// (`../../rekey/faults.rs`).
+    const REKEY_VAR: &str = "FIPS_REKEY_FAULTS";
 
     /// The test files only a build with `slow-explorers` compiles.
     const EXPLORERS: &[&str] = &[LEGACY];
@@ -760,17 +1316,21 @@ mod run {
         cfg!(feature = "slow-explorers") || !EXPLORERS.contains(&prefix)
     }
 
-    /// Run the test at `path` alone in a child process with `faults` on;
-    /// true when it passed, with what the child printed. Seeded sets
-    /// report a failure unshrunk, since only its being red counts here.
-    fn child(path: &str, faults: &str) -> (bool, String) {
+    /// Run the test at `path` alone in a child process with the variable
+    /// `var` set to `faults`, or with no switch when `var` is empty; true
+    /// when it passed, with what the child printed. Seeded sets report a
+    /// failure unshrunk, since only its being red counts here.
+    fn child(path: &str, var: &str, faults: &str) -> (bool, String) {
         let exe = std::env::current_exe().expect("the test binary's path");
-        let out = std::process::Command::new(exe)
-            .args([path, "--exact", "--test-threads=1"])
-            .env(VAR, faults)
-            .env("FIPS_SETTLE_SIM_NOSHRINK", "1")
-            .output()
-            .expect("the test binary runs");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args([path, "--exact", "--test-threads=1"])
+            .env_remove(VAR)
+            .env_remove(REKEY_VAR)
+            .env("FIPS_SETTLE_SIM_NOSHRINK", "1");
+        if !var.is_empty() {
+            cmd.env(var, faults);
+        }
+        let out = cmd.output().expect("the test binary runs");
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -801,16 +1361,25 @@ mod run {
 
     #[test]
     fn every_guard_switch_turns_each_test_it_names_red_and_each_passes_with_none() {
-        if std::env::var_os(VAR).is_some() {
+        if std::env::var_os(VAR).is_some() || std::env::var_os(REKEY_VAR).is_some() {
             return;
         }
+        let tables: Vec<(&str, String, &[Test])> = ROWS
+            .iter()
+            .map(|(f, ts)| (VAR, format!("{f:?}"), *ts))
+            .chain(
+                REKEY
+                    .iter()
+                    .map(|(f, ts)| (REKEY_VAR, String::from(*f), *ts)),
+            )
+            .collect();
         let mut named: Vec<String> = Vec::new();
         let mut jobs = Vec::new();
         let mut wrong = Vec::new();
         let mut left = 0;
-        for (fault, tests) in ROWS {
+        for (var, fault, tests) in &tables {
             if !tests.iter().any(|(prefix, _)| built(prefix)) {
-                wrong.push(format!("{fault:?} names no test this build compiles"));
+                wrong.push(format!("{fault} names no test this build compiles"));
             }
             for (prefix, test) in *tests {
                 if !built(prefix) {
@@ -821,16 +1390,16 @@ mod run {
                 if !named.contains(&path) {
                     named.push(path.clone());
                 }
-                jobs.push((format!("{fault:?}"), path));
+                jobs.push((*var, fault.clone(), path));
             }
         }
         for p in &named {
-            jobs.push((String::new(), p.clone()));
+            jobs.push(("", String::new(), p.clone()));
         }
         let started = std::time::Instant::now();
-        let results = parallel(jobs, |(fault, path)| {
+        let results = parallel(jobs, |(var, fault, path)| {
             let t = std::time::Instant::now();
-            let (passed, text) = child(path, fault);
+            let (passed, text) = child(path, var, fault);
             (fault.clone(), path.clone(), passed, text, t.elapsed())
         });
         for (fault, path, passed, text, took) in results {
@@ -846,8 +1415,9 @@ mod run {
             }
         }
         std::eprintln!(
-            "{} rows, {} tests, {} s; {left} row entries left to the explorers' build",
+            "{} rows and {} rekey rows, {} tests, {} s; {left} row entries left to the explorers' build",
             ROWS.len(),
+            REKEY.len(),
             named.len(),
             started.elapsed().as_secs()
         );

@@ -33,7 +33,7 @@ pub(super) fn ble_addr(n: u8) -> BleAddr {
 /// When a connect handler fires, it looks up the target address in this
 /// bank and returns the pre-created stream. The peer end should be
 /// injected into the target node's acceptor separately.
-type StreamBank = Arc<StdMutex<HashMap<String, MockBleStream>>>;
+pub(super) type StreamBank = Arc<StdMutex<HashMap<String, MockBleStream>>>;
 
 /// Create a test node with a BLE transport backed by MockBleIo.
 ///
@@ -77,6 +77,41 @@ async fn make_test_node_ble_with(node_num: u8, config: BleConfig) -> TestNode {
         transport_id,
         packet_rx: spanning_tree::bridge_to_unbounded(packet_rx),
         addr: ta,
+    }
+}
+
+/// The BLE configuration every node-level test node starts from.
+pub(super) fn base_config() -> BleConfig {
+    test_ble_config()
+}
+
+/// [`make_test_node_ble_with`] on a node built from `node_config`.
+pub(super) async fn make_test_node_ble_from(
+    node_num: u8,
+    config: BleConfig,
+    node_config: Config,
+) -> TestNode {
+    let mut node = make_node_with(node_config);
+    let transport_id = TransportId::new(1);
+    let addr = ble_addr(node_num);
+    let io = MockBleIo::new("hci0", addr.clone());
+    let (packet_tx, packet_rx) = packet_channel(256);
+    let mut transport = BleTransport::new(transport_id, None, config, io, packet_tx);
+    transport.start_async().await.unwrap();
+    node.transports
+        .insert(transport_id, TransportHandle::Ble(transport));
+    TestNode {
+        node,
+        transport_id,
+        packet_rx: spanning_tree::bridge_to_unbounded(packet_rx),
+        addr: addr.to_transport_addr(),
+    }
+}
+
+/// Order two nodes so that node 1 holds the larger node address.
+pub(super) fn larger_second(nodes: &mut [TestNode]) {
+    if nodes[0].node.node_addr() > nodes[1].node.node_addr() {
+        nodes.swap(0, 1);
     }
 }
 
@@ -946,7 +981,7 @@ async fn a_verified_link_stops_being_protected_when_its_peer_is_reaped() {
 /// Node 1's view of two links from node 0, both dialled by node 0: L1 at
 /// node 1's address (seen from node 0's) and L2 at an alias (seen from
 /// node 0's alias). Returns `(a0, a1, a0x, a1x)`.
-async fn two_links(nodes: &[TestNode]) -> (BleAddr, BleAddr, BleAddr, BleAddr) {
+pub(super) async fn two_links(nodes: &[TestNode]) -> (BleAddr, BleAddr, BleAddr, BleAddr) {
     let a0 = node_ble_addr(&nodes[0]);
     let a1 = node_ble_addr(&nodes[1]);
     let a0x = ble_addr(100);

@@ -28,7 +28,7 @@ mod rate_limit;
 pub(crate) mod reject;
 mod reloadable;
 pub(crate) mod session;
-mod settle;
+pub(crate) mod settle;
 pub(crate) use handlers::probe::ProbeJob;
 pub(crate) use handlers::rekey::REKEY_HANDSHAKE;
 

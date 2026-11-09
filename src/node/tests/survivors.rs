@@ -107,7 +107,8 @@ const SESSION: &[&str] = &[
 /// steps the shell ran on the machine's outputs, the index hand-off and
 /// releases, the resend sweep, the cross-connection replace, the restart
 /// note, the offer at promotion, the worker acceptance and the epoch record
-/// outside `step`), and the fields the link policy had.
+/// outside `step`), the fields the link policy had, and the MMP reset a
+/// cutover and a move ran beside the transition table's cells for them.
 const LINK: &[&str] = &[
     "check_rekey",
     "route_rekey_cadence",
@@ -223,6 +224,7 @@ const LINK: &[&str] = &[
     "k_rule",
     "drain_rule",
     "restart_cutover",
+    "reset_mmp",
 ];
 
 /// Names banned in the link and session shells only: a policy value,

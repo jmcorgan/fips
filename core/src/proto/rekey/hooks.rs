@@ -10,8 +10,10 @@
 //! peer restart. The core's and the root crate's tests each scan their
 //! crate's code for the names of the deployed rekey rules of both layers
 //! through [`code_idents`], so the two read code the same way. None of
-//! these runs a row or is reachable from `step`, and none exists outside
-//! test builds.
+//! these is reachable from `step`, and none exists outside test builds.
+//! Only `trigger` runs a row: it is a poll with the time trigger brought to
+//! its instant, for the world that explores a machine beside the settlement
+//! core.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -105,6 +107,26 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         let mut out = super::Outputs::new();
         if matches!(self.cycle, super::cycle::Cycle::Idle) {
             self.start(now, env, &mut out);
+        }
+        out
+    }
+
+    /// Poll at `now` as if the time trigger had just come, and put it back
+    /// afterwards, so an own rekey starts only where a scheduled start would:
+    /// every other condition of the start still decides. The jitter is put
+    /// back too, unless a cutover in the poll drew a new one.
+    #[doc(hidden)]
+    pub fn trigger(&mut self, now: C::Instant, env: &mut super::Env<'_, P>) -> super::Outputs<P> {
+        if fault!(TriggerForced) {
+            return self.start_now(now, env);
+        }
+        let (after, jitter) = (self.params.cfg.after, self.mem.jitter);
+        self.params.cfg.after = Duration::ZERO;
+        self.mem.jitter = i32::MIN;
+        let out = self.step(now, super::Input::Poll, env);
+        self.params.cfg.after = after;
+        if self.mem.jitter == i32::MIN {
+            self.mem.jitter = jitter;
         }
         out
     }

@@ -628,7 +628,7 @@ fn take_queued(tn: &mut TestNode) -> Vec<(TransportId, TransportAddr)> {
 }
 
 /// Handle every packet queued at `tn` as though it came from `from`.
-async fn deliver_from(tn: &mut TestNode, from: &TransportAddr) {
+pub(super) async fn deliver_from(tn: &mut TestNode, from: &TransportAddr) {
     while let Ok(mut packet) = tn.packet_rx.try_recv() {
         packet.remote_addr = from.clone();
         tn.node.handle_encrypted_frame(packet).await;
@@ -1181,7 +1181,7 @@ async fn a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it() {
 
 /// B sends a heartbeat that reaches A on `via`, B's pair for that path,
 /// or on B's active path when `via` is `None`, and A handles it.
-async fn beat(nodes: &mut [TestNode], via: Option<&PathRef>) {
+pub(super) async fn beat(nodes: &mut [TestNode], via: Option<&PathRef>) {
     let a = *nodes[0].node.node_addr();
     let heartbeat = [crate::proto::link::LinkMessageType::Heartbeat.to_byte()];
     nodes[1]

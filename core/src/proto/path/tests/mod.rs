@@ -22,7 +22,7 @@ mod intake;
 mod liveness;
 mod pin;
 mod renew;
-mod shell;
+pub(crate) mod shell;
 mod sim;
 mod stub;
 mod view;

@@ -565,4 +565,4 @@ pub struct SealedPrompt<P: Profile> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

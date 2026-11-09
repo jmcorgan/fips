@@ -6,6 +6,7 @@
 //! 2. **ActivePeer** - Authenticated phase, after successful Noise handshake
 
 mod active;
+mod data;
 pub(crate) mod machine;
 mod udp_slot;
 

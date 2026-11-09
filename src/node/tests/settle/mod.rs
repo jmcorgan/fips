@@ -19,6 +19,8 @@ mod crossing;
 mod fsp;
 mod lane;
 mod live;
+pub(super) mod readings;
+mod table;
 
 use super::spanning_tree::{
     TestNode, add_loopback_alias, bridge_to_unbounded, cleanup_nodes, loopback_tap,

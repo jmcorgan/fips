@@ -11,6 +11,7 @@ mod faults;
 mod fmp;
 mod fsp;
 mod next;
+pub(crate) mod oracles;
 mod regress;
 mod sim;
 pub(crate) mod stub;

@@ -4,7 +4,9 @@
 //!
 //! The checks are functions over one call's outputs, so
 //! `each_shell_check_fails_on_an_output_that_breaks_it` can show each one
-//! firing on a hand-built output that breaks it.
+//! firing on a hand-built output that breaks it. [`Checks`] holds what they
+//! remember across calls and runs them around one step, for this shell and
+//! for any other that drives a real bundle.
 
 use alloc::collections::VecDeque;
 use alloc::format;
@@ -39,7 +41,7 @@ std::thread_local! {
 
 /// A driver slot with a serial number that counts its drops, standing in
 /// for one whose drop closes a socket.
-pub(super) struct Slot {
+pub(crate) struct Slot {
     /// Unique on its thread.
     pub(super) serial: u64,
 }
@@ -243,7 +245,7 @@ pub(super) fn pair(transport: TransportId, a: TransportAddr) -> PathRef {
 
 /// One output, with each driver slot replaced by its serial: the shell
 /// keeps the slot itself.
-pub(super) type Out = Output<u64>;
+pub(crate) type Out = Output<u64>;
 
 /// A node running one bundle on the test clock, whose link was made at
 /// instant 0, on (`t(1)`, `addr(1)`) unless the test chose another pair.
@@ -256,26 +258,10 @@ pub(super) struct Node<E: EntropySource = SeededEntropy> {
     pub(super) facts: Stub,
     /// The link's cost the calls see, as the host measures it.
     pub(super) cost: f64,
-    /// Our identifier for the original path, and the pair the link was
-    /// made on.
-    first: (u32, PathRef),
     /// Every slot the bundle handed out, kept so none drops during a run.
     kept: Vec<Slot>,
-    /// Serials of the slots handed out, to catch one handed out twice.
-    handed: Vec<u64>,
-    /// `Orphaned` outputs seen so far.
-    orphans: usize,
-    /// Whether the bundle runs with multipath enabled.
-    enabled: bool,
-    /// Whether the bundle mixes kinds in a link's paths.
-    mix: bool,
-    /// The bundle's settings.
-    cfg: Config,
-    /// The capability probes and reports seen so far.
-    asked: Asked,
-    /// The stub's count of changes at the last step, so a poll counts as
-    /// early only while the facts are unchanged since then.
-    seen: usize,
+    /// What the checks of each call remember.
+    checks: Checks,
 }
 
 impl Node<SeededEntropy> {
@@ -339,21 +325,14 @@ impl<E: EntropySource> Node<E> {
             &env,
         );
         let id = b.paths().get(0).expect("the original path").path_id();
-        let seen = facts.changes;
+        let checks = Checks::new(*params.config(), (id, original), facts.changes);
         Self {
             b,
             now: TestInstant(0),
             facts,
             cost: 1.0,
-            first: (id, original),
             kept: Vec::new(),
-            handed: Vec::new(),
-            orphans: 0,
-            enabled: params.config().enabled,
-            mix: params.config().mix_kinds,
-            cfg: *params.config(),
-            asked: Asked::default(),
-            seen,
+            checks,
         }
     }
 
@@ -361,26 +340,15 @@ impl<E: EntropySource> Node<E> {
     /// give the link the class and kind it was made with, which the bundle
     /// fixed then; a test that needs others builds its node with them.
     pub(super) fn with(mut self, facts: Stub) -> Self {
-        let (_, original) = &self.first;
+        let (_, original) = &self.checks.first;
         assert_eq!(
             self.b.scope(),
             rules::link(&facts, original.transport, &original.addr),
             "the facts change the link's class or kind, fixed when it was made"
         );
-        self.seen = facts.changes;
+        self.checks.seen = facts.changes;
         self.facts = facts;
         self
-    }
-
-    /// The original path's pair, while the bundle holds it.
-    fn original(&self) -> Option<PathRef> {
-        let (id, _) = &self.first;
-        self.b
-            .paths()
-            .paths()
-            .iter()
-            .find(|p| p.path_id() == *id)
-            .map(|p| pair(p.transport_id(), p.addr().clone()))
     }
 
     /// Make the peer capable by a message, as in use: step a `PathClose`
@@ -393,7 +361,10 @@ impl<E: EntropySource> Node<E> {
         let unknown = (1..=u32::MAX)
             .find(|id| !ids.contains(id))
             .expect("an identifier no path holds");
-        let from = self.original().unwrap_or_else(|| self.first.1.clone());
+        let from = self
+            .checks
+            .original(&self.b)
+            .unwrap_or_else(|| self.checks.first.1.clone());
         self.step(Input::Close {
             transport: from.transport,
             addr: from.addr,
@@ -408,79 +379,20 @@ impl<E: EntropySource> Node<E> {
 
     /// Step `input` at `now`, check the outputs and return them.
     pub(super) fn step(&mut self, input: Input) -> Vec<Out> {
-        let active = self
-            .b
-            .paths()
-            .active()
-            .map(|p| pair(p.transport_id(), p.addr().clone()));
-        // The active path's transport going releases it with the rest.
-        let closing = matches!(
-            &input,
-            Input::Removed { transport } | Input::Present { transport, present: false }
-                if active.as_ref().is_some_and(|a| a.transport == *transport)
-        );
-        let leaving = self.b.paths().active().map(|p| p.path_id());
-        let named = named(&self.b);
-        let first = self.original().map(|to| (self.first.0, to));
-        // A poll before the next wake does nothing only while the facts
-        // are unchanged since the last step (`Input::Poll`): after a change
-        // it may admit a candidate a rule refused.
-        let early = input == Input::Poll
-            && self.facts.changes == self.seen
-            && self.b.next_wake().is_none_or(|w| self.now < w);
-        self.seen = self.facts.changes;
-        let was = early.then(|| format!("{:?}", self.b));
-        let before = drops();
-        let priced = self.b.cost(self.now, self.cost);
+        let call = self
+            .checks
+            .before(&self.b, self.now, &input, self.cost, self.facts.changes);
         let mut env = Env {
             facts: &self.facts,
             cost: self.cost,
         };
         let out = self.b.step(self.now, input.clone(), &mut env);
-        let after = drops();
-        let repriced = self.b.cost(self.now, self.cost);
-        let same = was.is_none_or(|w| w == format!("{:?}", self.b));
+        let stepped = call.stepped(&self.b);
         let out = keep(out, &mut self.kept);
-        let dead = dead(&self.b, self.first.0);
-        let terms = Terms {
-            facts: &self.facts,
-            link: self.b.scope(),
-            mix: self.mix,
-        };
-        let calm = Calm {
-            now: self.now,
-            capable: self.b.capable(),
-            first: first.as_ref(),
-            eligible: eligible(&self.b, &terms),
-            cfg: &self.cfg,
-        };
-        let checked = quiet(&out, &calm, &mut self.asked)
-            .and_then(|()| silent(&out, self.enabled))
-            .and_then(|()| acks(Some(&input), &out, &self.facts))
-            .and_then(|()| sizes(&out, &self.facts))
-            .and_then(|()| moves(Some(&input), &out))
-            .and_then(|()| ruled(&out, &terms, first.as_ref(), &dead))
-            .and_then(|()| closes(&out, &named))
-            .and_then(|()| connects(&out, &self.facts, &held_pairs(&self.b)))
-            .and_then(|()| slots(&out, &mut self.handed, before, after))
-            .and_then(|()| active_kept(&out, active.as_ref(), closing))
-            .and_then(|()| switches(&out, &acked(&self.b)))
-            .and_then(|()| chosen(&out, leaving, &held_states(&self.b)))
-            .and_then(|()| {
-                tiered(
-                    active_pair(&self.b).as_ref(),
-                    &live_acked(&self.b),
-                    &self.facts,
-                    self.b.pin(),
-                )
-            })
-            .and_then(|()| pinned(&out, self.b.pin()))
-            .and_then(|()| frozen(&out, priced, repriced))
-            .and_then(|()| held(&self.b))
-            .and_then(|()| orphans(&out, &mut self.orphans))
-            .and_then(|()| idle(early, &out, same))
-            .and_then(|()| ahead(self.b.next_wake(), self.now));
-        if let Err(e) = checked {
+        if let Err(e) = self
+            .checks
+            .after(stepped, &self.b, &input, &out, &self.facts)
+        {
             panic!("the shell's check failed on {input:?}: {e}\noutputs: {out:?}");
         }
         out
@@ -512,8 +424,8 @@ impl<E: EntropySource> Node<E> {
         let out = self.b.close();
         let after = drops();
         let out = keep(out, &mut self.kept);
-        let checked =
-            slots(&out, &mut self.handed, before, after).and_then(|()| released_once(&held, &out));
+        let checked = slots(&out, &mut self.checks.handed, before, after)
+            .and_then(|()| released_once(&held, &out));
         if let Err(e) = checked {
             panic!("the shell's check failed on close: {e}\noutputs: {out:?}");
         }
@@ -546,16 +458,10 @@ impl<E: EntropySource> Node<E> {
         let out = self.b.renew(self.now, &env, to);
         let after = drops();
         let out = keep(out, &mut self.kept);
-        if let Err(e) = slots(&out, &mut self.handed, before, after) {
+        if let Err(e) = slots(&out, &mut self.checks.handed, before, after) {
             panic!("the shell's check failed on renew: {e}\noutputs: {out:?}");
         }
-        if let Some(path) = self.b.paths().get(0) {
-            self.first = (
-                path.path_id(),
-                pair(path.transport_id(), path.addr().clone()),
-            );
-        }
-        self.asked = Asked::default();
+        self.checks.renewed(&self.b);
         out
     }
 
@@ -570,7 +476,7 @@ impl<E: EntropySource> Node<E> {
     ) -> Account {
         let before = drops();
         let account = self.b.account(self.now, transport, a, len, ty);
-        if let Err(e) = slots(&[], &mut self.handed, before, drops()) {
+        if let Err(e) = slots(&[], &mut self.checks.handed, before, drops()) {
             panic!("the shell's check failed on a frame from {a:?}: {e}");
         }
         account
@@ -582,7 +488,7 @@ impl<E: EntropySource> Node<E> {
     pub(super) fn charge(&mut self, transport: TransportId, a: &TransportAddr) -> Charge {
         let before = drops();
         let charge = self.b.charge(self.now, transport, a);
-        let checked = slots(&[], &mut self.handed, before, drops())
+        let checked = slots(&[], &mut self.checks.handed, before, drops())
             .and_then(|()| tripped(charge, self.b.next_wake(), self.now));
         if let Err(e) = checked {
             panic!("the shell's check failed on a failure from {a:?}: {e}");
@@ -596,7 +502,7 @@ impl<E: EntropySource> Node<E> {
     pub(super) fn authentic(&mut self, transport: TransportId, a: &TransportAddr) {
         let before = drops();
         self.b.authentic(transport, a);
-        if let Err(e) = slots(&[], &mut self.handed, before, drops()) {
+        if let Err(e) = slots(&[], &mut self.checks.handed, before, drops()) {
             panic!("the shell's check failed on an authentic frame from {a:?}: {e}");
         }
     }
@@ -677,8 +583,215 @@ impl<E: EntropySource> Node<E> {
     }
 }
 
+/// What the checks of one bundle remember across calls.
+pub(crate) struct Checks {
+    /// Our identifier for the original path, and the pair the link was
+    /// made on.
+    first: (u32, PathRef),
+    /// Serials of the slots handed out, to catch one handed out twice.
+    handed: Vec<u64>,
+    /// `Orphaned` outputs seen so far.
+    orphans: usize,
+    /// The bundle's settings.
+    cfg: Config,
+    /// The capability probes and reports seen so far.
+    asked: Asked,
+    /// The host's count of changes to its facts at the last step, so a poll
+    /// counts as early only while the facts are unchanged since then.
+    seen: usize,
+}
+
+/// What [`Checks::before`] reads ahead of one step.
+pub(crate) struct Call {
+    /// The call's instant.
+    now: TestInstant,
+    /// The link's cost the call sees.
+    cost: f64,
+    /// The pair of the path active before the call.
+    active: Option<PathRef>,
+    /// Whether the active path's transport is going.
+    closing: bool,
+    /// Our identifier for the path active before the call.
+    leaving: Option<u32>,
+    /// The paths held before the call, by our identifier.
+    named: Vec<(u32, PathRef)>,
+    /// Our identifier for the original path and its pair before the call.
+    first: Option<(u32, PathRef)>,
+    /// Whether this is a poll before the next wake.
+    early: bool,
+    /// The bundle before an early poll.
+    was: Option<String>,
+    /// The drops counted before the call.
+    before: usize,
+    /// The bundle's price of the link before the call.
+    priced: f64,
+}
+
+/// A [`Call`] with what its step changed, read before the shell takes the
+/// slots out of the outputs, for [`Checks::after`].
+pub(crate) struct Stepped {
+    /// What was read ahead of the step.
+    call: Call,
+    /// The drops counted after it.
+    after: usize,
+    /// The bundle's price of the link after it.
+    repriced: f64,
+    /// Whether an early poll left the bundle as it was.
+    same: bool,
+}
+
+impl Call {
+    /// Read what the step did to `b`, straight after it.
+    pub(crate) fn stepped<E: EntropySource>(self, b: &Bundle<TestClock, E, Slot>) -> Stepped {
+        let after = drops();
+        let repriced = b.cost(self.now, self.cost);
+        let same = self.was.as_ref().is_none_or(|w| *w == format!("{b:?}"));
+        Stepped {
+            call: self,
+            after,
+            repriced,
+            same,
+        }
+    }
+}
+
+impl Checks {
+    /// The checks of a bundle running `cfg`, whose original path is `first`,
+    /// on a host whose facts have changed `seen` times.
+    pub(crate) fn new(cfg: Config, first: (u32, PathRef), seen: usize) -> Self {
+        Self {
+            first,
+            handed: Vec::new(),
+            orphans: 0,
+            cfg,
+            asked: Asked::default(),
+            seen,
+        }
+    }
+
+    /// The original path's pair, while `b` holds it.
+    fn original<E: EntropySource>(&self, b: &Bundle<TestClock, E, Slot>) -> Option<PathRef> {
+        let (id, _) = &self.first;
+        b.paths()
+            .paths()
+            .iter()
+            .find(|p| p.path_id() == *id)
+            .map(|p| pair(p.transport_id(), p.addr().clone()))
+    }
+
+    /// Follow the new original path of a renewed link, and its capability
+    /// probes from the new link's first.
+    pub(crate) fn renewed<E: EntropySource>(&mut self, b: &Bundle<TestClock, E, Slot>) {
+        if let Some(path) = b.paths().get(0) {
+            self.first = (
+                path.path_id(),
+                pair(path.transport_id(), path.addr().clone()),
+            );
+        }
+        self.asked = Asked::default();
+    }
+
+    /// Read `b` ahead of a step of `input` at `now`. `changes` is the host's
+    /// count of changes to its facts.
+    pub(crate) fn before<E: EntropySource>(
+        &mut self,
+        b: &Bundle<TestClock, E, Slot>,
+        now: TestInstant,
+        input: &Input,
+        cost: f64,
+        changes: usize,
+    ) -> Call {
+        let active = b
+            .paths()
+            .active()
+            .map(|p| pair(p.transport_id(), p.addr().clone()));
+        // The active path's transport going releases it with the rest.
+        let closing = matches!(
+            input,
+            Input::Removed { transport } | Input::Present { transport, present: false }
+                if active.as_ref().is_some_and(|a| a.transport == *transport)
+        );
+        let leaving = b.paths().active().map(|p| p.path_id());
+        let named = named(b);
+        let first = self.original(b).map(|to| (self.first.0, to));
+        // A poll before the next wake does nothing only while the facts
+        // are unchanged since the last step (`Input::Poll`): after a change
+        // it may admit a candidate a rule refused.
+        let early =
+            *input == Input::Poll && changes == self.seen && b.next_wake().is_none_or(|w| now < w);
+        self.seen = changes;
+        let was = early.then(|| format!("{b:?}"));
+        let before = drops();
+        let priced = b.cost(now, cost);
+        Call {
+            now,
+            cost,
+            active,
+            closing,
+            leaving,
+            named,
+            first,
+            early,
+            was,
+            before,
+            priced,
+        }
+    }
+
+    /// Check one step's outputs `out`, the slots already out of them,
+    /// against what was read around it and `b` after it. The first rule
+    /// broken is the error.
+    pub(crate) fn after<E: EntropySource>(
+        &mut self,
+        step: Stepped,
+        b: &Bundle<TestClock, E, Slot>,
+        input: &Input,
+        out: &[Out],
+        facts: &dyn Facts,
+    ) -> Result<(), String> {
+        let Stepped {
+            call,
+            after,
+            repriced,
+            same,
+        } = step;
+        let dead = dead(b, self.first.0);
+        let terms = Terms {
+            facts,
+            link: b.scope(),
+            mix: self.cfg.mix_kinds,
+        };
+        let calm = Calm {
+            now: call.now,
+            capable: b.capable(),
+            first: call.first.as_ref(),
+            eligible: eligible(b, &terms),
+            cfg: &self.cfg,
+        };
+        quiet(out, &calm, &mut self.asked)
+            .and_then(|()| silent(out, self.cfg.enabled))
+            .and_then(|()| acks(Some(input), out, facts))
+            .and_then(|()| sizes(out, facts))
+            .and_then(|()| moves(Some(input), out))
+            .and_then(|()| ruled(out, &terms, call.first.as_ref(), &dead))
+            .and_then(|()| closes(out, &call.named))
+            .and_then(|()| connects(out, facts, &held_pairs(b)))
+            .and_then(|()| slots(out, &mut self.handed, call.before, after))
+            .and_then(|()| active_kept(out, call.active.as_ref(), call.closing))
+            .and_then(|()| switches(out, &acked(b)))
+            .and_then(|()| chosen(out, call.leaving, &held_states(b)))
+            .and_then(|()| tiered(active_pair(b).as_ref(), &live_acked(b), facts, b.pin()))
+            .and_then(|()| pinned(out, b.pin()))
+            .and_then(|()| frozen(out, call.priced, repriced))
+            .and_then(|()| held(b))
+            .and_then(|()| orphans(out, &mut self.orphans))
+            .and_then(|()| idle(call.early, out, same))
+            .and_then(|()| ahead(b.next_wake(), call.now))
+    }
+}
+
 /// Move every slot in `out` into `kept`, leaving its serial in its place.
-fn keep(out: Outputs<Slot>, kept: &mut Vec<Slot>) -> Vec<Out> {
+pub(crate) fn keep(out: Outputs<Slot>, kept: &mut Vec<Slot>) -> Vec<Out> {
     let mut serial = |driver: Slot| {
         let s = driver.serial;
         kept.push(driver);

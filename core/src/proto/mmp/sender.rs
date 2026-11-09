@@ -188,3 +188,78 @@ impl Default for SenderState {
         Self::new()
     }
 }
+
+/// What a sender state still carries, for tests: see `algorithms.rs`.
+#[cfg(any(test, feature = "test-hooks"))]
+impl SenderState {
+    /// The fields of `self` that differ from `fresh`'s.
+    pub(super) fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        use super::algorithms::note;
+        let Self {
+            cumulative_packets_sent,
+            interval_packets_sent,
+            interval_bytes_sent,
+            interval_has_data,
+            last_report_ms,
+            report_interval_ms,
+            consecutive_send_failures,
+            srtt_sample_count,
+        } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(
+            &mut out,
+            "sender.cumulative_packets_sent",
+            *cumulative_packets_sent == fresh.cumulative_packets_sent,
+        );
+        note(
+            &mut out,
+            "sender.interval_packets_sent",
+            *interval_packets_sent == fresh.interval_packets_sent,
+        );
+        note(
+            &mut out,
+            "sender.interval_bytes_sent",
+            *interval_bytes_sent == fresh.interval_bytes_sent,
+        );
+        note(
+            &mut out,
+            "sender.interval_has_data",
+            *interval_has_data == fresh.interval_has_data,
+        );
+        note(
+            &mut out,
+            "sender.last_report_ms",
+            *last_report_ms == fresh.last_report_ms,
+        );
+        note(
+            &mut out,
+            "sender.report_interval_ms",
+            *report_interval_ms == fresh.report_interval_ms,
+        );
+        note(
+            &mut out,
+            "sender.consecutive_send_failures",
+            *consecutive_send_failures == fresh.consecutive_send_failures,
+        );
+        note(
+            &mut out,
+            "sender.srtt_sample_count",
+            *srtt_sample_count == fresh.srtt_sample_count,
+        );
+        out
+    }
+
+    /// A sender state with every field away from a new one's.
+    pub(super) fn dirtied() -> Self {
+        Self {
+            cumulative_packets_sent: 120,
+            interval_packets_sent: 20,
+            interval_bytes_sent: 16_000,
+            interval_has_data: true,
+            last_report_ms: Some(6_000),
+            report_interval_ms: 1_500,
+            consecutive_send_failures: 2,
+            srtt_sample_count: 3,
+        }
+    }
+}

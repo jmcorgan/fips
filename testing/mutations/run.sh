@@ -101,6 +101,9 @@ BLE_ONLY=(
     "transport::ble::close_tests::"
     "transport::conformance::ble::"
     "node::tests::settle::carry::the_ble_initiators_link_is_verified_before_any_responder_frame"
+    "node::tests::settle::table::promote::a_promotion_on_a_ble_link_marks_it_at_the_initiator_and_at_the_responders_first_frame"
+    "node::tests::settle::table::crossing::a_crossing_won_on_a_second_ble_link_relinks_the_mark"
+    "node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says"
 )
 
 # The manifest's lines: break, expectation, crate, test, anchor.

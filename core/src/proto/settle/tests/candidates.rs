@@ -17,17 +17,28 @@
 //!   completing for a peer held through a link old enough to rekey moves
 //!   onto that dial, whatever the held link's direction.
 //!
+//! The candidate's nodes are joint nodes with multipath off
+//! (`joint/party.rs`): the core under the candidate, with a real rekey
+//! machine and bundle per held peer. A session the core keeps is the peer's
+//! machines left as they are, receive-only, beside the machines the shell
+//! builds for the session the peer is held on next, from what the kept ones
+//! show and a copy of their replay record (`joint::machines::Machines::beside`).
+//! That is a test's choice: the node has no second machine for one peer.
+//!
 //! Each candidate is explored on the starts it addresses and on every
-//! start the core's own rules pass (all but the two left for later), with
-//! the candidate at both ends, and at either end against the core's own
-//! rules, the reference model, and the models of the current and the
-//! deployed node, in both address orders. Only the dialer's candidate is
-//! compared with the model step by step. A split on a path that showed a
-//! known shape is exempt, except the shapes the candidate addresses: the
-//! stale frame and the later dial read first for the two late-dial
-//! candidates, the dial taken as a rekey for the aged move. At a node of a
-//! deployed model the properties other than one session are that node's
-//! own and are not asserted, as in `legacy/explore.rs`.
+//! named start the core's own rules pass (all but the two left for later),
+//! the start with two paths on real bundles as the joint world builds it,
+//! with the candidate at both ends, and at either end against the core's
+//! own rules, the reference model, and the models of the current node at
+//! multipath off and of the deployed node, in both address orders. Only the
+//! dialer's candidate is compared with the model step by step. A split on a
+//! path that showed a known shape is exempt, except the shapes the
+//! candidate addresses: the stale frame and the later dial read first for
+//! the two late-dial candidates, the dial taken as a rekey for the aged
+//! move; so is the breach `joint/pins.rs` holds of a proven path left with
+//! no connection. At a node of a deployed model the properties other than
+//! one session are that node's own and are not asserted, as in
+//! `legacy/explore.rs`.
 //!
 //! The outcome is recorded, not required to be clean: `candidates.txt`
 //! lists, per candidate, every breach a run shows that the core's own
@@ -50,12 +61,15 @@ use super::regress::{aged_rekey_answered, late_dial_splits};
 use {
     super::super::model::history::Node,
     super::explore::Act,
+    super::joint::Mode,
+    super::joint::explore::lapsed,
+    super::joint::party::JointParty,
+    super::joint::starts::uncapped,
     super::legacy::maint::maint,
     super::legacy::master::master,
     super::oracle::{Breach, Oracle, Swept, sweep},
     super::party::Configured,
-    super::starts::{Maker, Start, flipped, model, starts},
-    super::stub::{CoreParty, under, unseen_path},
+    super::starts::{Maker, Start, flipped, model},
     super::world::{Party, Shape, World},
     alloc::boxed::Box,
     alloc::format,
@@ -92,7 +106,7 @@ impl Other {
             Self::Both => "itself",
             Self::Plain => "core",
             Self::Model => "model",
-            Self::Master => "master",
+            Self::Master => "master off",
             Self::Maint => "maint",
         }
     }
@@ -113,25 +127,28 @@ fn cand(c: u8) -> Option<Candidate> {
     Candidate::ALL.get(usize::from(c)).copied()
 }
 
+/// A joint node at multipath off running candidate `c`, or the core's own
+/// rules with none.
+#[cfg(feature = "slow-explorers")]
+fn joint(ix: usize, me: Node, configured: Vec<Configured>, c: Option<Candidate>) -> Box<dyn Party> {
+    Box::new(JointParty::under(ix, me, configured, Mode::Off, c))
+}
+
 /// Node `ix` of a pairing: candidate `C` at node `AT`, or at every node
 /// when `OTHER` is 0, and otherwise what `OTHER` names (1 the core's own
-/// rules, 2 the model, 3 the model of master, 4 that of maint). With
-/// `OTHER` 5 the candidate is at every node and compared with no model,
-/// for the start with two paths.
+/// rules, 2 the model, 3 the model of master at multipath off, 4 that of
+/// maint).
 #[cfg(feature = "slow-explorers")]
 fn pairing<const C: u8, const OTHER: u8, const AT: usize>(
     ix: usize,
     me: Node,
     configured: Vec<Configured>,
 ) -> Box<dyn Party> {
-    if OTHER == 5 {
-        return Box::new(CoreParty::new(ix, me, configured, false, cand(C)));
-    }
     if OTHER == 0 || ix == AT {
-        return under(ix, me, configured, cand(C));
+        return joint(ix, me, configured, cand(C));
     }
     match OTHER {
-        1 => under(ix, me, configured, None),
+        1 => joint(ix, me, configured, None),
         2 => model(ix, me, configured),
         3 => master(ix, me, configured),
         _ => maint(ix, me, configured),
@@ -139,23 +156,21 @@ fn pairing<const C: u8, const OTHER: u8, const AT: usize>(
 }
 
 /// The maker of candidate `c` (none for the core's own rules) at node `at`
-/// against `other`; `paths` asks for the unshadowed one of the start with
-/// two paths.
+/// against `other`.
 #[cfg(feature = "slow-explorers")]
-fn maker(c: Option<Candidate>, other: Other, at: usize, paths: bool) -> Maker {
+fn maker(c: Option<Candidate>, other: Other, at: usize) -> Maker {
     macro_rules! of {
         ($c:literal) => {
-            match (other, at, paths) {
-                (_, _, true) => pairing::<$c, 5, 0>,
-                (Other::Both, _, false) => pairing::<$c, 0, 0>,
-                (Other::Plain, 0, false) => pairing::<$c, 1, 0>,
-                (Other::Plain, _, false) => pairing::<$c, 1, 1>,
-                (Other::Model, 0, false) => pairing::<$c, 2, 0>,
-                (Other::Model, _, false) => pairing::<$c, 2, 1>,
-                (Other::Master, 0, false) => pairing::<$c, 3, 0>,
-                (Other::Master, _, false) => pairing::<$c, 3, 1>,
-                (Other::Maint, 0, false) => pairing::<$c, 4, 0>,
-                (Other::Maint, _, false) => pairing::<$c, 4, 1>,
+            match (other, at) {
+                (Other::Both, _) => pairing::<$c, 0, 0>,
+                (Other::Plain, 0) => pairing::<$c, 1, 0>,
+                (Other::Plain, _) => pairing::<$c, 1, 1>,
+                (Other::Model, 0) => pairing::<$c, 2, 0>,
+                (Other::Model, _) => pairing::<$c, 2, 1>,
+                (Other::Master, 0) => pairing::<$c, 3, 0>,
+                (Other::Master, _) => pairing::<$c, 3, 1>,
+                (Other::Maint, 0) => pairing::<$c, 4, 0>,
+                (Other::Maint, _) => pairing::<$c, 4, 1>,
             }
         };
     }
@@ -221,7 +236,7 @@ impl Run {
     fn plain(&self) -> Option<String> {
         self.other.legacy().then(|| {
             format!(
-                "{}: core at n{} against {}, {}",
+                "{}: joint off at n{} against {}, {}",
                 self.st.name,
                 self.at,
                 self.other.name(),
@@ -236,19 +251,19 @@ impl Run {
 
     /// The same run with the core's own rules where the candidate was.
     fn baseline(&self) -> Swept {
-        let mut st = starts()
+        let mut st = named()
             .into_iter()
             .find(|s| s.name == self.st.name)
             .expect("the start exists");
-        st.maker = maker(None, self.other, self.at, self.st.number == 12);
+        st.maker = maker(None, self.other, self.at);
         self.sweep_of(&st)
     }
 
     fn sweep_of(&self, st: &Start) -> Swept {
         let (_, shapes) = addresses(self.cand);
         let exempt = |w: &World, b: &Breach| {
-            (b.oracle == Oracle::OneSession && w.shapes.iter().any(|s| !shapes.contains(s)))
-                || unseen_path(w, b)
+            (b.oracle == Oracle::OneSession && w.kinds().iter().any(|s| !shapes.contains(s)))
+                || lapsed(w, b)
         };
         let go = || sweep(st, st.depth, &exempt);
         if self.flip { flipped(go) } else { go() }
@@ -267,20 +282,27 @@ impl Run {
     }
 }
 
+/// The named starts, the one with two paths on real bundles, as the joint
+/// world builds them; the starts only joint nodes run are not among them.
+#[cfg(feature = "slow-explorers")]
+fn named() -> Vec<Start> {
+    uncapped(super::joint::off)
+        .into_iter()
+        .filter(|s| s.number <= 14)
+        .collect()
+}
+
 /// Every run of candidate `c`.
 #[cfg(feature = "slow-explorers")]
 fn runs(c: Candidate) -> Vec<Run> {
     let (extra, _) = addresses(c);
     let mut out = Vec::new();
-    for st in starts() {
+    for st in named() {
         let n = st.number;
         if matches!(n, 6 | 7) && n != extra {
             continue;
         }
         for other in Other::ALL {
-            if n == 12 && other != Other::Both {
-                continue;
-            }
             let ends: &[usize] = if other == Other::Both { &[0] } else { &[0, 1] };
             let flips: &[bool] = if matches!(n, 5 | 6 | 11 | 12) {
                 &[false]
@@ -289,11 +311,11 @@ fn runs(c: Candidate) -> Vec<Run> {
             };
             for &at in ends {
                 for &flip in flips {
-                    let mut st = starts()
+                    let mut st = named()
                         .into_iter()
                         .find(|s| s.name == st.name)
                         .expect("the start exists");
-                    st.maker = maker(Some(c), other, at, n == 12);
+                    st.maker = maker(Some(c), other, at);
                     out.push(Run {
                         st,
                         cand: c,

@@ -25,7 +25,9 @@
 //! replayed from its seed, and a failing run's decisions can be removed one
 //! at a time while it still fails, leaving a minimal schedule.
 //!
-//! The oracles (each named in the message of the failure it reports):
+//! The oracles (each named in the message of the failure it reports; O1,
+//! O3 to O6, O8 and O10 are predicates in `oracles.rs`, for the other shells
+//! that drive a real machine):
 //!
 //! - O1 convergence: once healed and idle, both ends hold the same current
 //!   epoch, no attempt, no pending, and (indexed) matching index pairs.
@@ -62,13 +64,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use super::oracles::{self, Before, Owed, Seen};
 use super::stub::{
     DATA, Ev, Hs, Kid, Local, Mid, Msg, Node, Stub, bytes, frame, hint, kid, ordered,
     pair_jittered, worker_open,
 };
 use crate::proto::rekey::{
-    Close, CycleView, Digest, EpochTag, EvidenceKind, IndexLease, Input, Intent, Msg1Read, MsgKind,
-    Params, PeerKey, RECORD_BOUND, Reason, RecvHome, Wire, allocate, leaked,
+    Close, CycleView, EpochTag, EvidenceKind, IndexLease, Input, Intent, Msg1Read, MsgKind, Params,
+    PeerKey, Reason, RecvHome, Wire, allocate, leaked,
 };
 use crate::testutil::{SplitMix64, TestInstant};
 
@@ -173,12 +176,9 @@ pub(crate) struct Track {
     pub(crate) residuals: Vec<String>,
     /// The adversary's msg1 copies with a rewritten sender index, by id.
     rewrites: BTreeSet<u64>,
-    /// Per node, oldest first: the ephemerals of the IK msg1s its machine
-    /// has answered, refused or handed to a replacement, which its replay
-    /// record must still hold. Kept from the machine's outputs, never from
-    /// its record, and cleared when the shell drops the machine (the world
-    /// discards the record a close hands back).
-    owed: [Vec<Digest>; 2],
+    /// Per node, what its replay record owes. Cleared when the shell drops
+    /// the machine, since the world discards the record a close hands back.
+    owed: [Owed; 2],
     /// Teardowns, per node.
     pub(crate) teardowns: [u32; 2],
     leak0: usize,
@@ -566,24 +566,15 @@ impl<P: Stub> World<P> {
             note!(self, "n{x} poll: {evs:?}");
         }
         self.after(x, &evs, true);
-        if let Some(w) = self.n[x].wake
-            && self.n[x].m.is_some()
-            && w <= now
-        {
-            self.fail(format!(
-                "O4: n{x}'s next wake {w} is not after the poll at {now}"
-            ));
+        let wake = self.n[x].wake.filter(|_| self.n[x].m.is_some());
+        if let Err(e) = oracles::ahead(x, wake, now) {
+            self.fail(e);
         }
         let budget = self.params.budget.as_millis() as u64;
         if let Some(m) = &self.n[x].m
-            && m.view().cycle == CycleView::Init
-            && let Some(&s) = self.t.starts[x].last()
-            && now >= s + budget
+            && let Err(e) = oracles::attempt(x, m, self.t.starts[x].last().copied(), now, budget)
         {
-            self.fail(format!(
-                "O4: n{x}'s attempt started at {s} outlived its deadline at {} in the poll at {now}",
-                s + budget
-            ));
+            self.fail(e);
         }
     }
 
@@ -815,13 +806,11 @@ impl<P: Stub> World<P> {
         };
         let watched = repeat || ephemeral.is_some();
         let forged = f.origin == Origin::Forged;
-        let before = self.n[x].m.as_ref().filter(|_| watched).map(|m| {
-            (
-                m.digest_core(forged),
-                m.view().last_rx,
-                format!("{:?}", m.view().cycle),
-            )
-        });
+        let before = self.n[x]
+            .m
+            .as_ref()
+            .filter(|_| watched)
+            .map(|m| Before::of(m, forged));
         let evs = self.take_raw(&f);
         self.t.taken[x].insert(root);
         let authed = evs
@@ -837,78 +826,43 @@ impl<P: Stub> World<P> {
                 self.outage(x);
             }
         }
-        let Some((digest, last_rx, cycle)) = before else {
+        let Some(before) = before else {
             return;
         };
         let Some(m) = self.n[x].m.as_ref() else {
             return;
         };
-        let after_cycle = m.view().cycle;
-        let refreshed = m.view().last_rx != last_rx;
-        let changed = m.digest_core(forged) != digest;
+        let change = before.change(m);
         let msg1 = matches!(f.msg, Msg::Hs(MsgKind::Msg1, _));
         let copied = matches!(f.origin, Origin::Copy(_));
-        let armed = after_cycle == CycleView::PendR && cycle != "PendR";
+        let seen = Seen {
+            origin: f.origin,
+            root,
+            x,
+        };
         if let Some(e) = ephemeral {
-            if armed && self.t.owed[x].contains(&e) {
-                self.fail(format!(
-                    "O5: {:?} of #{root} at n{x} armed a pending from a msg1 its record holds: {evs:?}",
-                    f.origin
-                ));
+            if let Err(msg) = oracles::rearmed(&seen, &self.t.owed[x], &e, &change, &evs) {
+                self.fail(msg);
                 return;
             }
-            self.owe(x, e, armed, &evs);
+            self.t.owed[x].add(e, change.armed, &evs);
         }
-        if msg1 && copied && armed {
+        if msg1 && copied && change.armed {
             let how = if self.t.rewrites.contains(&f.id) {
                 "rewritten"
             } else {
                 "replayed"
             };
-            let name = format!("{how} msg1 answered in {cycle}");
+            let name = format!("{how} msg1 answered in {}", before.cycle());
             self.t.residuals.push(name.clone());
             note!(self, "residual: {name}");
-            let bad = evs.iter().find(|e| {
-                matches!(
-                    e,
-                    Ev::Installed(..) | Ev::Rekeyed(..) | Ev::Reverted(..) | Ev::Retired(..)
-                )
-            });
-            if let Some(e) = bad {
-                self.fail(format!("O10: a residual replay at n{x} emitted {e:?}"));
-            }
-            if refreshed {
-                self.fail(format!("O10: a residual replay at n{x} refreshed liveness"));
+            for msg in oracles::contained(x, &change, &evs) {
+                self.fail(msg);
             }
             return;
         }
-        if repeat && changed {
-            self.fail(format!(
-                "O5: {:?} of #{root} at n{x} changed the state: {evs:?}",
-                f.origin
-            ));
-        }
-    }
-
-    /// Add the ephemeral `e` of a msg1 node `x` just took to the list its
-    /// record must hold, when the take armed a pending (whose exit records
-    /// it) or drew a refusal or replacement that records it. A refusal for
-    /// a copy already on the list records nothing new.
-    fn owe(&mut self, x: usize, e: Digest, armed: bool, evs: &[Ev<P::Transport>]) {
-        let recorded = armed
-            || evs.iter().any(|ev| {
-                matches!(
-                    ev,
-                    Ev::Replace
-                        | Ev::Reject(Reason::OffLink | Reason::PendingHeld | Reason::DualInitWon)
-                )
-            });
-        let owed = &mut self.t.owed[x];
-        if recorded && !owed.contains(&e) {
-            owed.push(e);
-            if owed.len() > RECORD_BOUND {
-                owed.remove(0);
-            }
+        if let Err(msg) = oracles::unchanged(&seen, repeat, &change, &evs) {
+            self.fail(msg);
         }
     }
 
@@ -1223,29 +1177,13 @@ impl<P: Stub> World<P> {
         let mut errs: Vec<String> = Vec::new();
         // O3: the shell's indices are the machine's and the leg table's.
         let bound = m.bindings().len() + self.legs[x].iter().filter(|l| l.lease.is_some()).count();
-        if P::held(&self.n[x].indices) != bound {
-            errs.push(format!(
-                "O3: n{x} holds {} indices, its machine and legs {bound}",
-                P::held(&self.n[x].indices)
-            ));
-        }
-        if leaked() != self.t.leak0 {
-            errs.push(format!("O3: {} leases leaked", leaked() - self.t.leak0));
-        }
+        errs.extend(oracles::balanced(x, P::held(&self.n[x].indices), bound).err());
+        errs.extend(oracles::unleaked(self.t.leak0).err());
         // O6: bounded memory.
-        if p.record > RECORD_BOUND + 1 {
-            errs.push(format!("O6: n{x}'s record holds {}", p.record));
-        }
+        errs.extend(oracles::memory(x, &p).err());
         // O8: no previous epoch past the ceiling (after a poll).
-        if let (Some(end), Some(cur)) = (p.drain_end, &p.current) {
-            let ceiling = cur.started.0 + self.params.config().retention.as_millis() as u64;
-            if end.0 > ceiling || (polled && now >= end.0) {
-                errs.push(format!(
-                    "O8: n{x} keeps a previous epoch to {} past its ceiling {ceiling}",
-                    end.0
-                ));
-            }
-        }
+        let retention = self.params.config().retention.as_millis() as u64;
+        errs.extend(oracles::retained(x, &p, retention, now, polled).err());
         // O9: the worker holds exactly the delegated epochs.
         let delegated: BTreeSet<EpochTag> = [&v.current, &v.previous]
             .into_iter()
@@ -1321,35 +1259,7 @@ impl<P: Stub> World<P> {
     /// O1: both ends hold the same current epoch and nothing else is in
     /// progress.
     pub(crate) fn converged(&self) -> Result<(), String> {
-        let (Some(a), Some(b)) = (&self.n[0].m, &self.n[1].m) else {
-            return Err(String::from("O1: a node has no session"));
-        };
-        let (pa, pb) = (a.peek(), b.peek());
-        let (Some(ca), Some(cb)) = (&pa.current, &pb.current) else {
-            return Err(String::from("O1: a node is not established"));
-        };
-        if kid(ca.session) != kid(cb.session) {
-            return Err(String::from("O1: the ends hold different current epochs"));
-        }
-        if a.view().cycle != CycleView::Idle || b.view().cycle != CycleView::Idle {
-            return Err(format!(
-                "O1: cycles {:?} and {:?}",
-                a.view().cycle,
-                b.view().cycle
-            ));
-        }
-        if pa
-            .candidates
-            .iter()
-            .chain(&pb.candidates)
-            .any(|d| d.0 <= self.now)
-        {
-            return Err(String::from("O1: an expired candidate is held"));
-        }
-        if P::INDEXED && (ca.theirs != cb.ours || cb.theirs != ca.ours) {
-            return Err(String::from("O1: the index pairs disagree"));
-        }
-        Ok(())
+        oracles::converged(self.n[0].m.as_ref(), self.n[1].m.as_ref(), self.now)
     }
 
     /// The earliest instant either node's timer shell polls.

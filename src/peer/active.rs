@@ -3,6 +3,7 @@
 //! Represents a fully authenticated peer after successful Noise handshake.
 //! ActivePeer holds tree state, Bloom filter, and routing information.
 
+use super::data::{Departed, PeerData};
 use super::{
     LinkCaps, LinkOutput, LinkOutputs, LinkProfile, LinkRekey, Match, PathCaps, PeerBundle,
     PeerInstant, PeerPath, Roam, UdpSlot, peer_now, since,
@@ -12,6 +13,7 @@ use super::{Medium, PathSet, Rebind};
 use crate::config::MmpConfig;
 use crate::node::diag::HsLineCounts;
 use crate::node::session::{ThreadJitter, with_tags};
+use crate::node::settle::table::Transition;
 use crate::noise::NoiseSession;
 use crate::proto::bloom::BloomFilter;
 use crate::proto::fmp::{NegotiationPayload, NodeProfile};
@@ -24,11 +26,14 @@ use fips_core::proto::fmp::rekey::{LinkKeys, LinkLocal};
 use fips_core::proto::path::{Account, Charge, Outputs};
 use fips_core::proto::rekey::{
     Bond, Close, Completed, CycleView, Env, Identity, Ids, IndexLease, Input, PeerKey, Record,
-    SealRefusal, Sealed, SendCopy, SetupFacts, Slot,
+    Role, SealRefusal, Sealed, SendCopy, SetupFacts, Slot,
 };
-use portable_atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use portable_atomic::AtomicU64;
+use portable_atomic::Ordering;
 use secp256k1::XOnlyPublicKey;
 use std::fmt;
+#[cfg(unix)]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -189,59 +194,30 @@ pub(crate) struct LinkAnchors {
 ///
 /// This is the send-critical subset of an `ActivePeer` that the data plane
 /// reads (and, on roam, writes) directly by plain borrow with no FSM
-/// dispatch: the transport target, the connected-UDP handles, and the hot
-/// per-packet counters. The epochs, their keys, indices and key-epoch bits
-/// and the session-relative time base live in the peer's link rekey machine.
+/// dispatch: the transport target and, per path, the connected-UDP handle.
+/// The epochs, their keys, indices and key-epoch bits and the
+/// session-relative time base live in the peer's link rekey machine; the hot
+/// per-packet counters live in its [`PeerData`].
 ///
 /// Co-located, not behind `Arc`/`ArcSwap` — the data plane is not sharded, so
 /// the hot path reads this by plain borrow. Publishing behind `Arc`/`ArcSwap`
 /// is later-increment plumbing for a sharded data plane.
 #[derive(Debug)]
 struct PeerSendState {
-    // === Transport target ===
     /// The machine of the link's paths: the paths this peer is reachable
     /// over, and which one *our* frames go out on. `None` for a peer not
     /// yet bound to a transport.
     bundle: Option<PeerBundle>,
     /// Link used to reach this peer.
     link_id: LinkId,
-
-    // === Hot counters ===
-    /// Link statistics.
-    link_stats: LinkStats,
-    /// When this peer was last seen (any activity, Unix milliseconds).
-    last_seen: u64,
-    /// Whether an authenticated frame from this peer has arrived since it was
-    /// promoted. Kept beside `last_seen` because `touch` writes both.
-    heard: bool,
-    /// Replays refused from this peer since it was promoted, on the inline
-    /// path and in the decrypt workers, which hold a clone of it.
-    replay_total: Arc<AtomicU64>,
-    /// `replay_total` at the last session reset.
-    replay_base: u64,
-    /// Frames authenticated on the previous session since the last cutover.
-    prev_frames: u64,
-    /// The receiver index of the last frame that failed to decrypt.
-    failed_idx: Option<SessionIndex>,
-    /// Per-peer MMP state (None for legacy peers without Noise sessions).
-    mmp: Option<MmpPeerState>,
 }
 
 impl PeerSendState {
-    /// Empty send-state for a peer with no Noise session yet. Mirrors the
-    /// send-critical portion of `ActivePeer::new`.
-    fn new(link_id: LinkId, last_seen: u64) -> Self {
+    /// Empty send-state for a peer with no Noise session yet.
+    fn new(link_id: LinkId) -> Self {
         Self {
             bundle: None,
             link_id,
-            link_stats: LinkStats::new(),
-            last_seen,
-            heard: false,
-            replay_total: Arc::new(AtomicU64::new(0)),
-            replay_base: 0,
-            prev_frames: 0,
-            failed_idx: None,
-            mmp: None,
         }
     }
 }
@@ -270,65 +246,6 @@ pub struct ActivePeer {
     /// Immutable for the same reason as [`ActivePeer::npub`].
     short_npub: String,
 
-    // === Spanning Tree ===
-    /// Their latest parent declaration.
-    declaration: Option<ParentDeclaration>,
-    /// Their path to root.
-    ancestry: Option<TreeCoordinate>,
-
-    // === Tree Announce Rate Limiting ===
-    /// Minimum interval between TreeAnnounce messages (milliseconds).
-    tree_announce_min_interval_ms: u64,
-    /// When we last sent a TreeAnnounce to this peer, in milliseconds of the
-    /// monotonic clock (`crate::time::mono_ms`); `None` if we never have.
-    last_tree_announce_sent_ms: Option<u64>,
-    /// Whether a tree announce is pending (deferred due to rate limit).
-    pending_tree_announce: bool,
-
-    // === Bloom Filter ===
-    /// What's reachable through them (inbound filter).
-    inbound_filter: Option<BloomFilter>,
-    /// Their filter's sequence number.
-    filter_sequence: u64,
-    /// When we received their last filter (Unix milliseconds).
-    filter_received_at: u64,
-    /// Whether we owe them a filter update.
-    pending_filter_update: bool,
-
-    // === Statistics ===
-    /// When this peer was authenticated (Unix milliseconds), as shown to
-    /// operators.
-    authenticated_at: u64,
-    /// When an authenticated frame from this peer last arrived, on the peer
-    /// clock, or the promotion instant before the first. The restart gate
-    /// measures a heard peering's quiet time by it.
-    heard_at: PeerInstant,
-
-    // === Negotiated Profile ===
-    /// Peer's node profile (Full, NonRouting, Leaf).
-    peer_profile: NodeProfile,
-    /// Whether to send sender reports to this peer (our provides_sr AND peer wants_sr).
-    send_sr: bool,
-    /// Whether to send receiver reports to this peer (our provides_rr AND peer wants_rr).
-    send_rr: bool,
-
-    // === Heartbeat ===
-    /// When a heartbeat to this peer last *succeeded*. A send that failed does
-    /// not move this: it told the peer nothing, and treating it as if it had
-    /// would leave the peer un-heartbeated for a full interval on the strength
-    /// of a send that never landed.
-    last_heartbeat_sent: Option<Instant>,
-    /// When a heartbeat to this peer was last *attempted*, whatever came of it.
-    /// Paired with the above so a peer whose send failed is retried sooner than
-    /// the heartbeat interval without being retried on every tick — see
-    /// `HEARTBEAT_RETRY_INTERVAL`.
-    last_heartbeat_attempt: Option<Instant>,
-
-    // === Handshake Resend ===
-    /// Wire-format msg2 for resend on duplicate msg1 (responder only).
-    /// Kept for the life of the peering: nothing clears it.
-    handshake_msg2: Option<Vec<u8>>,
-
     // === Rekey (Key Rotation) ===
     /// The link's rekey machine: its epochs and their keys, indices and
     /// key-epoch bits, this node's own rekey handshake in flight, the
@@ -337,9 +254,10 @@ pub struct ActivePeer {
     /// the rekey jitter and the record of answered msg1s. `None` for a peer
     /// built without a Noise session.
     rekey: Option<LinkRekey>,
-    /// Repeated handshake lines logged for this peer, by kind, so a peer
-    /// repeating one handshake outcome logs it a bounded number of times.
-    hs_lines: HsLineCounts,
+
+    // === Per-Peer Record ===
+    /// Everything held about this peer but its identity and its two machines.
+    data: PeerData,
 
     // === Published active-send-state (two-tier boundary) ===
     /// The send-critical subset read (and, on roam/responder-cutover, written)
@@ -358,26 +276,9 @@ impl ActivePeer {
             npub: identity.npub(),
             short_npub: identity.short_npub(),
             identity,
-            declaration: None,
-            ancestry: None,
-            tree_announce_min_interval_ms: 500,
-            last_tree_announce_sent_ms: None,
-            pending_tree_announce: false,
-            inbound_filter: None,
-            filter_sequence: 0,
-            filter_received_at: 0,
-            pending_filter_update: true, // Send filter on new connection
-            authenticated_at,
-            peer_profile: NodeProfile::Full,
-            send_sr: true,
-            send_rr: true,
-            heard_at: now,
-            last_heartbeat_sent: None,
-            last_heartbeat_attempt: None,
-            handshake_msg2: None,
             rekey: None,
-            hs_lines: HsLineCounts::default(),
-            send: PeerSendState::new(link_id, authenticated_at),
+            data: PeerData::new(authenticated_at, now),
+            send: PeerSendState::new(link_id),
         }
     }
 
@@ -392,7 +293,7 @@ impl ActivePeer {
         link_stats: LinkStats,
     ) -> Self {
         let mut peer = Self::new(identity, link_id, authenticated_at);
-        peer.send.link_stats = link_stats;
+        peer.data.link_stats = link_stats;
         peer
     }
 
@@ -442,38 +343,24 @@ impl ActivePeer {
             facts,
             caps,
         )?;
-        let mut send = PeerSendState::new(link_id, authenticated_at);
+        let mut send = PeerSendState::new(link_id);
         send.bundle = Some(bundle);
-        send.link_stats = link_stats;
-        send.mmp = Some(MmpPeerState::new(
+        let mut data = PeerData::new(authenticated_at, peer_now());
+        data.link_stats = link_stats;
+        data.peer_profile = peer_profile;
+        data.send_sr = send_sr;
+        data.send_rr = send_rr;
+        data.mmp = Some(MmpPeerState::new(
             mmp_config.mode,
             mmp_config.log_interval_secs,
             mmp_config.owd_window_size,
         ));
-        let now = peer_now();
         let peer = Self {
             npub: identity.npub(),
             short_npub: identity.short_npub(),
             identity,
-            declaration: None,
-            ancestry: None,
-            tree_announce_min_interval_ms: 500,
-            last_tree_announce_sent_ms: None,
-            pending_tree_announce: false,
-            inbound_filter: None,
-            filter_sequence: 0,
-            filter_received_at: 0,
-            pending_filter_update: true,
-            authenticated_at,
-            peer_profile,
-            send_sr,
-            send_rr,
-            heard_at: now,
-            last_heartbeat_sent: None,
-            last_heartbeat_attempt: None,
-            handshake_msg2: None,
             rekey: Some(rekey),
-            hs_lines: HsLineCounts::default(),
+            data,
             send,
         };
         Ok((peer, out))
@@ -526,7 +413,7 @@ impl ActivePeer {
         .unwrap_or_else(|_| unreachable!("a machine bonds to its own session's key"));
         let mut peer = Self::with_stats(identity, link_id, authenticated_at, link_stats);
         peer.send.bundle = Some(new_bundle(transport_id, current_addr, &caps.path));
-        peer.send.mmp = Some(MmpPeerState::new(
+        peer.data.mmp = Some(MmpPeerState::new(
             mmp_config.mode,
             mmp_config.log_interval_secs,
             mmp_config.owd_window_size,
@@ -572,6 +459,30 @@ impl ActivePeer {
     pub(crate) fn clear_connected_udp(&mut self) {
         if let Some(slot) = self.active_slot() {
             slot.clear_connected_udp();
+        }
+    }
+
+    /// Whether the path at `index` holds a connected socket, active or not.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn socket_at(&self, index: usize) -> bool {
+        self.send
+            .bundle
+            .as_ref()
+            .and_then(|b| b.paths().get(index))
+            .is_some_and(|p| p.driver().connected_udp().is_some())
+    }
+
+    /// Seat a connected socket with its recv drain on the path at `index`,
+    /// active or not. A no-op where no path is at `index`.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn seat_socket(
+        &mut self,
+        index: usize,
+        socket: std::sync::Arc<crate::transport::udp::ConnectedPeerSocket>,
+        drain: crate::transport::udp::PeerRecvDrain,
+    ) {
+        if let Some(slot) = self.send.bundle.as_mut().and_then(|b| b.driver_mut(index)) {
+            slot.set_connected_udp(socket, drain);
         }
     }
 
@@ -735,36 +646,69 @@ impl ActivePeer {
     /// the new machine is built with and whether a decrypt-worker pool runs, to
     /// which the new session is offered at once; its record is not read.
     ///
+    /// `dial` is the link of the handshake whose session the peer moves onto,
+    /// `own` says the dial answered was this node's own or a later one
+    /// rather than a crossing won on the tie-break, and `inbound` that the
+    /// handshake is an inbound leg the peer's msg3 completed rather than this
+    /// node's own dial.
+    ///
     /// Returns the outputs that unbind, revoke and release what the closed
     /// machine held and bind (and offer) the new session, and the outputs of
-    /// the path machine's renewal. Hands `ours` back in a release, changing
-    /// nothing (the peer's pair included), when `session` authenticated
-    /// another key than the peer's; the path outputs are then empty. Also
-    /// resets the replay suppression counter and the repeated handshake line
-    /// counts since the session changed, and, once the link has moved, the
-    /// link's counter-derived MMP state, as a cutover does, since the new
-    /// session's frame counter starts again at 0, and starts the path
-    /// machine again at `to`, as a new link (multipath v1 draft, Sections
-    /// 5.2 and 5.4): a path already held at `to`, active or not, stays
-    /// with its connected socket and its count of failed frames, every
-    /// other path is released, and when none is held there `to` becomes
-    /// the new link's original path ([`PeerBundle::renew`]); `caps.path`
-    /// gives the facts it reads.
+    /// the path machine's renewal. Hands `ours` back in a release, leaving the
+    /// machine and the peer's pair as they were, when `session` authenticated
+    /// another key than the peer's; the path outputs are then empty. The
+    /// peer's record is then reset by the transition table's cells for a
+    /// move, whether or not the move was refused: the replay suppression
+    /// counter and the repeated handshake line counts always, since the
+    /// session changed, and, once the link has moved, the link's
+    /// counter-derived MMP state, as a cutover does, since the new session's
+    /// frame counter starts again at 0. The move starts the path machine
+    /// again at `to`, as a new link (multipath v1 draft, Sections 5.2 and
+    /// 5.4): a path already held at `to`, active or not, stays with its
+    /// connected socket and its count of failed frames, every other path is
+    /// released, and when none is held there `to` becomes the new link's
+    /// original path ([`PeerBundle::renew`]); `caps.path` gives the facts it
+    /// reads.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn move_session(
         &mut self,
         session: NoiseSession,
         ours: IndexLease,
         theirs: SessionIndex,
         to: (TransportId, TransportAddr),
+        dial: LinkId,
+        own: bool,
+        inbound: bool,
         caps: &mut LinkCaps<'_>,
     ) -> (LinkOutputs, Outputs<UdpSlot>) {
-        self.reset_replay_suppressed();
-        self.hs_lines.roll();
+        let (out, paths, built) = self.rebuild(session, ours, theirs, to, caps);
+        self.settle(&Transition::Move {
+            dial,
+            own,
+            built,
+            inbound,
+        });
+        (out, paths)
+    }
+
+    /// The machine part of [`move_session`](Self::move_session): close the
+    /// rekey machine, build it again on `session`, and renew the bundle at
+    /// `to`. Returns the outputs, the path outputs, and whether the machine
+    /// was rebuilt; on every early return it was not, and the record is left
+    /// to the caller.
+    fn rebuild(
+        &mut self,
+        session: NoiseSession,
+        ours: IndexLease,
+        theirs: SessionIndex,
+        to: (TransportId, TransportAddr),
+        caps: &mut LinkCaps<'_>,
+    ) -> (LinkOutputs, Outputs<UdpSlot>, bool) {
         // The mutation lane's break: the link stays on its old transport and
         // its bundle is not renewed.
         let kept = node_fault!(MoveKeepsOldPair).then(|| self.bound_transport());
         let Some(old) = self.rekey.take() else {
-            return (vec![LinkOutput::Release(ours)], Vec::new());
+            return (vec![LinkOutput::Release(ours)], Vec::new(), false);
         };
         let remote = PeerKey::from_xonly(&session.remote_static_xonly());
         let view = old.view();
@@ -774,20 +718,19 @@ impl ActivePeer {
         };
         let Some(bond) = held else {
             self.rekey = Some(old);
-            return (vec![LinkOutput::Release(ours)], Vec::new());
+            return (vec![LinkOutput::Release(ours)], Vec::new(), false);
         };
         let (mut out, carry) = old.close(Close::CrossConnectionMove);
         let Some(carry) = carry else {
             out.push(LinkOutput::Release(ours));
-            return (out, Vec::new());
+            return (out, Vec::new(), false);
         };
         let mut paths = Vec::new();
         let transport = kept.unwrap_or(to.0);
         match link_machine(bond, session, ours, theirs, transport, carry.into(), caps) {
-            Ok((rekey, built)) => {
-                out.extend(built);
+            Ok((rekey, bound)) => {
+                out.extend(bound);
                 self.rekey = Some(rekey);
-                self.reset_mmp();
                 let env = fips_core::proto::path::Env {
                     facts: caps.path.facts,
                     cost: self.live_cost(),
@@ -797,10 +740,13 @@ impl ActivePeer {
                 {
                     paths = bundle.renew(peer_now(), &env, to);
                 }
+                (out, paths, true)
             }
-            Err(lease) => out.push(LinkOutput::Release(lease)),
+            Err(lease) => {
+                out.push(LinkOutput::Release(lease));
+                (out, paths, false)
+            }
         }
-        (out, paths)
     }
 
     /// The transport our frames to this peer go out on: the active path's.
@@ -1041,19 +987,19 @@ impl ActivePeer {
 
     /// Store wire-format msg2 for resend on duplicate msg1.
     pub(crate) fn set_handshake_msg2(&mut self, msg2: Vec<u8>) {
-        self.handshake_msg2 = Some(msg2);
+        self.data.handshake_msg2 = Some(msg2);
     }
 
     /// Get stored msg2 bytes for resend.
     pub(crate) fn handshake_msg2(&self) -> Option<&[u8]> {
-        self.handshake_msg2.as_deref()
+        self.data.handshake_msg2.as_deref()
     }
 
     // === Replay Detection Suppression ===
 
     /// Increment replay suppression counter. Returns the new count.
     pub fn increment_replay_suppressed(&mut self) -> u32 {
-        self.send.replay_total.fetch_add(1, Ordering::Relaxed);
+        self.data.replay_total.fetch_add(1, Ordering::Relaxed);
         self.replay_suppressed_count()
     }
 
@@ -1061,7 +1007,7 @@ impl ActivePeer {
     pub fn reset_replay_suppressed(&mut self) -> u32 {
         let total = self.replay_suppressed_total();
         let count = self.replay_count(total);
-        self.send.replay_base = total;
+        self.data.replay_base = total;
         count
     }
 
@@ -1073,31 +1019,37 @@ impl ActivePeer {
 
     /// The count since the last session reset, given the total.
     fn replay_count(&self, total: u64) -> u32 {
-        u32::try_from(total.saturating_sub(self.send.replay_base)).unwrap_or(u32::MAX)
+        u32::try_from(total.saturating_sub(self.data.replay_base)).unwrap_or(u32::MAX)
+    }
+
+    /// The total at the last session reset, which the count is taken from.
+    #[cfg(test)]
+    pub(crate) fn replay_base(&self) -> u64 {
+        self.data.replay_base
     }
 
     /// Refused replays since this peer was promoted. No session reset clears
     /// the total; a connection that replaces the peer starts a new one.
     pub fn replay_suppressed_total(&self) -> u64 {
-        self.send.replay_total.load(Ordering::Relaxed)
+        self.data.replay_total.load(Ordering::Relaxed)
     }
 
     /// The running total, for a decrypt worker to add its refusals to.
     #[cfg(unix)]
     pub(crate) fn replay_total(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.send.replay_total)
+        Arc::clone(&self.data.replay_total)
     }
 
     // === Repeated Handshake Lines ===
 
     /// This peer's repeated handshake line counts.
     pub(crate) fn hs_lines(&self) -> &HsLineCounts {
-        &self.hs_lines
+        &self.data.hs_lines
     }
 
     /// This peer's repeated handshake line counts, to count a line.
     pub(crate) fn hs_lines_mut(&mut self) -> &mut HsLineCounts {
-        &mut self.hs_lines
+        &mut self.data.hs_lines
     }
 
     // === Decryption Failure Tracking ===
@@ -1138,22 +1090,22 @@ impl ActivePeer {
 
     /// Record the receiver index of a frame that failed to decrypt.
     pub(crate) fn record_failed(&mut self, idx: SessionIndex) {
-        self.send.failed_idx = Some(idx);
+        self.data.failed_idx = Some(idx);
     }
 
     /// The receiver index of the last frame that failed to decrypt.
     pub(crate) fn last_failed(&self) -> Option<SessionIndex> {
-        self.send.failed_idx
+        self.data.failed_idx
     }
 
     /// Count one frame authenticated on the previous session.
     pub(crate) fn count_previous(&mut self) {
-        self.send.prev_frames = self.send.prev_frames.saturating_add(1);
+        self.data.prev_frames = self.data.prev_frames.saturating_add(1);
     }
 
     /// Frames authenticated on the previous session since the last cutover.
     pub(crate) fn prev_frames(&self) -> u64 {
-        self.send.prev_frames
+        self.data.prev_frames
     }
 
     // === Epoch Accessors ===
@@ -1177,59 +1129,66 @@ impl ActivePeer {
 
     /// Get peer's node profile.
     pub fn peer_profile(&self) -> NodeProfile {
-        self.peer_profile
+        self.data.peer_profile
     }
 
     /// Whether to send sender reports to this peer.
     pub fn send_sr(&self) -> bool {
-        self.send_sr
+        self.data.send_sr
     }
 
     /// Whether to send receiver reports to this peer.
     pub fn send_rr(&self) -> bool {
-        self.send_rr
+        self.data.send_rr
     }
 
     // === Tree Accessors ===
 
     /// Get the peer's tree coordinates, if known.
     pub fn coords(&self) -> Option<&TreeCoordinate> {
-        self.ancestry.as_ref()
+        self.data.ancestry.as_ref()
     }
 
     /// Get the peer's parent declaration, if known.
     pub fn declaration(&self) -> Option<&ParentDeclaration> {
-        self.declaration.as_ref()
+        self.data.declaration.as_ref()
     }
 
     /// Check if this peer has a known tree position.
     pub fn has_tree_position(&self) -> bool {
-        self.declaration.is_some() && self.ancestry.is_some()
+        self.data.declaration.is_some() && self.data.ancestry.is_some()
     }
 
     // === Filter Accessors ===
 
     /// Get the peer's inbound filter, if known.
     pub fn inbound_filter(&self) -> Option<&BloomFilter> {
-        self.inbound_filter.as_ref()
+        self.data.inbound_filter.as_ref()
     }
 
     /// Get the filter sequence number.
     pub fn filter_sequence(&self) -> u64 {
-        self.filter_sequence
+        self.data.filter_sequence
+    }
+
+    /// When the peer's filter was received, in the milliseconds `update_filter`
+    /// was given.
+    #[cfg(test)]
+    pub(crate) fn filter_received_at(&self) -> u64 {
+        self.data.filter_received_at
     }
 
     /// Check if this peer's filter is stale.
     pub fn filter_is_stale(&self, current_time_ms: u64, stale_threshold_ms: u64) -> bool {
-        if self.filter_received_at == 0 {
+        if self.data.filter_received_at == 0 {
             return true;
         }
-        current_time_ms.saturating_sub(self.filter_received_at) > stale_threshold_ms
+        current_time_ms.saturating_sub(self.data.filter_received_at) > stale_threshold_ms
     }
 
     /// Check if a destination might be reachable through this peer.
     pub fn may_reach(&self, node_addr: &NodeAddr) -> bool {
-        match &self.inbound_filter {
+        match &self.data.inbound_filter {
             Some(filter) => filter.contains(node_addr),
             None => false,
         }
@@ -1237,31 +1196,31 @@ impl ActivePeer {
 
     /// Check if we need to send this peer a filter update.
     pub fn needs_filter_update(&self) -> bool {
-        self.pending_filter_update
+        self.data.pending_filter_update
     }
 
     // === Statistics Accessors ===
 
     /// Get link statistics.
     pub fn link_stats(&self) -> &LinkStats {
-        &self.send.link_stats
+        &self.data.link_stats
     }
 
     /// Get mutable link statistics.
     pub fn link_stats_mut(&mut self) -> &mut LinkStats {
-        &mut self.send.link_stats
+        &mut self.data.link_stats
     }
 
     // === MMP Accessors ===
 
     /// Get MMP state (None for legacy peers without sessions).
     pub fn mmp(&self) -> Option<&MmpPeerState> {
-        self.send.mmp.as_ref()
+        self.data.mmp.as_ref()
     }
 
     /// Get mutable MMP state.
     pub fn mmp_mut(&mut self) -> Option<&mut MmpPeerState> {
-        self.send.mmp.as_mut()
+        self.data.mmp.as_mut()
     }
 
     /// Link cost for routing decisions.
@@ -1308,34 +1267,37 @@ impl ActivePeer {
 
     /// When this peer was authenticated.
     pub fn authenticated_at(&self) -> u64 {
-        self.authenticated_at
+        self.data.authenticated_at
     }
 
     /// When an authenticated frame from this peer last arrived, on the peer
     /// clock; the promotion instant before the first.
     pub(crate) fn heard_at(&self) -> PeerInstant {
-        self.heard_at
+        self.data.heard_at
     }
 
     /// When this peer was last seen.
     pub fn last_seen(&self) -> u64 {
-        self.send.last_seen
+        self.data.last_seen
     }
 
     /// Whether an authenticated frame from this peer has arrived since it was
     /// promoted.
+    // Not the record's own `heard`, which is `is_heard` and which a dialled
+    // peering sets before any frame arrives.
+    #[allow(clippy::misnamed_getters)]
     pub(crate) fn heard(&self) -> bool {
-        self.send.heard
+        self.data.frame_heard
     }
 
     /// Time since last activity.
     pub fn idle_time(&self, current_time_ms: u64) -> u64 {
-        current_time_ms.saturating_sub(self.send.last_seen)
+        current_time_ms.saturating_sub(self.data.last_seen)
     }
 
     /// Connection duration since authentication.
     pub fn connection_duration(&self, current_time_ms: u64) -> u64 {
-        current_time_ms.saturating_sub(self.authenticated_at)
+        current_time_ms.saturating_sub(self.data.authenticated_at)
     }
 
     /// Session-relative elapsed time in milliseconds (for inner header timestamp).
@@ -1372,7 +1334,7 @@ impl ActivePeer {
 
     /// When a heartbeat to this peer last succeeded.
     pub fn last_heartbeat_sent(&self) -> Option<Instant> {
-        self.last_heartbeat_sent
+        self.data.last_heartbeat_sent
     }
 
     /// Record that a heartbeat reached the transport without error.
@@ -1382,13 +1344,13 @@ impl ActivePeer {
     /// delivered one, which then suppresses the next attempt for a full
     /// `heartbeat_interval_secs` although the peer has heard nothing.
     pub fn mark_heartbeat_sent(&mut self, now: Instant) {
-        self.last_heartbeat_sent = Some(now);
-        self.last_heartbeat_attempt = Some(now);
+        self.data.last_heartbeat_sent = Some(now);
+        self.data.last_heartbeat_attempt = Some(now);
     }
 
     /// When a heartbeat to this peer was last attempted, whatever came of it.
     pub(crate) fn last_heartbeat_attempt(&self) -> Option<Instant> {
-        self.last_heartbeat_attempt
+        self.data.last_heartbeat_attempt
     }
 
     /// Record that a heartbeat send was attempted.
@@ -1396,7 +1358,7 @@ impl ActivePeer {
     /// Call this *before* the send, so an attempt that fails, or one that never
     /// returns, still spaces the next one out.
     pub(crate) fn mark_heartbeat_attempt(&mut self, now: Instant) {
-        self.last_heartbeat_attempt = Some(now);
+        self.data.last_heartbeat_attempt = Some(now);
     }
 
     // === State Updates ===
@@ -1405,17 +1367,17 @@ impl ActivePeer {
     /// time and mark the peer as heard.
     pub fn touch(&mut self, current_time_ms: u64) {
         if !node_fault!(TouchKeepsHeardInstant) {
-            self.heard_at = peer_now();
+            self.data.heard_at = peer_now();
         }
-        self.send.last_seen = current_time_ms;
-        self.send.heard = true;
+        self.data.last_seen = current_time_ms;
+        self.data.frame_heard = true;
     }
 
     /// Step the instant this peer was last heard back by `age`, as for a
     /// peering quiet that long. The wall-clock `last_seen` is not moved.
     #[cfg(test)]
     pub(crate) fn test_backdate_heard(&mut self, age: Duration) {
-        self.heard_at = fips_core::time::Instant::checked_sub(self.heard_at, age)
+        self.data.heard_at = fips_core::time::Instant::checked_sub(self.data.heard_at, age)
             .expect("the peer clock reaches back past the backdate");
     }
 
@@ -1433,35 +1395,41 @@ impl ActivePeer {
         ancestry: TreeCoordinate,
         current_time_ms: u64,
     ) {
-        self.declaration = Some(declaration);
-        self.ancestry = Some(ancestry);
-        self.send.last_seen = current_time_ms;
+        self.data.declaration = Some(declaration);
+        self.data.ancestry = Some(ancestry);
+        self.data.last_seen = current_time_ms;
     }
 
     /// Clear peer's tree position.
     pub fn clear_tree_position(&mut self) {
-        self.declaration = None;
-        self.ancestry = None;
+        self.data.declaration = None;
+        self.data.ancestry = None;
     }
 
     // === Tree Announce Rate Limiting ===
 
     /// Set the minimum interval between TreeAnnounce messages (milliseconds).
     pub fn set_tree_announce_min_interval_ms(&mut self, ms: u64) {
-        self.tree_announce_min_interval_ms = ms;
+        self.data.tree_announce_min_interval_ms = ms;
+    }
+
+    /// The minimum interval between TreeAnnounce messages (milliseconds).
+    #[cfg(test)]
+    pub(crate) fn tree_announce_min_interval_ms(&self) -> u64 {
+        self.data.tree_announce_min_interval_ms
     }
 
     /// When this peer was last sent a TreeAnnounce, in the monotonic
     /// milliseconds (`crate::time::mono_ms`) `can_send_tree_announce`
     /// compares; `None` if it never was.
     pub fn last_tree_announce_sent_ms(&self) -> Option<u64> {
-        self.last_tree_announce_sent_ms
+        self.data.last_tree_announce_sent_ms
     }
 
     /// Set when this peer was last sent a TreeAnnounce, in monotonic
     /// milliseconds or `None` for never, leaving a pending one pending.
     pub fn set_last_tree_announce_sent_ms(&mut self, ms: Option<u64>) {
-        self.last_tree_announce_sent_ms = ms;
+        self.data.last_tree_announce_sent_ms = ms;
     }
 
     /// Whether the rate limit lets a TreeAnnounce go to this peer at
@@ -1469,56 +1437,57 @@ impl ActivePeer {
     /// otherwise once the interval has passed since the last.
     pub fn can_send_tree_announce(&self, now_ms: u64) -> bool {
         if node_fault!(TreeNoneAsZero) {
-            return now_ms.saturating_sub(self.last_tree_announce_sent_ms.unwrap_or(0))
-                >= self.tree_announce_min_interval_ms;
+            return now_ms.saturating_sub(self.data.last_tree_announce_sent_ms.unwrap_or(0))
+                >= self.data.tree_announce_min_interval_ms;
         }
-        self.last_tree_announce_sent_ms
-            .is_none_or(|t| now_ms.saturating_sub(t) >= self.tree_announce_min_interval_ms)
+        self.data
+            .last_tree_announce_sent_ms
+            .is_none_or(|t| now_ms.saturating_sub(t) >= self.data.tree_announce_min_interval_ms)
     }
 
     /// Record that we sent a TreeAnnounce to this peer at `now_ms`, a
     /// monotonic reading.
     pub fn record_tree_announce_sent(&mut self, now_ms: u64) {
-        self.last_tree_announce_sent_ms = Some(now_ms);
-        self.pending_tree_announce = false;
+        self.data.last_tree_announce_sent_ms = Some(now_ms);
+        self.data.pending_tree_announce = false;
     }
 
     /// Mark that a tree announce is pending (deferred by the rate limit or by
     /// a failed link send).
     pub fn mark_tree_announce_pending(&mut self) {
-        self.pending_tree_announce = true;
+        self.data.pending_tree_announce = true;
     }
 
     /// Check if a deferred tree announce is waiting to be sent.
     pub fn has_pending_tree_announce(&self) -> bool {
-        self.pending_tree_announce
+        self.data.pending_tree_announce
     }
 
     // === Filter Updates ===
 
     /// Update peer's inbound filter.
     pub fn update_filter(&mut self, filter: BloomFilter, sequence: u64, current_time_ms: u64) {
-        self.inbound_filter = Some(filter);
-        self.filter_sequence = sequence;
-        self.filter_received_at = current_time_ms;
-        self.send.last_seen = current_time_ms;
+        self.data.inbound_filter = Some(filter);
+        self.data.filter_sequence = sequence;
+        self.data.filter_received_at = current_time_ms;
+        self.data.last_seen = current_time_ms;
     }
 
     /// Clear peer's inbound filter.
     pub fn clear_filter(&mut self) {
-        self.inbound_filter = None;
-        self.filter_sequence = 0;
-        self.filter_received_at = 0;
+        self.data.inbound_filter = None;
+        self.data.filter_sequence = 0;
+        self.data.filter_received_at = 0;
     }
 
     /// Mark that we need to send this peer a filter update.
     pub fn mark_filter_update_needed(&mut self) {
-        self.pending_filter_update = true;
+        self.data.pending_filter_update = true;
     }
 
     /// Clear the pending filter update flag.
     pub fn clear_filter_update_needed(&mut self) {
-        self.pending_filter_update = false;
+        self.data.pending_filter_update = false;
     }
 
     // === Rekey (Key Rotation) ===
@@ -1541,7 +1510,7 @@ impl ActivePeer {
             mode,
             ..MmpConfig::default()
         };
-        self.send.mmp = Some(MmpPeerState::new(
+        self.data.mmp = Some(MmpPeerState::new(
             config.mode,
             config.log_interval_secs,
             config.owd_window_size,
@@ -1664,6 +1633,25 @@ impl ActivePeer {
             .collect()
     }
 
+    /// Test-only seam: hold the peer at `profile`, sending it neither report,
+    /// as a negotiation with a peer of that profile that wants none would.
+    #[cfg(test)]
+    pub(crate) fn test_take_profile(&mut self, profile: NodeProfile) {
+        self.data.peer_profile = profile;
+        self.data.send_sr = false;
+        self.data.send_rr = false;
+    }
+
+    /// Test-only seam: hand the link's rekey machine `record` as the record of
+    /// the setup it was built from, as a machine holding a setup record would.
+    /// A no-op for a peer without a session.
+    #[cfg(test)]
+    pub(crate) fn test_note_setup(&mut self, record: Record) {
+        if let Some(rekey) = self.rekey.as_mut() {
+            rekey.note_setup(record);
+        }
+    }
+
     /// Test-only seam: backdate the session's timestamp base so a test can
     /// make `session_elapsed_ms()` read as `age`-old (needed to synthesize a
     /// positive RTT sample from a crafted ReceiverReport). This only shifts the
@@ -1755,8 +1743,7 @@ impl ActivePeer {
     /// Which side of the rekey handshake produced the pending session; `None`
     /// when no pending session is held.
     #[cfg(test)]
-    pub(crate) fn pending_role(&self) -> Option<fips_core::proto::rekey::Role> {
-        use fips_core::proto::rekey::Role;
+    pub(crate) fn pending_role(&self) -> Option<Role> {
         match self.rekey.as_ref()?.view().cycle {
             CycleView::PendI(_) => Some(Role::Initiator),
             CycleView::PendR => Some(Role::Responder),
@@ -1896,24 +1883,13 @@ impl ActivePeer {
         }
     }
 
-    /// Reset what a cutover resets beside the machine: the replay
-    /// suppression and handshake line counts, the frames counted on the
-    /// previous session, and the link MMP counters. The node runs it for
-    /// each cutover the link machine reports.
-    pub(crate) fn after_cutover(&mut self) {
-        self.send.prev_frames = 0;
-        self.reset_replay_suppressed();
-        self.hs_lines.roll();
-        self.reset_mmp();
-    }
-
-    /// Reset the link's counter-derived MMP state for a session whose frame
-    /// counter starts again at 0, as at a cutover or a cross-connection
-    /// move.
-    fn reset_mmp(&mut self) {
-        if let Some(mmp) = &mut self.send.mmp {
-            mmp.reset_for_rekey(crate::time::mono_ms());
-        }
+    /// Reset what a cutover this node made as `role` resets beside the
+    /// machine, by the transition table: the replay suppression and
+    /// handshake line counts, the frames counted on the previous session,
+    /// and the link MMP counters. The node runs it for each cutover the link
+    /// machine reports.
+    pub(crate) fn after_cutover(&mut self, role: Role) {
+        self.settle(&Transition::Cutover { role });
     }
 
     /// Whether a drain is in progress.
@@ -1951,6 +1927,22 @@ impl ActivePeer {
         };
         let (out, _) = rekey.close(fips_core::proto::rekey::Close::Admin);
         out
+    }
+
+    /// Apply `t`'s cells to the peer's record, reading the monotonic clock
+    /// once for an MMP reset's jitter grace. The peer's identity, its
+    /// machines and the node's state are not the record's, and `t` does not
+    /// reach them here.
+    pub(crate) fn settle(&mut self, t: &Transition) {
+        self.data.settle(t, crate::time::mono_ms());
+    }
+
+    /// End the peer's record as the peer is removed, handing over what the
+    /// removal reads of it. The peer's identity and machines go with it; a
+    /// caller closes the machines and the paths first.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn depart(self) -> Departed {
+        self.data.depart()
     }
 }
 

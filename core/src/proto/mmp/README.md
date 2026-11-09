@@ -13,7 +13,10 @@ and receive the reports and hold the configuration.
 - `core.rs`: the snapshot read traits, `MmpAction`, and the `plan_*`
   decisions.
 - `state.rs`: `Mmp`, the reporting anchor, and the per-peer and
-  per-session aggregates.
+  per-session aggregates. Under `test` or the `test-hooks` feature, a
+  link state's `fresh_diff` and `dirtied`, which a test uses to say what a
+  reset carries; each type the aggregate holds compares and dirties its own
+  fields in its own file, naming every one.
 - `sender.rs`, `receiver.rs`, `metrics.rs`, `path_mtu.rs`: the sender,
   receiver, derived-metrics and path-MTU state machines.
 - `delivery.rs`: whether a sent announce was delivered, inferred from

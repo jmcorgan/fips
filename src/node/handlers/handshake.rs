@@ -1353,6 +1353,11 @@ impl Node {
                         outbound_lease,
                         header.sender_idx,
                         (packet.transport_id, packet.remote_addr.clone()),
+                        link_id,
+                        // The tie-break alone swaps here: no dial of this
+                        // node's own is answered over a held peering.
+                        false,
+                        false,
                         &mut caps,
                     );
                     self.run_link_outputs(&peer_node_addr, out);
@@ -2250,11 +2255,16 @@ impl Node {
                     self.config().node.tree.announce_min_interval_ms,
                 );
 
-                self.peers.install(peer_node_addr, new_peer);
                 // The winning leg's machine (keyed by the winner link) survives
                 // the promotion; the executor crystallizes it in place via the
                 // `PromotionResolved` feedback after this returns.
-                self.run_link_outputs(&peer_node_addr, out);
+                if node_fault!(OutputsBeforeInstall) {
+                    self.run_link_outputs(&peer_node_addr, out);
+                    self.peers.install(peer_node_addr, new_peer);
+                } else {
+                    self.peers.install(peer_node_addr, new_peer);
+                    self.run_link_outputs(&peer_node_addr, out);
+                }
                 self.peering
                     .reconciler
                     .retry_pending
@@ -2375,11 +2385,16 @@ impl Node {
                 new_peer.set_last_tree_announce_sent_ms(Some(crate::time::mono_ms()));
             }
 
-            self.peers.install(peer_node_addr, new_peer);
             // The promoted leg's machine (born at msg1 for inbound, at dial for
             // outbound) survives the promotion; the executor crystallizes it in
             // place via the `PromotionResolved` feedback after this returns.
-            self.run_link_outputs(&peer_node_addr, out);
+            if node_fault!(OutputsBeforeInstall) {
+                self.run_link_outputs(&peer_node_addr, out);
+                self.peers.install(peer_node_addr, new_peer);
+            } else {
+                self.peers.install(peer_node_addr, new_peer);
+                self.run_link_outputs(&peer_node_addr, out);
+            }
             self.peering
                 .reconciler
                 .retry_pending

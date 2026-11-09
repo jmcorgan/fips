@@ -31,6 +31,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::hash::{Hash, Hasher};
 
+use crate::proto::path::Source;
+
 use super::super::model::history::{Addr, Bytes, Epoch, Hs, Node};
 use super::shadow::Entry;
 
@@ -70,7 +72,9 @@ pub enum Kind {
 }
 
 /// A packet's content, abstract: a handshake is named by its msg1's
-/// ephemeral, as the model names it.
+/// ephemeral, as the model names it. A party that writes real messages
+/// also carries their bytes, as `wire`: an index into [`Net::wires`], 0
+/// for none. Equal bytes take one index, so a resend equals its original.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pkt {
     /// A msg1 from identity `id`.
@@ -83,6 +87,8 @@ pub enum Pkt {
         bytes: Bytes,
         /// The sender's epoch.
         epoch: Epoch,
+        /// Its bytes on the wire.
+        wire: u32,
     },
     /// A msg2 answering handshake `hs`.
     Msg2 {
@@ -92,6 +98,8 @@ pub enum Pkt {
         hs: Hs,
         /// The sender's epoch.
         epoch: Epoch,
+        /// Its bytes on the wire.
+        wire: u32,
     },
     /// A frame sealed under the session of handshake `hs`.
     Frame {
@@ -99,6 +107,8 @@ pub enum Pkt {
         id: Node,
         /// The session's handshake.
         hs: Hs,
+        /// Its bytes on the wire.
+        wire: u32,
     },
     /// The far end closed the connection.
     Eof,
@@ -108,6 +118,41 @@ impl Pkt {
     /// Whether this is a handshake message.
     pub fn handshake(&self) -> bool {
         matches!(self, Self::Msg1 { .. } | Self::Msg2 { .. })
+    }
+
+    /// The index of its bytes in [`Net::wires`]; 0 for none.
+    pub fn wire(&self) -> u32 {
+        match self {
+            Self::Msg1 { wire, .. } | Self::Msg2 { wire, .. } | Self::Frame { wire, .. } => *wire,
+            Self::Eof => 0,
+        }
+    }
+
+    /// The same packet with no bytes named.
+    fn bare(self) -> Self {
+        match self {
+            Self::Msg1 {
+                id,
+                hs,
+                bytes,
+                epoch,
+                ..
+            } => Self::Msg1 {
+                id,
+                hs,
+                bytes,
+                epoch,
+                wire: 0,
+            },
+            Self::Msg2 { id, hs, epoch, .. } => Self::Msg2 {
+                id,
+                hs,
+                epoch,
+                wire: 0,
+            },
+            Self::Frame { id, hs, .. } => Self::Frame { id, hs, wire: 0 },
+            Self::Eof => Self::Eof,
+        }
     }
 }
 
@@ -169,44 +214,49 @@ pub struct Flight {
     pub copy: bool,
 }
 
-/// A path event of a link's bundle, as stage A reports them.
+/// An event at a node's paths that a start or the explorer gives it: a
+/// candidate a feed reports, a transport's carrier or removal, or a NAT's
+/// change of a source address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathEv {
-    /// The link's path at `from` moved to `to`.
-    Moved {
-        /// The peer whose link it is.
-        peer: Node,
-        /// The pair before.
-        from: Addr,
-        /// The pair after.
-        to: Addr,
-    },
-    /// The link's active path switched from `from` to `to`.
-    Switched {
+    /// A feed of the node's other than its configuration and the frames it
+    /// hears (a beacon, a Nostr advert, an operator's request) reports that
+    /// the peer may be reachable at `at`. Only a node with a real bundle
+    /// takes it.
+    Candidate {
         /// The peer.
         peer: Node,
-        /// The old active pair.
-        from: Addr,
-        /// The new active pair.
-        to: Addr,
-    },
-    /// The link's path at `at` was released.
-    Released {
-        /// The peer.
-        peer: Node,
-        /// The pair.
+        /// The peer's pair.
         at: Addr,
-        /// The peer may still send there.
-        keep: bool,
+        /// This node's address the pair is reached from; its home on that
+        /// transport when `None`.
+        from: Option<Addr>,
+        /// The feed.
+        source: Source,
     },
-    /// The link's path at `at` became live (proven) or probing.
-    State {
-        /// The peer.
-        peer: Node,
-        /// The pair.
-        at: Addr,
-        /// Live or acked.
-        live: bool,
+    /// The node's transport `transport` lost carrier (`up` false) or
+    /// regained it. Only a node with a real bundle takes it.
+    Carrier {
+        /// The transport.
+        transport: u8,
+        /// Whether it has carrier now.
+        up: bool,
+    },
+    /// The node's transport `transport` was removed. Only a node with a
+    /// real bundle takes it.
+    Gone {
+        /// The transport.
+        transport: u8,
+    },
+    /// A NAT in front of the node changed its source address `from` to
+    /// `to`: what the node sends from `from` arrives from `to`, and what is
+    /// sent to `to` reaches the node at `from`. The world applies it in
+    /// [`Net::send`]; no party is told.
+    Rebound {
+        /// The node's own address.
+        from: Addr,
+        /// The address the far end sees in its place.
+        to: Addr,
     },
 }
 
@@ -226,6 +276,9 @@ pub enum Input {
         pkt: Pkt,
         /// The wall clock at arrival, as a packet stamp carries it.
         stamp: i64,
+        /// A copy the explorer made (a duplicate, a replay or a forgery),
+        /// which a party can tell from its original in no other way.
+        copy: bool,
     },
     /// The connection this node sees at `at` closed.
     Closed {
@@ -386,12 +439,48 @@ impl Shape {
     }
 }
 
+/// What a known shape left where it was seen, which a breach must be
+/// about for the shape to exempt it (`oracle::by_shape`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Left {
+    /// The two ends of the pair, by the handshake each end's session of
+    /// the other descends from, as [`ends`] orders them, `None` for an end
+    /// holding no session of the other. A rekey keeps a session's origin,
+    /// so a heal that rekeys both ends leaves them as they were.
+    Split(Option<Hs>, Option<Hs>),
+    /// A responder pending, by its handshake.
+    Pending(Hs),
+}
+
+impl Left {
+    /// An order for the world's digest, which must not depend on the order
+    /// two shapes were seen in.
+    fn rank(self) -> (u8, Option<u32>, Option<u32>) {
+        match self {
+            Self::Split(a, b) => (0, a.map(|h| h.0), b.map(|h| h.0)),
+            Self::Pending(h) => (1, Some(h.0), None),
+        }
+    }
+}
+
+/// The two ends of a pair by the origins of their sessions of each other:
+/// node `x`'s, `a`, and node `y`'s, `b`, the lower-numbered node's first.
+pub fn ends<T>(x: usize, a: T, y: usize, b: T) -> (T, T) {
+    if x < y { (a, b) } else { (b, a) }
+}
+
 /// A node, as the world drives it.
 pub trait Party {
     /// Take one input, acting on the world through `net`.
     fn input(&mut self, net: &mut Net, inp: Input);
     /// The earliest instant this party has something to do.
     fn wake(&self) -> Option<Ms>;
+    /// The earliest instant this party has something to do that is not a
+    /// path bundle's: the wake [`World::leap`] runs to. A party with no
+    /// bundle has no other wake.
+    fn paced(&self) -> Option<Ms> {
+        self.wake()
+    }
     /// A canonical digest of the party's state.
     fn digest(&self) -> String;
     /// Whether the party holds keys for the session of `hs` with `peer`.
@@ -404,6 +493,30 @@ pub trait Party {
     fn view(&self) -> View;
     /// The epoch of the party's current life.
     fn epoch(&self) -> Epoch;
+    /// The pairs a path bundle of this party holds as acknowledged paths
+    /// that are not Live, which its link record counts as in use; empty
+    /// for a party with no bundle.
+    fn lapsed(&self) -> Vec<Addr> {
+        Vec::new()
+    }
+    /// What the joint world's oracles read of this party: its core, its
+    /// machines and its shell side by side; `None` for a party with no
+    /// rekey machines.
+    fn joint(&self) -> Option<super::joint::oracle::Facts> {
+        None
+    }
+    /// This party's rekey machine for `peer`, for the convergence of a
+    /// pair's machines; `None` for a party with no rekey machines.
+    fn rekey(&self, _peer: Node) -> Option<&super::joint::machines::Machine> {
+        None
+    }
+    /// The peers this party's liveness timer removed in the input it just
+    /// took, each with the handshake of the session it held the peer on
+    /// and the handshake that session descends from, taken from it; empty
+    /// for a party with no such timer.
+    fn expired(&mut self) -> Vec<(Node, Hs, Hs)> {
+        Vec::new()
+    }
 }
 
 /// What lies between the nodes.
@@ -423,8 +536,15 @@ pub struct Net {
     pub flight: Vec<Flight>,
     /// Every msg1 that entered flight, for the replay act.
     pub captured: Vec<Flight>,
+    /// The bytes packets carry, each distinct value once, by the index a
+    /// [`Pkt`]'s `wire` names; index 0 is the empty value, for none.
+    pub wires: Vec<Vec<u8>>,
     /// Sends from these nodes fail, one per entry.
     pub failing: Vec<usize>,
+    /// NAT changes of a node's source address on a connectionless
+    /// transport: the node, its own address, and the address the far end
+    /// sees in its place ([`PathEv::Rebound`]).
+    pub rebound: Vec<(usize, Addr, Addr)>,
     /// The next packet number.
     pub next: u64,
     /// Whether what is in flight survives an advance or a restart, as it
@@ -447,7 +567,9 @@ impl Net {
             conns: Vec::new(),
             flight: Vec::new(),
             captured: Vec::new(),
+            wires: alloc::vec![Vec::new()],
             failing: Vec::new(),
+            rebound: Vec::new(),
             next: 0,
             unbounded: false,
             logging: false,
@@ -466,6 +588,63 @@ impl Net {
     /// The node that listens at `a`.
     pub fn owner(&self, a: Addr) -> Option<usize> {
         self.addrs.iter().position(|v| v.contains(&a))
+    }
+
+    /// Where a datagram sent to `a` arrives: the node and its own address,
+    /// through a NAT that rebound one of its addresses to `a`.
+    fn reach(&self, a: Addr) -> Option<(usize, Addr)> {
+        match self.rebound.iter().find(|(_, _, to)| *to == a) {
+            Some(&(n, from, _)) => Some((n, from)),
+            None => self.owner(a).map(|n| (n, a)),
+        }
+    }
+
+    /// The address a datagram node `me` sends from `from` arrives from.
+    fn seen(&self, me: usize, from: Addr) -> Addr {
+        self.rebound
+            .iter()
+            .find(|(n, f, _)| *n == me && *f == from)
+            .map_or(from, |&(_, _, to)| to)
+    }
+
+    /// A NAT in front of node `me` rebinds its address `from` to `to`
+    /// ([`PathEv::Rebound`]).
+    pub fn rebind(&mut self, me: usize, from: Addr, to: Addr) {
+        self.rebound.retain(|(n, f, _)| !(*n == me && *f == from));
+        self.rebound.push((me, from, to));
+        self.note(|| format!("n{me}'s {from:?} rebound to {to:?}"));
+    }
+
+    /// The index of `bytes` in [`Self::wires`], added if it is new.
+    pub fn intern(&mut self, bytes: &[u8]) -> u32 {
+        let at = match self.wires.iter().position(|w| w == bytes) {
+            Some(i) => i,
+            None => {
+                self.wires.push(bytes.to_vec());
+                self.wires.len() - 1
+            }
+        };
+        u32::try_from(at).expect("fewer than 2^32 distinct wire values")
+    }
+
+    /// The bytes wire index `w` names.
+    pub fn bytes(&self, w: u32) -> &[u8] {
+        &self.wires[w as usize]
+    }
+
+    /// `pkt` as the digest prints it: its abstract fields and its bytes,
+    /// never the index, which depends on the order values were first sent
+    /// in.
+    pub fn shown(&self, pkt: &Pkt) -> String {
+        if fault!(WireByNumber) {
+            // The defect's shape: the index printed in place of the bytes.
+            return format!("{pkt:?}");
+        }
+        let mut s = format!("{:?}", pkt.bare());
+        for b in self.bytes(pkt.wire()) {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
     }
 
     /// Node `me`'s first address on transport `t`.
@@ -602,9 +781,9 @@ impl Net {
         self.note(|| format!("n{me} sends {pkt:?} to {to:?}"));
         match self.kind(to.transport) {
             Kind::Datagram => {
-                let src = from.unwrap_or_else(|| self.home(me, to.transport));
-                if let Some(owner) = self.owner(to) {
-                    self.push(owner, to, src, None, pkt, false);
+                let src = self.seen(me, from.unwrap_or_else(|| self.home(me, to.transport)));
+                if let Some((owner, local)) = self.reach(to) {
+                    self.push(owner, local, src, None, pkt, false);
                 }
                 true
             }
@@ -706,8 +885,16 @@ pub struct World {
     pub paths: Vec<(usize, PathEv)>,
     /// Which of them have been used.
     pub used: Vec<bool>,
-    /// The known shapes seen so far, each once.
-    pub shapes: Vec<Shape>,
+    /// The known shapes seen so far, each with what it left, each once.
+    pub shapes: Vec<(Shape, Left)>,
+    /// Each peer a node's liveness timer removed while the peer held that
+    /// node on another session: the node, the peer, and each end's session
+    /// at the removal by its origin and its current handshake, as [`ends`]
+    /// orders the ends. Two ends that held each
+    /// other on different sessions heard nothing from each other, and only
+    /// the timer ended the split. A removal at a session both ends hold is
+    /// not one: what was lost in flight silenced the link.
+    pub ended: Vec<(usize, Node, [Hs; 4])>,
 }
 
 impl World {
@@ -720,6 +907,7 @@ impl World {
             paths: Vec::new(),
             used: Vec::new(),
             shapes: Vec::new(),
+            ended: Vec::new(),
         }
     }
 
@@ -733,13 +921,32 @@ impl World {
             .map(|p| p.cur)
     }
 
+    /// The handshake node `x`'s session of peer `id` descends from, if it
+    /// holds it.
+    fn origin(&self, x: usize, id: Node) -> Option<Hs> {
+        self.parties[x]
+            .view()
+            .peers
+            .iter()
+            .find(|p| p.peer == id)
+            .map(|p| p.origin)
+    }
+
+    /// The names of the known shapes seen so far, each once, in order.
+    pub fn kinds(&self) -> Vec<Shape> {
+        let mut out: Vec<Shape> = self.shapes.iter().map(|&(s, _)| s).collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// What node `x`'s delivery of `pkt` could turn out to be, judged
     /// before it is handed over, and the session that decides it.
     fn suspect(&self, x: usize, pkt: Pkt) -> Option<(Shape, Hs, Option<Hs>)> {
         let loose = fault!(ShapeLoose);
         let me = self.ids[x];
         match pkt {
-            Pkt::Frame { id, hs } => {
+            Pkt::Frame { id, hs, .. } => {
                 // The sender's own session, which the receiver holds now.
                 let y = self.index(id)?;
                 let theirs = self.cur(y, me)?;
@@ -792,7 +999,8 @@ impl World {
     /// on; a rekey msg1, a msg1 of a previous life, or the msg2 of an
     /// earlier own dial, left it holding the sender on that handshake as
     /// its session, which `before` was not; a dial left a responder
-    /// pending on its handshake.
+    /// pending on its handshake. Each is kept with what it left, read just
+    /// after the delivery ([`Left`]).
     fn witness(&mut self, x: usize, pkt: Pkt, shape: Shape, hs: Hs, before: Option<Hs>) {
         let (Pkt::Frame { id, .. } | Pkt::Msg1 { id, .. } | Pkt::Msg2 { id, .. }) = pkt else {
             return;
@@ -811,18 +1019,58 @@ impl World {
         if fault!(ShapeBlind) || !shown {
             return;
         }
-        if !self.shapes.contains(&shape) {
-            self.shapes.push(shape);
-            self.shapes.sort_unstable();
-            self.net.note(|| format!("n{x} shows {shape:?}"));
+        let left = match (shape, self.index(id)) {
+            (Shape::DialAsRekey, _) => Left::Pending(hs),
+            (_, Some(y)) => {
+                let (a, b) = ends(x, self.origin(x, id), y, self.origin(y, self.ids[x]));
+                Left::Split(a, b)
+            }
+            (_, None) => Left::Split(None, None),
+        };
+        if !self.shapes.contains(&(shape, left)) {
+            self.shapes.push((shape, left));
+            self.shapes.sort_unstable_by_key(|&(s, l)| (s, l.rank()));
+            self.net
+                .note(|| format!("n{x} shows {shape:?}, leaving {left:?}"));
         }
     }
 
-    /// Hand `inp` to node `x`.
+    /// Hand `inp` to node `x`, noting each peer its liveness timer removed
+    /// while the peer held it on another session.
     pub fn input(&mut self, x: usize, inp: Input) {
-        let World { parties, net, .. } = self;
+        let World {
+            parties,
+            net,
+            ids,
+            ended,
+            ..
+        } = self;
         net.note(|| format!("n{x} <- {inp:?}"));
         parties[x].input(net, inp);
+        for (peer, mine, from) in parties[x].expired() {
+            let theirs = ids.iter().position(|&n| n == peer).and_then(|y| {
+                parties[y]
+                    .view()
+                    .peers
+                    .into_iter()
+                    .find(|p| p.peer == ids[x])
+                    .map(|p| (y, p.cur, p.origin))
+            });
+            let Some((y, theirs, origin)) = theirs.filter(|t| t.1 != mine) else {
+                continue;
+            };
+            let (m, n) = ends(x, [from, mine], y, [origin, theirs]);
+            let pair = [m[0], m[1], n[0], n[1]];
+            if !ended.contains(&(x, peer, pair)) {
+                ended.push((x, peer, pair));
+                net.note(|| {
+                    format!(
+                        "n{x}'s timer removed {peer:?} at {mine:?}, which held it at {:?}",
+                        Some(theirs)
+                    )
+                });
+            }
+        }
     }
 
     /// The node index of identity `id`.
@@ -846,7 +1094,7 @@ impl World {
         }
         let inp = match f.pkt {
             Pkt::Eof => Input::Closed { at: f.src },
-            Pkt::Frame { id: from, hs }
+            Pkt::Frame { id: from, hs, .. }
                 if !fault!(FrameOpensAny) && !self.parties[f.to].holds(from, hs) =>
             {
                 self.net
@@ -859,6 +1107,7 @@ impl World {
                 conn: f.conn,
                 pkt: f.pkt,
                 stamp: self.net.wallnow(),
+                copy: f.copy,
             },
         };
         let suspect = self.suspect(f.to, f.pkt);
@@ -975,6 +1224,48 @@ impl World {
         }
     }
 
+    /// The earliest wake of any party that is not a path bundle's.
+    pub fn paced(&self) -> Option<Ms> {
+        self.parties.iter().filter_map(|p| p.paced()).min()
+    }
+
+    /// Whether a path bundle's wake comes before every other wake, so that
+    /// a [`Self::leap`] does something an [`Self::advance`] does not.
+    pub fn leaps(&self) -> bool {
+        matches!((self.wake(), self.paced()), (Some(w), Some(p)) if w < p)
+    }
+
+    /// Advance to the next wake that is not a path bundle's, running each
+    /// bundle's wake on the way and delivering, after each, the frames in
+    /// flight (the path messages the wake sent and the answers they draw)
+    /// in order. As at an advance, whatever is in flight when the clock
+    /// moves is lost, so what was in flight before the leap is lost at its
+    /// first wake. A bundle wakes every fraction of a second while it
+    /// probes, so without this an advance moves the clock by that fraction
+    /// where, with no bundle wake, it moves it to the next timer.
+    pub fn leap(&mut self) {
+        for _ in 0..10_000 {
+            if !self.leaps() {
+                self.advance();
+                return;
+            }
+            self.advance();
+            for _ in 0..256 {
+                let Some(id) = self
+                    .net
+                    .flight
+                    .iter()
+                    .find(|f| matches!(f.pkt, Pkt::Frame { .. }) && self.net.deliverable(f))
+                    .map(|f| f.id)
+                else {
+                    break;
+                };
+                self.deliver(id);
+            }
+        }
+        panic!("a leap ran ten thousand bundle wakes without reaching another wake");
+    }
+
     /// Lose everything in flight but end-of-stream notices, which are the
     /// transport's own and still reach the far end.
     fn lose(&mut self, at: &'static str) {
@@ -1035,9 +1326,14 @@ impl World {
             s.push('|');
         }
         for c in &self.net.conns {
+            let queued: Vec<(usize, String)> = c
+                .queued
+                .iter()
+                .map(|(e, p)| (*e, self.net.shown(p)))
+                .collect();
             s.push_str(&format!(
                 "{}{:?}{:?}{:?}{:?};",
-                c.id, c.ends, c.state, c.queued, c.verified
+                c.id, c.ends, c.state, queued, c.verified
             ));
         }
         // Each direction of a connection delivers in order and keeps it;
@@ -1045,7 +1341,13 @@ impl World {
         // unordered set, so deliveries that commute reach one state.
         let mut lanes: BTreeMap<(Option<u32>, usize), Vec<String>> = BTreeMap::new();
         for f in &self.net.flight {
-            let item = format!("{:?}{:?}{:?}{};", f.local, f.src, f.pkt, f.copy);
+            let item = format!(
+                "{:?}{:?}{}{};",
+                f.local,
+                f.src,
+                self.net.shown(&f.pkt),
+                f.copy
+            );
             lanes.entry((f.conn, f.to)).or_default().push(item);
         }
         for ((conn, _), items) in lanes.iter_mut() {
@@ -1057,13 +1359,15 @@ impl World {
             s.push_str(&format!("{lane:?}{}", items.concat()));
         }
         s.push_str(&format!(
-            "{}/{}/{}/{:?}/{:?}/{:?}",
+            "{}/{}/{}/{:?}/{:?}/{:?}/{:?}/{:?}",
             self.net.now,
             self.net.wall,
             self.net.captured.len(),
             self.net.failing,
+            self.net.rebound,
             self.used,
-            self.shapes
+            self.shapes,
+            self.ended
         ));
         s
     }
@@ -1123,7 +1427,7 @@ mod checks {
         let mut w = world(&[A, B], &[]);
         w.parties[0] = Box::new(rec);
         for hs in [Hs(8), Hs(7)] {
-            let pkt = Pkt::Frame { id: B, hs };
+            let pkt = Pkt::Frame { id: B, hs, wire: 0 };
             w.net.inject(0, home(0, UDP), home(1, UDP), pkt);
             let id = w.net.flight[0].id;
             w.deliver(id);
@@ -1151,6 +1455,59 @@ mod checks {
             frames,
             [Hs(7)],
             "only the frame under a held session reaches the party"
+        );
+    }
+
+    /// Two frames, each `(handshake, bytes)`, sent in the order given:
+    /// first both as datagrams from node 0 to node 1, then each on a
+    /// connection still inside its connect window, the frame of handshake
+    /// 7 from node 0 and the other from node 1, the connections opened
+    /// beforehand in a fixed order. Each value is interned as it is sent,
+    /// so the order of sends decides its index.
+    fn sent(order: [(u32, &[u8]); 2]) -> u64 {
+        let mut w = world(&[A, B], &[]);
+        for (hs, bytes) in order {
+            let wire = w.net.intern(bytes);
+            let pkt = Pkt::Frame {
+                id: A,
+                hs: Hs(hs),
+                wire,
+            };
+            w.net.send(0, None, home(1, UDP), pkt);
+        }
+        w.net.connect(0, None, home(1, TCP));
+        w.net.connect(1, None, home(0, TCP));
+        for (hs, bytes) in order {
+            let x = usize::from(hs != 7);
+            let wire = w.net.intern(bytes);
+            let pkt = Pkt::Frame {
+                id: A,
+                hs: Hs(hs),
+                wire,
+            };
+            w.net.send(x, None, home(1 - x, TCP), pkt);
+        }
+        assert_eq!(
+            w.net.conns.iter().map(|c| c.queued.len()).sum::<usize>(),
+            2,
+            "precondition: one frame waits in each connect window"
+        );
+        w.key()
+    }
+
+    #[test]
+    fn two_orders_of_commuting_sends_reach_one_key() {
+        let p: &[u8] = &[1, 2, 3];
+        let q: &[u8] = &[4, 5, 6];
+        assert_eq!(
+            sent([(7, p), (8, q)]),
+            sent([(8, q), (7, p)]),
+            "the same packets sent in the other order are one state: the digest prints their bytes, not the order they were first seen in"
+        );
+        assert_ne!(
+            sent([(7, p), (8, q)]),
+            sent([(7, q), (8, p)]),
+            "control: packets whose bytes differ are another state"
         );
     }
 
@@ -1367,6 +1724,7 @@ mod checks {
             hs: Hs(0x0100_0099),
             bytes: Bytes(0x0100_0099),
             epoch,
+            wire: 0,
         };
         w.net.send(2, None, home(1, TCP), pkt);
         settle(&mut w);

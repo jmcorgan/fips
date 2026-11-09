@@ -614,6 +614,9 @@ impl Node {
                                         lease,
                                         their_index,
                                         (ambient.transport_id, ambient.remote_addr.clone()),
+                                        link,
+                                        false,
+                                        true,
                                         &mut caps,
                                     )
                                 }

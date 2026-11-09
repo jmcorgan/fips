@@ -44,7 +44,7 @@ mod rules;
 mod select;
 mod set;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 pub mod wire;
 
 pub use candidate::{Candidates, Entry, Sources};

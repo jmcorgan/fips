@@ -771,6 +771,56 @@ fn unanswered_attempt_is_abandoned_and_retried_after_backoff() {
     conserved(&a);
 }
 
+/// Whether `evs` hold a msg1 going out.
+fn sends_msg1(evs: &[Ev<u8>]) -> bool {
+    evs.iter().any(|e| matches!(e, Ev::Send(MsgKind::Msg1, ..)))
+}
+
+#[test]
+fn a_trigger_starts_an_own_rekey_only_where_a_scheduled_start_would() {
+    // A young link: the link floor holds the trigger, and the time trigger
+    // is left where it was.
+    let (mut a, _) = link();
+    let was = a.m().digest_core(true);
+    assert_eq!(a.trigger(30_999), vec![], "under the link floor");
+    assert_eq!(a.m().digest_core(true), was, "the trigger leaves no mark");
+    assert_eq!(a.m().next_wake(), Some(TestInstant(T)));
+    assert!(sends_msg1(&a.trigger(31_000)), "at the link floor");
+
+    // Idle and eligible, long before the time trigger; a second trigger
+    // finds the cycle busy.
+    let (mut a, _) = link();
+    assert!(sends_msg1(&a.trigger(40_000)), "idle and eligible");
+    assert!(!sends_msg1(&a.trigger(40_100)), "an attempt is in flight");
+
+    // Dampened: the peer's rekey holds this end and not the initiator. The
+    // session floor is below the dampening, so dampening binds on its own.
+    let (x, y) = ordered(1, 2);
+    let short = with(Config::fmp(), |c| {
+        c.floor_session = core::time::Duration::from_secs(20);
+    });
+    let (mut a, mut b) = pair::<Ik>(x, y, 0, short);
+    cycle(&mut a, &mut b, T);
+    let open = T + 10 + 30_000;
+    assert!(b.m().dampened(TestInstant(open - 1)));
+    assert!(!sends_msg1(&b.trigger(open - 1)), "dampening holds");
+    assert!(
+        sends_msg1(&a.trigger(open - 1)),
+        "only the answerer is held"
+    );
+    assert!(sends_msg1(&b.trigger(open)), "dampening over");
+
+    // In back-off: the attempt abandoned at its deadline waits out one
+    // check and the stub's mid draw.
+    let (mut a, _) = link();
+    a.poll(T);
+    for s in 1..=30u64 {
+        a.poll(T + s * 1_000);
+    }
+    assert!(!sends_msg1(&a.trigger(T + 37_999)), "in back-off");
+    assert!(sends_msg1(&a.trigger(T + 38_000)), "back-off over");
+}
+
 #[test]
 fn peer_on_previous_epoch_is_not_reaped_while_drain_held() {
     let (mut a, mut b) = link();

@@ -411,3 +411,190 @@ impl Default for MmpMetrics {
         Self::new()
     }
 }
+
+/// What a metrics state still carries, for tests: see `algorithms.rs`.
+#[cfg(any(test, feature = "test-hooks"))]
+impl MmpMetrics {
+    /// The fields of `self` that differ from `fresh`'s. A field of a nested
+    /// estimator is named once, by the estimator's name.
+    pub(super) fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        use super::algorithms::{note, same_float};
+        let Self {
+            srtt,
+            rtt_trend,
+            loss_trend,
+            goodput_trend,
+            jitter_trend,
+            etx_trend,
+            delivery_ratio_forward,
+            delivery_ratio_reverse,
+            etx,
+            goodput_bps,
+            prev_rr_cum_packets,
+            prev_rr_cum_bytes,
+            prev_rr_highest_counter,
+            prev_rr_ecn_ce,
+            prev_rr_reorder,
+            prev_rr_ms,
+            has_prev_rr,
+            prev_reverse_packets,
+            prev_reverse_highest,
+            has_prev_reverse,
+            reports_seen,
+            rtt_samples,
+            rtt_zero,
+            rtt_arith_fail,
+            last_rtt_ms,
+        } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(
+            &mut out,
+            "metrics.srtt",
+            srtt.fresh_diff(&fresh.srtt).is_empty(),
+        );
+        note(
+            &mut out,
+            "metrics.rtt_trend",
+            rtt_trend.fresh_diff(&fresh.rtt_trend).is_empty(),
+        );
+        note(
+            &mut out,
+            "metrics.loss_trend",
+            loss_trend.fresh_diff(&fresh.loss_trend).is_empty(),
+        );
+        note(
+            &mut out,
+            "metrics.goodput_trend",
+            goodput_trend.fresh_diff(&fresh.goodput_trend).is_empty(),
+        );
+        note(
+            &mut out,
+            "metrics.jitter_trend",
+            jitter_trend.fresh_diff(&fresh.jitter_trend).is_empty(),
+        );
+        note(
+            &mut out,
+            "metrics.etx_trend",
+            etx_trend.fresh_diff(&fresh.etx_trend).is_empty(),
+        );
+        note(
+            &mut out,
+            "metrics.delivery_ratio_forward",
+            same_float(*delivery_ratio_forward, fresh.delivery_ratio_forward),
+        );
+        note(
+            &mut out,
+            "metrics.delivery_ratio_reverse",
+            same_float(*delivery_ratio_reverse, fresh.delivery_ratio_reverse),
+        );
+        note(&mut out, "metrics.etx", same_float(*etx, fresh.etx));
+        note(
+            &mut out,
+            "metrics.goodput_bps",
+            same_float(*goodput_bps, fresh.goodput_bps),
+        );
+        note(
+            &mut out,
+            "metrics.prev_rr_cum_packets",
+            *prev_rr_cum_packets == fresh.prev_rr_cum_packets,
+        );
+        note(
+            &mut out,
+            "metrics.prev_rr_cum_bytes",
+            *prev_rr_cum_bytes == fresh.prev_rr_cum_bytes,
+        );
+        note(
+            &mut out,
+            "metrics.prev_rr_highest_counter",
+            *prev_rr_highest_counter == fresh.prev_rr_highest_counter,
+        );
+        note(
+            &mut out,
+            "metrics.prev_rr_ecn_ce",
+            *prev_rr_ecn_ce == fresh.prev_rr_ecn_ce,
+        );
+        note(
+            &mut out,
+            "metrics.prev_rr_reorder",
+            *prev_rr_reorder == fresh.prev_rr_reorder,
+        );
+        note(
+            &mut out,
+            "metrics.prev_rr_ms",
+            *prev_rr_ms == fresh.prev_rr_ms,
+        );
+        note(
+            &mut out,
+            "metrics.has_prev_rr",
+            *has_prev_rr == fresh.has_prev_rr,
+        );
+        note(
+            &mut out,
+            "metrics.prev_reverse_packets",
+            *prev_reverse_packets == fresh.prev_reverse_packets,
+        );
+        note(
+            &mut out,
+            "metrics.prev_reverse_highest",
+            *prev_reverse_highest == fresh.prev_reverse_highest,
+        );
+        note(
+            &mut out,
+            "metrics.has_prev_reverse",
+            *has_prev_reverse == fresh.has_prev_reverse,
+        );
+        note(
+            &mut out,
+            "metrics.reports_seen",
+            *reports_seen == fresh.reports_seen,
+        );
+        note(
+            &mut out,
+            "metrics.rtt_samples",
+            *rtt_samples == fresh.rtt_samples,
+        );
+        note(&mut out, "metrics.rtt_zero", *rtt_zero == fresh.rtt_zero);
+        note(
+            &mut out,
+            "metrics.rtt_arith_fail",
+            *rtt_arith_fail == fresh.rtt_arith_fail,
+        );
+        note(
+            &mut out,
+            "metrics.last_rtt_ms",
+            *last_rtt_ms == fresh.last_rtt_ms,
+        );
+        out
+    }
+
+    /// A metrics state with every field away from a new one's.
+    pub(super) fn dirtied() -> Self {
+        Self {
+            srtt: SrttEstimator::dirtied(),
+            rtt_trend: DualEwma::dirtied(),
+            loss_trend: DualEwma::dirtied(),
+            goodput_trend: DualEwma::dirtied(),
+            jitter_trend: DualEwma::dirtied(),
+            etx_trend: DualEwma::dirtied(),
+            delivery_ratio_forward: 0.9,
+            delivery_ratio_reverse: 0.8,
+            etx: 1.4,
+            goodput_bps: 12_000.0,
+            prev_rr_cum_packets: 100,
+            prev_rr_cum_bytes: 80_000,
+            prev_rr_highest_counter: 110,
+            prev_rr_ecn_ce: 1,
+            prev_rr_reorder: 2,
+            prev_rr_ms: Some(5_000),
+            has_prev_rr: true,
+            prev_reverse_packets: 90,
+            prev_reverse_highest: 95,
+            has_prev_reverse: true,
+            reports_seen: 4,
+            rtt_samples: 3,
+            rtt_zero: 1,
+            rtt_arith_fail: 1,
+            last_rtt_ms: Some(40),
+        }
+    }
+}

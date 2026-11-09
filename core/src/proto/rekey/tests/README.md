@@ -5,6 +5,10 @@ public interface with synthetic instants (`testutil::TestInstant`,
 milliseconds) and deterministic stub crypto, read no clock and never
 sleep.
 
+The module is `pub(crate)`, as are `stub` and `oracles`, because the
+settlement tests run real machines on this stub and hold them to these
+oracles.
+
 ## Files
 
 - `mod.rs`: declares the files below, checks that the module root still
@@ -21,10 +25,12 @@ sleep.
   - Stub handshakes: an ephemeral is an attempt identifier from a
     per-node counter, and every message carries a keyed hash over its
     transcript in place of an AEAD tag, so forged, replayed, corrupt and
-    wrong-identity messages are all easy to build. `read_msg1` stands
+    wrong-identity messages are all easy to build. `Local::name` sets
+    the counter, for a shell whose ephemerals must follow from a name
+    and not from the order of events. `read_msg1` stands
     for the node-level IK msg1 read; `leg_answer` and `leg_done` for a
-    leg table; `forge3`, `ik_frame` and `leg_frame` build messages a
-    peer or a third identity would send.
+    leg table; `forge3`, `ik_frame`, `seal_as`, `seal_to` and `leg_frame` build
+    messages a peer or a third identity would send.
   - `Node`, the test shell: it owns one machine and the capabilities its
     `Env` lends, executes outputs as a shell does (returning leases to
     its pool, sealing each `Prompt` at once, putting sends and frames on
@@ -43,7 +49,8 @@ sleep.
     jitter) unless a test queued draws. `failed` counts the frames this
     thread's stub sessions failed to open, which shows the order epochs
     were tried in.
-- `fmp.rs`: the two-message tables: trigger, attempt and ladder, every
+- `fmp.rs`: the two-message tables: trigger, the `trigger` hook held by
+  each condition of a scheduled start, attempt and ladder, every
   IK msg1 and msg2 cell, the answer's route with arrival replies on and
   off (a msg1 accepted off an unreachable link is answered on the link,
   one on the link on its arrival path, and a resend follows the first
@@ -58,6 +65,13 @@ sleep.
 - `next.rs`: the rows only next's profiles select: leg completions, the
   delayed cutover and its retained msg3, and a frame-driven session
   responder.
+- `oracles.rs`: the simulator's oracles over one machine or one delivery
+  as predicates, each with its message: O1, O3, O4, O5's comparison and
+  the list of what a record owes, O6, O8 and O10. `sim.rs` and the
+  settlement tests' joint world call them; `sim.rs` says what each means.
+  The list says whether it owes an ephemeral, which a shell that cannot
+  tell a copy's original reads to know a copy for a repeat, and the
+  machine's `Peek` is re-exported from here for a shell that plants one.
 - `sim.rs`: the deterministic two-party simulator. `World` holds two
   shells and the datagrams between them, executes outputs as a shell
   does, models a decrypt worker (indexed profiles) and next's leg table

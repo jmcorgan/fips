@@ -18,9 +18,18 @@
 
 # fips-core
 benchmark     fips-core  proto::link::tests::bench_session_datagram_decode_owned_vs_ref  core/src/proto/tests/link.rs
+benchmark     fips-core  proto::settle::tests::joint::explore::the_cold_start_is_explored_as_deep_as_the_reach_budget_allows_at_off_and_at_on  core/src/proto/settle/tests/joint/explore.rs
 known-defect  fips-core  proto::settle::tests::regress::after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey  core/src/proto/settle/tests/regress.rs
 known-defect  fips-core  proto::settle::tests::regress::after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_larger_dialer  core/src/proto/settle/tests/regress.rs
 known-defect  fips-core  proto::settle::tests::regress::after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_smaller_dialer  core/src/proto/settle/tests/regress.rs
+known-defect  fips-core  proto::settle::tests::joint::pins::a_crossing_moved_onto_the_pair_of_the_peers_dial_keeps_that_connection_open  core/src/proto/settle/tests/joint/pins.rs
+known-defect  fips-core  proto::settle::tests::joint::pins::a_proven_path_whose_connection_failed_is_not_counted_in_use_without_a_connection  core/src/proto/settle/tests/joint/pins.rs
+known-defect  fips-core  proto::settle::tests::joint::pins::a_frame_from_another_transport_leaves_the_cores_record_of_the_peer_at_the_active_path  core/src/proto/settle/tests/joint/pins.rs
+known-defect  fips-core  proto::settle::tests::joint::pins::a_switch_moves_the_cores_record_of_the_peer_to_the_new_active_path  core/src/proto/settle/tests/joint/pins.rs
+known-defect  fips-core  proto::settle::tests::joint::pins::a_msg1_from_a_capable_peers_setup_pair_with_no_path_is_off_the_link  core/src/proto/settle/tests/joint/pins.rs
+known-defect  fips-core  proto::settle::tests::joint::pins::a_switch_to_a_path_that_is_not_live_leaves_it_acknowledged_in_the_core  core/src/proto/settle/tests/joint/pins.rs
+known-defect  fips-core  proto::settle::tests::joint::pins::a_msg1_from_the_pair_a_frame_from_another_transport_came_from_is_off_the_link  core/src/proto/settle/tests/joint/pins.rs
+known-defect  fips-core  proto::settle::tests::joint::pins::a_msg1_from_the_pair_a_frame_moved_the_cores_record_to_whose_path_is_probing_is_off_the_link  core/src/proto/settle/tests/joint/pins.rs
 
 # fips-mesh
 environment   fips-mesh  gateway::nat::tests::kernel_rejection_retries_latest_state_without_another_mapping_event  src/gateway/nat.rs
@@ -104,3 +113,4 @@ known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_
 known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first_with_multipath_on  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::readings::a_close_queued_at_a_restart_teardown_spares_the_new_link_at_that_pair  src/node/tests/settle/readings.rs

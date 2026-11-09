@@ -1,8 +1,10 @@
 # src/node/settle
 
-One owner for each of the node's per-peer maps. The module is
-`node::settle`, declared in `../mod.rs`; `Node` holds each map as a field
-whose type is a wrapper defined here.
+One owner for each of the node's per-peer maps, and the table of what each
+change to a held peer does to each piece of its state. The module is
+`node::settle`, declared `pub(crate)` in `../mod.rs` so that `src/peer/` can
+name the table; `Node` holds each map as a field whose type is a wrapper
+defined here, and the wrappers stay `pub(in crate::node)`.
 
 Each wrapper keeps its map in a private field. It derefs to the map, so
 every read in the node is written as it was against a plain `HashMap`, and
@@ -52,9 +54,18 @@ field, at once.
   writers, counts each audit on the node's link table, and records the
   audit's reach when `FIPS_AUDIT_REACH` names a file
   (`testing/check-audit-reach.py`).
-- `tests.rs`: each writer against the statements it transcribes, the rule
-  that only the ways past the writers mark a map, and each clause of the
-  audit against a state, built through the writers, that breaks it alone.
+- `table.rs`: `Transition`, each thing the code does to a held peer; `Row`,
+  each piece of what the node holds per peer, with `DataRow` for the peer's
+  record; `Cell` and `DataCell`, what a transition does to a row; `Owner` and
+  `Facet`, who holds a row; and `cell`, `data_cell` and `owner`, the rule as
+  nested total matches. The peer's record settles by `data_cell`, and the
+  rekey handler marks the filter at a cutover by `cell`; the other rows wait
+  for their sites to be routed.
+- `plan.rs`: `Effect`, one step the node takes for a transition, `plan`, the
+  effects of each transition in their order, and `Node::run_plan`, which runs
+  them on a held peer. A restart found at a rekey runs from here; a
+  transition whose list is empty runs its own statements at its site.
+- `tests/`: the unit tests of this level; its own README names each file.
 
 ## Rules for this level
 
@@ -78,4 +89,12 @@ field, at once.
 - A clause states a rule that holds between any two node entries, mid
   handshake included. A rule that holds only at quiescence belongs to the
   quiescent audit in `../tests/settle/audit.rs`, not here.
+- `table.rs` denies wildcard match arms and holds none, so a new row,
+  transition or cause does not compile until it has taken a side at each cell.
+  Its rule states what the code does today; a cell the code does not match is
+  a wrong cell or a wrong site, and a change of what a transition does changes
+  the cell and its golden line in the same commit.
+- `plan.rs` denies wildcard arms as `table.rs` does, and a plan lists the
+  statements it stands for in their old order: a reordering is a change of
+  behaviour.
 - Keep the file list in step with the directory.

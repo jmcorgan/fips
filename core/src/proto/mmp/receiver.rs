@@ -484,3 +484,205 @@ impl Default for ReceiverState {
         Self::new(DEFAULT_OWD_WINDOW_SIZE)
     }
 }
+
+/// What a gap tracker still carries, for tests: see `algorithms.rs`.
+#[cfg(any(test, feature = "test-hooks"))]
+impl GapTracker {
+    /// The fields of `self` that differ from `fresh`'s.
+    fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        use super::algorithms::note;
+        let Self {
+            expected_next,
+            in_burst,
+            current_burst_len,
+            burst_count,
+            max_burst_len,
+            total_burst_len,
+        } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(
+            &mut out,
+            "expected_next",
+            *expected_next == fresh.expected_next,
+        );
+        note(&mut out, "in_burst", *in_burst == fresh.in_burst);
+        note(
+            &mut out,
+            "current_burst_len",
+            *current_burst_len == fresh.current_burst_len,
+        );
+        note(&mut out, "burst_count", *burst_count == fresh.burst_count);
+        note(
+            &mut out,
+            "max_burst_len",
+            *max_burst_len == fresh.max_burst_len,
+        );
+        note(
+            &mut out,
+            "total_burst_len",
+            *total_burst_len == fresh.total_burst_len,
+        );
+        out
+    }
+
+    /// A tracker with every field away from a new one's.
+    fn dirtied() -> Self {
+        Self {
+            expected_next: Some(120),
+            in_burst: true,
+            current_burst_len: 2,
+            burst_count: 3,
+            max_burst_len: 4,
+            total_burst_len: 9,
+        }
+    }
+}
+
+/// What a receiver state still carries, for tests: see `algorithms.rs`.
+#[cfg(any(test, feature = "test-hooks"))]
+impl ReceiverState {
+    /// The fields of `self` that differ from `fresh`'s. A field of a nested
+    /// state is named once, by the nested state's name.
+    pub(super) fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        use super::algorithms::note;
+        let Self {
+            cumulative_packets_recv,
+            cumulative_bytes_recv,
+            cumulative_reorder_count,
+            highest_counter,
+            interval_packets_recv,
+            interval_bytes_recv,
+            jitter,
+            owd_trend,
+            owd_seq,
+            gap_tracker,
+            ecn_ce_count,
+            last_sender_timestamp,
+            last_recv_ms,
+            rekey_jitter_grace_until_ms,
+            last_report_ms,
+            report_interval_ms,
+            interval_has_data,
+            srtt_sample_count,
+        } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(
+            &mut out,
+            "receiver.cumulative_packets_recv",
+            *cumulative_packets_recv == fresh.cumulative_packets_recv,
+        );
+        note(
+            &mut out,
+            "receiver.cumulative_bytes_recv",
+            *cumulative_bytes_recv == fresh.cumulative_bytes_recv,
+        );
+        note(
+            &mut out,
+            "receiver.cumulative_reorder_count",
+            *cumulative_reorder_count == fresh.cumulative_reorder_count,
+        );
+        note(
+            &mut out,
+            "receiver.highest_counter",
+            *highest_counter == fresh.highest_counter,
+        );
+        note(
+            &mut out,
+            "receiver.interval_packets_recv",
+            *interval_packets_recv == fresh.interval_packets_recv,
+        );
+        note(
+            &mut out,
+            "receiver.interval_bytes_recv",
+            *interval_bytes_recv == fresh.interval_bytes_recv,
+        );
+        note(
+            &mut out,
+            "receiver.jitter",
+            jitter.fresh_diff(&fresh.jitter).is_empty(),
+        );
+        note(
+            &mut out,
+            "receiver.owd_trend",
+            owd_trend.fresh_diff(&fresh.owd_trend).is_empty(),
+        );
+        note(&mut out, "receiver.owd_seq", *owd_seq == fresh.owd_seq);
+        note(
+            &mut out,
+            "receiver.gap_tracker",
+            gap_tracker.fresh_diff(&fresh.gap_tracker).is_empty(),
+        );
+        note(
+            &mut out,
+            "receiver.ecn_ce_count",
+            *ecn_ce_count == fresh.ecn_ce_count,
+        );
+        note(
+            &mut out,
+            "receiver.last_sender_timestamp",
+            *last_sender_timestamp == fresh.last_sender_timestamp,
+        );
+        note(
+            &mut out,
+            "receiver.last_recv_ms",
+            *last_recv_ms == fresh.last_recv_ms,
+        );
+        note(
+            &mut out,
+            "receiver.rekey_jitter_grace_until_ms",
+            *rekey_jitter_grace_until_ms == fresh.rekey_jitter_grace_until_ms,
+        );
+        note(
+            &mut out,
+            "receiver.last_report_ms",
+            *last_report_ms == fresh.last_report_ms,
+        );
+        note(
+            &mut out,
+            "receiver.report_interval_ms",
+            *report_interval_ms == fresh.report_interval_ms,
+        );
+        note(
+            &mut out,
+            "receiver.interval_has_data",
+            *interval_has_data == fresh.interval_has_data,
+        );
+        note(
+            &mut out,
+            "receiver.srtt_sample_count",
+            *srtt_sample_count == fresh.srtt_sample_count,
+        );
+        out
+    }
+
+    /// A receiver state with every field away from a new one's but the
+    /// one-way-delay window's `owd_window_size`, which `new` takes.
+    pub(super) fn dirtied(owd_window_size: usize) -> Self {
+        Self {
+            cumulative_packets_recv: 110,
+            cumulative_bytes_recv: 88_000,
+            cumulative_reorder_count: 2,
+            highest_counter: 119,
+            interval_packets_recv: 10,
+            interval_bytes_recv: 8_000,
+            jitter: JitterEstimator::dirtied(),
+            owd_trend: OwdTrendDetector::dirtied(owd_window_size),
+            owd_seq: 9,
+            gap_tracker: GapTracker::dirtied(),
+            ecn_ce_count: 1,
+            last_sender_timestamp: 5_900,
+            last_recv_ms: Some(6_100),
+            rekey_jitter_grace_until_ms: Some(1),
+            last_report_ms: Some(6_050),
+            report_interval_ms: 1_500,
+            interval_has_data: true,
+            srtt_sample_count: 3,
+        }
+    }
+
+    /// The gap tracker's fields that differ from a new tracker's.
+    #[cfg(test)]
+    pub(super) fn gaps_fresh_diff(&self) -> alloc::vec::Vec<&'static str> {
+        self.gap_tracker.fresh_diff(&GapTracker::new())
+    }
+}

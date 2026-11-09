@@ -71,6 +71,12 @@ faults! {
     /// transport and leaves the path bundle as it was, instead of taking
     /// the winning msg2's transport and address.
     MoveKeepsOldPair,
+    /// A peer's record keeps its link's MMP counters through a rekey
+    /// cutover, whose frame counter starts again at zero.
+    CutoverSkipsMmpReset,
+    /// A peer's record keeps its link's MMP counters through a move onto
+    /// a new session, whose frame counter starts again at zero.
+    MoveSkipsMmpReset,
     /// A rekey machine that yields to a peer's completed attempt keeps its
     /// own attempt instead of abandoning it.
     YieldKeepsOwnAttempt,
@@ -100,12 +106,19 @@ faults! {
     /// A msg2 that does not authenticate ends the pending dial instead of
     /// keeping the attempt for the genuine msg2.
     ForgetDialOnRefusedMsg2,
+    /// A promotion runs the link machine's outputs before the peer is in
+    /// the table, so its session finds no peer's total to hand the decrypt
+    /// workers and is not delegated.
+    OutputsBeforeInstall,
     /// A newly promoted peer starts as if a tree announce had just been
     /// sent to it, so the rate limit holds back its first one.
     NewPeerStartsRateLimited,
     /// A peer replaced by a restart keeps the old peer's record of when it
     /// was last sent a tree announce.
     TreeCarryAcrossRestart,
+    /// A peer restart found at a rekey leaves the peer in the spanning
+    /// tree's state, so the declaration its previous run sent stays held.
+    RestartSkipsTreeReset,
     /// A stream transport's close aborts the connection's writer at once
     /// instead of letting it write what was queued.
     DrainAbortsAtOnce,

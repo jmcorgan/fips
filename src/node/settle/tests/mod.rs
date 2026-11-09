@@ -10,6 +10,9 @@ use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId};
 use crate::{Identity, NodeAddr, PeerIdentity};
 use std::time::Duration;
 
+mod census;
+mod plan;
+
 /// An inbound machine for `link`, with no handshake started.
 fn machine(link: LinkId) -> PeerMachine {
     PeerMachine::new_inbound(link, LegStamp::at(1000))

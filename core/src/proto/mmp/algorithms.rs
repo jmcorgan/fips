@@ -280,3 +280,114 @@ pub fn compute_etx(d_forward: f64, d_reverse: f64) -> f64 {
 pub fn quality_index(etx: f64, rtt_ms: f64) -> f64 {
     etx * (1.0 + rtt_ms / 100.0)
 }
+
+// ============================================================================
+// What a state still carries, for tests
+// ============================================================================
+
+/// Add `name` to `out` unless `same`: one step of a `fresh_diff`.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(super) fn note(out: &mut alloc::vec::Vec<&'static str>, name: &'static str, same: bool) {
+    if !same {
+        out.push(name);
+    }
+}
+
+/// Whether two floats hold the same value, bit for bit.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(super) fn same_float(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits()
+}
+
+// Each `fresh_diff` below names the fields of `self` that differ from
+// `fresh`'s, and each `dirtied` builds a state whose every field is away from
+// a new one's but those `new` takes as arguments. Both name every field with
+// no `..`, so a new field does not compile until it takes a side.
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl JitterEstimator {
+    /// The fields of `self` that differ from `fresh`'s.
+    pub(super) fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        let Self { jitter_q4 } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(&mut out, "jitter_q4", *jitter_q4 == fresh.jitter_q4);
+        out
+    }
+
+    /// An estimator with every field away from a new one's.
+    pub(super) fn dirtied() -> Self {
+        Self { jitter_q4: 1600 }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl SrttEstimator {
+    /// The fields of `self` that differ from `fresh`'s.
+    pub(super) fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        let Self {
+            srtt_us,
+            rttvar_us,
+            initialized,
+        } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(&mut out, "srtt_us", *srtt_us == fresh.srtt_us);
+        note(&mut out, "rttvar_us", *rttvar_us == fresh.rttvar_us);
+        note(&mut out, "initialized", *initialized == fresh.initialized);
+        out
+    }
+
+    /// An estimator with every field away from a new one's.
+    pub(super) fn dirtied() -> Self {
+        Self {
+            srtt_us: 40_000,
+            rttvar_us: 5_000,
+            initialized: true,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl DualEwma {
+    /// The fields of `self` that differ from `fresh`'s.
+    pub(super) fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        let Self {
+            short,
+            long,
+            initialized,
+        } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(&mut out, "short", same_float(*short, fresh.short));
+        note(&mut out, "long", same_float(*long, fresh.long));
+        note(&mut out, "initialized", *initialized == fresh.initialized);
+        out
+    }
+
+    /// A detector with every field away from a new one's.
+    pub(super) fn dirtied() -> Self {
+        Self {
+            short: 3.5,
+            long: 2.5,
+            initialized: true,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl OwdTrendDetector {
+    /// The fields of `self` that differ from `fresh`'s.
+    pub(super) fn fresh_diff(&self, fresh: &Self) -> alloc::vec::Vec<&'static str> {
+        let Self { samples, capacity } = self;
+        let mut out = alloc::vec::Vec::new();
+        note(&mut out, "samples", *samples == fresh.samples);
+        note(&mut out, "capacity", *capacity == fresh.capacity);
+        out
+    }
+
+    /// A detector of `capacity` holding samples, which a new one does not.
+    pub(super) fn dirtied(capacity: usize) -> Self {
+        let mut detector = Self::new(capacity);
+        detector.push(7, 1_200);
+        detector.push(8, 1_350);
+        detector
+    }
+}

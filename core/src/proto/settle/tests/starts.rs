@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use super::super::model::history::{Addr, Node};
 use super::explore::{Act, Budget, SMALL};
 use super::party::{Configured, ModelParty};
-use super::world::{Input, Kind, Net, Party, PathEv, Pkt, State, World};
+use super::world::{Input, Kind, Net, Party, Pkt, State, World};
 
 /// The smaller and the larger node of a pair, and a third node.
 pub const A: Node = Node(1);
@@ -82,6 +82,9 @@ pub struct Start {
     pub wall: bool,
     /// Whether third-party msg1s and forged msg2s are injected.
     pub forged: bool,
+    /// Whether each node may dial another once ([`Act::Dial`]): the cold
+    /// start's, whose world holds nothing to deliver until a node dials.
+    pub cold: bool,
 }
 
 /// Which packet a script step delivers.
@@ -99,10 +102,33 @@ pub enum Do {
     /// Deliver the first deliverable packet of this kind to node `x`, sent
     /// by node index `from` if given.
     Get(usize, Want, Option<usize>),
+    /// Put a copy of the packet [`Do::Get`] would deliver in flight beside
+    /// it: a duplicate.
+    Copy(usize, Want, Option<usize>),
     /// Resolve node `x`'s first connecting connection, open.
     Open(usize),
     /// An event as it is.
     Then(Act),
+}
+
+/// The first deliverable packet of kind `want` to node `x`, sent by node
+/// index `from` if given.
+fn first(w: &World, x: usize, want: Want, from: Option<usize>) -> u64 {
+    w.net
+        .flight
+        .iter()
+        .find(|f| {
+            f.to == x
+                && w.net.deliverable(f)
+                && match (want, f.pkt) {
+                    (Want::Msg1, Pkt::Msg1 { id, .. }) | (Want::Msg2, Pkt::Msg2 { id, .. }) => {
+                        from.is_none_or(|y| w.ids[y] == id)
+                    }
+                    _ => false,
+                }
+        })
+        .map(|f| f.id)
+        .unwrap_or_else(|| panic!("the script finds {want:?} for n{x}"))
 }
 
 /// Run `steps` on `w` and return them as the explorer's events.
@@ -110,26 +136,8 @@ pub fn run(w: &mut World, steps: &[Do]) -> Vec<Act> {
     let mut out = Vec::new();
     for s in steps {
         let a = match *s {
-            Do::Get(x, want, from) => {
-                let id = w
-                    .net
-                    .flight
-                    .iter()
-                    .find(|f| {
-                        f.to == x
-                            && w.net.deliverable(f)
-                            && match (want, f.pkt) {
-                                (Want::Msg1, Pkt::Msg1 { id, .. })
-                                | (Want::Msg2, Pkt::Msg2 { id, .. }) => {
-                                    from.is_none_or(|y| w.ids[y] == id)
-                                }
-                                _ => false,
-                            }
-                    })
-                    .map(|f| f.id)
-                    .unwrap_or_else(|| panic!("the script finds {want:?} for n{x}"));
-                Act::Deliver(id)
-            }
+            Do::Get(x, want, from) => Act::Deliver(first(w, x, want, from)),
+            Do::Copy(x, want, from) => Act::Dup(first(w, x, want, from)),
             Do::Open(x) => {
                 let c = w
                     .net
@@ -237,7 +245,6 @@ std::thread_local! {
 /// smaller, and the other way round. The scripts and the explorer address
 /// nodes by index, so a start runs unchanged with the roles of the smaller
 /// and the larger node exchanged.
-#[cfg(feature = "slow-explorers")]
 pub fn flipped<T>(f: impl FnOnce() -> T) -> T {
     struct Reset(bool);
     impl Drop for Reset {
@@ -251,7 +258,7 @@ pub fn flipped<T>(f: impl FnOnce() -> T) -> T {
 
 /// Nodes 0 and 1, node 0 the identity `first`, or the other one when the
 /// address order is [`flipped`].
-fn pair(mk: Maker, first: Node, dials: &[&[(usize, u8)]]) -> World {
+pub fn pair(mk: Maker, first: Node, dials: &[&[(usize, u8)]]) -> World {
     let other = if first == A { B } else { A };
     if FLIPPED.with(core::cell::Cell::get) {
         world_of(mk, &[other, first], dials)
@@ -527,9 +534,10 @@ fn three_script(w: &mut World) -> Vec<Act> {
     )
 }
 
-/// Nodes 0 and 1 cross on BLE, node 1 dialing from its second address,
-/// which node 0's dialed link already holds as a second live path; the
-/// bundles' other path events are available.
+/// Nodes 0 and 1 cross on BLE, node 1 dialing from its second address.
+/// The joint world runs this start on real bundles, built in
+/// `joint/starts.rs`, where a link holds two paths; this one, which the
+/// model runs, has none.
 fn paths(mk: Maker) -> World {
     let mut w = pair(mk, A, &[&[(1, BLE)], &[(0, BLE)]]);
     dial_home(&mut w, 0, 1, BLE);
@@ -538,41 +546,6 @@ fn paths(mk: Maker) -> World {
     for c in ids {
         w.connected(c, true);
     }
-    w.input(
-        0,
-        Input::Path(PathEv::State {
-            peer: B,
-            at: second(1, BLE),
-            live: true,
-        }),
-    );
-    w.paths = alloc::vec![
-        (
-            0,
-            PathEv::Released {
-                peer: B,
-                at: second(1, BLE),
-                keep: false,
-            },
-        ),
-        (
-            1,
-            PathEv::Switched {
-                peer: A,
-                from: home(0, BLE),
-                to: second(0, BLE),
-            },
-        ),
-        (
-            1,
-            PathEv::Moved {
-                peer: A,
-                from: second(0, BLE),
-                to: at(BLE, 12),
-            },
-        ),
-    ];
-    w.used = alloc::vec![false; w.paths.len()];
     w
 }
 
@@ -650,6 +623,7 @@ pub fn starts() -> Vec<Start> {
         budget: SMALL,
         wall: false,
         forged: false,
+        cold: false,
     };
     let mut v = alloc::vec![
         s(

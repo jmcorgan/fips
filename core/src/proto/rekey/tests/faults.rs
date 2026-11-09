@@ -552,6 +552,13 @@ const ROWS: &[Row] = &[
         &[Fault::GlobalJitter],
         &[(SIM, "simulator_replay_from_a_seed_is_byte_identical")],
     ),
+    (
+        &[Fault::TriggerForced],
+        &[(
+            FMP,
+            "a_trigger_starts_an_own_rekey_only_where_a_scheduled_start_would",
+        )],
+    ),
 ];
 
 /// Run the test at `path` alone in a child process with `faults` on; true

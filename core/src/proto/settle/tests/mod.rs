@@ -13,16 +13,15 @@ mod cmp;
 mod drive;
 mod explore;
 mod faults;
+mod joint;
 mod legacy;
 mod oracle;
 mod party;
 mod regress;
-mod rekeyside;
 mod shadow;
 mod shapes;
 mod sim;
 mod starts;
-mod stub;
 mod world;
 
 use alloc::format;
@@ -314,6 +313,7 @@ fn every_settlement_test_is_named_by_a_switch_or_listed_and_the_scan_finds_a_pla
     let missing = faults::uncovered(
         &tests,
         faults::ROWS,
+        faults::REKEY,
         faults::SELF_CHECKED,
         faults::CHARACTERISATION,
     );
@@ -326,6 +326,7 @@ fn every_settlement_test_is_named_by_a_switch_or_listed_and_the_scan_finds_a_pla
         faults::uncovered(
             &planted,
             faults::ROWS,
+            faults::REKEY,
             faults::SELF_CHECKED,
             faults::CHARACTERISATION
         ),
@@ -335,6 +336,11 @@ fn every_settlement_test_is_named_by_a_switch_or_listed_and_the_scan_finds_a_pla
     let stale: Vec<&str> = faults::ROWS
         .iter()
         .flat_map(|(_, ts)| ts.iter().map(|(_, n)| *n))
+        .chain(
+            faults::REKEY
+                .iter()
+                .flat_map(|(_, ts)| ts.iter().map(|(_, n)| *n)),
+        )
         .chain(faults::SELF_CHECKED.iter().copied())
         .chain(faults::CHARACTERISATION.iter().map(|(n, _)| *n))
         .filter(|n| !tests.iter().any(|t| t == n))
@@ -343,6 +349,21 @@ fn every_settlement_test_is_named_by_a_switch_or_listed_and_the_scan_finds_a_pla
         stale.is_empty(),
         "the tables name tests the scan cannot find: {stale:?}"
     );
+}
+
+/// The rekey machine's switches, read from its source.
+const REKEY_FAULTS: &str = include_str!("../../rekey/faults.rs");
+
+/// The names of `rekey` that are no switch of the rekey machine, whose
+/// list in `source` names each as `Self::<name>`: a child would panic on
+/// such a name, red for the wrong reason.
+fn unknown(rekey: &[faults::RekeyRow], source: &str) -> Vec<&'static str> {
+    let idents = code_idents(source);
+    rekey
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| !idents.windows(2).any(|w| w[0].1 == "Self" && w[1].1 == *n))
+        .collect()
 }
 
 #[test]
@@ -358,4 +379,217 @@ fn every_switch_has_a_row_and_the_scan_finds_a_row_removed() {
         [first],
         "the scan finds a switch whose row was removed"
     );
+    let unnamed = unknown(faults::REKEY, REKEY_FAULTS);
+    assert!(
+        unnamed.is_empty(),
+        "these rekey rows name no switch of the rekey machine: {unnamed:?}"
+    );
+    let planted: &[faults::RekeyRow] = &[("NoSuchSwitch", &[])];
+    assert_eq!(
+        unknown(planted, REKEY_FAULTS),
+        ["NoSuchSwitch"],
+        "the scan finds a rekey row naming no switch"
+    );
+}
+
+/// The `.rs` files directly in the joint world's directory, by name.
+fn joint_sources() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = std::fs::read_dir(dir("tests/joint"))
+        .expect("the directory reads")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .map(|p| {
+            let name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(String::from)
+                .expect("a file name");
+            (name, std::fs::read_to_string(&p).expect("the file reads"))
+        })
+        .collect();
+    out.sort();
+    assert!(
+        out.iter().any(|(n, _)| n == "party.rs"),
+        "the joint world's sources are found"
+    );
+    out
+}
+
+#[test]
+fn no_joint_source_defines_a_setter_and_the_scan_finds_a_planted_one() {
+    for (name, source) in joint_sources() {
+        assert!(
+            setters(&source).is_empty(),
+            "joint/{name} defines a setter at lines {:?}, so a test could reach a state the world's inputs cannot",
+            setters(&source)
+        );
+    }
+    let planted = "impl Machines {\n    pub(super) fn set_active(&mut self) {}\n}\n";
+    assert_eq!(setters(planted), [2], "the scan finds a planted setter");
+}
+
+/// The lines of `source` whose code names the wildcard-arm lint: under
+/// the joint world the lint is only ever denied, at the settlement root.
+fn wildcards(source: &str) -> Vec<usize> {
+    code_text(source)
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.contains("wildcard_enum_match_arm"))
+        .map(|(n, _)| n + 1)
+        .collect()
+}
+
+#[test]
+fn no_joint_source_allows_a_wildcard_arm_and_the_scan_finds_a_planted_one() {
+    for (name, source) in joint_sources() {
+        assert!(
+            wildcards(&source).is_empty(),
+            "joint/{name} names the wildcard-arm lint at lines {:?}; a match over a machine's outputs or a core output must name every arm",
+            wildcards(&source)
+        );
+    }
+    for plant in [
+        "#[allow(clippy::wildcard_enum_match_arm)]",
+        "#[expect(clippy::too_many_arguments, clippy::wildcard_enum_match_arm)]",
+    ] {
+        let planted = format!("fn route() {{}}\n{plant}\nfn moved() {{}}\n");
+        assert_eq!(wildcards(&planted), [2], "the scan finds {plant} planted");
+    }
+}
+
+/// The name a joint node's shell binds the core's record of a held peer
+/// to, wherever it reads one.
+const HELD: &str = "h";
+
+/// The functions of a joint source allowed to read the core's record of
+/// where a held peer is, `Held.current`, each with why: the node's own
+/// address for the peer is the bundle's active path, and the core's
+/// record is read for the oracles alone.
+const READS_CURRENT: &[(&str, &str, &str)] = &[
+    ("party.rs", "view", "the view's record of the peer"),
+    (
+        "party.rs",
+        "facts",
+        "the joint oracles' input, which the paths' mirror compares with the active path",
+    ),
+    (
+        "party.rs",
+        "attribute",
+        "attribution's judge, naming the pinned shapes where the core's rule is wider",
+    ),
+    (
+        "party.rs",
+        "to",
+        "the switch that sends by the core's record, the defect's shape",
+    ),
+];
+
+/// Each read of `<HELD>.current` in `source`, with the function it is in.
+fn current_reads(source: &str) -> Vec<(usize, String)> {
+    let code = code_text(source);
+    let needle = format!("{HELD}.current");
+    let mut func = String::new();
+    let mut out = Vec::new();
+    for (n, line) in code.lines().enumerate() {
+        let words: Vec<&str> = line.split(|c: char| !ident(c)).collect();
+        if let Some(i) = words.iter().position(|w| *w == "fn")
+            && let Some(name) = words[i + 1..].iter().find(|w| !w.is_empty())
+        {
+            func = String::from(*name);
+        }
+        let mut from = 0;
+        while let Some(at) = line[from..].find(&needle) {
+            let start = from + at;
+            from = start + needle.len();
+            let before = line[..start].chars().next_back();
+            let after = line[from..].chars().next();
+            if !before.is_some_and(ident) && !after.is_some_and(ident) {
+                out.push((n + 1, func.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// The reads of `Held.current` in the joint source `name` outside the
+/// functions [`READS_CURRENT`] allows.
+fn stray_reads(name: &str, source: &str) -> Vec<(usize, String)> {
+    current_reads(source)
+        .into_iter()
+        .filter(|(_, f)| {
+            !READS_CURRENT
+                .iter()
+                .any(|(file, func, _)| *file == name && func == f)
+        })
+        .collect()
+}
+
+#[test]
+fn the_cores_record_of_where_a_peer_is_is_read_only_for_the_oracles_and_the_scan_finds_a_planted_read()
+ {
+    let mut seen = Vec::new();
+    for (name, source) in joint_sources() {
+        let stray = stray_reads(&name, &source);
+        assert!(
+            stray.is_empty(),
+            "joint/{name} reads the core's record of where a peer is outside the view and the oracles, at (line, function) {stray:?}; the shell's address for the peer is the bundle's active path"
+        );
+        seen.extend(
+            current_reads(&source)
+                .into_iter()
+                .map(|(_, f)| (name.clone(), f)),
+        );
+    }
+    for (file, func, _) in READS_CURRENT {
+        assert!(
+            seen.iter().any(|(n, f)| n == file && f == func),
+            "joint/{file}'s {func} no longer reads the core's record; its entry is stale"
+        );
+    }
+    let party = std::fs::read_to_string(dir("tests/joint/party.rs")).expect("the file reads");
+    let planted = format!("{party}\nfn reply(h: &Held) -> Pair {{\n    h.current.clone()\n}}\n");
+    let stray = stray_reads("party.rs", &planted);
+    assert_eq!(
+        stray.iter().map(|(_, f)| f.as_str()).collect::<Vec<_>>(),
+        ["reply"],
+        "the scan finds a planted read: {stray:?}"
+    );
+    assert!(
+        stray_reads(
+            "party.rs",
+            "fn reply(h: &Held) -> bool {\n    h.currently\n}\n"
+        )
+        .is_empty(),
+        "and does not take another field for it"
+    );
+}
+
+/// The names the deleted transcription of the rekey machine and the
+/// stand-in core's party went by.
+const RETIRED: &[&str] = &["RekeySide", "CoreParty", "TwinParty", "rekeyside"];
+
+/// The lines of `source` whose code names one of [`RETIRED`].
+fn retired(source: &str) -> Vec<usize> {
+    let mut out: Vec<usize> = code_idents(source)
+        .into_iter()
+        .filter(|(_, w)| RETIRED.contains(&w.as_str()))
+        .map(|(n, _)| n)
+        .collect();
+    out.dedup();
+    out
+}
+
+#[test]
+fn no_settlement_test_names_the_retired_rekey_transcription_and_the_scan_finds_a_planted_one() {
+    for source in files(&dir("tests"), true) {
+        let found = retired(&source);
+        let first = source.lines().next().unwrap_or_default();
+        assert!(
+            found.is_empty(),
+            "a settlement test names the retired rekey transcription at lines {found:?} (the file begins {first:?}); a joint node runs the real machine"
+        );
+    }
+    let planted = "// RekeySide in a comment is not code\nuse super::rekeyside::{RekeySide};\n";
+    assert_eq!(retired(planted), [2], "the scan finds a planted use");
 }

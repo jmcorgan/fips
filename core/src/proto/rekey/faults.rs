@@ -184,6 +184,8 @@ pub(crate) enum Fault {
     RecordUnbounded,
     /// The jitter comes from a process-wide counter instead of `Env`.
     GlobalJitter,
+    /// The test hook `trigger` skips the floors, dampening and the back-off.
+    TriggerForced,
 }
 
 impl Fault {
@@ -260,6 +262,7 @@ impl Fault {
         Self::DrainReapedAtWindow,
         Self::RecordUnbounded,
         Self::GlobalJitter,
+        Self::TriggerForced,
     ];
 
     /// The switch whose variant name is `name`.
