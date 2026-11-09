@@ -65,8 +65,18 @@ pub const XK_HANDSHAKE_MSG2_SIZE: usize = PUBKEY_SIZE + EPOCH_ENCRYPTED_SIZE;
 /// XK msg3: encrypted static (33 + 16 tag) + encrypted epoch (8 + 16 tag) = 73 bytes.
 pub const XK_HANDSHAKE_MSG3_SIZE: usize = PUBKEY_SIZE + TAG_SIZE + EPOCH_ENCRYPTED_SIZE;
 
-/// Replay window size in packets (matching WireGuard).
-pub const REPLAY_WINDOW_SIZE: usize = 2048;
+/// Replay window size in packets.
+///
+/// A link whose frames arrive on two of the receiver's sockets is reordered
+/// by the receiver's own queues: under load the busy socket's kernel queue
+/// fills to its buffer, and a frame on an idle socket, such as a path probe,
+/// is read ahead of all of it. The window has to cover that queue, or the
+/// queued frames are refused once the probe moves it. A default UDP receive
+/// buffer (2 MB, 4 MB as the kernel charges it) holds about 4400 of the
+/// smallest frames on Linux, and the sender's encrypt queue for another
+/// destination adds up to 1024 more, so 8192 covers both with room for the
+/// frames in flight. A node configured with a larger buffer can queue more.
+pub const REPLAY_WINDOW_SIZE: usize = 8192;
 
 /// Errors from Noise protocol operations.
 #[derive(Debug, Error)]

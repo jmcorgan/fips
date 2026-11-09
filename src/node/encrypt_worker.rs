@@ -264,7 +264,7 @@ impl Refused {
 /// active and about to drain the next packet. Bounded so the producer
 /// back-pressures the rx_loop if the worker thread can't keep up —
 /// same rationale as the bounded endpoint_commands channel upstream.
-const WORKER_CHANNEL_CAP: usize = 1024;
+pub(crate) const WORKER_CHANNEL_CAP: usize = 1024;
 
 #[cfg(any(target_os = "macos", test))]
 struct MacWorkerSender<T> {

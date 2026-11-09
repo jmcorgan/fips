@@ -369,7 +369,7 @@ FSP uses explicit 8-byte counters on the wire for replay protection, adapted
 from the DTLS anti-replay mechanism (Rescorla & Modadugu, RFC 6347). Each side
 maintains a monotonically increasing send counter, included in the 12-byte
 cleartext header of every encrypted message. The receiver maintains a sliding
-window (2048-entry bitmap) tracking which counters have been seen.
+window (8192-entry bitmap) tracking which counters have been seen.
 
 This design is critical for operation over unreliable transports. Under UDP
 packet loss or reordering, implicit nonce counters (where the receiver

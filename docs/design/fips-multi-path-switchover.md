@@ -246,12 +246,22 @@ the rekey completes.
 
 ## One replay window, several paths
 
-All paths of a link share the epoch's anti-replay window of 2048 counters.
-That is a real limit, and the window is not wide. A frame on a slow path
-falls behind the window once the fast path has carried 2048 frames past it,
-which at 1 Gbit/s of full-size frames is about 23 ms of path skew. A standby
-is the slow path by construction: under bulk load its probes can be refused
-as replays, it goes Suspect, and it recovers once the load falls.
+All paths of a link share the epoch's anti-replay window of 8192 counters.
+That is a real limit. A frame on a slow path falls behind the window once
+the fast path has carried 8192 frames past it, which at 1 Gbit/s of
+full-size frames is about 90 ms of path skew. A standby is the slow path by
+construction: under bulk load its probes can be refused as replays, it goes
+Suspect, and it recovers once the load falls.
+
+The width is set by the receiver's own queues. A link whose paths end on
+different sockets of the receiver is reordered by them: under load the busy
+socket's kernel queue fills to its buffer, and a probe arriving on an idle
+socket is read ahead of all of it. A default UDP receive buffer holds about
+4400 of the smallest frames on Linux, and the sender's encrypt queue for
+another destination can add up to 1024 between the two, so the window is
+wide enough for both. A node configured with a larger `recv_buf_size` can
+queue more than the window covers, and then a probe on an idle path can
+cause the loaded path's own queued frames to be refused.
 
 The node handles this at two points. A link whose only remaining path is
 such a starved standby switches to an acked Suspect path and probes it

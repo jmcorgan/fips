@@ -111,7 +111,7 @@ Explicit topologies exercising non-UDP transports.
 | dual-udp-flap | 2     | UDP + UDP      | Pair  | 180s     | yes   | yes        | Two interface-bound UDP paths; the same flaps |
 | dual-path-carrier | 2 | Ethernet + UDP | Pair  | 180s     | yes   | scheduled  | Two paths; the cable taken down at one end; signalled switch in 1 s |
 | forward-only  | 2     | UDP + UDP      | Pair  | 160s     | yes   | scheduled  | Two UDP paths; the active one fails one way, under load |
-| loaded-standby | 2    | Ethernet + UDP | Pair  | 90s      | yes   | scheduled  | Standby starved under load, then the cable lost; Dead standby probed at once |
+| loaded-standby | 2    | Ethernet + UDP | Pair  | 105s     | yes   | scheduled  | Standby starved under load, then the cable lost; Dead standby probed at once |
 | two-bound-udp | 2     | UDP lanes      | Pair  | 120s     | yes   | --         | Two bound UDP instances per end on one subnet; acks cross |
 | two-bound-udp-bulk | 2 | UDP lanes     | Pair  | 120s     | yes   | --         | The same under uncapped traffic; no frame refused as a replay |
 | steady-dual-path | 2  | Ethernet + UDP | Pair  | 300s     | yes   | --         | Two healthy near-equal paths; no churn (calibration) |
@@ -158,16 +158,16 @@ Explicit topologies exercising non-UDP transports.
   half holds none, since a Dead path's interval can grow longer than
   the half. Probes to the stopped address are held to the floor and
   counted against the capture at the far ingress.
-- **loaded-standby**: the cable and a bridge half delayed 500 ms each way,
-  under bidirectional load for 25 s until the standby is Dead at both ends,
+- **loaded-standby**: the cable and a bridge half delayed 2 s each way,
+  under bidirectional load for 40 s until the standby is Dead at both ends,
   then the cable taken down at n01. With nothing Live each end must probe
   its acked Dead standby at once (draft 5.7) and bring it back: `rescue`
   checks the probe, within 60 ms of the active path leaving Live, and the
-  standby Live within 2 s, with no peer removed. Its control is that the
-  standby was Dead, not merely Suspect, before the cut. The 500 ms is the
-  largest delay considered (200 to 500 ms); measured on the development
-  host, the containers' frame rate had a tenth percentile of 12405
-  frames/s, and 500 ms leaves the control working on a host half as fast.
+  standby Live within 5 s, with no peer removed. Its control is that the
+  standby was Dead, not merely Suspect, before the cut. The delay is sized
+  to the replay window of 8192: measured on the development host, the
+  containers' frame rate had a tenth percentile of 12405 frames/s, and 2 s
+  leaves the control working on a host half as fast.
 - **two-bound-udp**: one veth pair carrying two lanes (`[n01, n02, udp-veth,
   {lanes: 2}]`), an interface-bound UDP instance on each lane at each end,
   all on port 2122, no bridge. Once the link is up the runner binds n02's
@@ -182,10 +182,13 @@ Explicit topologies exercising non-UDP transports.
   would go Suspect for load rather than for the crediting rule.
 - **two-bound-udp-bulk**: the same two lanes with the rate cap removed and
   `lanes` left out, since the crossed listen socket still overflows at that
-  rate. The check is `max_replay_refusals: {max_total: 0, min_nodes: 2}`:
-  a standby probe waiting behind the bulk stream's frames must still be read
-  inside the replay window, on a node whose decrypt workers refuse what falls
-  behind it.
+  rate. The check is `max_replay_refusals: {max_total: 0, min_nodes: 2}`.
+  Under load the bulk lane's receive queue fills to its buffer and a probe
+  on the idle lane is read ahead of it, so the link's frames arrive out of
+  order by up to one full queue. The replay window covers that, so no frame
+  may be refused, on a node whose decrypt workers refuse what falls behind
+  it. The receive loop's hold on the thread is guarded by the polling tests
+  in `src/node/tests/decrypt_replay.rs`, not by this suite.
 - **steady-dual-path**: the churn calibration. A cable (`role: preferred`,
   through `transport_overrides`) and a bridge path, both 1 to 3 ms, nothing
   flapped, light traffic, 300 s. A healthy pair meets once, switches at

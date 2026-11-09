@@ -7,8 +7,12 @@
 //! runtime, the daemon's shape, with an OS thread keeping one arm's channel
 //! full, and count the frames fed between two polls of a spawned task. A
 //! listen socket's reader is such a task, so a frame it has yet to read is
-//! overtaken by every frame fed meanwhile, and past one replay window it is
-//! refused. The count is of frames, not time, so a slow host cannot turn a
+//! overtaken by every frame fed meanwhile, and past the replay window it is
+//! refused. The bound they hold the loop to is [`HOLD_BOUND`], 2048 frames,
+//! the window's width when they were written. The window is wider now, to
+//! cover a full receive queue, and that width is not the loop's to use up,
+//! so the tests keep the old bound and their names still say "one replay
+//! window". The count is of frames, not time, so a slow host cannot turn a
 //! run green, and a run ends after a set number of frames fed against a full
 //! channel for the same reason: a host that starves the feeders only makes the
 //! run longer.
@@ -29,6 +33,11 @@
 //! capped burst never yields there; the full-channel tests meet that pattern
 //! only by chance.
 //!
+//! The overtake test hands the decrypt worker a frame that overtook as many
+//! as a full default receive buffer and the sender's encrypt queue hold, the
+//! reorder two sockets of one link produce under load, and checks that none
+//! is refused.
+//!
 //! The tests print their measurements; run with `--nocapture` to see them.
 
 use super::connected_udp::{PROMOTED_ADDR, promoted_peer_with_the_far_side_session};
@@ -43,12 +52,16 @@ use super::rekey_parity::{
 use super::spanning_tree::TestNode;
 use super::spanning_tree::cleanup_nodes;
 use super::*;
-use crate::noise::REPLAY_WINDOW_SIZE;
 use crate::proto::fmp::wire::{build_encrypted, build_established_header};
 use crate::transport::packet_channel;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::mpsc::error::TrySendError;
+
+/// The most frames a spawned task may be overtaken by while the loop holds
+/// the thread: the replay window's width before it was widened to cover a
+/// full receive queue. A yield after 512 items keeps the gap under 1536.
+const HOLD_BOUND: u64 = 2048;
 
 /// Frames the loop can take in one cooperative budget: 128 rounds of a burst
 /// of 257.
@@ -247,8 +260,8 @@ async fn polled(arm: Arm, pace: Option<Pace>, frames: u64) -> Polling {
     seen
 }
 
-/// A spawned task is polled within one replay window of frames while `arm`
-/// is kept ready.
+/// A spawned task is polled within [`HOLD_BOUND`] frames while `arm` is kept
+/// ready.
 async fn polled_within_one_window(arm: Arm) {
     let seen = polled(arm, None, FRAMES).await;
     assert!(
@@ -256,9 +269,9 @@ async fn polled_within_one_window(arm: Arm) {
         "precondition: the feed outran the loop for {FRAMES} frames: {seen:?}"
     );
     assert!(
-        seen.largest < REPLAY_WINDOW_SIZE as u64,
+        seen.largest < HOLD_BOUND,
         "{} frames were fed to the {arm:?} arm between two polls of a spawned task, \
-         against a window of {REPLAY_WINDOW_SIZE}",
+         against a bound of {HOLD_BOUND}",
         seen.largest
     );
 }
@@ -404,24 +417,24 @@ async fn polled_short(arm: Arm, burst: u64, pause: Duration, frames: u64) -> Pol
     seen
 }
 
-/// A spawned task is polled within one replay window of frames while `arm` is
-/// fed in bursts of `burst` and of 128, each landing short of the cap, at
-/// every pause in [`SHORT_PAUSES_US`].
+/// A spawned task is polled within [`HOLD_BOUND`] frames while `arm` is fed in
+/// bursts of `burst` and of 128, each landing short of the cap, at every pause
+/// in [`SHORT_PAUSES_US`].
 async fn polled_within_one_window_on_short_bursts(arm: Arm, burst: u64) {
     let mut past = Vec::new();
     for burst in [burst, 128] {
         for pause in SHORT_PAUSES_US {
             let seen = polled_short(arm, burst, Duration::from_micros(pause), FRAMES).await;
             eprintln!("{arm:?} burst {burst} pause {pause} us {seen:?}");
-            if seen.largest >= REPLAY_WINDOW_SIZE as u64 {
+            if seen.largest >= HOLD_BOUND {
                 past.push((burst, pause, seen.largest));
             }
         }
     }
     assert!(
         past.is_empty(),
-        "frames fed to the {arm:?} arm between two polls of a spawned task, against a window \
-         of {REPLAY_WINDOW_SIZE}, as (burst, pause in us, frames): {past:?}"
+        "frames fed to the {arm:?} arm between two polls of a spawned task, against a bound \
+         of {HOLD_BOUND}, as (burst, pause in us, frames): {past:?}"
     );
 }
 
@@ -458,6 +471,115 @@ async fn a_feeder_below_the_loops_rate_does_not_count_as_keeping_the_arm_ready()
     let seen = polled(Arm::Datagram, Some(pace), frames).await;
     assert!(seen.frames > 0, "the spawned task saw the feed: {seen:?}");
     assert!(!seen.arm_stayed_ready(frames), "{seen:?}");
+}
+
+/// The kernel's charge against a UDP receive buffer for each datagram of
+/// `len` bytes on this host: a loopback socket's buffer over the number of
+/// datagrams it held when full. The ratio does not depend on the buffer's
+/// size, so a small buffer keeps the fill short.
+#[cfg(target_os = "linux")]
+fn charge_per_datagram(len: usize) -> usize {
+    use std::net::UdpSocket;
+    let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let rx_ref = socket2::SockRef::from(&rx);
+    rx_ref.set_recv_buffer_size(64 * 1024).unwrap();
+    let buf = rx_ref.recv_buffer_size().unwrap();
+    rx.set_nonblocking(true).unwrap();
+    let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let to = rx.local_addr().unwrap();
+    let datagram = vec![0u8; len];
+    // Twice what the buffer could hold at no charge above the payload, so it
+    // is full at any real charge. The kernel drops the rest.
+    for _ in 0..2 * buf / len {
+        let _ = tx.send_to(&datagram, to);
+    }
+    let mut sink = [0u8; 2048];
+    let mut queued = 0;
+    while rx.recv(&mut sink).is_ok() {
+        queued += 1;
+    }
+    assert!(
+        queued > 0,
+        "precondition: the loopback socket queued a datagram"
+    );
+    buf / queued
+}
+
+/// While a receiver is saturated, the socket carrying a link's bulk stream
+/// fills to its buffer, and a path probe arriving on the link's other socket
+/// is read ahead of all of it. The sender's encrypt queue for another
+/// destination can put up to its capacity more between them. The decrypt
+/// worker's window has to cover that reorder, or the queued frames are
+/// refused once the probe moves it. The buffer is the default UDP one, sized
+/// in the smallest frames by this host's kernel.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_frame_queued_behind_a_full_default_receive_buffer_is_not_refused_when_a_probe_overtakes_it()
+ {
+    use super::connected_udp::far_side_frame;
+    use crate::config::UdpConfig;
+    use crate::node::decrypt_worker::{DecryptWorkerEvent, DecryptWorkerPool};
+    use crate::node::encrypt_worker::WORKER_CHANNEL_CAP;
+
+    let charge = charge_per_datagram(60);
+    let queue = 2 * UdpConfig::default().recv_buf_size() / charge;
+    let held = (queue + WORKER_CHANNEL_CAP + 1) as u64;
+    eprintln!("{charge} B charged per small datagram: {queue} queued, {held} overtaken");
+    assert!(
+        held > HOLD_BOUND,
+        "precondition: the probe overtakes more frames than the window once covered"
+    );
+
+    let tid = TransportId::new(1);
+    let (mut node, peer, index, mut far_side) = promoted_peer_with_the_far_side_session(tid);
+    let original = TransportAddr::from_string(PROMOTED_ADDR);
+    node.supervisor.decrypt_workers = Some(DecryptWorkerPool::spawn(1));
+    let offer = node.get_peer(&peer).unwrap().offer_to_workers();
+    node.run_link_outputs(&peer, offer);
+    assert!(
+        node.decrypt_registered_sessions.contains(&index.as_u32()),
+        "precondition: the session is registered with the worker"
+    );
+    let mut events = node.decrypt_fallback_rx.take().unwrap();
+
+    // Sealed in counter order; the last is the probe, and it is read first.
+    let mut frames: Vec<_> = (0..=held)
+        .map(|_| far_side_frame(&mut far_side, index))
+        .collect();
+    let probe = frames.pop().unwrap();
+    for frame in std::iter::once(probe).chain(frames) {
+        node.process_packet(ReceivedPacket::new(tid, original.clone(), frame))
+            .await;
+    }
+    node.process_packet(ReceivedPacket::new(
+        tid,
+        original,
+        forged_frame(index, 1_000_000),
+    ))
+    .await;
+    let mut plaintext = 0u64;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("precondition: the marker's report arrived")
+            .expect("precondition: the worker event channel is open");
+        let done = matches!(event, DecryptWorkerEvent::DecryptFailure(_));
+        if matches!(event, DecryptWorkerEvent::Plaintext(_)) {
+            plaintext += 1;
+        }
+        node.process_decrypt_worker_event(event).await;
+        if done {
+            break;
+        }
+    }
+    let refused = node.get_peer(&peer).unwrap().replay_suppressed_total();
+    assert_eq!(
+        refused,
+        0,
+        "{refused} of the {held} frames the probe overtook were refused as replays \
+         ({plaintext} of {} delivered)",
+        held + 1
+    );
 }
 
 /// A peer promoted on `tid`, and one authentic frame from its far side.
