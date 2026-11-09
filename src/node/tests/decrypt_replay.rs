@@ -15,8 +15,19 @@
 //! One limit: with the feeders and the loop made to share a CPU, the loop can
 //! empty the channel between the feeders' time slices, and then it goes back
 //! to the scheduler for that reason, so the two cheapest arms can read under
-//! the window with no yield at all. A failure means what it says; a pass needs
-//! a CPU for each.
+//! the window with no yield at all. A failure means what it says.
+//!
+//! The count is of frames fed between two polls, so it also takes in frames
+//! still queued at the second poll, up to the channel's 1024. It reads at or
+//! above the frames that overtook one waiting at the first poll, never below.
+//! A loop that yields after 512 items handled at most keeps it under 1536.
+//!
+//! The short-burst tests feed one arm in bursts that end short of the cap,
+//! waiting for the channel to empty and a few microseconds more before each.
+//! A burst then lands after the loop's drain reads empty and before its next
+//! select, so no round stops at the cap. A loop that yields only after a
+//! capped burst never yields there; the full-channel tests meet that pattern
+//! only by chance.
 //!
 //! The tests print their measurements; run with `--nocapture` to see them.
 
@@ -265,6 +276,171 @@ async fn a_spawned_task_is_polled_within_one_replay_window_while_the_datagram_ar
 #[tokio::test]
 async fn a_spawned_task_is_polled_within_one_replay_window_while_the_app_tun_arm_stays_full() {
     polled_within_one_window(Arm::AppTun).await;
+}
+
+/// Pauses after the channel reads empty, in microseconds, before a short-burst
+/// feeder's next burst. They cover the bands where a refill lands between the
+/// loop's empty read and its next select: 0 to 5 on the packet and app-TUN
+/// arms, 5 to 20 on the datagram arm, which costs more per frame.
+const SHORT_PAUSES_US: [u64; 6] = [0, 1, 2, 5, 10, 20];
+
+/// One feeder thread for `tx`: push `burst` frames, wait until the channel
+/// reads empty, spin `pause` more, and again, until `stop` or a closed channel.
+fn short_feeder<T: Send + 'static>(
+    tx: tokio::sync::mpsc::Sender<T>,
+    make: impl Fn() -> T + Send + 'static,
+    burst: u64,
+    pause: Duration,
+    sent: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) && !tx.is_closed() {
+            for _ in 0..burst {
+                if tx.try_send(make()).is_err() {
+                    break;
+                }
+                sent.fetch_add(1, Ordering::Relaxed);
+            }
+            while tx.capacity() != tx.max_capacity() {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::hint::spin_loop();
+            }
+            let until = std::time::Instant::now() + pause;
+            while std::time::Instant::now() < until {
+                std::hint::spin_loop();
+            }
+        }
+    })
+}
+
+/// Give `node` a new channel for `arm` and a short-burst feeder on it. The
+/// returned sender keeps the packet channel open when another arm is fed.
+fn short_feed(
+    node: &mut Node,
+    arm: Arm,
+    burst: u64,
+    pause: Duration,
+    sent: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+) -> (
+    std::thread::JoinHandle<()>,
+    Option<crate::transport::PacketTx>,
+) {
+    let (packet_tx, packet_rx) = packet_channel(1024);
+    node.packet_rx = Some(packet_rx);
+    match arm {
+        Arm::Packet => {
+            let packet = || {
+                ReceivedPacket::new(
+                    TransportId::new(1),
+                    TransportAddr::from_string("feeder"),
+                    vec![0xffu8; 40],
+                )
+            };
+            (
+                short_feeder(packet_tx, packet, burst, pause, sent, stop),
+                None,
+            )
+        }
+        Arm::Datagram => {
+            let (tx, rx) = tokio::sync::mpsc::channel(1024);
+            node.supervisor.datagram_rx = Some(rx);
+            let peer = crate::ipv6tun::link::any_key();
+            let datagram = move || crate::ipv6tun::link::Datagram {
+                peer,
+                payload: vec![0u8; 40],
+            };
+            let feeder = short_feeder(tx, datagram, burst, pause, sent, stop);
+            (feeder, Some(packet_tx))
+        }
+        Arm::AppTun => {
+            let (tx, rx) = tokio::sync::mpsc::channel(1024);
+            node.supervisor.ipv6tun.install_outbound(rx);
+            let feeder = short_feeder(tx, || vec![0u8; 40], burst, pause, sent, stop);
+            (feeder, Some(packet_tx))
+        }
+    }
+}
+
+/// Run the real receive loop with one short-burst feeder on `arm` until
+/// `frames` have been fed, and return what a spawned task saw.
+async fn polled_short(arm: Arm, burst: u64, pause: Duration, frames: u64) -> Polling {
+    let mut node = make_node();
+    let sent = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (feeder, keep) = short_feed(&mut node, arm, burst, pause, sent.clone(), stop.clone());
+    let mut task = tokio::spawn(async move {
+        let mut seen = Polling::default();
+        let mut fed = sent.load(Ordering::Relaxed);
+        while seen.frames < frames {
+            tokio::task::yield_now().await;
+            let now = sent.load(Ordering::Relaxed);
+            let gap = now - fed;
+            fed = now;
+            seen.polls += 1;
+            seen.frames += gap;
+            seen.largest = seen.largest.max(gap);
+        }
+        seen
+    });
+    let run = async {
+        tokio::select! {
+            biased;
+            seen = &mut task => seen.expect("the polling task panicked"),
+            _ = node.run_rx_loop_with_shutdown(std::future::pending()) => {
+                panic!("precondition: the receive loop ended before the frames were fed")
+            }
+        }
+    };
+    let seen = tokio::time::timeout(DEADLINE, run)
+        .await
+        .expect("precondition: the feeder fed the run's frames in time");
+    stop.store(true, Ordering::Relaxed);
+    feeder.join().expect("the feeder panicked");
+    drop(keep);
+    seen
+}
+
+/// A spawned task is polled within one replay window of frames while `arm` is
+/// fed in bursts of `burst` and of 128, each landing short of the cap, at
+/// every pause in [`SHORT_PAUSES_US`].
+async fn polled_within_one_window_on_short_bursts(arm: Arm, burst: u64) {
+    let mut past = Vec::new();
+    for burst in [burst, 128] {
+        for pause in SHORT_PAUSES_US {
+            let seen = polled_short(arm, burst, Duration::from_micros(pause), FRAMES).await;
+            eprintln!("{arm:?} burst {burst} pause {pause} us {seen:?}");
+            if seen.largest >= REPLAY_WINDOW_SIZE as u64 {
+                past.push((burst, pause, seen.largest));
+            }
+        }
+    }
+    assert!(
+        past.is_empty(),
+        "frames fed to the {arm:?} arm between two polls of a spawned task, against a window \
+         of {REPLAY_WINDOW_SIZE}, as (burst, pause in us, frames): {past:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_spawned_task_is_polled_within_one_replay_window_while_short_bursts_keep_the_packet_arm_ready()
+ {
+    polled_within_one_window_on_short_bursts(Arm::Packet, 255).await;
+}
+
+#[tokio::test]
+async fn a_spawned_task_is_polled_within_one_replay_window_while_short_bursts_keep_the_datagram_arm_ready()
+ {
+    polled_within_one_window_on_short_bursts(Arm::Datagram, 256).await;
+}
+
+#[tokio::test]
+async fn a_spawned_task_is_polled_within_one_replay_window_while_short_bursts_keep_the_app_tun_arm_ready()
+ {
+    polled_within_one_window_on_short_bursts(Arm::AppTun, 256).await;
 }
 
 /// The polling tests' precondition has to fail on a feeder that holds nothing
