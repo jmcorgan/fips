@@ -6,6 +6,7 @@ use crate::node::diag::HsLine;
 use crate::noise::{HandshakeState, NoiseSession};
 use crate::peer::{ActivePeer, LinkCaps, peer_now, test_caps, test_link_params};
 use crate::proto::mmp::MmpMode;
+use crate::testutil::with_lf;
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::IndexAllocator;
 use crate::{Identity, NodeAddr, PeerIdentity};
@@ -728,10 +729,32 @@ fn settling_a_transition_that_builds_or_ends_a_record_stops_a_debug_build() {
     );
 }
 
+/// `../data.rs` with LF line endings, whatever the checkout's.
+fn record_source() -> String {
+    with_lf(include_str!("../data.rs"))
+}
+
 #[test]
 fn the_record_denies_wildcard_arms_and_the_scan_finds_a_planted_one() {
+    wildcard_scans(&record_source());
+}
+
+#[test]
+fn the_record_scans_find_their_planted_lines_in_a_source_checked_out_with_crlf_line_endings() {
+    let crlf = record_source().replace('\n', "\r\n");
+    assert!(
+        crlf.contains("} = self;\r\n"),
+        "precondition: a copy of the source with CRLF line endings"
+    );
+    let source = with_lf(&crlf);
+    wildcard_scans(&source);
+    destructure_scans(&source);
+}
+
+/// That `source`, `../data.rs` as read, denies wildcard arms and holds none,
+/// and that the scans find a planted catch-all arm and the deny taken away.
+fn wildcard_scans(source: &str) {
     use crate::node::settle::table::tests::{denies_wildcards, wildcard_arms};
-    let source = include_str!("../data.rs");
     assert!(
         denies_wildcards(source),
         "defect: data.rs does not deny wildcard arms at its head"
@@ -896,7 +919,13 @@ fn destructure_faults(source: &str) -> (usize, Vec<String>) {
 
 #[test]
 fn the_record_is_destructured_whole_and_the_scan_finds_a_planted_one() {
-    let source = include_str!("../data.rs");
+    destructure_scans(&record_source());
+}
+
+/// That `source`, `../data.rs` as read, names every field of the record in
+/// both of its destructuring patterns with no rest pattern, and that the scan
+/// finds a planted rest pattern and a planted field neither pattern names.
+fn destructure_scans(source: &str) {
     let fields = declared_fields(source);
     assert_eq!(
         fields.len(),
