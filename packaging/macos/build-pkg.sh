@@ -149,11 +149,39 @@ nameserver ::1
 port 5354
 EOF
 
-# Create postinstall script
-cat > "${SCRIPTS_DIR}/postinstall" <<'POSTINSTALL'
-#!/bin/sh
-set -e
+# Both install scripts stop launchd jobs the same way, so the function is
+# written once here and printed into each.
+#
+# Stop a launchd job and wait until its process has exited. `launchctl
+# bootout` returns while the job is still shutting down; replacing its binary
+# or starting the new one in that window has left the old daemon's UDP socket
+# bound after the old process was gone, so the new daemon could not bind its
+# port. The BLE agent runs the same file through a hard link, so it is waited
+# for too. $1 is the job's service target, for its pid; the rest are bootout's
+# arguments. A job still running after 30 s is killed. The kill may find the
+# process already gone, and must not end a caller running under `set -e`.
+STOP_JOB_FN="$(cat <<'STOPJOB'
+stop_job() {
+    JOB_PID="$(launchctl print "$1" 2>/dev/null | awk '$1 == "pid" { print $3; exit }')"
+    shift
+    launchctl bootout "$@" 2>/dev/null || true
+    [ -n "$JOB_PID" ] || return 0
+    JOB_WAIT=0
+    while kill -0 "$JOB_PID" 2>/dev/null; do
+        JOB_WAIT=$((JOB_WAIT + 1))
+        [ "$JOB_WAIT" -eq 60 ] && { kill -9 "$JOB_PID" 2>/dev/null || true; }
+        [ "$JOB_WAIT" -ge 70 ] && break
+        sleep 0.5
+    done
+    return 0
+}
+STOPJOB
+)"
 
+# Create postinstall script
+{
+printf '#!/bin/sh\nset -e\n\n%s\n\n' "$STOP_JOB_FN"
+cat <<'POSTINSTALL'
 LOG="/var/log/fips-install.log"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG"; logger -t fips-install "$*"; }
 
@@ -206,7 +234,7 @@ if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
 fi
 
 # Load the launchd service
-launchctl bootout system /Library/LaunchDaemons/com.fips.daemon.plist 2>/dev/null || true
+stop_job system/com.fips.daemon system /Library/LaunchDaemons/com.fips.daemon.plist
 launchctl bootstrap system /Library/LaunchDaemons/com.fips.daemon.plist 2>/dev/null || true
 log "launchd service loaded"
 
@@ -219,7 +247,7 @@ log "launchd service loaded"
 for AGENT_USER in $(who | awk '$2 == "console" { print $1 }' | sort -u); do
     [ "$AGENT_USER" = "root" ] && continue
     AGENT_UID="$(id -u "$AGENT_USER" 2>/dev/null)" || continue
-    launchctl bootout "gui/$AGENT_UID/com.fips.ble-agent" 2>/dev/null || true
+    stop_job "gui/$AGENT_UID/com.fips.ble-agent" "gui/$AGENT_UID/com.fips.ble-agent"
     launchctl bootstrap "gui/$AGENT_UID" /Library/LaunchAgents/com.fips.ble-agent.plist 2>/dev/null || true
     log "BLE agent loaded for $AGENT_USER"
 done
@@ -227,21 +255,24 @@ done
 log "postinstall complete"
 exit 0
 POSTINSTALL
+} > "${SCRIPTS_DIR}/postinstall"
 chmod +x "${SCRIPTS_DIR}/postinstall"
 
 # Create preinstall script (stop service before upgrade)
-cat > "${SCRIPTS_DIR}/preinstall" <<'PREINSTALL'
-#!/bin/sh
+{
+printf '#!/bin/sh\n\n%s\n\n' "$STOP_JOB_FN"
+cat <<'PREINSTALL'
 # Stop service before upgrade
-launchctl bootout system /Library/LaunchDaemons/com.fips.daemon.plist 2>/dev/null || true
+stop_job system/com.fips.daemon system /Library/LaunchDaemons/com.fips.daemon.plist
 # Stop the BLE agent in every GUI session; postinstall starts the new one.
 for AGENT_USER in $(who | awk '$2 == "console" { print $1 }' | sort -u); do
     [ "$AGENT_USER" = "root" ] && continue
     AGENT_UID="$(id -u "$AGENT_USER" 2>/dev/null)" || continue
-    launchctl bootout "gui/$AGENT_UID/com.fips.ble-agent" 2>/dev/null || true
+    stop_job "gui/$AGENT_UID/com.fips.ble-agent" "gui/$AGENT_UID/com.fips.ble-agent"
 done
 exit 0
 PREINSTALL
+} > "${SCRIPTS_DIR}/preinstall"
 chmod +x "${SCRIPTS_DIR}/preinstall"
 
 # Build the .pkg
