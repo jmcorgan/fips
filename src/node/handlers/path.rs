@@ -19,12 +19,13 @@ use fips_core::proto::path::{
     Class, Config, Env, Facts, Input, Kind, Medium, Output, Outputs, Params, PathRef, PathState,
     Role, Why,
 };
+use fips_core::proto::settle::join::Step;
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 
 use crate::NodeAddr;
 use crate::config::{NodeConfig, PathKind, TransportRole};
-use crate::node::settle::exec::Run;
+use crate::node::settle::exec::{PathSteps, Run, pathed};
 use crate::node::{Node, TICK};
 use crate::peer::{PeerBundle, PeerInstant, UdpSlot, peer_now};
 use crate::transport::{
@@ -458,6 +459,7 @@ impl Node {
             return Ran::default();
         };
         let cost = peer.live_cost();
+        let link = self.links.no(&peer.link_id());
         let Some(bundle) = peer.bundle_mut() else {
             return Ran::default();
         };
@@ -471,7 +473,10 @@ impl Node {
         };
         let out = bundle.step(peer_now(), input, &mut env);
         self.paths.fold(bundle.next_wake());
-        self.run_outputs(node_addr, out, why).await
+        let Some(steps) = pathed(*node_addr, out, Some(bundle), link) else {
+            return Ran::default();
+        };
+        self.run_outputs(node_addr, steps, why).await
     }
 
     /// Run the links' path machines' timers (draft Section 5.6): settle the
@@ -540,17 +545,31 @@ impl Node {
     }
 
     /// Carry out the outputs of `node_addr`'s path machine, front to back,
-    /// then close the connections left to close. `why` says, for the log,
+    /// then close the connections left to close. Each comes through the
+    /// settlement core's join with the core input it stands for after it,
+    /// which goes to the core's record of the link. `why` says, for the log,
     /// why an orphaned link's peer is removed.
     async fn run_outputs(
         &mut self,
         node_addr: &NodeAddr,
-        out: Outputs<UdpSlot>,
+        steps: PathSteps,
         why: &'static str,
     ) -> Ran {
         let mut ran = Ran::default();
         let link = self.peers.get(node_addr).map(|p| p.link_id());
-        for output in out {
+        for step in steps {
+            let output = match step {
+                Step::Path(output) => output,
+                // An orphaning is acted on as the path output beside it.
+                Step::Core(input) => {
+                    self.feed(&input);
+                    continue;
+                }
+                Step::Rekey(_) | Step::Replace(_) => {
+                    debug_assert!(false, "the join gave a bundle's step a rekey step");
+                    continue;
+                }
+            };
             match output {
                 Output::Send { to, bytes } => {
                     match self.send_via(node_addr, &bytes, false, Some(&to)).await {
@@ -666,11 +685,27 @@ impl Node {
     /// Carry out what `node_addr`'s path machine handed back when its link
     /// started again at a won crossed handshake ([`PeerBundle::renew`]):
     /// each path's change of state is logged, and each path released is
-    /// disposed of while the link lives. The connections left to close are
+    /// disposed of while the link lives. Each comes through the settlement
+    /// core's join with the core input it stands for after it, which goes to
+    /// the core's record of the link. The connections left to close are
     /// closed at the next tick.
     pub(in crate::node) fn run_renewed(&mut self, node_addr: &NodeAddr, out: Outputs<UdpSlot>) {
         let link = self.peers.get(node_addr).map(|p| p.link_id());
-        for output in out {
+        let no = link.and_then(|link| self.links.no(&link));
+        let bundle = self.peers.get(node_addr).and_then(|p| p.bundle());
+        let steps = pathed(*node_addr, out, bundle, no);
+        for step in steps.into_iter().flatten() {
+            let output = match step {
+                Step::Path(output) => output,
+                Step::Core(input) => {
+                    self.feed(&input);
+                    continue;
+                }
+                Step::Rekey(_) | Step::Replace(_) => {
+                    debug_assert!(false, "the join gave a bundle's step a rekey step");
+                    continue;
+                }
+            };
             match output {
                 Output::State {
                     to,

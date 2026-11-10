@@ -30,7 +30,9 @@ use fips_core::proto::rekey::{
     Close, Completed, CycleView, Env, IndexLease, Input, PeerKey, Record, Role, SealRefusal,
     Sealed, SendCopy, SetupFacts, Slot,
 };
+use fips_core::proto::settle::input::Input as In;
 use fips_core::proto::settle::join::{Caps, Event, Joined, Setup, Step, join};
+use fips_core::proto::settle::links::LinkNo;
 #[cfg(unix)]
 use portable_atomic::AtomicU64;
 use portable_atomic::Ordering;
@@ -151,28 +153,38 @@ fn lent<R>(
     })
 }
 
+/// What building a peer's machines hands the node to carry out once it holds
+/// the peer: the rekey machine's outputs and the core inputs.
+type Started = (LinkOutputs, Vec<In>);
+
 /// What closing a peer's machines hands the node: every path's driver slot
 /// to release, the rekey machine's outputs, and the peer's startup epoch
 /// with the replay record the machine kept, if it held a session.
 type Stopped = (Outputs<UdpSlot>, LinkOutputs, Option<([u8; 8], Record)>);
 
 /// The steps `joined` holds, as the node carries them out: the rekey
-/// machine's outputs and the bundle's, each in its order. A start without a
-/// link, a move and a removal tell the core nothing, since building and
-/// closing a rekey machine report no restart, teardown or replacement.
-fn split(joined: LinkJoined) -> (LinkOutputs, Outputs<UdpSlot>) {
+/// machine's outputs and the bundle's, each in its order, and the core
+/// inputs. Building and closing a rekey machine report no restart, teardown
+/// or replacement, so only a start on a link the core records tells the core
+/// anything: that the new bundle's original path is Live.
+fn split(joined: LinkJoined) -> (LinkOutputs, Outputs<UdpSlot>, Vec<In>) {
     let mut rekey = LinkOutputs::new();
     let mut paths = Outputs::new();
+    let mut core = Vec::new();
     for step in joined {
         match step {
             Step::Rekey(o) => rekey.push(o),
             Step::Path(o) => paths.push(o),
-            Step::Core(_) | Step::Replace(_) => {
-                debug_assert!(false, "a build or close of the machines told the core");
+            Step::Core(input) => core.push(input),
+            Step::Replace(_) => {
+                debug_assert!(
+                    false,
+                    "a build or close of the machines asked for a replacement"
+                );
             }
         }
     }
-    (rekey, paths)
+    (rekey, paths, core)
 }
 
 /// The path machine of a link established now on (`transport_id`,
@@ -313,6 +325,13 @@ pub struct ActivePeer {
     /// The send-critical subset read (and, on roam/responder-cutover, written)
     /// directly by the data plane. See `PeerSendState`.
     send: PeerSendState,
+
+    /// Whether a test changed the link's bundle past the feed of the
+    /// settlement core's record of the link: a test mutator of the paths, or
+    /// a test's own call of [`account`](Self::account). The live audit then
+    /// holds the record to the bundle no longer (test builds only).
+    #[cfg(test)]
+    past_feed: bool,
 }
 
 impl ActivePeer {
@@ -329,6 +348,8 @@ impl ActivePeer {
             rekey: None,
             data: PeerData::new(authenticated_at, now, true),
             send: PeerSendState::new(link_id),
+            #[cfg(test)]
+            past_feed: false,
         }
     }
 
@@ -355,8 +376,11 @@ impl ActivePeer {
     /// `their_index`, bound on `transport_id`; the machine is bonded to the
     /// identity's key. The link's path machine is built next, its original
     /// path at (`transport_id`, `current_addr`); the settlement core's join
-    /// makes both calls. Returns the outputs the node executes, the binding
-    /// of `our_index` among them. Hands the lease back, building nothing,
+    /// makes both calls. `link` is the core's number for the link, where the
+    /// node's link table records it. Returns the peer and what the node
+    /// carries out once it holds the peer: the rekey machine's outputs, the
+    /// binding of `our_index` among them, and the core inputs, the original
+    /// path recorded Live on `link`. Hands the lease back, building nothing,
     /// when the session authenticated another key than `identity`'s, which a
     /// completed handshake never does.
     #[allow(clippy::too_many_arguments)]
@@ -373,8 +397,9 @@ impl ActivePeer {
         is_initiator: bool,
         mmp_config: &MmpConfig,
         remote_epoch: Option<[u8; 8]>,
+        link: Option<LinkNo>,
         caps: &mut LinkCaps<'_>,
-    ) -> Result<(Self, LinkOutputs), IndexLease> {
+    ) -> Result<(Self, Started), IndexLease> {
         let key = PeerKey::from_xonly(&identity.pubkey());
         let facts = setup_facts(remote_epoch, std::mem::take(&mut caps.record));
         let setup = Setup {
@@ -407,11 +432,11 @@ impl ActivePeer {
                     to: (transport_id, current_addr),
                     params,
                     env: &env,
-                    link: None,
+                    link,
                 },
             )
         })?;
-        let (out, paths) = split(joined);
+        let (out, paths, core) = split(joined);
         debug_assert!(paths.is_empty(), "a new bundle reports nothing");
         let mut send = PeerSendState::new(link_id);
         send.bundle = bundle;
@@ -430,8 +455,10 @@ impl ActivePeer {
             rekey,
             data,
             send,
+            #[cfg(test)]
+            past_feed: false,
         };
-        Ok((peer, out))
+        Ok((peer, (out, core)))
     }
 
     /// [`with_session`](Self::with_session) for a test that needs a keyed
@@ -799,7 +826,8 @@ impl ActivePeer {
         match joined {
             Ok(joined) => {
                 let built = joined.built;
-                let (out, paths) = split(joined);
+                let (out, paths, core) = split(joined);
+                debug_assert!(core.is_empty(), "a move told the core something");
                 (out, paths, built)
             }
             Err(lease) => (vec![LinkOutput::Release(lease)], Vec::new(), false),
@@ -906,6 +934,12 @@ impl ActivePeer {
         if bound {
             account.roam = Roam::Bound;
         }
+        // The frame's accounting tells the core of the roam and puts the
+        // flag back; any other caller is a test's, past the feed.
+        #[cfg(test)]
+        if account.roam != Roam::Unmoved {
+            self.past_feed = true;
+        }
         // A path that is not active roamed: its socket aims at the old address.
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Roam::Standby { index } = account.roam
@@ -914,6 +948,33 @@ impl ActivePeer {
             slot.clear_connected_udp();
         }
         account
+    }
+
+    /// The pair of the link's one path while it is not active, which a roam
+    /// of that path leaves and [`Roam::Standby`] does not name: read before
+    /// [`account`](Self::account), so the roam can be reported whole. One
+    /// test per frame, and a copy of the pair only while no path is active.
+    pub(crate) fn standby(&self) -> Option<(TransportId, TransportAddr)> {
+        let paths = self.send.bundle.as_ref()?.paths();
+        if paths.active_index().is_some() || paths.len() != 1 {
+            return None;
+        }
+        paths.get(0).map(|p| (p.transport_id(), p.addr().clone()))
+    }
+
+    /// Whether a test changed the link's bundle past the feed of the
+    /// settlement core's record of the link (test builds only).
+    #[cfg(test)]
+    pub(crate) fn past_feed(&self) -> bool {
+        self.past_feed
+    }
+
+    /// Put back what [`past_feed`](Self::past_feed) read before the frame's
+    /// accounting, which tells the core of the roam itself (test builds
+    /// only).
+    #[cfg(test)]
+    pub(crate) fn set_past_feed(&mut self, was: bool) {
+        self.past_feed = was;
     }
 
     /// Bind a peer that holds no path to (`transport_id`, `addr`), its
@@ -950,6 +1011,7 @@ impl ActivePeer {
         addr: TransportAddr,
         medium: Medium,
     ) -> Rebind {
+        self.past_feed = true;
         let Some(bundle) = self.send.bundle.as_mut() else {
             self.bind(transport_id, addr);
             return Rebind::Switched;
@@ -979,6 +1041,7 @@ impl ActivePeer {
     /// tests of the set's rules.
     #[cfg(test)]
     fn test_paths(&mut self) -> &mut PathSet {
+        self.past_feed = true;
         self.send
             .bundle
             .as_mut()
@@ -1030,6 +1093,7 @@ impl ActivePeer {
     /// multipath disabled, as every caller's node runs.
     #[cfg(test)]
     pub(crate) fn repin(&mut self, transport_id: TransportId, addr: TransportAddr) {
+        self.past_feed = true;
         for out in self.close_paths() {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             if let fips_core::proto::path::Output::Released { mut driver, .. } = out {
@@ -1997,7 +2061,8 @@ impl ActivePeer {
         match join(*self.identity.node_addr(), event) {
             Ok(mut joined) => {
                 let carry = joined.carry.take();
-                let (out, paths) = split(joined);
+                let (out, paths, core) = split(joined);
+                debug_assert!(core.is_empty(), "a removal told the core something");
                 let kept = carry.map(|c| (c.peer_epoch.unwrap_or_default(), c.record));
                 (paths, out, kept)
             }

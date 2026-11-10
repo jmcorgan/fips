@@ -10,9 +10,6 @@
 //! empty still runs its own statements at its site.
 
 #![deny(clippy::wildcard_enum_match_arm)]
-// Most of `Facts` is constructed only by the sites that run their
-// transitions here, which are not yet routed.
-#![allow(dead_code)]
 
 mod cross;
 mod install;
@@ -21,6 +18,7 @@ mod paths;
 pub(in crate::node) mod plan;
 mod remove;
 
+pub(in crate::node) use links::{PathSteps, pathed};
 pub(in crate::node) use remove::Removed;
 
 use crate::NodeAddr;

@@ -27,6 +27,7 @@ use crate::peer::machine::{PeerAction, PeerEvent};
 use crate::peer::{ActivePeer, LinkCaps, LinkOutputs, PathCaps};
 use crate::proto::fmp::wire::Msg1Header;
 use crate::proto::fmp::{EphemeralDigest, PromotionResult};
+use crate::proto::settle::input::Input;
 use crate::proto::settle::output::Why;
 use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
@@ -205,9 +206,11 @@ impl Node {
     /// `noise_session` and authenticated `verified_identity`, an identity
     /// this node does not hold: seed the path MTU from the pair it runs on,
     /// build its machines, put it in the node's maps, run what its link rekey
-    /// machine returned once it is there, drop any retry of the identity and
-    /// register its key. A session that authenticated another key frees
-    /// `our_index` and fails, with nothing installed but the MTU seed.
+    /// machine returned once it is there, hold the core's record of the link
+    /// for the peer and record the new bundle's original path in it, drop any
+    /// retry of the identity and register its key. A session that
+    /// authenticated another key frees `our_index` and fails, with nothing
+    /// installed but the MTU seed.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::node) fn install(
         &mut self,
@@ -228,7 +231,7 @@ impl Node {
         let peer_key = crate::ipv6tun::link::PeerKey::from_xonly(&verified_identity.pubkey());
         self.seed_path_mtu_for_link_peer(&peer_node_addr, peer_key, transport_id, &current_addr);
 
-        let (mut new_peer, out) = self.keyed_peer(
+        let (mut new_peer, (out, core)) = self.keyed_peer(
             link_id,
             verified_identity,
             current_time_ms,
@@ -254,6 +257,10 @@ impl Node {
             self.peers.install(peer_node_addr, new_peer);
             self.run_link_outputs(&peer_node_addr, out);
         }
+        self.links.hold(&link_id, peer_node_addr);
+        for input in &core {
+            self.feed(input);
+        }
         self.peering
             .reconciler
             .retry_pending
@@ -266,11 +273,12 @@ impl Node {
     /// `noise_session`: its link rekey machine takes the session as its first
     /// epoch, under `our_index` (the lease link setup took) and the peer's
     /// `their_index`, bound on `transport_id`, and is offered to the decrypt
-    /// workers when a pool runs. Returns the peer and the machine's outputs
-    /// (the binding of `our_index` and any offer), to execute once the peer
-    /// is in the table. A session that authenticated another key than
-    /// `verified_identity`'s, which a completed handshake never has, frees
-    /// the index and fails the promotion.
+    /// workers when a pool runs. Returns the peer and what to carry out once
+    /// the peer is in the table: the machine's outputs (the binding of
+    /// `our_index` and any offer) and the core inputs for the link's record.
+    /// A session that authenticated another key than `verified_identity`'s,
+    /// which a completed handshake never has, frees the index and fails the
+    /// promotion.
     #[allow(clippy::too_many_arguments)]
     fn keyed_peer(
         &mut self,
@@ -285,7 +293,7 @@ impl Node {
         link_stats: LinkStats,
         is_outbound: bool,
         remote_epoch: Option<[u8; 8]>,
-    ) -> Result<(ActivePeer, LinkOutputs), NodeError> {
+    ) -> Result<(ActivePeer, (LinkOutputs, Vec<Input>)), NodeError> {
         let local = self.session_node_keys();
         let me = *self.identity().node_addr();
         let mmp = self.config().node.mmp.clone();
@@ -296,6 +304,7 @@ impl Node {
             remote_epoch.unwrap_or_default(),
         );
         let workers = self.link_workers();
+        let link = self.links.no(&link_id);
         // A machine built at promotion, for a peer whose handshake the ACL
         // has passed; no probe is stepped here.
         let facts = NodeFacts {
@@ -327,6 +336,7 @@ impl Node {
             is_outbound,
             &mmp,
             remote_epoch,
+            link,
             &mut caps,
         )
         .map_err(|lease| {

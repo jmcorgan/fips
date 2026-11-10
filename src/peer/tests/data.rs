@@ -70,6 +70,7 @@ fn promoted_peer(is_initiator: bool, link_stats: LinkStats) -> ActivePeer {
         is_initiator,
         &MmpConfig::default(),
         None,
+        None,
         &mut caps,
     );
     let Ok((peer, _outputs)) = built else {

@@ -38,14 +38,13 @@ pub(super) use listed;
 
 /// One thing the code does to a held peer.
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum Transition {
     /// A peer installed for an identity not held, by a msg2 this node
     /// initiated or by a msg1 it answered.
     Promote {
-        // Named so a site cannot leave out the link it installs; no cell reads
-        // it, since a cell states what happens and not to which link.
-        #[allow(dead_code)]
+        // Named so a site cannot leave out the link it installs. No cell
+        // reads it, since a cell states what happens and not to which link;
+        // the promotion's effects do.
         link: LinkId,
         initiator: bool,
     },
@@ -55,7 +54,6 @@ pub(crate) enum Transition {
     /// (`OwnRestart`, the only one this node initiated).
     Replace {
         // As in `Promote`.
-        #[allow(dead_code)]
         link: LinkId,
         initiator: bool,
         why: Why,
@@ -66,8 +64,7 @@ pub(crate) enum Transition {
     /// session; without it the move was refused or failed and renewed nothing.
     Move {
         // Named so that a site cannot leave out the link it moves off the
-        // dial; no cell reads it yet.
-        #[allow(dead_code)]
+        // dial. No cell reads it; the crossing's effects do.
         dial: LinkId,
         own: bool,
         built: bool,
@@ -76,7 +73,6 @@ pub(crate) enum Transition {
     /// its dial.
     Keep {
         // As in `Move`.
-        #[allow(dead_code)]
         dial: LinkId,
     },
     /// A rekey's new session installed, this node having played `role`.
@@ -100,7 +96,6 @@ listed! {
     /// A row of the record each peer holds, `PeerData`: the state a transition
     /// sets through the record's `settle`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    #[cfg_attr(not(test), allow(dead_code))]
     DataRow {
         /// The link's MMP counters.
         Mmp,
@@ -142,6 +137,8 @@ macro_rules! rows {
     ($($(#[$inner:meta])* $variant:ident,)*) => {
         /// One piece of what the node holds per peer.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        // Production names only the rows an effect reads a cell of; the
+        // table's tests and the census name every row.
         #[cfg_attr(not(test), allow(dead_code))]
         pub(crate) enum Row {
             /// A row of the peer's record.
@@ -229,7 +226,6 @@ rows! {
 
 /// What a transition does to a row of the record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum DataCell {
     /// Nothing.
     Keep,
@@ -249,7 +245,6 @@ pub(crate) enum DataCell {
 
 /// What a transition does to a row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum Cell {
     /// A row of the record.
     Data(DataCell),
@@ -483,6 +478,7 @@ listed! {
     /// The node's state outside the peer that a row names, one field or map
     /// each.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    // Read by the census, through `owner`, and by nothing in production.
     #[cfg_attr(not(test), allow(dead_code))]
     Facet {
         /// `sessions`.
@@ -526,6 +522,7 @@ listed! {
 
 /// Who holds a row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Read by the census and the table's tests, and by nothing in production.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum Owner {
     /// `ActivePeer` itself, and nothing writes it after construction.
@@ -544,7 +541,6 @@ pub(crate) enum Owner {
 
 /// Whether code at the transition reaches its cause. A cause with no site has
 /// [`Cell::NoSite`] in every row outside the record.
-#[cfg_attr(not(test), allow(dead_code))]
 fn reached(t: &Transition) -> bool {
     match t {
         Transition::Replace { initiator, why, .. } => match why {
@@ -572,7 +568,6 @@ fn reached(t: &Transition) -> bool {
 
 /// What `t` does to a row of the record. A record ends whatever the cause, so
 /// a cause with no site reads the same as one with.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn data_cell(row: DataRow, t: &Transition) -> DataCell {
     match t {
         Transition::Promote { .. } | Transition::Replace { .. } => DataCell::New,
@@ -636,7 +631,6 @@ pub(crate) fn data_cell(row: DataRow, t: &Transition) -> DataCell {
 
 /// What `t` does to `row`. For the record's rows this is [`data_cell`]; for
 /// the others, a cause no code reaches gives [`Cell::NoSite`].
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
     use Transition as T;
     if !reached(t) && !matches!(row, Row::Data(_)) {
@@ -1101,6 +1095,7 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
 }
 
 /// Who holds `row`.
+// As `Owner`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn owner(row: Row) -> Owner {
     match row {

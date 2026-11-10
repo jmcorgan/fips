@@ -123,8 +123,11 @@ for off. The other files run off, which is what they test.
   table fails at the next frame; the crossing's waiver is recorded at the
   crossing on that link only, and a crossing that keeps the link's entry
   records none; a session a degraded decrypt-worker pool refused, and two
-  started nodes on real pools, pass. Tests that need the audit to run carry
-  `#[cfg(debug_assertions)]`.
+  started nodes on real pools, pass. The settlement core's record of a
+  dialed link holds its original path Live, follows a one-path roam, and
+  records a switch to an acknowledged path Live, which `links-mirror` lets
+  off for the active path alone; a record off its bundle fails the clause.
+  Tests that need the audit to run carry `#[cfg(debug_assertions)]`.
 - `table/`: the transition table checked on real nodes. Its `mod.rs` is
   the harness: a reading of every row of a peer's state on one node
   (`Seen`), a writer that makes every row it can reach differ from a fresh

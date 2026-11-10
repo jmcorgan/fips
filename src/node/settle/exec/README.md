@@ -56,8 +56,17 @@ statements at its site.
   a replacement's removal, reading its `Removed` from `install.rs`'s
   `Facts` and the replacement's cells. A loss noted for a reconnect where
   the removal was decided is not noted again.
-- `links.rs`: the place the settlement core's link records are fed from;
-  it holds nothing yet.
+- `links.rs`: the feed of the settlement core's link records, which the
+  link table keeps beside its own: `pathed`, which runs what a step of a
+  link's bundle returned through the core's join, each output followed by
+  the core input it stands for, for the path machine's executor in
+  `../../handlers/path.rs`; `Node::roamed`, which tells the join of a
+  one-path roam or a bind, which the bundle reports in no output, for the
+  frame's accounting in `../../dataplane/encrypted.rs`; and `Node::feed`,
+  which applies a path's state, move, switch or release to the record. A
+  promotion, in `install.rs`, holds the record for its peer and records the
+  new bundle's original path. Nothing reads the records to decide anything
+  yet.
 
 ## Rules for this level
 
@@ -72,6 +81,14 @@ statements at its site.
   `paths.rs`. An effect not yet routed stops a debug build if reached.
 - `Run` holds only what effects of two changes read; what one change's
   effects read goes in that change's `Facts`.
-- Its tests are in `../tests/plan.rs`, with the other tests of
+- A peer's machines are built and closed here, through the active peer's
+  `with_session` and `stop`, which alone ask the settlement core's join for
+  those changes; a crossing's move is the one change its site asks for,
+  through `move_session`, before running the rest here. No code outside the
+  join calls a machine to build, renew or close it but the exemptions
+  `../tests/scans.rs` lists with their reasons, and that scan reds on any
+  other.
+- Its tests are in `../tests/plan.rs`, `../tests/remove.rs`,
+  `../tests/links.rs` and `../tests/scans.rs`, with the other tests of
   `src/node/settle/`.
 - Keep the file list in step with the directory.

@@ -174,3 +174,8 @@ DisconnectKeepsVerified	red	fips-mesh	node::tests::ble::a_verified_link_stops_be
 EndedSchedulesRetry	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say
 EndedSchedulesRetry	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say_with_multipath_on
 EndedSchedulesRetry	red	fips-mesh	node::tests::settle::table::remove::a_test_removal_runs_no_tail
+LinksNotFed	red	fips-mesh	node::tests::settle::live::a_dialed_links_record_holds_its_original_path_live_and_one_off_its_bundle_fails	links-mirror
+LinksNotFed	red	fips-mesh	node::tests::settle::live::a_dialed_links_record_holds_its_original_path_live_and_one_off_its_bundle_fails_with_multipath_on	links-mirror
+LinksNotFed	red	fips-mesh	node::tests::settle::live::a_healthy_dial_passes_the_live_audit_at_every_entry	links-mirror
+LinksNotFed	red	fips-mesh	node::tests::settle::live::a_healthy_dial_passes_the_live_audit_at_every_entry_with_multipath_on	links-mirror
+MirrorLetsAckedOff	red	fips-mesh	node::tests::settle::live::a_switch_to_an_acked_path_is_recorded_live_and_is_let_off_with_multipath_on	let off an acknowledged path that is not active

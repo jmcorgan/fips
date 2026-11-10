@@ -31,6 +31,12 @@ tests.
   default configuration, at each multipath setting, against the ones
   `fips_core::proto::settle::parity` states for the schedules a real node
   and the joint world both run, so the two run alike.
+- `links.rs`: the settlement core's link records the link table keeps, from
+  a link's open to its close or a dial's forget; and the live audit's
+  `links-mirror` clause, which skips only a peer a test mutator changed past
+  the feed, every other clause still reading it, with one row per mutator
+  that it flags its peer. The clause on real nodes is in
+  `../../tests/settle/live.rs`.
 - `plan.rs`: each transition's plan against the statements its sites ran,
   in their order, written beside each effect; that every transition but a
   cutover has a list and every effect is in one; each announcing
@@ -43,6 +49,14 @@ tests.
   routine of `../exec/remove.rs`, by a scan of the node's code outside its
   tests for a peer taken out of the peer map, with its one exemption and a
   planted line.
+- `scans.rs`: that no code of the root crate outside its tests builds,
+  renews or closes a link's rekey or path machine but through the
+  settlement core's join, with each exemption's reason and a check that
+  each still names a call; that only `src/peer/active.rs` asks the join for
+  a change of machines, one function for each, and that only `../exec/`
+  calls those functions in the node's code but for a crossing's move at its
+  site. Each scan finds planted lines of every shape it reads. The file
+  walker is `src/node/tests/survivors.rs`'s.
 
 ## Rules for this level
 

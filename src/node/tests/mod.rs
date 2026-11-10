@@ -82,7 +82,7 @@ mod spanning_tree;
 mod status;
 mod stored_msg2;
 mod stored_msg2_install;
-mod survivors;
+pub(in crate::node) mod survivors;
 mod task_wait;
 mod tcp;
 mod traffic_diag;

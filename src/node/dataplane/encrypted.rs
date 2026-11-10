@@ -461,10 +461,14 @@ impl Node {
         let mut prior = None;
         let mut wake = None;
         let mut heard_from = false;
+        let mut roamed = None;
         let intake = self.config().node.path.enabled;
         if let Some(peer) = self.peers.get_mut(node_addr) {
             present = true;
             let msg_type = link_message.first().copied().unwrap_or(0);
+            let standby = peer.standby();
+            #[cfg(test)]
+            let fed = peer.past_feed();
             let account = peer.account(
                 now,
                 frame.transport_id,
@@ -472,6 +476,8 @@ impl Node {
                 frame.len,
                 msg_type,
             );
+            #[cfg(test)]
+            peer.set_past_feed(fed);
             let roam = account.roam;
             // An authentic frame from a pair the link holds no path at, that
             // the one-path roam did not follow, makes the pair a candidate,
@@ -492,9 +498,17 @@ impl Node {
                 );
             address_changed = roam.changed();
             // A roam that moved an address may leave the path machine work
-            // to do, which the path tick must not sleep through.
+            // to do, which the path tick must not sleep through. The bundle
+            // reports no roam in its outputs, so the core's record of the
+            // link is told of it below.
             if roam != Roam::Unmoved {
                 wake = peer.bundle().and_then(PeerBundle::next_wake);
+                let from = match &roam {
+                    Roam::Roamed { from } => Some(from.clone()),
+                    Roam::Standby { .. } => standby,
+                    Roam::Bound | Roam::Unmoved => None,
+                };
+                roamed = Some((peer.link_id(), from));
             }
             // Only a link the peer actually left loses its verification. A
             // frame the roaming rule refuses to follow (another transport, or
@@ -529,6 +543,10 @@ impl Node {
             }
         }
         self.paths.fold(wake);
+        if let Some((link, from)) = roamed {
+            let to = (frame.transport_id, frame.remote_addr.clone());
+            self.roamed(*node_addr, link, from, &to);
+        }
         // A session's first authenticated frame clears its identity's
         // silent-session record: one identity has one peer entry, and a
         // record grows only when an unheard session ends.

@@ -6,7 +6,8 @@
 //! the peer machine still carries those results. A third keeps the per-peer
 //! map wrappers of `node/settle/` closed: what the compiler cannot refuse
 //! there is a `DerefMut` on a wrapper, or a way past the writers outside
-//! `#[cfg(test)]`.
+//! `#[cfg(test)]`. The settlement scans of `node/settle/tests/` walk the
+//! source with this file's `sources` too.
 
 use std::path::{Path, PathBuf};
 
@@ -107,8 +108,10 @@ const SESSION: &[&str] = &[
 /// steps the shell ran on the machine's outputs, the index hand-off and
 /// releases, the resend sweep, the cross-connection replace, the restart
 /// note, the offer at promotion, the worker acceptance and the epoch record
-/// outside `step`), the fields the link policy had, and the MMP reset a
-/// cutover and a move ran beside the transition table's cells for them.
+/// outside `step`), the fields the link policy had, the MMP reset a
+/// cutover and a move ran beside the transition table's cells for them, and
+/// the release of a removed peer's indices beside its machine's close, which
+/// the settlement core's join now makes.
 const LINK: &[&str] = &[
     "check_rekey",
     "route_rekey_cadence",
@@ -225,6 +228,7 @@ const LINK: &[&str] = &[
     "drain_rule",
     "restart_cutover",
     "reset_mmp",
+    "release_peer_indices",
 ];
 
 /// Names banned in the link and session shells only: a policy value,
@@ -250,7 +254,7 @@ fn uses(file: &str, source: &str, banned: &[&str]) -> Vec<String> {
 
 /// Every non-test `.rs` file under `dir`, recursively, leaving out a
 /// `tests` directory and a file named `tests.rs` or ending `_tests.rs`.
-fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
+pub(in crate::node) fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("the source directory reads") {
         let path = entry.expect("the directory entry reads").path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");

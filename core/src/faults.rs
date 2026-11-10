@@ -229,6 +229,13 @@ faults! {
     DisconnectKeepsVerified,
     /// A link its rekey machine ended schedules a reconnect to the peer.
     EndedSchedulesRetry,
+    /// The core's record of a link is never told a path's state, so a new
+    /// bundle's original path and every later change of a path's state are
+    /// missing from it.
+    LinksNotFed,
+    /// The live audit lets off any acknowledged path the core records Live,
+    /// not only the active path a switch made Live.
+    MirrorLetsAckedOff,
 }
 
 impl Fault {
