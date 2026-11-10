@@ -154,6 +154,23 @@ cat > "${SCRIPTS_DIR}/postinstall" <<'POSTINSTALL'
 #!/bin/sh
 set -e
 
+# Stop the daemon and wait until its process has exited. `launchctl bootout`
+# returns while the daemon is still shutting down; replacing its binary or
+# starting the new one in that window has left the old UDP socket bound
+# after the old process was gone, so the new daemon could not bind its port.
+stop_daemon() {
+    DAEMON_PID="$(launchctl print system/com.fips.daemon 2>/dev/null | awk '$1 == "pid" { print $3; exit }')"
+    launchctl bootout system /Library/LaunchDaemons/com.fips.daemon.plist 2>/dev/null || true
+    [ -n "$DAEMON_PID" ] || return 0
+    i=0
+    while kill -0 "$DAEMON_PID" 2>/dev/null; do
+        i=$((i + 1))
+        [ "$i" -eq 60 ] && kill -9 "$DAEMON_PID" 2>/dev/null
+        [ "$i" -ge 70 ] && break
+        sleep 0.5
+    done
+}
+
 LOG="/var/log/fips-install.log"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG"; logger -t fips-install "$*"; }
 
@@ -206,7 +223,7 @@ if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
 fi
 
 # Load the launchd service
-launchctl bootout system /Library/LaunchDaemons/com.fips.daemon.plist 2>/dev/null || true
+stop_daemon
 launchctl bootstrap system /Library/LaunchDaemons/com.fips.daemon.plist 2>/dev/null || true
 log "launchd service loaded"
 
@@ -232,8 +249,25 @@ chmod +x "${SCRIPTS_DIR}/postinstall"
 # Create preinstall script (stop service before upgrade)
 cat > "${SCRIPTS_DIR}/preinstall" <<'PREINSTALL'
 #!/bin/sh
+# Stop the daemon and wait until its process has exited. `launchctl bootout`
+# returns while the daemon is still shutting down; replacing its binary or
+# starting the new one in that window has left the old UDP socket bound
+# after the old process was gone, so the new daemon could not bind its port.
+stop_daemon() {
+    DAEMON_PID="$(launchctl print system/com.fips.daemon 2>/dev/null | awk '$1 == "pid" { print $3; exit }')"
+    launchctl bootout system /Library/LaunchDaemons/com.fips.daemon.plist 2>/dev/null || true
+    [ -n "$DAEMON_PID" ] || return 0
+    i=0
+    while kill -0 "$DAEMON_PID" 2>/dev/null; do
+        i=$((i + 1))
+        [ "$i" -eq 60 ] && kill -9 "$DAEMON_PID" 2>/dev/null
+        [ "$i" -ge 70 ] && break
+        sleep 0.5
+    done
+}
+
 # Stop service before upgrade
-launchctl bootout system /Library/LaunchDaemons/com.fips.daemon.plist 2>/dev/null || true
+stop_daemon
 # Stop the BLE agent in every GUI session; postinstall starts the new one.
 for AGENT_USER in $(who | awk '$2 == "console" { print $1 }' | sort -u); do
     [ "$AGENT_USER" = "root" ] && continue
