@@ -410,3 +410,32 @@ fn a_dropped_link_frees_a_descriptor_whose_write_never_returns() {
         "the link's descriptor is closed"
     );
 }
+
+/// A link whose write fails ends at once, even while its reader is still
+/// blocked: an accessory opened just after its session ended fails its first
+/// write, and waiting out the hello's timeout instead held the descriptor
+/// long enough for a quick replug to fail.
+/// Mutation: end the link only on the reader or on a drop.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn a_link_whose_write_fails_ends_while_its_read_still_blocks() {
+    use std::os::unix::net::UnixStream;
+
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    // The far end takes no more bytes, but keeps its own side open, so our
+    // read would block for ever.
+    theirs.shutdown(std::net::Shutdown::Read).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut link = UsbLink::from_fd(ours.into(), "accessory-test");
+        link.tx.send(b"hello".to_vec()).await.unwrap();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(2), link.rx.recv())
+            .await
+            .expect("the link ends within the timeout");
+        assert!(ended.is_none(), "the link's receiver is closed");
+    });
+    drop(theirs);
+}

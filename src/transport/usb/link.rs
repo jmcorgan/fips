@@ -79,7 +79,8 @@ impl UsbLink {
     /// the next one starts. Holding the descriptor meanwhile is what stops
     /// the next one starting: Android opens the same device to start
     /// accessory mode, and it admits one opener. So a third thread watches
-    /// for the transport dropping the link, or the reader ending; it then
+    /// for the transport dropping the link, or the reader or the writer
+    /// ending; it then
     /// interrupts both with [`wake`] and joins them, and the descriptor is
     /// closed.
     #[cfg(unix)]
@@ -93,6 +94,7 @@ impl UsbLink {
         let stop = Arc::new(AtomicBool::new(false));
         let dropped = in_tx.clone();
         let (reader_exit, reader_exited) = tokio::sync::oneshot::channel::<()>();
+        let (writer_exit, writer_exited) = tokio::sync::oneshot::channel::<()>();
 
         let reader = Arc::clone(&file);
         let reader_label = label.clone();
@@ -141,6 +143,7 @@ impl UsbLink {
                         break;
                     }
                 }
+                drop(writer_exit);
             });
         let writer_thread = match spawned {
             Ok(handle) => Some(handle),
@@ -155,12 +158,16 @@ impl UsbLink {
             .name(format!("fips-usb-wd-{label}"))
             .spawn(move || {
                 // Ends when the transport drops the link's receiver, or the
-                // reader ends — the link is over either way. Holding a
-                // sender past the reader's end would keep the receiver from
-                // seeing the link close.
+                // reader or the writer ends — the link is over either way.
+                // A write that fails (the session ended before the descriptor
+                // was opened, say) ends it at once instead of after the
+                // hello's timeout, which matters: the descriptor is held
+                // until then, and while it is, the next session cannot start.
+                // Holding a sender past the reader's end would keep the
+                // receiver from seeing the link close.
                 futures::executor::block_on(futures::future::select(
                     Box::pin(dropped.closed()),
-                    reader_exited,
+                    futures::future::select(reader_exited, writer_exited),
                 ));
                 drop(dropped);
                 stop.store(true, Ordering::Release);
