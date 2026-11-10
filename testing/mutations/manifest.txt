@@ -17,6 +17,10 @@ MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more
 MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_smaller_dialer	defect: the audit finds only the dialer's documented breach
 MoveKeepsOldPair	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_another_transport_does_what_the_move_cells_say
 MoveKeepsOldPair	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_a_second_ble_link_relinks_the_mark
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_tcp
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_tcp_with_multipath_on
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::explore::parity::every_shared_schedule_gives_its_trace_on_real_nodes
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::explore::parity::every_shared_schedule_gives_its_trace_on_real_nodes_with_multipath_on
 MoveAnnouncesFirst	red	fips-mesh	node::tests::control::test_api_connect_to_a_second_address_of_a_quiet_peer_dials_it_and_leaves_the_link_on_its_path	heartbeat must authenticate at node
 MoveAnnouncesFirst	red	fips-mesh	node::tests::rekey_parity::an_alternate_path_dial_on_an_aged_session_leaves_both_ends_able_to_authenticate	S receives L's heartbeat on its current session
 IgnoreOwnDial	red	fips-mesh	node::tests::handshake::heard::a_second_msg1_after_the_replaceable_age_from_the_larger_address_leaves_a_working_peering	the responder must have decrypted the dialer's frames on the peering that replaced the first
@@ -24,9 +28,15 @@ IgnoreOwnDial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_th
 IgnoreOwnDial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer	defect: Err(
 IgnoreOwnDial	pass	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer
 IgnoreOwnDial	pass	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer
+IgnoreOwnDial	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_loopback
+IgnoreOwnDial	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_loopback_with_multipath_on
+CrossedRunsKeep	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says
+CrossedRunsKeep	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says_with_multipath_on
 ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_garbage_msg2s
 ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_replayed_msg2s
 OutputsBeforeInstall	red	fips-mesh	node::tests::decrypt_replay::a_promoted_session_reaches_the_decrypt_workers_with_the_peers_total
+MoveSkipsWorkerOffer	red	fips-mesh	node::tests::settle::explore::oracle::a_crossing_with_the_worker_pool_started_offers_the_moved_session
+MoveSkipsWorkerOffer	red	fips-mesh	node::tests::settle::explore::oracle::a_crossing_with_the_worker_pool_started_offers_the_moved_session_with_multipath_on
 YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::fsp::every_xk_final_cell_takes_its_rows_action	core/src/proto/rekey/tests/fsp.rs:353
 YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::fsp::late_first_handshake_setup_copy_never_moves_the_smaller_node_off_its_confirmed_epoch	core/src/proto/rekey/tests/fsp.rs:1477
 YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::sim::crossing_runs_converge_with_only_the_tie_break_outcomes	reported FinalNoAttempt
@@ -81,12 +91,16 @@ CutoverSkipsMmpReset	red	fips-mesh	node::tests::settle::table::rekey::a_responde
 CutoverSkipsMmpReset	red	fips-mesh	node::tests::settle::table::rekey::a_responders_cutover_does_what_its_cells_say_with_multipath_on
 CutoverSkipsMmpReset	red	fips-mesh	node::tests::settle::table::rekey::a_restart_found_at_a_rekey_does_what_its_cells_say
 CutoverSkipsMmpReset	red	fips-mesh	node::tests::settle::table::rekey::a_restart_found_at_a_rekey_does_what_its_cells_say_with_multipath_on
+CutoverSkipsMmpReset	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says
+CutoverSkipsMmpReset	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says_with_multipath_on
 CutoverSkipsMmpReset	pass	fips-mesh	peer::data::tests::a_move_resets_what_its_cells_say_and_carries_the_rest
 MoveSkipsMmpReset	red	fips-mesh	peer::data::tests::a_move_resets_what_its_cells_say_and_carries_the_rest
 MoveSkipsMmpReset	red	fips-mesh	peer::active::tests::a_cross_connection_move_resets_the_link_mmp_observer_as_a_cutover_does	highest_counter counts from the new session
 MoveSkipsMmpReset	red	fips-mesh	peer::active::tests::a_cross_connection_move_accepts_the_peers_receiver_reports_on_the_new_session	is not dropped as stale
 MoveSkipsMmpReset	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_another_transport_does_what_the_move_cells_say
 MoveSkipsMmpReset	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_another_transport_does_what_the_move_cells_say_with_multipath_on
+MoveSkipsMmpReset	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says
+MoveSkipsMmpReset	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says_with_multipath_on
 MoveSkipsMmpReset	pass	fips-mesh	peer::data::tests::a_cutover_resets_what_its_cells_say_and_carries_the_rest
 TreeCarryAcrossRestart	red	fips-mesh	node::tests::settle::carry::a_peer_replaced_by_a_restart_after_an_announce_just_now_is_sent_a_tree_announce_at_once
 TreeCarryAcrossRestart	red	fips-mesh	node::tests::settle::table::replace::a_restart_msg1_replaces_the_peer_as_the_table_says
@@ -160,6 +174,8 @@ RemoveKeepsLink	red	fips-mesh	node::tests::settle::table::remove::a_peer_that_di
 RemoveKeepsLink	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say
 RemoveKeepsLink	red	fips-mesh	node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says
 RemoveKeepsLink	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say_with_multipath_on
+RemoveKeepsLink	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_loopback
+RemoveKeepsLink	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_loopback_with_multipath_on
 UnbindKept	red	fips-mesh	node::tests::disconnect::test_disconnect_clears_session	peers_by_index must map exactly
 UnbindKept	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_is_reaped	peers_by_index must map exactly
 UnbindKept	red	fips-mesh	node::tests::settle::table::remove::a_peer_that_disconnects_is_removed_as_its_cells_say

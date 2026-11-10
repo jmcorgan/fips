@@ -39,7 +39,9 @@ statements at its site.
 - `cross.rs`: a crossing's effects, moved onto this node's dial or kept on
   the peer's inbound session, with their `Facts`, which the site in
   `handle_msg2` fills through `Run::crossing`, since this file's module is
-  private to `exec/`. The move itself, `move_session`, stays at the site.
+  private to `exec/`. The move itself, `move_session`, stays at the site,
+  and so does the decision between a move and a keep, which passes through
+  `Run::swaps` for the mutation lane's break of it.
 - `paths.rs`: a followed, switched or released path's effects, which are
   plain functions because a removal reaches a release where it cannot
   await, with `Node::run_now`, which walks such a plan without awaiting;

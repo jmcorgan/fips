@@ -2246,7 +2246,7 @@ impl Node {
                 }
             };
 
-            if swap {
+            if crate::node::settle::exec::Run::swaps(swap, !own_dial && !later_dial) {
                 // We're the smaller node, or the peer's answer to this dial
                 // supersedes our earlier dial's. Swap to outbound session +
                 // indices. The peer keeps the session it answered this dial

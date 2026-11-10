@@ -78,6 +78,10 @@ faults! {
     /// existing peer ignores that the dial was this node's own, so only
     /// the tie-break decides between swapping and keeping.
     IgnoreOwnDial,
+    /// The smaller node of a crossed dial keeps the peer on its inbound
+    /// session and closes its own dial, as the larger node does, where the
+    /// tie-break moves it onto its dial.
+    CrossedRunsKeep,
     /// A link's MMP state keeps its spin bit through a rekey cutover,
     /// whose counters start again at zero.
     LinkSpinKept,
@@ -140,6 +144,9 @@ faults! {
     /// the table, so its session finds no peer's total to hand the decrypt
     /// workers and is not delegated.
     OutputsBeforeInstall,
+    /// A crossed dial's move builds the new link machine without offering
+    /// its session to the decrypt workers, though a pool runs.
+    MoveSkipsWorkerOffer,
     /// A newly promoted peer starts as if a tree announce had just been
     /// sent to it, so the rate limit holds back its first one.
     NewPeerStartsRateLimited,

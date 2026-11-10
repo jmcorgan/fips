@@ -163,7 +163,9 @@ builds, and changes no line of the core, the machine or the bundle.
   of a transport losing or regaining carrier and being removed go to
   every held peer's bundle.
   It names, for the sweeps' exemption, the pairs its bundles hold as
-  acknowledged paths that are not Live (`Party::lapsed`).
+  acknowledged paths that are not Live (`Party::lapsed`), and for the
+  shared schedules whether the core counts a held peer heard
+  (`Party::heard`).
   Under a candidate rule (`../candidates.rs`) the core may keep the
   session a peer is held on beside its next one: the shell then keeps
   that peer's machines and what it holds for it in a kept slot,
@@ -383,6 +385,17 @@ builds, and changes no line of the core, the machine or the bundle.
   the smaller node answered, reaching it after it moved onto its dial's
   session, which the machine refuses as answered before
   (`CloseSkipsRecord`).
+- `parity.rs`: the shared schedules (`../../parity.rs`) run in the
+  world, each step translated one for one into the world's events, and
+  each end's mark read from the party after every step: on the model of
+  the node (`../legacy/master.rs`, at the setting the script states),
+  which must give the trace's lines, and on joint nodes, which must give
+  them with the trace's `core` lines applied. Each run fails if it walked
+  fewer scripts than there are. Both are on the rows of the two switches
+  a mark shows, `MoveBuildsStale` (whose dial the session came from) and
+  `RenewSkipped` (the active pair, on a crossing whose dials' pairs
+  differ); `MoveBuildsFresh` changes nothing a mark holds, so it keeps its
+  own row.
 - `route.rs`: `route`, which turns one call's machine events into what
   the shell sends (an own msg1, a reply by its route, a sealed prompt, a
   path message, a connection the bundle asks for),

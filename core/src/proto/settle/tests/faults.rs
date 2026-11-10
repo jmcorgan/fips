@@ -54,6 +54,7 @@ const JOINT_PARTY: &str = "proto::settle::tests::joint::party::";
 const JOINT_EXPLORE: &str = "proto::settle::tests::joint::explore::";
 const JOINT_FEEDS: &str = "proto::settle::tests::joint::feeds::";
 const JOINT_ORACLE: &str = "proto::settle::tests::joint::oracle::";
+const JOINT_PARITY: &str = "proto::settle::tests::joint::parity::";
 const JOINT_RUNS: &str = "proto::settle::tests::joint::runs::";
 const JOINT_STARTS: &str = "proto::settle::tests::joint::starts::";
 
@@ -179,6 +180,19 @@ const JOINT_ORPHANED: Test = (
 const JOINT_DEFECTS: Test = (
     JOINT_PARTY,
     "starts_6_and_7_show_their_two_defects_on_real_machines",
+);
+
+/// The shared schedules on the model of the node, against the trace.
+const PARITY_MODEL: Test = (
+    JOINT_PARITY,
+    "every_shared_schedule_gives_its_trace_on_the_model_of_the_node",
+);
+
+/// The shared schedules on joint nodes, against the trace and its `core`
+/// lines.
+const PARITY_JOINT: Test = (
+    JOINT_PARITY,
+    "every_shared_schedule_gives_its_trace_on_joint_nodes",
 );
 
 /// Every start's script with its heal, joint nodes at Off at both ends.
@@ -880,6 +894,8 @@ pub const ROWS: &[Row] = &[
                 JOINT_STARTS,
                 "a_crossing_while_capability_probes_are_out_renews_the_bundle_and_keeps_both_ends_mirrored",
             ),
+            PARITY_MODEL,
+            PARITY_JOINT,
         ],
     ),
     (
@@ -952,7 +968,11 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::MoveBuildsStale,
-        &[(JOINT_ORACLE, "one_view_reads_the_session_a_move_built_from")],
+        &[
+            (JOINT_ORACLE, "one_view_reads_the_session_a_move_built_from"),
+            PARITY_MODEL,
+            PARITY_JOINT,
+        ],
     ),
     (Fault::ReplaceKeepsMachine, &[JOINT_RESTART]),
     (

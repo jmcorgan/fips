@@ -2753,6 +2753,10 @@ impl Party for JointParty {
         self.s.peers.keys().map(|&k| Node(k)).collect()
     }
 
+    fn heard(&self, peer: Node) -> Option<bool> {
+        self.s.table.held(&key(peer)).map(|h| h.heard)
+    }
+
     fn lapsed(&self) -> Vec<Addr> {
         let mut out = Vec::new();
         for p in self.s.peers.values() {

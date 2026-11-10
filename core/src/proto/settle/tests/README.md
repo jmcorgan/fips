@@ -60,7 +60,9 @@ can rebuild any state by replaying the path that reached it.
   Live (`Party::lapsed`), which the joint sweeps' exemption reads, and a
   joint node gives what the joint world's oracles read of its core, its
   machines and its shell (`Party::joint`), and its rekey machine for a
-  peer, for the convergence of a pair's machines (`Party::rekey`). Its own
+  peer, for the convergence of a pair's machines (`Party::rekey`). A
+  party that keeps a count of a held peer heard gives it
+  (`Party::heard`), which the shared schedules read. Its own
   tests check the stub crypto, the
   heartbeat, each transport model's guarantee, and that two orders of the
   same sends reach one key.

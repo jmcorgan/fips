@@ -17,6 +17,7 @@ mod carry;
 mod cells;
 mod clock;
 mod crossing;
+mod explore;
 mod fsp;
 mod lane;
 mod live;

@@ -12,6 +12,7 @@ pub mod feeds;
 pub mod machines;
 pub mod names;
 pub mod oracle;
+pub mod parity;
 pub mod party;
 pub mod pins;
 pub mod route;
@@ -24,7 +25,6 @@ use alloc::vec::Vec;
 
 use crate::proto::path;
 use crate::proto::rekey;
-use crate::proto::settle::parity;
 use crate::time::Duration;
 
 use super::super::model::history::Node;
@@ -90,7 +90,7 @@ impl Mode {
     /// (`parity::path`), which a root test ties to the node's
     /// `path_params`.
     pub fn path(self) -> path::Params {
-        parity::path(self.enabled())
+        crate::proto::settle::parity::path(self.enabled())
     }
 
     /// The path settings [`Self::path`] is made from, which the path
@@ -111,6 +111,6 @@ impl Mode {
     pub fn rekey(self) -> rekey::Params {
         // The defect's shape: the answer on the established link whatever
         // the setting.
-        parity::rekey(self.enabled() && !fault!(ArrivalIgnored))
+        crate::proto::settle::parity::rekey(self.enabled() && !fault!(ArrivalIgnored))
     }
 }

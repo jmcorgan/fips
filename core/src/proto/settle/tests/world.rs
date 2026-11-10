@@ -487,6 +487,12 @@ pub trait Party {
     fn holds(&self, peer: Node, hs: Hs) -> bool;
     /// The identities this party holds a peering of.
     fn held(&self) -> Vec<Node>;
+    /// Whether this party counts its peering of `peer` heard; `None` where
+    /// it holds no peering of `peer`, or for a party that keeps no such
+    /// count.
+    fn heard(&self, _peer: Node) -> Option<bool> {
+        None
+    }
     /// Whether an own rekey of `peer` may start now.
     fn rekeyable(&self, peer: Node) -> bool;
     /// The party's state, for the oracles.

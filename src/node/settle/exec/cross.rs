@@ -67,6 +67,15 @@ impl Run {
             | super::Facts::Remove(_) => unreachable!("set to a crossing's above"),
         }
     }
+
+    /// Whether a resolved crossing moves the peer onto this node's dial, as
+    /// the decision `swap` says. `tie` says the tie-break decided it, with
+    /// neither this node's own nor a later dial in play.
+    pub(in crate::node) fn swaps(swap: bool, tie: bool) -> bool {
+        // The mutation lane's break: the smaller node keeps, as the larger
+        // does.
+        swap && !(tie && node_fault!(CrossedRunsKeep))
+    }
 }
 
 /// The dial `t` names, and whether it answered this node's own or a later

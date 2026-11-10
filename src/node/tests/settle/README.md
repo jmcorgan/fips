@@ -11,12 +11,12 @@ real TCP sockets.
 
 Every test here states `node.path.enabled` and takes nothing from the daemon's
 default, so a change of default changes none of them. The tests of
-`crossing.rs`, `audit.rs` and `table/` run both ways: a test's plain name
-runs multipath off, and its `_with_multipath_on` sibling runs it on. They are
-two tests and not one loop, since a pin that fails in a loop's first pass
-would never reach the second, and each pin has a line of its own in
-`testing/ignored-tests.txt`. `readings.rs` runs on, but for its one test named
-for off. The other files run off, which is what they test.
+`crossing.rs`, `audit.rs`, `explore/` and `table/` run both ways: a test's
+plain name runs multipath off, and its `_with_multipath_on` sibling runs it
+on. They are two tests and not one loop, since a pin that fails in a loop's
+first pass would never reach the second, and each pin has a line of its own
+in `testing/ignored-tests.txt`. `readings.rs` runs on, but for its one test
+named for off. The other files run off, which is what they test.
 
 ## Files
 
@@ -86,6 +86,14 @@ for off. The other files run off, which is what they test.
   control). Each two-order case is one test per order. It holds copies of
   private helpers of `crossed_dial.rs` and `control.rs`, each naming its
   original.
+- `explore/`: the real-node explorer and its world: two or three real nodes
+  on the loopback, TCP or the BLE mock, driven by a schedule written as data,
+  every dial through `initiate_connection`, each node's receive channel
+  held by the world; and the core's named starts run on them, each scripted
+  and then varied packet by packet. Its tests show each step does what it
+  says on each transport, and that the explorer reaches each start's target;
+  `src/node/tests/settle/explore/README.md` says what the world models, what
+  it does not, and which starts run.
 - `fsp.rs`: an end-to-end session whose responder restarts before its
   frames reach the initiator. At the smaller address the pair carries data
   within one exchange. At the larger address it recovers when the

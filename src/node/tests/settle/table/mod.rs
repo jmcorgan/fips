@@ -8,7 +8,9 @@
 //! [`assert_cells`] holds each row of a before and an after reading against
 //! the row's cell at the transition the test ran, and fails, at a message
 //! starting `defect:`, on a row the site changed that its cell keeps or kept
-//! that its cell changes. `src/node/tests/settle/table/README.md` says what a
+//! that its cell changes. [`check_decided`] holds the rows the same way with
+//! each row's outcome decided by its caller, for a test whose own script
+//! does not state it. `src/node/tests/settle/table/README.md` says what a
 //! test here must do.
 //!
 //! A reading leaves out what any authenticated frame moves, since a frame is
@@ -311,6 +313,53 @@ pub(super) fn assert_cells(
         checked.breaches
     );
     checked
+}
+
+/// What [`check_decided`] found.
+#[derive(Debug, Default)]
+pub(super) struct Decided {
+    /// Each row whose reading did not do what its decided outcome says, as
+    /// [`Checked`] names one.
+    pub(super) breaches: Vec<String>,
+    /// How many rows were held to an outcome.
+    pub(super) held: usize,
+    /// The rows the decision gave no outcome, which are not checked.
+    pub(super) undecided: Vec<Row>,
+}
+
+/// Hold every row of `before` and `after` against its cell at `t`, as
+/// [`check_cells`] does, but with each row's outcome given by `decide` from
+/// the row, its cell and what the cell says of it, in place of a test's own
+/// statement. So a [`Expect::Stated`] row takes its outcome from whatever
+/// `decide` reads, a reference model among them. A row `decide` gives no
+/// outcome, or read on neither side, is not checked.
+pub(super) fn check_decided(
+    before: &Seen,
+    after: &Seen,
+    t: &Transition,
+    decide: impl Fn(Row, Cell, Expect) -> Option<Outcome>,
+) -> Decided {
+    let mut decided = Decided::default();
+    for row in Row::all() {
+        let c = cell(row, t);
+        let (b, a) = (before.get(row), after.get(row));
+        let Some(want) = decide(row, c, expect(c)).filter(|_| b.is_some() || a.is_some()) else {
+            decided.undecided.push(row);
+            continue;
+        };
+        decided.held += 1;
+        let got = if b == a {
+            Outcome::Kept
+        } else {
+            Outcome::Changed
+        };
+        if got != want {
+            decided.breaches.push(format!(
+                "{row:?} at {t:?} is {c:?}, so {want:?}, but {got:?}: before {b:?}, after {a:?}"
+            ));
+        }
+    }
+    decided
 }
 
 /// The pairs a reading covers: the peer's paths and `also`, each once, in
@@ -1023,7 +1072,7 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
 }
 
 /// Make one row of the record differ from a fresh one's.
-fn dirty_record(p: &mut ActivePeer, row: DataRow) {
+pub(super) fn dirty_record(p: &mut ActivePeer, row: DataRow) {
     match row {
         DataRow::Mmp => {
             if let Some(m) = p.mmp_mut() {

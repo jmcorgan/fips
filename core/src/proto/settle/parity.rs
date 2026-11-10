@@ -165,7 +165,9 @@ pub enum Step {
     /// Everything in flight is delivered, every connection opens, and the
     /// clocks run for a minute with no fault.
     Heal,
-    /// The clocks run this many milliseconds.
+    /// The clocks run this many milliseconds, each timer due on the way
+    /// firing; nothing is delivered meanwhile, and what is in flight when
+    /// they move is lost.
     Advance(u64),
     /// Node `node` restarts.
     Restart {
@@ -179,7 +181,9 @@ pub enum Step {
     },
 }
 
-/// One schedule both sides run.
+/// One schedule both sides run. A node that dials a peer in it redials
+/// that peer at the same address whenever it holds none, as a node redials
+/// a peer it is configured with.
 #[derive(Clone, Copy, Debug)]
 pub struct Script {
     /// Its name, which its block in the trace carries.
@@ -275,8 +279,163 @@ const CROSSING_TCP: &[Step] = &[
     Step::Heal,
 ];
 
-/// Every shared schedule. A crossing's name says whose msg1 is read first:
-/// node 0's, and node 0 is the smaller node or the larger.
+/// Node `from` dials node `to`'s home on `transport`.
+const fn dial(from: usize, to: usize, transport: Transport) -> Step {
+    Step::Dial {
+        from,
+        to,
+        transport,
+    }
+}
+
+/// Node `to` reads the msg1 of its peer's handshake `nth`.
+const fn msg1(to: usize, nth: u32) -> Step {
+    Step::Handshake {
+        to,
+        kind: Packet::Msg1,
+        nth,
+    }
+}
+
+/// Node `to` reads the msg2 answering its own handshake `nth`.
+const fn msg2(to: usize, nth: u32) -> Step {
+    Step::Handshake {
+        to,
+        kind: Packet::Msg2,
+        nth,
+    }
+}
+
+/// Crossed dials over two transports, node 0 dialing on UDP and node 1 on
+/// TCP: node 1's connection opens, node 0 reads node 1's msg1, node 1
+/// reads node 0's, and node 1 reads its msg2 before node 0 does (start 2).
+const CROSSING_MIXED: &[Step] = &[
+    dial(0, 1, Transport::Udp),
+    dial(1, 0, Transport::Tcp),
+    Step::Connected { node: 1 },
+    msg1(0, 1),
+    msg1(1, 1),
+    msg2(1, 1),
+    msg2(0, 1),
+    Step::Heal,
+];
+
+/// Crossed dials on BLE, which share the pair's one connection: it opens,
+/// and the four messages are read as on a connectionless crossing (start
+/// 4).
+const CROSSING_BLE: &[Step] = &[
+    dial(0, 1, Transport::Ble),
+    dial(1, 0, Transport::Ble),
+    Step::Connected { node: 0 },
+    msg1(1, 1),
+    msg1(0, 1),
+    msg2(0, 1),
+    msg2(1, 1),
+    Step::Heal,
+];
+
+/// Node 0 dials node 1 and reads the answer; a second later it dials again,
+/// and node 1's answer to that is read in order (start 5).
+const LATE_ORDER: &[Step] = &[
+    dial(0, 1, Transport::Udp),
+    msg1(1, 1),
+    msg2(0, 1),
+    Step::Advance(1_000),
+    dial(0, 1, Transport::Udp),
+    msg1(1, 2),
+    msg2(0, 2),
+    Step::Heal,
+];
+
+/// Node 0 dials node 1 twice; node 1 reads the first msg1, then, a resend
+/// interval later, the first msg1's resend and the second's, and node 0
+/// reads the second msg2 before the first (start 6).
+const LATE_REORDERED: &[Step] = &[
+    dial(0, 1, Transport::Udp),
+    dial(0, 1, Transport::Udp),
+    msg1(1, 1),
+    Step::Advance(1_000),
+    msg1(1, 1),
+    msg1(1, 2),
+    msg2(0, 2),
+    msg2(0, 1),
+    Step::Heal,
+];
+
+/// Node 0 dials node 1, which answers; node 0 restarts after reading the
+/// answer, and redials (start 8).
+const RESTART: &[Step] = &[
+    dial(0, 1, Transport::Udp),
+    msg1(1, 1),
+    msg2(0, 1),
+    Step::Restart { node: 0 },
+    Step::Heal,
+];
+
+/// Node 0 dials node 1, which answers, and the pair settles; node 0
+/// starts its own rekey, which node 1 answers.
+const REKEY_OWN: &[Step] = &[
+    dial(0, 1, Transport::Udp),
+    msg1(1, 1),
+    msg2(0, 1),
+    Step::Heal,
+    Step::Rekey { node: 0 },
+    msg1(1, 2),
+    msg2(0, 2),
+    Step::Heal,
+];
+
+/// As [`REKEY_OWN`], with the rekey node 1's, the responder of the dial.
+const REKEY_PEER: &[Step] = &[
+    dial(0, 1, Transport::Udp),
+    msg1(1, 1),
+    msg2(0, 1),
+    Step::Heal,
+    Step::Rekey { node: 1 },
+    msg1(0, 1),
+    msg2(1, 1),
+    Step::Heal,
+];
+
+/// [`CROSSING_TCP`], then node 0, which moved when node 0 is the smaller
+/// node, starts its own rekey.
+const CROSSING_TCP_REKEY: &[Step] = &[
+    dial(0, 1, Transport::Tcp),
+    dial(1, 0, Transport::Tcp),
+    Step::Connected { node: 0 },
+    msg1(1, 1),
+    Step::Connected { node: 1 },
+    msg1(0, 1),
+    msg2(0, 1),
+    msg2(1, 1),
+    Step::Heal,
+    Step::Rekey { node: 0 },
+    msg1(1, 2),
+    msg2(0, 2),
+    Step::Heal,
+];
+
+/// Node 0 dials node 1 on BLE, and five seconds later again over the same
+/// connection; everything either sends is lost until the first dial's
+/// handshake deadline has passed, which reaps its leg while the second is
+/// still out (start 18).
+const BLE_REAPED: &[Step] = &[
+    dial(0, 1, Transport::Ble),
+    Step::Connected { node: 0 },
+    Step::Advance(5_000),
+    dial(0, 1, Transport::Ble),
+    Step::Advance(25_000),
+    Step::Heal,
+];
+
+/// Every shared schedule. The two first crossings' names say whose msg1 is
+/// read first: node 0's, and node 0 is the smaller node or the larger.
+/// Every other name says whether node 0 is the smaller node or the larger,
+/// and ends with the setting. The named starts of the settlement tests
+/// they run are 1 (`crossing-udp`), 2 and 15 (`crossing-mixed`, the same
+/// schedule), 3 (`crossing-tcp`), 4 (`crossing-ble`), 5
+/// (`late-dial-in-order`), 6 (`late-dial-reordered`), 8 (`restart`) and
+/// 18 (`ble-reaped`); [`UNSHARED`] says why each other start is not here.
 pub const SCRIPTS: &[Script] = &[
     Script {
         name: "crossing-udp-smaller-first-off",
@@ -334,6 +493,289 @@ pub const SCRIPTS: &[Script] = &[
         transports: &[Transport::Tcp],
         steps: CROSSING_TCP,
     },
+    Script {
+        name: "crossing-mixed-smaller-off",
+        settings: OFF,
+        smaller: 0,
+        transports: &[Transport::Udp, Transport::Tcp],
+        steps: CROSSING_MIXED,
+    },
+    Script {
+        name: "crossing-mixed-larger-off",
+        settings: OFF,
+        smaller: 1,
+        transports: &[Transport::Udp, Transport::Tcp],
+        steps: CROSSING_MIXED,
+    },
+    Script {
+        name: "crossing-mixed-smaller-on",
+        settings: ON,
+        smaller: 0,
+        transports: &[Transport::Udp, Transport::Tcp],
+        steps: CROSSING_MIXED,
+    },
+    Script {
+        name: "crossing-mixed-larger-on",
+        settings: ON,
+        smaller: 1,
+        transports: &[Transport::Udp, Transport::Tcp],
+        steps: CROSSING_MIXED,
+    },
+    Script {
+        name: "crossing-ble-smaller-off",
+        settings: OFF,
+        smaller: 0,
+        transports: &[Transport::Ble],
+        steps: CROSSING_BLE,
+    },
+    Script {
+        name: "crossing-ble-larger-off",
+        settings: OFF,
+        smaller: 1,
+        transports: &[Transport::Ble],
+        steps: CROSSING_BLE,
+    },
+    Script {
+        name: "crossing-ble-smaller-on",
+        settings: ON,
+        smaller: 0,
+        transports: &[Transport::Ble],
+        steps: CROSSING_BLE,
+    },
+    Script {
+        name: "crossing-ble-larger-on",
+        settings: ON,
+        smaller: 1,
+        transports: &[Transport::Ble],
+        steps: CROSSING_BLE,
+    },
+    Script {
+        name: "late-dial-in-order-smaller-off",
+        settings: OFF,
+        smaller: 0,
+        transports: &[Transport::Udp],
+        steps: LATE_ORDER,
+    },
+    Script {
+        name: "late-dial-in-order-larger-off",
+        settings: OFF,
+        smaller: 1,
+        transports: &[Transport::Udp],
+        steps: LATE_ORDER,
+    },
+    Script {
+        name: "late-dial-in-order-smaller-on",
+        settings: ON,
+        smaller: 0,
+        transports: &[Transport::Udp],
+        steps: LATE_ORDER,
+    },
+    Script {
+        name: "late-dial-in-order-larger-on",
+        settings: ON,
+        smaller: 1,
+        transports: &[Transport::Udp],
+        steps: LATE_ORDER,
+    },
+    Script {
+        name: "late-dial-reordered-smaller-off",
+        settings: OFF,
+        smaller: 0,
+        transports: &[Transport::Udp],
+        steps: LATE_REORDERED,
+    },
+    Script {
+        name: "late-dial-reordered-larger-off",
+        settings: OFF,
+        smaller: 1,
+        transports: &[Transport::Udp],
+        steps: LATE_REORDERED,
+    },
+    Script {
+        name: "late-dial-reordered-smaller-on",
+        settings: ON,
+        smaller: 0,
+        transports: &[Transport::Udp],
+        steps: LATE_REORDERED,
+    },
+    Script {
+        name: "late-dial-reordered-larger-on",
+        settings: ON,
+        smaller: 1,
+        transports: &[Transport::Udp],
+        steps: LATE_REORDERED,
+    },
+    Script {
+        name: "restart-smaller-off",
+        settings: OFF,
+        smaller: 0,
+        transports: &[Transport::Udp],
+        steps: RESTART,
+    },
+    Script {
+        name: "restart-larger-off",
+        settings: OFF,
+        smaller: 1,
+        transports: &[Transport::Udp],
+        steps: RESTART,
+    },
+    Script {
+        name: "restart-smaller-on",
+        settings: ON,
+        smaller: 0,
+        transports: &[Transport::Udp],
+        steps: RESTART,
+    },
+    Script {
+        name: "restart-larger-on",
+        settings: ON,
+        smaller: 1,
+        transports: &[Transport::Udp],
+        steps: RESTART,
+    },
+    Script {
+        name: "rekey-own-smaller-off",
+        settings: OFF,
+        smaller: 0,
+        transports: &[Transport::Udp],
+        steps: REKEY_OWN,
+    },
+    Script {
+        name: "rekey-own-larger-off",
+        settings: OFF,
+        smaller: 1,
+        transports: &[Transport::Udp],
+        steps: REKEY_OWN,
+    },
+    Script {
+        name: "rekey-own-smaller-on",
+        settings: ON,
+        smaller: 0,
+        transports: &[Transport::Udp],
+        steps: REKEY_OWN,
+    },
+    Script {
+        name: "rekey-own-larger-on",
+        settings: ON,
+        smaller: 1,
+        transports: &[Transport::Udp],
+        steps: REKEY_OWN,
+    },
+    Script {
+        name: "rekey-peer-smaller-off",
+        settings: OFF,
+        smaller: 0,
+        transports: &[Transport::Udp],
+        steps: REKEY_PEER,
+    },
+    Script {
+        name: "rekey-peer-larger-off",
+        settings: OFF,
+        smaller: 1,
+        transports: &[Transport::Udp],
+        steps: REKEY_PEER,
+    },
+    Script {
+        name: "rekey-peer-smaller-on",
+        settings: ON,
+        smaller: 0,
+        transports: &[Transport::Udp],
+        steps: REKEY_PEER,
+    },
+    Script {
+        name: "rekey-peer-larger-on",
+        settings: ON,
+        smaller: 1,
+        transports: &[Transport::Udp],
+        steps: REKEY_PEER,
+    },
+    Script {
+        name: "crossing-tcp-rekey-smaller-off",
+        settings: OFF,
+        smaller: 0,
+        transports: &[Transport::Tcp],
+        steps: CROSSING_TCP_REKEY,
+    },
+    Script {
+        name: "crossing-tcp-rekey-larger-off",
+        settings: OFF,
+        smaller: 1,
+        transports: &[Transport::Tcp],
+        steps: CROSSING_TCP_REKEY,
+    },
+    Script {
+        name: "crossing-tcp-rekey-smaller-on",
+        settings: ON,
+        smaller: 0,
+        transports: &[Transport::Tcp],
+        steps: CROSSING_TCP_REKEY,
+    },
+    Script {
+        name: "crossing-tcp-rekey-larger-on",
+        settings: ON,
+        smaller: 1,
+        transports: &[Transport::Tcp],
+        steps: CROSSING_TCP_REKEY,
+    },
+    Script {
+        name: "ble-reaped-smaller-on",
+        settings: ON,
+        smaller: 0,
+        transports: &[Transport::Ble],
+        steps: BLE_REAPED,
+    },
+    Script {
+        name: "ble-reaped-larger-on",
+        settings: ON,
+        smaller: 1,
+        transports: &[Transport::Ble],
+        steps: BLE_REAPED,
+    },
+];
+
+/// The named starts of the settlement tests that no script runs, each with
+/// why: what it needs that no step names, or that no mark shows.
+pub const UNSHARED: &[(&str, &str)] = &[
+    (
+        "7, a dial on the peer's aged link, then an own rekey",
+        "its dial goes to the peer's second address, and a step dials only a home",
+    ),
+    (
+        "9, a crossing during a rekey and during its drain",
+        "its dials go from and to second addresses, and a step dials only from and to a home",
+    ),
+    (
+        "10, a stored msg2 whose first send failed",
+        "a send that fails, which no step names",
+    ),
+    (
+        "11, three nodes",
+        "a mark holds what an end holds of one peer",
+    ),
+    (
+        "12, two paths",
+        "its second dial goes from a second address, and on joint nodes the link's second path comes from the capability exchange",
+    ),
+    (
+        "13, a replayed msg1 and a forged msg2 spray",
+        "a copy of a captured msg1 and a forged message, which no node sends",
+    ),
+    (
+        "14, a wall step inside the heard floor",
+        "the wall clock stepping apart from the monotonic one",
+    ),
+    (
+        "16, 17, 20 and 23, a two-path link",
+        "the link's second path comes from the capability exchange, started by a feed's candidate, and 20 and 23 add a carrier loss and a transport's removal",
+    ),
+    (
+        "21, the only path's transport removed",
+        "a transport's removal, which no step names",
+    ),
+    (
+        "22, a NAT rebound of the second path",
+        "a NAT's rebinding of a source address, after the capability exchange",
+    ),
 ];
 
 /// What in `script` names a node or a transport the script does not hold,

@@ -795,6 +795,9 @@ impl ActivePeer {
         // its bundle is not renewed.
         let kept = node_fault!(MoveKeepsOldPair).then(|| self.bound_transport());
         let transport = kept.unwrap_or(to.0);
+        // The mutation lane's break: the rebuilt machine does not offer its
+        // session to the decrypt workers.
+        caps.workers &= !node_fault!(MoveSkipsWorkerOffer);
         // The epoch the closed machine carries; building does not read it.
         let epoch = self.rekey.as_ref().and_then(|r| r.view().peer_epoch);
         let setup = Setup {
