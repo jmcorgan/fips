@@ -141,28 +141,82 @@ fn switch_key(serial: Option<&str>, label: &str) -> String {
 
 /// Run `switch` for the phone `key` unless a switch of it is claimed, and
 /// keep the claim only if the start request went out.
-async fn switch_once<F>(switches: &Switches, key: &str, label: &str, switch: F)
+async fn switch_once<F>(switches: &Switches, key: &str, label: &str, switch: F) -> bool
 where
     F: std::future::Future<Output = Result<bool, String>>,
 {
     if !switches.claim(key, Instant::now()) {
         debug!(device = %label, key = %key, "USB host: already asked to become an accessory; not asking again");
-        return;
+        return false;
     }
     match switch.await {
         Ok(true) => {
             switches.sent(key, Instant::now());
             info!(device = %label, "USB host: asked device to become an accessory");
+            true
         }
         Ok(false) => {
             switches.release(key);
             debug!(device = %label, "USB host: device does not speak AOA");
+            false
         }
         Err(e) => {
             switches.release(key);
             debug!(device = %label, error = %e, "USB host: AOA switch failed");
+            false
         }
     }
+}
+
+/// The most times one plug of a phone is asked to become an accessory.
+const SWITCH_ASKS: usize = 3;
+
+/// Ask the opened phone `dev` to become an accessory, and ask it again if,
+/// a [`SWITCH_COOLDOWN`] after the request, it is still here as the same
+/// device: a phone that switches leaves the bus, so this one did not. That
+/// happens when the phone could not start accessory mode — Android opens
+/// its accessory device to start it, which fails while an app still holds
+/// it from an earlier session — and nothing else would ask again before a
+/// replug. A phone that did not switch showed no accessory dialog, so
+/// asking again shows none twice. At most [`SWITCH_ASKS`] asks per plug.
+async fn switch_until_gone(
+    dev: &nusb::Device,
+    switches: &Switches,
+    key: &str,
+    label: &str,
+    uri: &str,
+) {
+    for ask in 1..=SWITCH_ASKS {
+        if !switch_once(switches, key, label, switch_device(dev, uri)).await {
+            return;
+        }
+        tokio::time::sleep(SWITCH_COOLDOWN + Duration::from_millis(500)).await;
+        if !still_here(dev).await {
+            return;
+        }
+        if ask < SWITCH_ASKS {
+            info!(device = %label, ask, "USB host: device did not become an accessory; asking again");
+        } else {
+            warn!(device = %label, "USB host: device did not become an accessory; giving up until it is replugged");
+        }
+    }
+}
+
+/// Whether the phone `dev` still answers as the device it was opened as.
+async fn still_here(dev: &nusb::Device) -> bool {
+    dev.control_in(
+        ControlIn {
+            control_type: ControlType::Vendor,
+            recipient: Recipient::Device,
+            request: AOA_GET_PROTOCOL,
+            value: 0,
+            index: 0,
+            length: 2,
+        },
+        CONTROL_TIMEOUT,
+    )
+    .await
+    .is_ok()
 }
 
 /// The least time between two resets of one phone (see [`recover`]), so a
@@ -324,7 +378,12 @@ fn consider(
         let uri = uri.to_string();
         let switches = switches.clone();
         tasks.spawn(async move {
-            switch_once(&switches, &key, &label, switch_to_accessory(&device, &uri)).await;
+            match device.open().await {
+                Ok(dev) => switch_until_gone(&dev, &switches, &key, &label, &uri).await,
+                Err(e) => {
+                    debug!(device = %label, error = %e, "USB host: cannot open device to switch it")
+                }
+            }
         });
     }
 }
@@ -353,13 +412,6 @@ fn looks_like_phone(device: &DeviceInfo) -> bool {
 fn label_of(device: &DeviceInfo) -> String {
     let ports: Vec<String> = device.port_chain().iter().map(|p| p.to_string()).collect();
     format!("host/{}-{}", device.bus_id(), ports.join("."))
-}
-
-#[cfg(not(target_os = "android"))]
-/// Run the AOA handshake. `Ok(false)` when the device does not support AOA.
-async fn switch_to_accessory(device: &DeviceInfo, uri: &str) -> Result<bool, String> {
-    let dev = device.open().await.map_err(|e| format!("open: {e}"))?;
-    switch_device(&dev, uri).await
 }
 
 /// Take a device the embedder opened as USB host — on Android, through
@@ -405,7 +457,7 @@ pub(crate) async fn adopt(
             Err(e) => warn!(link = %label, error = %e, "USB host: cannot open accessory"),
         }
     } else {
-        switch_once(&switches, &key, &label, switch_device(&dev, &uri)).await;
+        switch_until_gone(&dev, &switches, &key, &label, &uri).await;
     }
 }
 
