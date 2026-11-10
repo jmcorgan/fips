@@ -18,7 +18,7 @@ use crate::transport::{TransportAddr, TransportHandle, TransportId, packet_chann
 
 #[cfg(ble_available)]
 use super::ble;
-use super::{nym, tcp, tor};
+use super::{nym, tcp, tor, usb};
 
 /// How a transport kind meets one rule.
 enum Cover {
@@ -121,13 +121,21 @@ fn listing(handle: &TransportHandle) -> Kind {
                  a frame above it, so a frame the sender admits is within the receiver's bound",
             ),
         }),
-        // TODO(usb): no conformance instance yet; these are placeholders,
-        // not checked exemptions.
         TransportHandle::Usb(_) => Kind::Oriented(Rules {
-            close: Cover::Exempt("not yet covered: no USB instance of the close rule"),
-            stop: Cover::Exempt("not yet covered: no USB instance of the stop rule"),
-            idle: Cover::Exempt("not yet covered: no USB instance of the idle rule"),
-            bound: Cover::Exempt("not yet covered: no USB instance of the receive-bound rule"),
+            close: Cover::Instance(&[usb::a_frame_queued_just_before_a_close_reaches_the_peer]),
+            stop: Cover::Instance(&[
+                usb::stopping_the_transport_ends_a_writer_still_draining_after_a_close,
+            ]),
+            idle: Cover::Exempt(
+                "a USB link is pooled only once the far end's hello has arrived, and one whose \
+                 far end sends nothing is dropped unpooled at HELLO_TIMEOUT (5 s), so no silent \
+                 far end holds a pooled link; a link exists only while its cable is attached, \
+                 one per cable",
+            ),
+            bound: Cover::Instance(&[
+                usb::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered,
+                usb::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes,
+            ]),
         }),
         #[cfg(test)]
         TransportHandle::Loopback(_) => Kind::TestDouble(
@@ -165,6 +173,13 @@ fn every_kind() -> Vec<TransportHandle> {
             id,
             None,
             NymConfig::default(),
+            tx.clone(),
+        )),
+        TransportHandle::Usb(crate::transport::usb::UsbTransport::new(
+            id,
+            None,
+            crate::config::UsbConfig::default(),
+            std::sync::Arc::new(crate::transport::usb::UsbLinkQueue::new()),
             tx.clone(),
         )),
         TransportHandle::Loopback(LoopbackTransport::new(

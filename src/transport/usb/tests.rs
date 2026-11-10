@@ -305,3 +305,37 @@ async fn a_transport_without_a_key_refuses_to_start() {
         Err(TransportError::StartFailed(_))
     ));
 }
+
+/// A far end that sends no hello is never pooled, and is dropped at
+/// `HELLO_TIMEOUT`: the reason the conformance listing exempts USB from the
+/// rule that a silent accepted connection is closed within its deadline.
+#[tokio::test(start_paused = true)]
+async fn a_far_end_that_sends_no_hello_is_dropped_unpooled_at_the_hello_timeout() {
+    let a = side(1).await;
+    let (near, mut far) = UsbLink::pair("acc0", "far");
+    let at = TransportAddr::from_string("acc0");
+    a.links.push(near);
+    assert!(
+        far.rx.recv().await.is_some(),
+        "precondition: the transport sends its hello"
+    );
+
+    tokio::time::sleep(HELLO_TIMEOUT - Duration::from_millis(100)).await;
+    assert!(
+        !a.transport.has_connection(&at).await,
+        "a link without a hello is not pooled"
+    );
+    assert_eq!(
+        a.transport.stats().snapshot().hello_failures,
+        0,
+        "dropped before the timeout"
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        far.rx.recv().await.is_none(),
+        "the silent link is closed at the hello timeout"
+    );
+    assert_eq!(a.transport.stats().snapshot().hello_failures, 1);
+    assert!(!a.transport.has_connection(&at).await);
+}

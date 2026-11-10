@@ -31,6 +31,7 @@ mod kinds;
 mod nym;
 mod tcp;
 mod tor;
+mod usb;
 
 /// The `mtu` of a receiving end in the receive-bound rule.
 const SMALL_MTU: u16 = 1400;

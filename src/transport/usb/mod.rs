@@ -45,8 +45,10 @@ pub mod stats;
 
 pub use link::{USB_TRANSFER_MAX, UsbAttach, UsbLink, UsbLinkQueue};
 
-use super::framing::{StreamError, read_fmp_packet};
-use super::stream::{ConnId, PooledConn, next_conn_id, remove_own};
+use super::framing::{RECV_CEILING, StreamError, read_fmp_packet};
+use super::stream::{
+    ConnId, DrainingWriters, PooledConn, WRITER_DRAIN_TIMEOUT, next_conn_id, remove_own,
+};
 use super::{
     ConnectionState, DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr,
     TransportError, TransportId, TransportState, TransportType,
@@ -90,7 +92,9 @@ struct UsbConnection {
     id: ConnId,
     node_addr: NodeAddr,
     send_tx: mpsc::Sender<Vec<u8>>,
-    send_task: JoinHandle<()>,
+    /// The writer, taken out by a deliberate close so it can finish its
+    /// queue; aborted with the link otherwise.
+    send_task: Option<JoinHandle<()>>,
     recv_task: JoinHandle<()>,
 }
 
@@ -102,7 +106,9 @@ impl PooledConn for UsbConnection {
 
 impl Drop for UsbConnection {
     fn drop(&mut self) {
-        self.send_task.abort();
+        if let Some(task) = &self.send_task {
+            task.abort();
+        }
         self.recv_task.abort();
     }
 }
@@ -130,6 +136,8 @@ pub struct UsbTransport {
     closed: Arc<std::sync::Mutex<Vec<TransportAddr>>>,
     /// Poked when a link is added to `closed`, so the node reads it at once.
     closed_notify: Arc<tokio::sync::Notify>,
+    /// Writers of links the node closed, still finishing their queues.
+    draining: DrainingWriters,
     stats: Arc<UsbStats>,
     /// Our public key, sent in every hello. A transport without one cannot
     /// identify itself and refuses links.
@@ -158,6 +166,7 @@ impl UsbTransport {
             neighbors: Arc::new(std::sync::Mutex::new(Vec::new())),
             closed: Arc::new(std::sync::Mutex::new(Vec::new())),
             closed_notify: Arc::new(tokio::sync::Notify::new()),
+            draining: DrainingWriters::default(),
             stats: Arc::new(UsbStats::new()),
             local_pubkey: None,
         }
@@ -199,7 +208,6 @@ impl UsbTransport {
                 transport_id: self.transport_id,
                 local_pubkey,
                 local_node,
-                mtu: self.config.mtu(),
                 pool: Arc::clone(&self.pool),
                 packet_tx: self.packet_tx.clone(),
                 neighbors: Arc::clone(&self.neighbors),
@@ -256,6 +264,8 @@ impl UsbTransport {
             task.abort();
         }
         self.pool.lock().await.clear();
+        // Links the node closed are out of the pool; end their writers too.
+        self.draining.stop().await;
         self.state = TransportState::Down;
         info!(name = ?self.name, "USB transport stopped");
         Ok(())
@@ -339,11 +349,51 @@ impl UsbTransport {
         std::mem::take(&mut *self.closed.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
-    /// Drop the link at `addr`.
+    /// Close the link at `addr`: abort its reader and let its writer finish
+    /// the frames already queued, within [`WRITER_DRAIN_TIMEOUT`], without
+    /// waiting for it, as `TcpTransport` and `BleTransport` do. The writer
+    /// ends by dropping its side of the link, which ends the link at the far
+    /// end. Stopping the transport ends a writer still draining. Every other
+    /// teardown (a replug, link loss, the transport stopping) drops the link
+    /// with its writer and discards the queue.
     pub async fn close_connection_async(&self, addr: &TransportAddr) {
-        if self.pool.lock().await.remove(addr).is_some() {
+        let removed = self.pool.lock().await.remove(addr);
+        if let Some(mut conn) = removed {
+            let writer = conn.send_task.take();
+            // Aborts the reader and drops the queue's sender, so the writer
+            // ends once it has written what was queued.
+            drop(conn);
+            if let Some(writer) = writer {
+                self.draining.drain(writer, WRITER_DRAIN_TIMEOUT);
+            }
             debug!(addr = %addr, "USB link closed");
         }
+    }
+
+    /// Pool a link at `remote` whose writer never finishes, and return a
+    /// receiver whose sender the writer holds, so it sees the sender dropped
+    /// only once the writer task has ended.
+    ///
+    /// Test-only: the conformance suite's stop rule needs a writer still
+    /// draining after a close, and cannot reach the private pool.
+    #[cfg(test)]
+    pub(crate) async fn stuck_writer(
+        &self,
+        remote: &TransportAddr,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (guard_tx, guard_rx) = tokio::sync::oneshot::channel::<()>();
+        let conn = UsbConnection {
+            id: next_conn_id(),
+            node_addr: NodeAddr::from_bytes([0xfe; 16]),
+            send_tx: mpsc::channel(1).0,
+            send_task: Some(tokio::spawn(async move {
+                let _guard = guard_tx;
+                std::future::pending::<()>().await
+            })),
+            recv_task: tokio::spawn(std::future::pending::<()>()),
+        };
+        self.pool.lock().await.insert(remote.clone(), conn);
+        guard_rx
     }
 }
 
@@ -416,7 +466,6 @@ struct LinkContext {
     transport_id: TransportId,
     local_pubkey: [u8; 32],
     local_node: NodeAddr,
-    mtu: u16,
     pool: Pool,
     packet_tx: PacketTx,
     neighbors: Arc<std::sync::Mutex<Vec<DiscoveredPeer>>>,
@@ -537,7 +586,7 @@ async fn admit(ctx: LinkContext, link: UsbLink) {
                 id,
                 node_addr: peer_node,
                 send_tx,
-                send_task,
+                send_task: Some(send_task),
                 recv_task,
             },
         );
@@ -548,6 +597,17 @@ async fn admit(ctx: LinkContext, link: UsbLink) {
     let mut neighbors = ctx.neighbors.lock().unwrap_or_else(|e| e.into_inner());
     neighbors.retain(|p| p.addr != ta);
     neighbors.push(DiscoveredPeer::with_hint(ctx.transport_id, ta, peer_key));
+}
+
+/// The hello a node with `pubkey` sends, for tests that play the far end of a
+/// link by hand.
+#[cfg(test)]
+pub(crate) fn hello_for(pubkey: &[u8; 32]) -> Vec<u8> {
+    let mut hello = Vec::with_capacity(HELLO_SIZE);
+    hello.extend_from_slice(&HELLO_MAGIC);
+    hello.push(HELLO_VERSION);
+    hello.extend_from_slice(pubkey);
+    hello
 }
 
 /// Exchange hellos: send ours, read theirs, and return the key it carries.
@@ -628,11 +688,13 @@ async fn send_loop(
 }
 
 /// A link's reader: pulls whole FMP packets out of the byte stream and hands
-/// them to the node. Ends, and removes its own link, when the link closes or
+/// them to the node. Frames are read up to `RECV_CEILING`, whatever the local
+/// `mtu`: nothing tells the peer this end's `mtu`, so it may send any frame
+/// up to its own. Ends, and removes its own link, when the link closes or
 /// carries something that is not FMP.
 async fn receive_loop(mut reader: LinkRead, addr: TransportAddr, id: ConnId, ctx: LinkContext) {
     loop {
-        match read_fmp_packet(&mut reader, ctx.mtu).await {
+        match read_fmp_packet(&mut reader, RECV_CEILING).await {
             Ok(data) => {
                 ctx.stats.record_recv(data.len());
                 let packet = ReceivedPacket::new(ctx.transport_id, addr.clone(), data);
