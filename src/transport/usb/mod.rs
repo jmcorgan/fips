@@ -138,6 +138,13 @@ pub struct UsbTransport {
     closed_notify: Arc<tokio::sync::Notify>,
     /// Writers of links the node closed, still finishing their queues.
     draining: DrainingWriters,
+    /// The phones asked to become an accessory, shared by the bus watcher
+    /// and the embedder's handovers so a phone is asked once per plug.
+    #[cfg(all(
+        feature = "usb-host",
+        any(target_os = "linux", target_os = "macos", target_os = "android")
+    ))]
+    switches: host::Switches,
     stats: Arc<UsbStats>,
     /// Our public key, sent in every hello. A transport without one cannot
     /// identify itself and refuses links.
@@ -167,6 +174,11 @@ impl UsbTransport {
             closed: Arc::new(std::sync::Mutex::new(Vec::new())),
             closed_notify: Arc::new(tokio::sync::Notify::new()),
             draining: DrainingWriters::default(),
+            #[cfg(all(
+                feature = "usb-host",
+                any(target_os = "linux", target_os = "macos", target_os = "android")
+            ))]
+            switches: host::Switches::default(),
             stats: Arc::new(UsbStats::new()),
             local_pubkey: None,
         }
@@ -215,6 +227,8 @@ impl UsbTransport {
                 closed_notify: Arc::clone(&self.closed_notify),
                 stats: Arc::clone(&self.stats),
                 uri: self.config.uri().to_string(),
+                #[cfg(all(feature = "usb-host", any(target_os = "linux", target_os = "android")))]
+                switches: self.switches.clone(),
             },
             Arc::clone(&self.links),
         )));
@@ -235,6 +249,7 @@ impl UsbTransport {
         self.host_task = Some(tokio::spawn(host::run(
             Arc::clone(&self.links),
             self.config.uri().to_string(),
+            self.switches.clone(),
         )));
     }
 
@@ -474,6 +489,9 @@ struct LinkContext {
     stats: Arc<UsbStats>,
     /// Announced to devices this node switches into accessory mode.
     uri: String,
+    /// See `UsbTransport::switches`.
+    #[cfg(all(feature = "usb-host", any(target_os = "linux", target_os = "android")))]
+    switches: host::Switches,
 }
 
 /// Take attached links as they arrive and admit each on its own task, so a
@@ -493,7 +511,7 @@ async fn accept_loop(ctx: LinkContext, links: Arc<UsbLinkQueue>) {
                 }
                 #[cfg(unix)]
                 link::Attached::HostDevice { fd, label } => {
-                    adopt_host_device(&mut admitting, fd, label, &links, &ctx.uri);
+                    adopt_host_device(&mut admitting, fd, label, &links, &ctx.uri, &ctx);
                 }
             },
             Some(_) = admitting.join_next(), if !admitting.is_empty() => {}
@@ -511,9 +529,16 @@ fn adopt_host_device(
     label: String,
     links: &Arc<UsbLinkQueue>,
     uri: &str,
+    ctx: &LinkContext,
 ) {
     debug!(device = %label, "USB host device handed over");
-    tasks.spawn(host::adopt(fd, label, Arc::clone(links), uri.to_string()));
+    tasks.spawn(host::adopt(
+        fd,
+        label,
+        Arc::clone(links),
+        uri.to_string(),
+        ctx.switches.clone(),
+    ));
 }
 
 /// Without host support a handed-over device cannot be used; it is dropped,
@@ -528,6 +553,7 @@ fn adopt_host_device(
     label: String,
     _links: &Arc<UsbLinkQueue>,
     _uri: &str,
+    _ctx: &LinkContext,
 ) {
     warn!(
         device = %label,

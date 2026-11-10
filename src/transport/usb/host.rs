@@ -18,6 +18,19 @@
 //! does not answer the AOA protocol query is left alone until it is next
 //! plugged in.
 //!
+//! ## Asking a phone once
+//!
+//! Each AOA start makes the phone leave the bus and come back as an
+//! accessory, and Android runs its accessory dialogs again each time it does.
+//! A phone can be offered more than once for one plug: an embedder may hand
+//! the same device over from several triggers (the attach intent, a
+//! permission grant, a scan on resume), and a phone may come back briefly as
+//! an ordinary device while it switches. So a switch is claimed per phone in
+//! [`Switches`], keyed by its serial number: a phone that is not an accessory
+//! is not asked again while a switch of it runs or within
+//! [`SWITCH_COOLDOWN`] of one, and an accessory that comes up with that
+//! serial ends the claim, so a replug later is asked afresh.
+//!
 //! ## Zero-length packets
 //!
 //! The phone reads the accessory in 16 KiB buffers, and a read completes on a
@@ -27,10 +40,11 @@
 //! buffer, and a zero-length packet after it would surface on the phone as an
 //! empty read.
 
+use std::collections::HashMap;
 #[cfg(not(target_os = "android"))]
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(not(target_os = "android"))]
 use futures::StreamExt;
@@ -73,6 +87,84 @@ const AOA_SERIAL: &str = "fips";
 /// Timeout for each AOA control request. A phone answers in milliseconds.
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(1000);
 
+/// How long after a phone is asked to become an accessory a device with its
+/// serial that is not yet an accessory is left alone, unless the accessory
+/// came up meanwhile. A phone that switches is back as an accessory within a
+/// couple of seconds; one that is replugged sooner than this after a switch
+/// that never came up waits out the rest of it.
+pub(crate) const SWITCH_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// The phones asked to become an accessory, by key (serial number, else
+/// label), with when each was claimed. Shared by the bus watcher and the
+/// embedder's handovers, cheap to clone.
+#[derive(Clone, Default)]
+pub(crate) struct Switches(Arc<std::sync::Mutex<HashMap<String, Instant>>>);
+
+impl Switches {
+    /// Claim the switch of the phone `key` at `now`: `false` if a switch of
+    /// it is running or was claimed less than [`SWITCH_COOLDOWN`] ago.
+    pub(crate) fn claim(&self, key: &str, now: Instant) -> bool {
+        let mut claims = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        claims.retain(|_, at| now.saturating_duration_since(*at) < SWITCH_COOLDOWN);
+        if claims.contains_key(key) {
+            return false;
+        }
+        claims.insert(key.to_string(), now);
+        true
+    }
+
+    /// The claimed switch of `key` was sent at `now`: the cooldown runs from
+    /// the start request, not from the claim.
+    pub(crate) fn sent(&self, key: &str, now: Instant) {
+        let mut claims = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = claims.get_mut(key) {
+            *at = now;
+        }
+    }
+
+    /// End the claim of `key`: its switch failed or never happened, or the
+    /// phone is an accessory now, so its next appearance as a phone is asked.
+    pub(crate) fn release(&self, key: &str) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+}
+
+/// The key a phone's switch is claimed under: its serial number, which it
+/// keeps across leaving and rejoining the bus, or `label` for a device with
+/// none.
+fn switch_key(serial: Option<&str>, label: &str) -> String {
+    match serial.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(serial) => format!("serial:{serial}"),
+        None => format!("label:{label}"),
+    }
+}
+
+/// Run `switch` for the phone `key` unless a switch of it is claimed, and
+/// keep the claim only if the start request went out.
+async fn switch_once<F>(switches: &Switches, key: &str, label: &str, switch: F)
+where
+    F: std::future::Future<Output = Result<bool, String>>,
+{
+    if !switches.claim(key, Instant::now()) {
+        debug!(device = %label, key = %key, "USB host: already asked to become an accessory; not asking again");
+        return;
+    }
+    match switch.await {
+        Ok(true) => {
+            switches.sent(key, Instant::now());
+            info!(device = %label, "USB host: asked device to become an accessory");
+        }
+        Ok(false) => {
+            switches.release(key);
+            debug!(device = %label, "USB host: device does not speak AOA");
+        }
+        Err(e) => {
+            switches.release(key);
+            debug!(device = %label, error = %e, "USB host: AOA switch failed");
+        }
+    }
+}
+
 /// Bulk IN transfers kept queued, so the phone never waits on this side to
 /// ask for the next one.
 const IN_FLIGHT: usize = 4;
@@ -89,7 +181,7 @@ const PUMP_QUEUE_DEPTH: usize = 8;
 ///
 /// `uri` is announced in the AOA handshake: a phone with no app that accepts
 /// the accessory offers it to the user, so it should say where to get one.
-pub(crate) async fn run(links: Arc<UsbLinkQueue>, uri: String) {
+pub(crate) async fn run(links: Arc<UsbLinkQueue>, uri: String, switches: Switches) {
     // Watch before listing, so a device plugged in between the two is seen.
     let mut watch = match nusb::watch_devices() {
         Ok(watch) => watch,
@@ -106,7 +198,7 @@ pub(crate) async fn run(links: Arc<UsbLinkQueue>, uri: String) {
     match nusb::list_devices().await {
         Ok(devices) => {
             for device in devices {
-                consider(device, &mut handled, &mut tasks, &links, &uri);
+                consider(device, &mut handled, &mut tasks, &links, &uri, &switches);
             }
         }
         Err(e) => warn!(error = %e, "USB host: cannot list devices"),
@@ -117,7 +209,7 @@ pub(crate) async fn run(links: Arc<UsbLinkQueue>, uri: String) {
         tokio::select! {
             event = watch.next() => match event {
                 Some(HotplugEvent::Connected(device)) => {
-                    consider(device, &mut handled, &mut tasks, &links, &uri);
+                    consider(device, &mut handled, &mut tasks, &links, &uri, &switches);
                 }
                 Some(HotplugEvent::Disconnected(id)) => {
                     handled.remove(&id);
@@ -138,15 +230,18 @@ fn consider(
     tasks: &mut JoinSet<()>,
     links: &Arc<UsbLinkQueue>,
     uri: &str,
+    switches: &Switches,
 ) {
     if handled.contains(&device.id()) {
         return;
     }
+    let label = label_of(&device);
+    let key = switch_key(device.serial_number(), &label);
     if is_accessory(&device) {
         handled.insert(device.id());
+        switches.release(&key);
         let links = Arc::clone(links);
         tasks.spawn(async move {
-            let label = label_of(&device);
             match open_accessory(&device, &label).await {
                 Ok(link) => {
                     info!(link = %label, "USB host: accessory opened");
@@ -158,15 +253,9 @@ fn consider(
     } else if looks_like_phone(&device) {
         handled.insert(device.id());
         let uri = uri.to_string();
+        let switches = switches.clone();
         tasks.spawn(async move {
-            let label = label_of(&device);
-            match switch_to_accessory(&device, &uri).await {
-                Ok(true) => {
-                    debug!(device = %label, "USB host: asked device to become an accessory")
-                }
-                Ok(false) => debug!(device = %label, "USB host: device does not speak AOA"),
-                Err(e) => debug!(device = %label, error = %e, "USB host: AOA switch failed"),
-            }
+            switch_once(&switches, &key, &label, switch_to_accessory(&device, &uri)).await;
         });
     }
 }
@@ -215,6 +304,7 @@ pub(crate) async fn adopt(
     label: String,
     links: Arc<UsbLinkQueue>,
     uri: String,
+    switches: Switches,
 ) {
     let dev = match nusb::Device::from_fd(fd).await {
         Ok(dev) => dev,
@@ -224,7 +314,20 @@ pub(crate) async fn adopt(
         }
     };
     let desc = dev.device_descriptor();
+    let serial = match desc.serial_number_string_index() {
+        Some(index) => dev
+            .get_string_descriptor(
+                index,
+                nusb::descriptors::language_id::US_ENGLISH,
+                CONTROL_TIMEOUT,
+            )
+            .await
+            .ok(),
+        None => None,
+    };
+    let key = switch_key(serial.as_deref(), &label);
     if desc.vendor_id() == AOA_VID && AOA_PIDS.contains(&desc.product_id()) {
+        switches.release(&key);
         match open_link(dev, &label).await {
             Ok(link) => {
                 info!(link = %label, "USB host: accessory opened");
@@ -233,11 +336,7 @@ pub(crate) async fn adopt(
             Err(e) => warn!(link = %label, error = %e, "USB host: cannot open accessory"),
         }
     } else {
-        match switch_device(&dev, &uri).await {
-            Ok(true) => info!(device = %label, "USB host: asked device to become an accessory"),
-            Ok(false) => debug!(device = %label, "USB host: device does not speak AOA"),
-            Err(e) => debug!(device = %label, error = %e, "USB host: AOA switch failed"),
-        }
+        switch_once(&switches, &key, &label, switch_device(&dev, &uri)).await;
     }
 }
 
@@ -447,6 +546,60 @@ fn needs_zlp(len: usize, max_packet_size: usize) -> bool {
 mod tests {
     use super::*;
 
+    /// A phone is asked once while its switch runs and for the cooldown
+    /// after, whoever offers it; asked again after the cooldown, after a
+    /// failed switch, and after it came up as an accessory.
+    #[test]
+    fn a_phone_is_asked_once_per_plug() {
+        let switches = Switches::default();
+        let t0 = Instant::now();
+        let key = switch_key(Some("R58M12345"), "host/1-2");
+
+        assert!(switches.claim(&key, t0), "first offer is asked");
+        assert!(
+            !switches.claim(&key, t0 + Duration::from_millis(5)),
+            "a second handover while the switch runs is not asked"
+        );
+        switches.sent(&key, t0 + Duration::from_secs(1));
+        assert!(
+            !switches.claim(&key, t0 + Duration::from_secs(3)),
+            "the phone back briefly as an ordinary device is not asked again"
+        );
+        assert!(
+            !switches.claim(
+                &key,
+                t0 + Duration::from_secs(1) + SWITCH_COOLDOWN - Duration::from_millis(1)
+            ),
+            "the cooldown runs from the start request"
+        );
+        assert!(
+            switches.claim(&key, t0 + Duration::from_secs(1) + SWITCH_COOLDOWN),
+            "after the cooldown the phone is asked again"
+        );
+
+        let other = switch_key(Some("ZY22ABC"), "host/1-3");
+        assert!(switches.claim(&other, t0), "another phone is its own claim");
+        switches.release(&other);
+        assert!(
+            switches.claim(&other, t0),
+            "a released claim is asked again at once"
+        );
+    }
+
+    /// The key is the serial whatever the label, so a phone the embedder
+    /// labels differently on each handover is still one phone; a device
+    /// with no serial falls back to its label.
+    #[test]
+    fn the_switch_key_is_the_serial_else_the_label() {
+        assert_eq!(
+            switch_key(Some("R58M12345"), "/dev/bus/usb/001/004"),
+            switch_key(Some("R58M12345"), "/dev/bus/usb/001/007"),
+        );
+        assert_ne!(switch_key(None, "a"), switch_key(None, "b"));
+        assert_eq!(switch_key(Some("  "), "a"), switch_key(None, "a"));
+        assert_ne!(switch_key(Some("a"), "x"), switch_key(None, "a"));
+    }
+
     #[test]
     fn a_zero_length_packet_follows_only_short_aligned_transfers() {
         assert!(needs_zlp(512, 512));
@@ -472,7 +625,11 @@ mod tests {
     #[ignore = "needs a phone on USB running an echoing accessory app"]
     async fn aoa_echo_against_a_phone() {
         let links = Arc::new(UsbLinkQueue::new());
-        let host = tokio::spawn(run(Arc::clone(&links), "https://example.invalid".into()));
+        let host = tokio::spawn(run(
+            Arc::clone(&links),
+            "https://example.invalid".into(),
+            Switches::default(),
+        ));
         let mut link = tokio::time::timeout(Duration::from_secs(15), links.next_link())
             .await
             .expect("no accessory came up within 15 s");
