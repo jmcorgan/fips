@@ -654,7 +654,7 @@ Controls end-to-end session behavior and packet queuing.
 | `node.session.coords_warmup_packets` | u8 | `5` | Number of initial data packets per session that include the CP flag for transit cache warmup; also the reset count on CoordsRequired/PathBroken receipt |
 | `node.session.coords_response_interval_ms` | u64 | `2000` | Minimum interval (ms) between standalone CoordsWarmup responses to CoordsRequired/PathBroken signals per destination |
 
-The anti-replay window size (2048 packets) is a compile-time constant and not
+The anti-replay window size (8192 packets) is a compile-time constant and not
 configurable.
 
 ### Link-Layer MMP (`node.mmp.*`)

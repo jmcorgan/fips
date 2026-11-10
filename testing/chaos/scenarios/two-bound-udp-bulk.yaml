@@ -4,9 +4,17 @@
 # Two nodes joined by one veth pair carrying two lanes, as in
 # two-bound-udp.yaml, with the rate cap removed. A session then runs at over
 # 1 Gbit/s, and its standby probes share a replay window with the bulk
-# stream. A node has to read a probe off its listen socket before the
-# stream's own frames carry the window past it, so `max_replay_refusals`
-# holds the nodes to no refusal at all.
+# stream, so the two lanes' sockets reorder the link's frames by as much as
+# one socket queues. Under load the bulk lane's receive queue fills to its
+# buffer, and a probe on the idle lane is read ahead of all of it. The
+# window covers a full default buffer and the sender's encrypt queue, so
+# `max_replay_refusals` holds the nodes to no refusal at all: a refusal
+# means a frame older than anything the node's own queues can hold.
+#
+# The window is wider than the receive loop's hold on the thread could
+# reach before the loop yielded, so this suite no longer catches that hold
+# coming back. The polling tests in src/node/tests/decrypt_replay.rs guard
+# it, at the window's old width.
 #
 # `lanes` is left out. The cap also guards the crossed listen socket's
 # overflow, which this suite is not about, so a lane path can go Suspect for

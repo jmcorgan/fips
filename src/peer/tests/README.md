@@ -34,7 +34,8 @@ items.
   it reads of the record, the same values the accessors give; and two source
   scans of `data.rs`, each with a planted line: it denies wildcard arms, and
   `settle` and `depart` each destructure the record naming every field the
-  struct declares, with no rest pattern.
+  struct declares, with no rest pattern. The scans read `data.rs` with LF line
+  endings, and a test runs both on a CRLF copy, as a Windows checkout has.
 - `machine.rs`: tests for `PeerMachine` (`src/peer/machine.rs`), declared as
   `mod msg2_tests` because `machine.rs` already has an inline `tests` module.
   They cover an initial (XX) dial receiving a msg2 that does not complete it:

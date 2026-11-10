@@ -194,7 +194,7 @@ the Noise key schedule and, on a link, the session indices.
 ## Replay Window
 
 Both layers use explicit per-packet counters with a sliding bitmap
-window for replay protection. The bitmap is **2048 entries** at both
+window for replay protection. The bitmap is **8192 entries** at both
 layers — large enough to accommodate UDP reordering and packet loss
 without false-positive replay rejection. Counters older than the
 window are rejected. The same `ReplayWindow` and
@@ -401,7 +401,7 @@ the FMP design document:
 | ------ | ---------- |
 | Connection exhaustion | Token-bucket rate limit + connection count limit |
 | CPU exhaustion (msg1 flood) | Rate limit before crypto operations |
-| Replay attacks | Counter-based nonces with sliding window (2048 entries) |
+| Replay attacks | Counter-based nonces with sliding window (8192 entries) |
 | State confusion | Strict handshake state machine validation |
 | Spoofed encrypted packets | Index lookup + AEAD verification |
 | Spoofed msg2 | Index lookup + Noise ephemeral key binding |

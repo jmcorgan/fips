@@ -360,12 +360,12 @@ Each link session maintains per-direction counters:
 
 - **Send counter**: Monotonically increasing, used as the AEAD nonce for each
   outbound packet
-- **Receive window**: A sliding bitmap (2048 entries) tracking which counters
+- **Receive window**: A sliding bitmap (8192 entries) tracking which counters
   have been seen
 
 The receive window handles the realities of unreliable transports: packets may
 arrive out of order, be duplicated, or be lost. The window accepts any counter
-not yet seen and within 2048 of the highest counter received. Counters older
+not yet seen and within 8192 of the highest counter received. Counters older
 than the window are rejected.
 
 The replay check is performed before decryption to prevent CPU exhaustion from

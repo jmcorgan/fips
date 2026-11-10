@@ -1,34 +1,41 @@
 # One peer, two paths: the standby starved under load, then the cable lost
 #
 # Two nodes joined by a raw-Ethernet veth (the cable, 1 to 3 ms) and by UDP
-# over the bridge delayed 500 ms each way. The cable carries the link.
+# over the bridge delayed 2 s each way. The cable carries the link.
 #
 # The mechanism: under load, a standby probe sent on the slow bridge
-# arrives 500 ms behind the frames sent on the cable at the same time.
-# Once the cable carries more than 2048 frames in that time, which the
-# containers sustain (12405 frames/s at the tenth percentile, measured on
-# the development host; 500 ms covers hosts down to 6144 frames/s
-# with a margin of 1.5), the standby's probes and answers fall outside the
-# receiver's replay window and are rejected, so the standby goes Suspect
-# and then Dead at both ends: K timeouts, then `retire` at the standby
-# cadence, about 14 s plus the longer probe timeout a 1 s round trip
-# gives. The load runs 25 s before the cable goes.
+# arrives 2 s behind the frames sent on the cable at the same time.
+# Once the cable carries more than 8192 frames in that time (the
+# receiver's replay window), which the containers sustain (12405 frames/s at
+# the tenth percentile, measured on the development host; 2 s covers hosts
+# down to 6144 frames/s with a margin of 1.5), the standby's probes and
+# answers fall outside the window and are rejected, so the standby goes
+# Suspect and then Dead at both ends: K timeouts, then `retire` at the
+# standby cadence, behind the 12 s probe timeout a 4 s round trip gives.
+# Measured on the development host: Suspect about 11 s and Dead about 25 s
+# after the load starts. The load runs 40 s before the cable goes.
+#
+# The delay is applied once the link is up, so the standby's round trip
+# jumps from about 1 ms to 4 s, and during the runner's convergence wait it
+# can go Dead once on its short early timeouts. A Dead standby is still
+# probed and answered, and it was Live again about 10 s later in every run
+# measured, 3 to 4 s into the run and well before the load.
 #
 # Then the cable is taken down administratively at n01. With nothing Live,
 # the draft (5.7) requires each end to probe its acked Dead standby at
 # once, which revives it: `rescue` checks that probe at each end, within
 # 60 ms of the step in which the active path left Live or was released,
-# and the standby Live within 2 x 500 ms + 1 s, with no peer removed. Its
+# and the standby Live within 2 x 2 s + 1 s, with no peer removed. Its
 # control is that the standby was Dead at both ends before the cut; a run
 # whose standby was only Suspect did not exercise the rule and fails.
 #
-#   n01 ===eth=== n02      (loaded from 10 s for 50 s; down at n01 at 35 s for 20 s)
-#   n01 ---udp--- n02      (500 ms each way)
+#   n01 ===eth=== n02      (loaded from 10 s for 65 s; down at n01 at 50 s for 20 s)
+#   n01 ---udp--- n02      (2 s each way)
 
 scenario:
   name: "loaded-standby"
   seed: 42
-  duration_secs: 90
+  duration_secs: 105
 
 topology:
   algorithm: explicit
@@ -45,7 +52,7 @@ netem:
     jitter_ms: [0, 0]
     loss_pct: [0, 0]
   bridge_policy:
-    delay_ms: [500, 500]
+    delay_ms: [2000, 2000]
     jitter_ms: [0, 0]
     loss_pct: [0, 0]
 
@@ -56,8 +63,8 @@ traffic:
   enabled: false
 
 schedule:
-  - {at: 10, load: [n01, n02], secs: 50, streams: 4, bidir: true}
-  - {at: 35, down: [n01, n02], mode: admin, end: n01, secs: 20}
+  - {at: 10, load: [n01, n02], secs: 65, streams: 4, bidir: true}
+  - {at: 50, down: [n01, n02], mode: admin, end: n01, secs: 20}
 
 node_churn:
   enabled: false
@@ -76,7 +83,7 @@ assertions:
     min_nodes_parented: 1
 
   rescue:
-    delay_ms: 500
+    delay_ms: 2000
 
   max_promotions:
     per_node: 1

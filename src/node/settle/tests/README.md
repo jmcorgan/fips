@@ -23,10 +23,13 @@ tests.
   source; that every facet has a field and every map wrapper is the table's;
   that `ActivePeer` has no setter but the listed ones; and that every field of
   the peer's record is `pub(super)`. Each scan finds a planted line. The
-  census cannot tell a field put on the exempt list wrongly.
+  sources are read with LF line endings, and a test reads and plants in a
+  CRLF copy, as a Windows checkout has. The census cannot tell a field put on
+  the exempt list wrongly.
 - `plan.rs`: a restart's plan against the statements it ran before, in their
   order; that every other transition's plan is empty; and the scan that
-  `../plan.rs` denies wildcard arms and holds none, through `table.rs`'s.
+  `../plan.rs` denies wildcard arms and holds none, through `table.rs`'s. That
+  scan reads the file with LF line endings, and a test runs it on a CRLF copy.
 
 ## Rules for this level
 

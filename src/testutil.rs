@@ -9,6 +9,14 @@ pub(crate) fn make_node_addr(val: u8) -> NodeAddr {
     NodeAddr::from_bytes(bytes)
 }
 
+/// `text` with each CRLF line ending made LF. `include_str!` gives a file as it
+/// is checked out, and a checkout on Windows can end its lines with CRLF; a
+/// test that finds or plants text across a line end reads its source through
+/// this, so it sees LF either way.
+pub(crate) fn with_lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
 /// Collects emitted tracing events so a test can assert on a log line.
 ///
 /// Some behaviour is reported only in the log: a structured field an operator

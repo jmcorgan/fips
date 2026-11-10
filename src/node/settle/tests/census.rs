@@ -12,9 +12,13 @@
 //!
 //! The scans read the source as rustfmt leaves it: a struct's fields and an
 //! impl's methods one indent in, and a top-level item closed by a `}` alone on
-//! its line.
+//! its line. Each source is read with its line endings made LF, so a checkout
+//! that ends lines with CRLF reads the same.
+
+use std::sync::LazyLock;
 
 use crate::node::settle::table::Facet;
+use crate::testutil::with_lf;
 
 /// What holds a field.
 #[derive(Clone, Copy, Debug)]
@@ -168,10 +172,13 @@ const SETTERS: &[&str] = &[
     "set_remote_epoch",
 ];
 
-const NODE_SOURCE: &str = include_str!("../../mod.rs");
-const PATH_SOURCE: &str = include_str!("../../handlers/path.rs");
-const ACTIVE_SOURCE: &str = include_str!("../../../peer/active.rs");
-const DATA_SOURCE: &str = include_str!("../../../peer/data.rs");
+static NODE_SOURCE: LazyLock<String> = LazyLock::new(|| with_lf(include_str!("../../mod.rs")));
+static PATH_SOURCE: LazyLock<String> =
+    LazyLock::new(|| with_lf(include_str!("../../handlers/path.rs")));
+static ACTIVE_SOURCE: LazyLock<String> =
+    LazyLock::new(|| with_lf(include_str!("../../../peer/active.rs")));
+static DATA_SOURCE: LazyLock<String> =
+    LazyLock::new(|| with_lf(include_str!("../../../peer/data.rs")));
 
 /// The lines of the top-level item whose opening line ends with `header`, up
 /// to the `}` that closes it, or `None` if `source` has no such item.
@@ -268,31 +275,31 @@ fn without(source: &str, field: &str) -> String {
 #[test]
 fn every_node_field_has_an_owner_and_the_scan_finds_a_planted_one() {
     assert_eq!(
-        gaps(NODE_SOURCE, "Node", NODE),
+        gaps(&NODE_SOURCE, "Node", NODE),
         Vec::<String>::new(),
         "defect: the census of Node"
     );
 
-    let planted = plant(NODE_SOURCE, "Node", "    by_peer: HashMap<NodeAddr, u64>,");
+    let planted = plant(&NODE_SOURCE, "Node", "    by_peer: HashMap<NodeAddr, u64>,");
     assert_eq!(
         gaps(&planted, "Node", NODE),
         ["Node.by_peer has no line"],
         "defect: a planted per-peer map is not found"
     );
-    let planted = plant(NODE_SOURCE, "Node", "    pub(crate) msg1_x: u64,");
+    let planted = plant(&NODE_SOURCE, "Node", "    pub(crate) msg1_x: u64,");
     assert_eq!(
         gaps(&planted, "Node", NODE),
         ["Node.msg1_x has no line"],
         "defect: a planted field with a digit in its name is not found"
     );
-    let planted = plant(NODE_SOURCE, "Node", "    wrapped_x:\n        Option<u64>,");
+    let planted = plant(&NODE_SOURCE, "Node", "    wrapped_x:\n        Option<u64>,");
     assert_eq!(
         gaps(&planted, "Node", NODE),
         ["Node.wrapped_x has no line"],
         "defect: a planted field whose type wraps is not found"
     );
     let planted = plant(
-        NODE_SOURCE,
+        &NODE_SOURCE,
         "Node",
         "    /// doc_x: a comment.\n    #[cfg(test)]\n    nested_x: HashMap<\n\
          \x20       inner_x: u64,\n    >,",
@@ -303,22 +310,43 @@ fn every_node_field_has_an_owner_and_the_scan_finds_a_planted_one() {
         "defect: a comment or a continuation line is read as a field"
     );
     assert_eq!(
-        gaps(&without(NODE_SOURCE, "next_link_id"), "Node", NODE),
+        gaps(&without(&NODE_SOURCE, "next_link_id"), "Node", NODE),
         ["Node.next_link_id is listed and is not a field"],
         "defect: a removed field still listed is not found"
     );
 }
 
 #[test]
+fn a_source_checked_out_with_crlf_line_endings_is_read_and_planted_in_as_its_lf_text() {
+    let crlf = NODE_SOURCE.replace('\n', "\r\n");
+    assert!(
+        crlf.contains("struct Node {\r\n"),
+        "precondition: a copy of the source with CRLF line endings"
+    );
+    let source = with_lf(&crlf);
+    assert_eq!(
+        gaps(&source, "Node", NODE),
+        Vec::<String>::new(),
+        "defect: the census of Node read from a CRLF checkout"
+    );
+    let planted = plant(&source, "Node", "    by_peer: HashMap<NodeAddr, u64>,");
+    assert_eq!(
+        gaps(&planted, "Node", NODE),
+        ["Node.by_peer has no line"],
+        "defect: a field planted in a CRLF checkout's source is not found"
+    );
+}
+
+#[test]
 fn every_path_driver_field_has_an_owner() {
     assert_eq!(
-        gaps(PATH_SOURCE, "PathDriver", PATH_DRIVER),
+        gaps(&PATH_SOURCE, "PathDriver", PATH_DRIVER),
         Vec::<String>::new(),
         "defect: the census of the path driver"
     );
 
     let planted = plant(
-        PATH_SOURCE,
+        &PATH_SOURCE,
         "PathDriver",
         "    by_peer: HashMap<NodeAddr, u64>,",
     );
@@ -327,14 +355,14 @@ fn every_path_driver_field_has_an_owner() {
         ["PathDriver.by_peer has no line"],
         "defect: a planted per-peer map is not found"
     );
-    let planted = plant(PATH_SOURCE, "PathDriver", "    msg1_x: u64,");
+    let planted = plant(&PATH_SOURCE, "PathDriver", "    msg1_x: u64,");
     assert_eq!(
         gaps(&planted, "PathDriver", PATH_DRIVER),
         ["PathDriver.msg1_x has no line"],
         "defect: a planted field with a digit in its name is not found"
     );
     assert_eq!(
-        gaps(&without(PATH_SOURCE, "wake"), "PathDriver", PATH_DRIVER),
+        gaps(&without(&PATH_SOURCE, "wake"), "PathDriver", PATH_DRIVER),
         ["PathDriver.wake is listed and is not a field"],
         "defect: a removed field still listed is not found"
     );
@@ -381,7 +409,7 @@ fn every_exemption_has_a_reason_every_facet_a_field_and_every_map_wrapper_the_ta
         );
     }
 
-    for (_, field, ty) in fields(NODE_SOURCE, "Node") {
+    for (_, field, ty) in fields(&NODE_SOURCE, "Node") {
         let listed = NODE.iter().find(|(f, _)| *f == field).map(|(_, held)| held);
         let wrapper = ty.starts_with("settle::");
         assert_eq!(
@@ -417,7 +445,7 @@ fn opened(source: &str) -> Vec<String> {
 
 #[test]
 fn no_setter_beyond_the_list_and_the_scan_finds_a_planted_one() {
-    let mut found = setters(ACTIVE_SOURCE);
+    let mut found = setters(&ACTIVE_SOURCE);
     found.sort_unstable();
     let mut listed = SETTERS.to_vec();
     listed.sort_unstable();
@@ -432,7 +460,10 @@ fn no_setter_beyond_the_list_and_the_scan_finds_a_planted_one() {
          \x20   pub(crate) fn set_x(&mut self) {}\n",
         1,
     );
-    assert_ne!(planted, ACTIVE_SOURCE, "precondition: the impl to plant in");
+    assert_ne!(
+        planted, *ACTIVE_SOURCE,
+        "precondition: the impl to plant in"
+    );
     assert!(
         setters(&planted).contains(&"set_x"),
         "defect: a planted setter is not found"
@@ -443,16 +474,16 @@ fn no_setter_beyond_the_list_and_the_scan_finds_a_planted_one() {
     );
 
     assert_eq!(
-        opened(DATA_SOURCE),
+        opened(&DATA_SOURCE),
         Vec::<String>::new(),
         "defect: a field of PeerData is open beyond the peer module"
     );
     assert!(
-        fields(DATA_SOURCE, "PeerData").len() > 1,
+        fields(&DATA_SOURCE, "PeerData").len() > 1,
         "precondition: the scan reads PeerData's fields"
     );
     let planted = plant(
-        DATA_SOURCE,
+        &DATA_SOURCE,
         "PeerData",
         "    pub(crate) wide_x: u64,\n    pub open_x: u64,",
     );
@@ -462,8 +493,9 @@ fn no_setter_beyond_the_list_and_the_scan_finds_a_planted_one() {
         "defect: a planted open field of PeerData is not found"
     );
     let planted = format!(
-        "{DATA_SOURCE}\npub(crate) struct Departed {{\n    pub heard: bool,\n\
-         \x20   pub frame_heard: bool,\n}}\n"
+        "{}\npub(crate) struct Departed {{\n    pub heard: bool,\n\
+         \x20   pub frame_heard: bool,\n}}\n",
+        *DATA_SOURCE
     );
     assert_eq!(
         opened(&planted),

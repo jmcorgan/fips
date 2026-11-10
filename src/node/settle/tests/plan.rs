@@ -7,6 +7,7 @@ use crate::node::settle::table::Transition;
 use crate::node::settle::table::tests::{denies_wildcards, wildcard_arms};
 use crate::proto::rekey::Role;
 use crate::proto::settle::output::Why;
+use crate::testutil::with_lf;
 use crate::transport::LinkId;
 
 /// A restart found at a rekey ran, in this order: the end-to-end session
@@ -114,7 +115,22 @@ fn every_transition_but_a_restart_has_an_empty_plan() {
 
 #[test]
 fn the_plan_denies_wildcard_arms_and_the_scan_finds_a_planted_one() {
-    let source = include_str!("../plan.rs");
+    wildcard_scans(&with_lf(include_str!("../plan.rs")));
+}
+
+#[test]
+fn the_wildcard_scans_of_the_plan_hold_on_a_source_checked_out_with_crlf_line_endings() {
+    let crlf = with_lf(include_str!("../plan.rs")).replace('\n', "\r\n");
+    assert!(
+        crlf.contains("=> &[],\r\n"),
+        "precondition: a copy of the source with CRLF line endings"
+    );
+    wildcard_scans(&with_lf(&crlf));
+}
+
+/// That `source`, `../plan.rs` as read, denies wildcard arms and holds none,
+/// and that the scans find a planted catch-all arm and the deny taken away.
+fn wildcard_scans(source: &str) {
     assert!(
         denies_wildcards(source),
         "defect: plan.rs does not deny wildcard arms at its head"
