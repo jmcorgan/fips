@@ -1278,6 +1278,86 @@ async fn test_api_connect_to_a_live_capable_peer_holds_a_new_address_as_a_path_c
     );
 }
 
+/// With multipath enabled, a dial to a peer that times out after the peer
+/// came up on another link — it raced a sibling dial and lost — leaves its
+/// address held as a path candidate, as a connect request for the live
+/// peer would, instead of dropping it with the dial.
+/// Mutation: drop the address with the timed-out dial.
+#[tokio::test]
+async fn a_dial_that_times_out_after_its_peer_came_up_elsewhere_leaves_a_path_candidate() {
+    use super::paths::{capable_at, enabled, sources_at};
+    use super::rekey_parity::{linked_pair, pump};
+    use crate::peer::machine::{PeerEvent, PeerMachine, TimerKind};
+    use crate::proto::fmp::LegStamp;
+
+    let mut nodes = linked_pair(enabled(), enabled()).await;
+    let b_addr = *nodes[1].node.node_addr();
+    let t1 = nodes[0].transport_id;
+    let q = add_loopback_alias(&nodes[1].addr, nodes[1].transport_id);
+    nodes[0].node.offer_path(&b_addr, t1, q).await;
+    pump(&mut nodes).await;
+    assert!(capable_at(&nodes[0], &b_addr), "precondition: B is capable");
+    assert!(
+        nodes[0].node.active_peer_link_is_live(&b_addr),
+        "precondition: B is live at A"
+    );
+
+    // A's dial to B at another address, still unanswered: the leg that
+    // lost the race.
+    let lost = add_loopback_alias(&nodes[1].addr, nodes[1].transport_id);
+    let b_identity = PeerIdentity::from_npub(&nodes[1].node.npub()).unwrap();
+    let node = &mut nodes[0].node;
+    let dial_ms = 1000u64;
+    let link_id = node.allocate_link_id();
+    let mut conn = outbound_leg(link_id, b_identity, dial_ms);
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let _ = conn
+        .start_handshake(
+            node.identity().keypair(),
+            node.startup_epoch(),
+            LegStamp::at(dial_ms),
+        )
+        .unwrap();
+    let mut machine = PeerMachine::new_outbound(link_id, b_identity, LegStamp::at(dial_ms));
+    let _ = machine.step(
+        PeerEvent::Dial {
+            transport_id: t1,
+            remote_addr: lost.clone(),
+            peer_identity: b_identity,
+            connection_oriented: false,
+        },
+        dial_ms,
+        &mut node.index_allocator,
+    );
+    let _ = machine.set_conn_our_index(our_lease);
+    machine.set_conn_transport_id(t1);
+    machine.set_conn_source_addr(lost.clone());
+    machine.set_leg(conn.take_leg().unwrap());
+    node.peer_machines.raw().insert(link_id, machine);
+    node.peer_machines
+        .raw_timers()
+        .entry(link_id)
+        .or_default()
+        .insert(TimerKind::HandshakeTimeout, dial_ms + 30_000);
+    assert!(
+        sources_at(&nodes[0], &b_addr, t1, &lost).is_none(),
+        "precondition: the address is no candidate yet"
+    );
+
+    nodes[0].node.drive_peer_timers(dial_ms + 100_000).await;
+
+    assert!(
+        !nodes[0].node.peer_machines.contains_key(&link_id),
+        "the timed-out leg is reaped"
+    );
+    let sources = sources_at(&nodes[0], &b_addr, t1, &lost);
+    assert!(
+        sources.is_some_and(|s| s.has(fips_core::proto::path::Source::Request)),
+        "the lost dial's address is held as a candidate: {sources:?}"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
 /// With multipath enabled, `connect` naming a new address of a live peer
 /// not known to implement multipath keeps the reply a node without
 /// multipath gives; the address is held as a candidate, which opens

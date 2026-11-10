@@ -1,11 +1,13 @@
 //! Timeout management for stale handshake connections, idle sessions, link
 //! handshake message resend scheduling, and held TUN packets.
 
+use crate::NodeAddr;
 use crate::node::Node;
 use crate::node::session::SessionInstant;
-use crate::peer::machine::TimerKind;
+use crate::peer::machine::{DialOrigin, TimerKind};
 use crate::proto::fmp::{ConnAction, ConnSnapshot, LifecycleView};
-use crate::transport::LinkId;
+use crate::transport::{LinkId, TransportAddr, TransportId};
+use fips_core::proto::path::{Input, Source};
 use fips_core::time::Instant;
 use std::time::Duration;
 use tracing::{debug, info};
@@ -307,10 +309,73 @@ impl Node {
                 if let Some(peer) = retry_peer {
                     self.note_handshake_timeout(peer, Self::peering_now());
                 }
+                let candidate = retry_peer.and_then(|peer| self.dial_candidate(link, peer));
                 debug!(link_id = %link, "Handshake connection timed out");
                 self.cleanup_stale_connection(link, now_ms).await;
+                if let Some((peer, transport, addr, source)) = candidate {
+                    self.hold_lost_dial(peer, transport, addr, source).await;
+                }
             }
         }
+    }
+
+    /// The address the outbound leg on `link` dialled `peer` at, with the
+    /// candidate source it maps to, if it is one the path machine should
+    /// hold should the dial lose. A dial a transport neighbour's key claim
+    /// started is left out: the neighbour is offered again while it stays.
+    fn dial_candidate(
+        &self,
+        link: LinkId,
+        peer: NodeAddr,
+    ) -> Option<(NodeAddr, TransportId, TransportAddr, Source)> {
+        let machine = self.peer_machines.get(&link)?;
+        let source = match machine.dial_origin() {
+            DialOrigin::Addressed => Source::Request,
+            DialOrigin::MdnsAdvert => Source::Discovery,
+            DialOrigin::NeighbourClaim => return None,
+        };
+        let transport = machine.conn_transport_id()?;
+        let addr = machine.conn_source_addr()?.clone();
+        Some((peer, transport, addr, source))
+    }
+
+    /// A dial to `peer` at `addr` timed out. If the peer came up meanwhile
+    /// on another link — a dial that raced a sibling and lost, typically
+    /// because the peer answered on the other first — the address is still
+    /// a way to reach it: hold it as a path candidate, as a connect request
+    /// for a live peer is held, so the path machine opens it. Otherwise the
+    /// address goes with the dial and nothing tries it again until whatever
+    /// supplied it supplies it anew, which a discovery feed reporting only
+    /// changes never does.
+    async fn hold_lost_dial(
+        &mut self,
+        peer: NodeAddr,
+        transport: TransportId,
+        addr: TransportAddr,
+        source: Source,
+    ) {
+        // `active_peer_link_is_live` answers true for a peer not held.
+        if !self.config().node.path.enabled
+            || !self.peers.contains_key(&peer)
+            || !self.active_peer_link_is_live(&peer)
+        {
+            return;
+        }
+        debug!(
+            peer = %self.peer_display_name(&peer),
+            transport_id = %transport,
+            remote_addr = %addr,
+            "Dial to a live peer timed out; holding its address as a path candidate"
+        );
+        self.step_path(
+            &peer,
+            Input::Candidate {
+                transport,
+                addr,
+                source,
+            },
+        )
+        .await;
     }
 
     /// Fire due handshake-retransmit timers: resend the stored msg1.
