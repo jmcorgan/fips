@@ -4,7 +4,7 @@
 //! only the active peer asks the join to build, move or close them, and
 //! only the executor, or the move's site, asks the active peer.
 
-use crate::node::tests::survivors::sources;
+use crate::node::tests::survivors::{label, sources};
 use std::path::Path;
 
 /// One token of a source's code: an identifier or one character of
@@ -228,7 +228,7 @@ fn the_machines_are_built_and_closed_only_through_join_and_the_executor() {
     let mut found = Vec::new();
     for path in &files {
         let source = std::fs::read_to_string(path).expect("the source file reads");
-        let file = path.strip_prefix(&root).unwrap().to_string_lossy();
+        let file = label(&root, path);
         for (n, function, what) in machine_calls(&source) {
             let at = format!("{file}:{n}: {function}: {what}");
             match EXEMPT
@@ -435,7 +435,7 @@ fn only_active_calls_join_for_a_change_of_machines() {
     let mut executor = Vec::new();
     for path in &files {
         let source = std::fs::read_to_string(path).expect("the source file reads");
-        let file = path.strip_prefix(&root).unwrap().to_string_lossy();
+        let file = label(&root, path);
         for (n, function, change) in join_changes(&source) {
             if file == "peer/active.rs" {
                 changes.push((function, change));

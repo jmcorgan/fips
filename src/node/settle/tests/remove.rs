@@ -2,7 +2,8 @@
 //! one removal routine, which is the only code outside the tests that takes
 //! a peer out of the peer map.
 
-use std::path::{Path, PathBuf};
+use crate::node::tests::survivors::{label, sources};
+use std::path::Path;
 
 /// Code that takes a peer out of the map other than the removal routine,
 /// as `(file, function, why it is not a removal)`.
@@ -43,22 +44,6 @@ fn takes(source: &str) -> Vec<(usize, String)> {
     found
 }
 
-/// Every non-test `.rs` file under `dir`, recursively, leaving out a
-/// `tests` directory and a file named `tests.rs` or ending `_tests.rs`.
-fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(dir).expect("the source directory reads") {
-        let path = entry.expect("the directory entry reads").path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if path.is_dir() {
-            if name != "tests" {
-                sources(&path, out);
-            }
-        } else if name.ends_with(".rs") && name != "tests.rs" && !name.ends_with("_tests.rs") {
-            out.push(path);
-        }
-    }
-}
-
 /// Outside the executor, nothing in the node's code takes a peer out of
 /// the peer map but the one listed exemption, and inside it only the
 /// removal routine does, once: so a disconnect, a dead or orphaned link, a
@@ -92,7 +77,7 @@ fn every_remove_path_runs_one_routine() {
     let mut found = Vec::new();
     for path in &files {
         let source = std::fs::read_to_string(path).expect("the source file reads");
-        let file = path.strip_prefix(&root).unwrap().to_string_lossy();
+        let file = label(&root, path);
         for (n, within) in takes(&source) {
             let at = format!("{file}:{n}: {within}");
             if path.starts_with(&exec) {

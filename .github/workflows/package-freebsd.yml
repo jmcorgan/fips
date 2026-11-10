@@ -117,6 +117,19 @@ jobs:
             # block for ever is a defect at the test, and the ones this suite
             # has are bounded where they are written.
             #
+            # The bound is on running the suite, which is what it exists to
+            # catch, not on compiling it. So the test binaries are built first,
+            # outside it, by `cargo test --no-run` with the same cargo
+            # arguments (what follows `--` goes to the test binaries and does
+            # not change the build), and the bounded run compiles nothing but
+            # the few doc-tests, which rustdoc builds as it runs them. The two
+            # passes after it reuse those binaries and compile nothing. In
+            # November 2026, when the bounded run did its own compiling, this
+            # VM spent 398 s of the 900 s building the tests and 87 s running
+            # fips-core's, and the root crate's library tests were killed one
+            # test short of done, with the binaries' tests and the doc-tests
+            # still to run.
+            #
             # The tests that need a TCP address whose SYNs go unanswered
             # (`testutil::Blackhole`) run in a second pass. FreeBSD resets a
             # connect to a full accept queue, so it gets that address only
@@ -139,6 +152,7 @@ jobs:
             JOINT_TESTS="proto::settle::tests::joint::"
             skips=""
             for t in $BLACKHOLE_TESTS $JOINT_TESTS; do skips="$skips --skip $t"; done
+            cargo test --no-run
             if ! timeout -s KILL 900 cargo test -- $skips; then
               echo "FAIL: cargo test failed, or did not finish within its 900s bound." >&2
               echo "      If the output above stops mid-run, look for libtest's" >&2
