@@ -55,8 +55,13 @@ tests.
   each still names a call; that only `src/peer/active.rs` asks the join for
   a change of machines, one function for each, and that only `../exec/`
   calls those functions in the node's code but for a crossing's move at its
-  site. Each scan finds planted lines of every shape it reads. The file
-  walker is `src/node/tests/survivors.rs`'s.
+  site. Each scan finds planted lines of every shape it reads.
+
+`remove.rs` and `scans.rs` walk the source with `src/node/tests/survivors.rs`'s
+`sources`, and name each file with its `label`: the file's path below `src/`,
+its components joined with `/`, which is what their lists of allowed sites are
+written in. They read each file as it is checked out; every scan in them reads
+by line, so a CRLF checkout reads as an LF one.
 
 ## Rules for this level
 
@@ -65,4 +70,7 @@ tests.
   writes the field.
 - A test that builds a state no writer builds goes through `raw` and marks the
   map, as `src/node/settle/README.md` says; a test of a writer does not.
+- A scan that compares a file with a path written in the test names it with
+  `label`, never with the path's display form, which joins the components
+  with `\` on Windows.
 - Keep the file list in step with the directory.

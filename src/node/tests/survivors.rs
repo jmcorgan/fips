@@ -7,7 +7,8 @@
 //! map wrappers of `node/settle/` closed: what the compiler cannot refuse
 //! there is a `DerefMut` on a wrapper, or a way past the writers outside
 //! `#[cfg(test)]`. The settlement scans of `node/settle/tests/` walk the
-//! source with this file's `sources` too.
+//! source with this file's `sources` too, and name each file with its
+//! `label`.
 
 use std::path::{Path, PathBuf};
 
@@ -268,6 +269,42 @@ pub(in crate::node) fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The name a scan gives `path`, a file under `root`: its components below
+/// `root` joined with `/`, the form the scans' lists of files are written
+/// in. Its display form would join them with the platform's separator,
+/// which on Windows is `\`, so no written path would match it there.
+pub(in crate::node) fn label(root: &Path, path: &Path) -> String {
+    let below = path
+        .strip_prefix(root)
+        .expect("the scanned file is under the scan's root");
+    below
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// A scan names a file by its components joined with `/`, whatever the
+/// platform's separator: a path built from components reads as the path
+/// the scans' lists are written in, and one with a `.` component reads
+/// without it, where the path's display form keeps it.
+#[test]
+fn a_scanned_file_is_named_by_its_components_joined_with_a_forward_slash() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let path = root
+        .join("node")
+        .join("settle")
+        .join("exec")
+        .join("remove.rs");
+    assert_eq!(label(&root, &path), "node/settle/exec/remove.rs");
+    let dotted = root.join("node").join(".").join("mod.rs");
+    assert_eq!(
+        label(&root, &dotted),
+        "node/mod.rs",
+        "the name is built from the path's components, not its display form"
+    );
+}
+
 /// Every deployed rekey rule, predicate and transitional move the shells of
 /// either layer held stays deleted: the code of every non-test source file
 /// of the root crate is scanned for their names, and the link and session
@@ -320,7 +357,7 @@ fn no_deployed_rekey_rule_of_either_layer_survives_in_the_shells_and_the_scan_fi
     let mut found = Vec::new();
     for path in &files {
         let source = std::fs::read_to_string(path).expect("the source file reads");
-        let file = path.strip_prefix(&root).unwrap().to_string_lossy();
+        let file = label(&root, path);
         found.extend(uses(&file, &source, SESSION));
         found.extend(uses(&file, &source, LINK));
         let lost = fips_core::proto::rekey::lost_items(&source);
@@ -375,7 +412,7 @@ fn no_node_code_names_a_cross_connection_promotion_result_and_the_scan_finds_a_p
     let mut found = Vec::new();
     for path in &files {
         let source = std::fs::read_to_string(path).expect("the source file reads");
-        let file = path.strip_prefix(&root).unwrap().to_string_lossy();
+        let file = label(&root, path);
         found.extend(uses(&file, &source, PROMOTION));
     }
     assert!(
@@ -456,7 +493,7 @@ fn no_map_wrapper_opens_its_map_to_production_writes_and_the_scan_finds_a_plante
     let mut found = Vec::new();
     for path in &files {
         let source = std::fs::read_to_string(path).expect("the source file reads");
-        let file = path.strip_prefix(&root).unwrap().to_string_lossy();
+        let file = label(&root, path);
         found.extend(wrapper_escapes(&file, &source));
     }
     assert!(
