@@ -165,12 +165,45 @@ where
     }
 }
 
+/// The least time between two resets of one phone (see [`recover`]), so a
+/// phone whose links keep failing is not reset in a tight loop.
+#[cfg(not(target_os = "android"))]
+const RECOVER_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// How long after a link that heard nothing ends the accessory is opened
+/// again.
+#[cfg(not(target_os = "android"))]
+const REOPEN_DELAY: Duration = Duration::from_secs(5);
+
+/// When each phone, by switch key, was last reset to recover its link.
+#[cfg(not(target_os = "android"))]
+#[derive(Clone, Default)]
+struct Resets(Arc<std::sync::Mutex<HashMap<String, Instant>>>);
+
+#[cfg(not(target_os = "android"))]
+impl Resets {
+    /// Claim a reset of `key` at `now`: `false` if one was made less than
+    /// [`RECOVER_COOLDOWN`] ago.
+    fn claim(&self, key: &str, now: Instant) -> bool {
+        let mut resets = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        resets.retain(|_, at| now.saturating_duration_since(*at) < RECOVER_COOLDOWN);
+        if resets.contains_key(key) {
+            return false;
+        }
+        resets.insert(key.to_string(), now);
+        true
+    }
+}
+
 /// Bulk IN transfers kept queued, so the phone never waits on this side to
 /// ask for the next one.
 const IN_FLIGHT: usize = 4;
 
 /// Bulk OUT transfers allowed in flight before the writer waits.
 const OUT_IN_FLIGHT: usize = 2;
+
+/// How long the writer may take to finish once the reader has ended.
+const OUT_DRAIN: Duration = Duration::from_secs(1);
 
 /// Link queue depth between the pumps and the transport.
 const PUMP_QUEUE_DEPTH: usize = 8;
@@ -194,11 +227,20 @@ pub(crate) async fn run(links: Arc<UsbLinkQueue>, uri: String, switches: Switche
     // Devices already handled since they were plugged in: being switched,
     // linked, or found not to speak AOA. Forgotten when they go away.
     let mut handled: HashSet<DeviceId> = HashSet::new();
+    let resets = Resets::default();
 
     match nusb::list_devices().await {
         Ok(devices) => {
             for device in devices {
-                consider(device, &mut handled, &mut tasks, &links, &uri, &switches);
+                consider(
+                    device,
+                    &mut handled,
+                    &mut tasks,
+                    &links,
+                    &uri,
+                    &switches,
+                    &resets,
+                );
             }
         }
         Err(e) => warn!(error = %e, "USB host: cannot list devices"),
@@ -209,7 +251,7 @@ pub(crate) async fn run(links: Arc<UsbLinkQueue>, uri: String, switches: Switche
         tokio::select! {
             event = watch.next() => match event {
                 Some(HotplugEvent::Connected(device)) => {
-                    consider(device, &mut handled, &mut tasks, &links, &uri, &switches);
+                    consider(device, &mut handled, &mut tasks, &links, &uri, &switches, &resets);
                 }
                 Some(HotplugEvent::Disconnected(id)) => {
                     handled.remove(&id);
@@ -231,6 +273,7 @@ fn consider(
     links: &Arc<UsbLinkQueue>,
     uri: &str,
     switches: &Switches,
+    resets: &Resets,
 ) {
     if handled.contains(&device.id()) {
         return;
@@ -241,13 +284,39 @@ fn consider(
         handled.insert(device.id());
         switches.release(&key);
         let links = Arc::clone(links);
+        let resets = resets.clone();
         tasks.spawn(async move {
-            match open_accessory(&device, &label).await {
-                Ok(link) => {
-                    info!(link = %label, "USB host: accessory opened");
-                    links.push(link);
+            // A link that ends without a word from the phone is opened again
+            // while the device is on the bus: the app on the phone may have
+            // had the accessory closed when this side opened it, and opens it
+            // again later with nothing on the bus to say so. Opening is
+            // invisible to the phone, so a phone with no app costs nothing.
+            loop {
+                let dev = match device.open().await {
+                    Ok(dev) => dev,
+                    Err(e) => {
+                        debug!(link = %label, error = %e, "USB host: cannot open accessory; gone?");
+                        return;
+                    }
+                };
+                match open_link(dev.clone(), &label).await {
+                    Ok((link, pumps)) => {
+                        info!(link = %label, "USB host: accessory opened");
+                        links.push(link);
+                        let heard = pumps.await.unwrap_or(false);
+                        if heard {
+                            recover(&dev, &label, &key, &resets).await;
+                            return;
+                        }
+                        debug!(link = %label, "USB host: accessory link ended without a word from the phone; opening it again");
+                    }
+                    Err(e) => {
+                        warn!(link = %label, error = %e, "USB host: cannot open accessory");
+                        return;
+                    }
                 }
-                Err(e) => warn!(link = %label, error = %e, "USB host: cannot open accessory"),
+                drop(dev);
+                tokio::time::sleep(REOPEN_DELAY).await;
             }
         });
     } else if looks_like_phone(&device) {
@@ -329,7 +398,7 @@ pub(crate) async fn adopt(
     if desc.vendor_id() == AOA_VID && AOA_PIDS.contains(&desc.product_id()) {
         switches.release(&key);
         match open_link(dev, &label).await {
-            Ok(link) => {
+            Ok((link, _pumps)) => {
                 info!(link = %label, "USB host: accessory opened");
                 links.push(link);
             }
@@ -407,10 +476,28 @@ async fn switch_device(dev: &nusb::Device, uri: &str) -> Result<bool, String> {
 }
 
 #[cfg(not(target_os = "android"))]
-/// Open an accessory-mode device and wrap its bulk pipe as a link.
-async fn open_accessory(device: &DeviceInfo, label: &str) -> Result<UsbLink, String> {
-    let dev = device.open().await.map_err(|e| format!("open: {e}"))?;
-    open_link(dev, label).await
+/// A link with an accessory has ended and the phone may still be on the bus,
+/// still in accessory mode: the app on it restarted, or the node closed the
+/// link. Nothing on the bus changes then, so nothing would bring the link
+/// back short of a replug. Reset the device instead, which is that replug:
+/// the phone leaves the bus and returns, is asked to become an accessory
+/// again or comes back as one, and its app is offered the accessory anew.
+///
+/// Only a link the phone sent something on gets here, so a phone with no
+/// app that takes the accessory is not reset over and over; and a phone is
+/// reset at most once per [`RECOVER_COOLDOWN`]. A phone that was unplugged
+/// fails the reset, which is the end of it.
+async fn recover(dev: &nusb::Device, label: &str, key: &str, resets: &Resets) {
+    if !resets.claim(key, Instant::now()) {
+        debug!(link = %label, "USB host: accessory link ended; reset too recently to reset again");
+        return;
+    }
+    match dev.reset().await {
+        Ok(()) => {
+            info!(link = %label, "USB host: accessory link ended; reset the device to link again")
+        }
+        Err(e) => debug!(link = %label, error = %e, "USB host: accessory link ended; device gone"),
+    }
 }
 
 /// Claim the accessory interface of an opened device and start the pumps
@@ -419,7 +506,13 @@ async fn open_accessory(device: &DeviceInfo, label: &str) -> Result<UsbLink, Str
 /// The accessory interface is the vendor-class one with a bulk endpoint each
 /// way; an accessory with adb also has adb's, which is told apart by its
 /// subclass.
-pub(crate) async fn open_link(dev: nusb::Device, label: &str) -> Result<UsbLink, String> {
+///
+/// Also returns a task that ends when both pumps have stopped — the device
+/// went, or the link was dropped — with whether the phone sent anything.
+pub(crate) async fn open_link(
+    dev: nusb::Device,
+    label: &str,
+) -> Result<(UsbLink, tokio::task::JoinHandle<bool>), String> {
     let (number, ep_in, ep_out) = {
         let config = dev
             .active_configuration()
@@ -464,27 +557,52 @@ pub(crate) async fn open_link(dev: nusb::Device, label: &str) -> Result<UsbLink,
 
     let (in_tx, in_rx) = mpsc::channel(PUMP_QUEUE_DEPTH);
     let (out_tx, out_rx) = mpsc::channel(PUMP_QUEUE_DEPTH);
-    tokio::spawn(pump_in(ep_in, in_tx, label.to_string()));
-    tokio::spawn(pump_out(ep_out, out_rx, label.to_string()));
-    Ok(UsbLink {
-        label: label.to_string(),
-        rx: in_rx,
-        tx: out_tx,
-    })
+    let pump_label = label.to_string();
+    let pumps = tokio::spawn(async move {
+        let mut out = tokio::spawn(pump_out(ep_out, out_rx, pump_label.clone()));
+        let heard = pump_in(ep_in, in_tx, pump_label).await;
+        // The reader ends when the link is dropped or the device goes. A
+        // phone that closed the accessory reads nothing, so the writer's
+        // queued transfers would wait forever: give it a moment to finish,
+        // then drop it, which cancels them.
+        if tokio::time::timeout(OUT_DRAIN, &mut out).await.is_err() {
+            out.abort();
+        }
+        heard
+    });
+    Ok((
+        UsbLink {
+            label: label.to_string(),
+            rx: in_rx,
+            tx: out_tx,
+        },
+        pumps,
+    ))
 }
 
 /// Keep [`IN_FLIGHT`] reads queued on the bulk IN endpoint and pass what
 /// each brings to the link, until the device goes or the link is dropped.
-async fn pump_in(mut ep: nusb::Endpoint<Bulk, In>, to_link: mpsc::Sender<Vec<u8>>, label: String) {
+async fn pump_in(
+    mut ep: nusb::Endpoint<Bulk, In>,
+    to_link: mpsc::Sender<Vec<u8>>,
+    label: String,
+) -> bool {
+    let mut heard = false;
     for _ in 0..IN_FLIGHT {
         ep.submit(Buffer::new(USB_TRANSFER_MAX));
     }
     loop {
-        let done = ep.next_complete().await;
+        // A phone whose app closed the accessory sends nothing and fails no
+        // transfer, so the link being dropped must end this too.
+        let done = tokio::select! {
+            done = ep.next_complete() => done,
+            () = to_link.closed() => break,
+        };
         if let Err(e) = done.status {
             debug!(link = %label, error = %e, "USB host: bulk in ended");
             break;
         }
+        heard |= done.actual_len > 0;
         if done.actual_len > 0
             && to_link
                 .send(done.buffer[..done.actual_len].to_vec())
@@ -496,6 +614,7 @@ async fn pump_in(mut ep: nusb::Endpoint<Bulk, In>, to_link: mpsc::Sender<Vec<u8>
         ep.submit(Buffer::new(USB_TRANSFER_MAX));
     }
     ep.cancel_all();
+    heard
 }
 
 /// Write what the link queues to the bulk OUT endpoint, joined into transfers
