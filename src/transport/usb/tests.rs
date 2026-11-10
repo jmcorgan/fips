@@ -369,3 +369,44 @@ fn a_dropped_link_frees_a_descriptor_whose_read_never_returns() {
         .expect("the far end sees the descriptor closed, not a timeout");
     assert_eq!(n, 0, "end of file: the link's descriptor is closed");
 }
+
+/// Dropping a link whose writer is blocked — the far end stopped reading,
+/// as a host whose link ended does — closes the descriptor too: the writer
+/// is interrupted as the reader is, rather than holding it.
+/// Mutation: retry an interrupted write whatever the stop flag says.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn a_dropped_link_frees_a_descriptor_whose_write_never_returns() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let link = rt.block_on(async { UsbLink::from_fd(ours.into(), "accessory-test") });
+    // Queue more than the socket holds, so the writer blocks in a write.
+    for _ in 0..64 {
+        if link.tx.try_send(vec![0u8; USB_TRANSFER_MAX]).is_err() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    drop(link);
+
+    // Without reading a byte, the far end sees ours closed.
+    let mut fds = [libc::pollfd {
+        fd: theirs.as_raw_fd(),
+        events: libc::POLLRDHUP,
+        revents: 0,
+    }];
+    // SAFETY: one valid pollfd for the call's duration.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, 2000) };
+    assert_eq!(ready, 1, "the far end is told within the timeout");
+    assert_ne!(
+        fds[0].revents & libc::POLLRDHUP,
+        0,
+        "the link's descriptor is closed"
+    );
+}

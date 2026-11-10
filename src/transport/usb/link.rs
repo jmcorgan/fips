@@ -73,28 +73,30 @@ impl UsbLink {
     /// returns `EIO` the moment the cable is pulled — or end of file closes
     /// the link.
     ///
-    /// The accessory driver's read waits for the accessory to be online, so
-    /// a read on a session that has already ended — opened as the cable
-    /// came out, say — blocks until the next one starts. Holding the
-    /// descriptor meanwhile is what stops the next one starting: Android
-    /// opens the same device to start accessory mode, and it admits one
-    /// opener. So when the writer ends — the link was dropped, or a write
-    /// failed — it interrupts the reader with [`wake_reader`]; the reader
-    /// ends and the descriptor is closed when both threads have.
+    /// The accessory driver's read and write wait for the accessory to be
+    /// online, so on a session that has already ended — opened as the cable
+    /// came out, say, or one whose host stopped reading — they block until
+    /// the next one starts. Holding the descriptor meanwhile is what stops
+    /// the next one starting: Android opens the same device to start
+    /// accessory mode, and it admits one opener. So a third thread watches
+    /// for the transport dropping the link, or the reader ending; it then
+    /// interrupts both with [`wake`] and joins them, and the descriptor is
+    /// closed.
     #[cfg(unix)]
     pub fn from_fd(fd: std::os::fd::OwnedFd, label: impl Into<String>) -> UsbLink {
-        use std::io::{Read, Write};
+        use std::io::Read;
 
         let label = label.into();
         let file = Arc::new(std::fs::File::from(fd));
         let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>(LINK_QUEUE_DEPTH);
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(LINK_QUEUE_DEPTH);
-
         let stop = Arc::new(AtomicBool::new(false));
-        let done = Arc::new(AtomicBool::new(false));
+        let dropped = in_tx.clone();
+        let (reader_exit, reader_exited) = tokio::sync::oneshot::channel::<()>();
+
         let reader = Arc::clone(&file);
         let reader_label = label.clone();
-        let (reader_stop, reader_done) = (Arc::clone(&stop), Arc::clone(&done));
+        let reader_stop = Arc::clone(&stop);
         let spawned = std::thread::Builder::new()
             .name(format!("fips-usb-rd-{label}"))
             .spawn(move || {
@@ -115,7 +117,7 @@ impl UsbLink {
                         }
                     }
                 }
-                reader_done.store(true, Ordering::Release);
+                drop(reader_exit);
             });
         let reader_thread = match spawned {
             Ok(handle) => Some(handle),
@@ -127,25 +129,48 @@ impl UsbLink {
 
         let writer = file;
         let writer_label = label.clone();
+        let writer_stop = Arc::clone(&stop);
         let spawned = std::thread::Builder::new()
             .name(format!("fips-usb-wr-{label}"))
             .spawn(move || {
                 let mut carried = None;
                 while let Some(first) = carried.take().or_else(|| out_rx.blocking_recv()) {
                     let chunk = gather(first, &mut out_rx, &mut carried);
-                    if let Err(e) = (&*writer).write_all(&chunk) {
+                    if let Err(e) = write_all_until(&writer, &chunk, &writer_stop) {
                         tracing::debug!(link = %writer_label, error = %e, "USB link write ended");
                         break;
                     }
                 }
-                drop(writer);
-                if let Some(reader) = reader_thread {
-                    wake_reader(&reader, &stop, &done, &writer_label);
-                    let _ = reader.join();
+            });
+        let writer_thread = match spawned {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                tracing::warn!(link = %label, error = %e, "could not start USB link writer");
+                None
+            }
+        };
+
+        let watcher_label = label.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("fips-usb-wd-{label}"))
+            .spawn(move || {
+                // Ends when the transport drops the link's receiver, or the
+                // reader ends — the link is over either way. Holding a
+                // sender past the reader's end would keep the receiver from
+                // seeing the link close.
+                futures::executor::block_on(futures::future::select(
+                    Box::pin(dropped.closed()),
+                    reader_exited,
+                ));
+                drop(dropped);
+                stop.store(true, Ordering::Release);
+                for thread in [reader_thread, writer_thread].into_iter().flatten() {
+                    wake(&thread, &watcher_label);
+                    let _ = thread.join();
                 }
             });
         if let Err(e) = spawned {
-            tracing::warn!(link = %label, error = %e, "could not start USB link writer");
+            tracing::warn!(link = %label, error = %e, "could not start USB link watcher");
         }
 
         UsbLink {
@@ -156,57 +181,67 @@ impl UsbLink {
     }
 }
 
-/// Stop the reader thread `reader` of a link whose writer has ended: set
-/// `stop`, then interrupt its blocking read with [`WAKE_SIGNAL`] until it
-/// reports `done`. A signal that lands between reads is lost, so it is sent
-/// again until the reader has seen `stop`. The reader is joined only after
-/// this, so its thread id stays valid for every signal.
+/// Write all of `buf` to `file`, retrying a write a signal interrupted
+/// unless `stop` is set, when it fails with the interruption.
+#[cfg(unix)]
+fn write_all_until(file: &std::fs::File, mut buf: &[u8], stop: &AtomicBool) -> std::io::Result<()> {
+    use std::io::{ErrorKind, Write};
+    while !buf.is_empty() {
+        match (&*file).write(buf) {
+            Ok(0) => return Err(ErrorKind::WriteZero.into()),
+            Ok(n) => buf = &buf[n..],
+            Err(e) if e.kind() == ErrorKind::Interrupted && !stop.load(Ordering::Acquire) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Interrupt the link thread `thread`, whose stop flag is set, out of a
+/// blocking read or write with the signal [`wake_signal`] installs, until it
+/// has ended. A signal that lands between calls is lost, so it is sent
+/// again until the thread is finished. The caller joins the thread only
+/// after this, so its thread id stays valid for every signal.
 ///
 /// Without a wake signal — the platform has none, or the signal already has
-/// a handler that is not ours — the reader is left to end on its own, as it
-/// did before.
+/// a handler that is not ours — the thread is left to end on its own, which
+/// for an accessory is at the next session.
 #[cfg(unix)]
-fn wake_reader(
-    reader: &std::thread::JoinHandle<()>,
-    stop: &AtomicBool,
-    done: &AtomicBool,
-    label: &str,
-) {
-    stop.store(true, Ordering::Release);
+fn wake(thread: &std::thread::JoinHandle<()>, label: &str) {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::unix::thread::JoinHandleExt;
         let Some(signal) = wake_signal() else {
             return;
         };
-        let thread = reader.as_pthread_t();
+        let id = thread.as_pthread_t();
         for _ in 0..WAKE_TRIES {
-            if done.load(Ordering::Acquire) {
+            if thread.is_finished() {
                 return;
             }
-            // SAFETY: the reader is not joined yet, so `thread` names a
-            // live or exited-but-unjoined thread, either of which
-            // `pthread_kill` accepts.
+            // SAFETY: the thread is not joined yet, so `id` names a live or
+            // exited-but-unjoined thread, either of which `pthread_kill`
+            // accepts.
             unsafe {
-                libc::pthread_kill(thread, signal);
+                libc::pthread_kill(id, signal);
             }
             std::thread::sleep(WAKE_INTERVAL);
         }
-        if !done.load(Ordering::Acquire) {
-            tracing::debug!(link = %label, "USB link reader did not wake; leaving it to the next unplug");
+        if !thread.is_finished() {
+            tracing::debug!(link = %label, "USB link thread did not wake; leaving it to the next session");
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let _ = (reader, done, label);
+    let _ = (thread, label);
 }
 
-/// How many times, and how far apart, a link's reader is signalled.
+/// How many times, and how far apart, a link thread is signalled.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const WAKE_TRIES: usize = 50;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const WAKE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 
-/// The signal that interrupts a link reader's blocking read, with a handler
+/// The signal that interrupts a link thread's blocking read or write, with a handler
 /// that does nothing, installed without `SA_RESTART` so the read returns
 /// `EINTR`; `None` when it cannot be installed. Installed once, and only
 /// over the default action: a handler someone else installed is left alone.
