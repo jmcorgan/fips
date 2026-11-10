@@ -102,6 +102,7 @@ async fn isolated_service_types_do_not_cross_feed() {
         &identity_a,
         Some("scope-x".to_string()),
         61001,
+        true,
         config_for(service_a.clone()),
     )
     .await
@@ -110,6 +111,7 @@ async fn isolated_service_types_do_not_cross_feed() {
         &identity_b,
         Some("scope-x".to_string()),
         61002,
+        true,
         config_for(service_b.clone()),
     )
     .await
@@ -162,6 +164,7 @@ async fn matched_scope_peers_observe_each_other() {
         &identity_a,
         Some("scope-shared".to_string()),
         61101,
+        true,
         config_for(service.clone()),
     )
     .await
@@ -170,6 +173,7 @@ async fn matched_scope_peers_observe_each_other() {
         &identity_b,
         Some("scope-shared".to_string()),
         61102,
+        true,
         config_for(service.clone()),
     )
     .await
@@ -207,6 +211,7 @@ async fn cross_scope_advert_is_filtered() {
         &identity_a,
         Some("scope-a".to_string()),
         61201,
+        true,
         config_for(service.clone()),
     )
     .await
@@ -215,6 +220,7 @@ async fn cross_scope_advert_is_filtered() {
         &identity_b,
         Some("scope-b".to_string()),
         61202,
+        true,
         config_for(service.clone()),
     )
     .await
@@ -436,4 +442,57 @@ fn an_advert_carrying_our_npub_in_another_case_is_skipped_as_our_own() {
             "an advert carrying {spelling} passed as a peer's: {checked:?}"
         );
     }
+}
+
+/// A node whose UDP socket receives IPv4 only advertises IPv4 addresses
+/// only: a peer handed one of the host's IPv6 addresses would dial it and
+/// never be answered. Same multicast-loopback caveat as
+/// `matched_scope_peers_observe_each_other`.
+/// Mutation: advertise every interface address whatever the socket.
+#[ignore = "two mDNS daemons in one process depend on the host's multicast loopback; run on a host where it works"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ipv4_only_node_advertises_no_ipv6_address() {
+    let identity_a = Identity::generate();
+    let identity_b = Identity::generate();
+    let service = isolated_service_type("v4only");
+
+    let lan_a = LanRendezvous::start(
+        &identity_a,
+        Some("scope-v4".to_string()),
+        61301,
+        true,
+        config_for(service.clone()),
+    )
+    .await
+    .expect("start a");
+    let lan_b = LanRendezvous::start(
+        &identity_b,
+        Some("scope-v4".to_string()),
+        61302,
+        false,
+        config_for(service.clone()),
+    )
+    .await
+    .expect("start b");
+
+    // Collect every address `a` resolves for `b` over a few seconds.
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        for event in lan_a.drain_events().await {
+            let LanEvent::Discovered(peer) = event;
+            if peer.npub == identity_b.npub() {
+                seen.push(peer.addr);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    lan_a.shutdown().await;
+    lan_b.shutdown().await;
+
+    assert!(!seen.is_empty(), "a must see b");
+    assert!(
+        seen.iter().all(|addr| addr.is_ipv4()),
+        "b's advert carries IPv4 addresses only: {seen:?}"
+    );
 }

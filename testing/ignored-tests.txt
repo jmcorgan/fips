@@ -70,6 +70,7 @@ environment   fips-mesh  transport::ethernet::rebind_tests::a_recreated_interfac
 environment   fips-mesh  transport::ethernet::rebind_tests::an_interface_that_returns_with_the_same_index_is_rebound  src/transport/ethernet/tests/rebind.rs
 environment   fips-mesh  transport::ethernet::rebind_tests::a_socket_reports_its_bound_index_until_the_interface_is_unregistered  src/transport/ethernet/tests/rebind.rs
 environment   fips-mesh  mdns::tests::matched_scope_peers_observe_each_other  src/mdns/tests.rs
+environment   fips-mesh  mdns::tests::an_ipv4_only_node_advertises_no_ipv6_address  src/mdns/tests.rs
 environment   fips-mesh  node::netmon::tests::a_route_change_alone_reaches_the_watcher  src/node/netmon/tests.rs
 environment   fips-mesh  node::netmon::tests::an_interface_going_down_is_reported_only_when_a_peer_was_reached_over_it  src/node/netmon/tests.rs
 environment   fips-mesh  node::netmon::tests::an_interface_no_peer_is_reached_through_does_not_move_the_fingerprint  src/node/netmon/tests.rs
