@@ -12,6 +12,7 @@ pub mod feeds;
 pub mod machines;
 pub mod names;
 pub mod oracle;
+pub mod parity;
 pub mod party;
 pub mod pins;
 pub mod route;
@@ -85,12 +86,11 @@ impl Mode {
     }
 
     /// The path machine's settings the node derives at the default
-    /// configuration with this setting (`path_params`,
-    /// `src/node/handlers/path.rs:162-176`): the draft's values, enabled
-    /// by the setting, with the 10 s heartbeat.
+    /// configuration with this setting: the shared statement of them
+    /// (`parity::path`), which a root test ties to the node's
+    /// `path_params`.
     pub fn path(self) -> path::Params {
-        path::Params::new(self.config())
-            .expect("the draft's values with a 10 s heartbeat are valid")
+        crate::proto::settle::parity::path(self.enabled())
     }
 
     /// The path settings [`Self::path`] is made from, which the path
@@ -104,33 +104,13 @@ impl Mode {
     }
 
     /// The link rekey settings the node derives at the default
-    /// configuration with this setting (`link_params`,
-    /// `src/node/handlers/rekey.rs:103-158`): the FMP defaults, with the
-    /// 1 s check, five resends and the 30 s handshake timeout, the pending
-    /// hold the link's longest silence needs, and the answer on a msg1's
-    /// arrival path when multipath is enabled. At the defaults the time
-    /// trigger (120 s, above the 15 s jitter plus the 30 s link age), the
-    /// message trigger and both start floors (31 s) are the FMP defaults'.
+    /// configuration with this setting: the shared statement of them
+    /// (`parity::rekey`), which a root test ties to the node's
+    /// `link_params`, with the answer on a msg1's arrival path when
+    /// multipath is enabled.
     pub fn rekey(self) -> rekey::Params {
-        let base = rekey::Config {
-            // The defect's shape: the answer on the established link
-            // whatever the setting.
-            arrival: self.enabled() && !fault!(ArrivalIgnored),
-            check: Duration::from_secs(1),
-            resends: 5,
-            handshake: Duration::from_secs(30),
-            ..rekey::Config::fmp()
-        };
-        rekey::Params::new(base.with_hold(silence())).expect("the link defaults are valid")
+        // The defect's shape: the answer on the established link whatever
+        // the setting.
+        crate::proto::settle::parity::rekey(self.enabled() && !fault!(ArrivalIgnored))
     }
-}
-
-/// The longest silence the node tolerates on a link it keeps, at the
-/// default configuration (`link_silence_ms`, `src/node/handlers/rekey.rs:50-58`):
-/// the msg1 resend ladder of five resends, three 1 s ticks, and the longer
-/// of the 10 s heartbeat and the 30 s link-dead timeout.
-fn silence() -> Duration {
-    rekey::msg1_span(5)
-        .saturating_add(Duration::from_secs(3))
-        .saturating_add(Duration::from_secs(30))
 }

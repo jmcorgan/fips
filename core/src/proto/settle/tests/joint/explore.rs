@@ -468,43 +468,33 @@ fn each_breach_the_pins_hold_is_exempted_by_its_own_cause_and_a_settled_pair_by_
 }
 
 /// Sweep each of `runs` at the pairing `label` names, one thread per
-/// start, and return every breach found, each with its path: every state
-/// checked at every step and every leaf healed and checked, with
-/// [`spared`] as the exemption, whose breaches each start's line counts
-/// by cause.
+/// start, a few at a time ([`crate::testutil::bounded`]), and return
+/// every breach found, each with its path: every state checked at every
+/// step and every leaf healed and checked, with [`spared`] as the
+/// exemption, whose breaches each start's line counts by cause.
 pub(super) fn swept(runs: &[Start], label: &str) -> Vec<String> {
     use super::super::oracle::sweep;
-    let report = std::thread::scope(|sc| {
-        let hs: Vec<_> = runs
+    let report = crate::testutil::bounded(runs, |st| {
+        let counts = Spared::ALL.map(|_| AtomicUsize::new(0));
+        let exempt = |w: &World, b: &Breach| match spared(w, b) {
+            Some(s) => {
+                if let Some(i) = Spared::ALL.iter().position(|c| *c == s) {
+                    counts[i].fetch_add(1, Ordering::Relaxed);
+                }
+                true
+            }
+            None => false,
+        };
+        let t = std::time::Instant::now();
+        let swept = sweep(st, st.depth, &exempt);
+        let ms = t.elapsed().as_millis();
+        let by: Vec<(Spared, usize)> = Spared::ALL
             .iter()
-            .map(|st| {
-                sc.spawn(move || {
-                    let counts = Spared::ALL.map(|_| AtomicUsize::new(0));
-                    let exempt = |w: &World, b: &Breach| match spared(w, b) {
-                        Some(s) => {
-                            if let Some(i) = Spared::ALL.iter().position(|c| *c == s) {
-                                counts[i].fetch_add(1, Ordering::Relaxed);
-                            }
-                            true
-                        }
-                        None => false,
-                    };
-                    let t = std::time::Instant::now();
-                    let swept = sweep(st, st.depth, &exempt);
-                    let ms = t.elapsed().as_millis();
-                    let by: Vec<(Spared, usize)> = Spared::ALL
-                        .iter()
-                        .zip(&counts)
-                        .map(|(s, n)| (*s, n.load(Ordering::Relaxed)))
-                        .filter(|(_, n)| *n > 0)
-                        .collect();
-                    (swept, ms, by)
-                })
-            })
+            .zip(&counts)
+            .map(|(s, n)| (*s, n.load(Ordering::Relaxed)))
+            .filter(|(_, n)| *n > 0)
             .collect();
-        hs.into_iter()
-            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect::<Vec<_>>()
+        (swept, ms, by)
     });
     let mut wrong = Vec::new();
     for (st, (swept, ms, by)) in runs.iter().zip(report) {
@@ -550,7 +540,7 @@ pub const CAPABLE: &[&str] = &[
 /// The starts on real bundles whose links turn capable at On with On, so
 /// that each healed leaf steps a minute of probes and each sweep there
 /// takes minutes: they run in the slow explorers' lane, together in one
-/// test, each on a thread of its own.
+/// test, each on a thread of its own, a few at a time.
 pub const DOUBLED: &[&str] = &[
     "crossing while capability probes are out",
     "restart on a two-path link",

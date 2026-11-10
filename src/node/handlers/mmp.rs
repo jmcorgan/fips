@@ -17,6 +17,7 @@ use crate::proto::mmp::{
     LinkReportKind, LinkReportSnapshot, MmpAction, PeerLivenessSnapshot, ReceiverReport, RrLog,
     SenderReport,
 };
+use crate::proto::settle::output::Why;
 use crate::proto::stp::{Stp, TreeDecision};
 use crate::transport::{TransportAddr, TransportId};
 use std::time::{Duration, Instant};
@@ -615,7 +616,7 @@ impl Node {
                         link_addr = %link_addr,
                         "Removing peer: link dead timeout"
                     );
-                    self.route_link_dead(peer, wall_ms).await;
+                    self.route_link_dead(peer, wall_ms, Why::Dead).await;
                 }
                 MmpAction::Heartbeat { peer } => {
                     // Attempt first, success after: the attempt is recorded
@@ -655,7 +656,7 @@ impl Node {
     /// interface its one path used goes away. The shell has already
     /// decided by the time this runs, so the machine only CONSUMES the decision
     /// via [`PeerEvent::LinkDeadSuspected`]. The resulting executor arms
-    /// (`InvalidateSendState` → `remove_active_peer`, `ReportLost` →
+    /// (`InvalidateSendState` → the removal, `ReportLost` →
     /// `note_link_dead`) reproduce the pre-refactor inline reap body exactly, in
     /// that order.
     ///
@@ -666,28 +667,34 @@ impl Node {
     ///
     /// `now_ms` is the caller's hoisted wall-clock ms; it flows to the peer
     /// machine's ambient context. The reconnect schedule itself is on the
-    /// peering clock, which `note_link_dead`'s callers read.
-    pub(in crate::node) async fn route_link_dead(&mut self, node_addr: NodeAddr, now_ms: u64) {
-        self.linkdead_body(node_addr, now_ms).await;
+    /// peering clock, which `note_link_dead`'s callers read. `why` is which
+    /// of the two callers decided: `Dead` from the sweep, `Orphaned` from
+    /// the path machine.
+    pub(in crate::node) async fn route_link_dead(
+        &mut self,
+        node_addr: NodeAddr,
+        now_ms: u64,
+        why: Why,
+    ) {
+        self.linkdead_body(node_addr, now_ms, why).await;
         self.audit_live("route_link_dead");
     }
 
     /// The work of [`Self::route_link_dead`], which audits the per-peer maps
     /// after it.
-    async fn linkdead_body(&mut self, node_addr: NodeAddr, now_ms: u64) {
+    async fn linkdead_body(&mut self, node_addr: NodeAddr, now_ms: u64, why: Why) {
         let link = match self.peers.get(&node_addr) {
             Some(peer) => peer.link_id(),
             None => return,
         };
         if !self.peer_machines.contains_key(&link) {
             debug_assert!(false, "peer machine present for every established peer");
-            let held = self.peer_link(&node_addr);
-            self.remove_active_peer(&node_addr);
-            self.relink(&node_addr, held, None).await;
-            self.note_link_dead(node_addr, Self::peering_now());
+            if let Some(removed) = self.remove(&node_addr, Why::Dead) {
+                self.removed(&node_addr, removed).await;
+            }
             return;
         }
-        let ambient = self.link_dead_ctx(&node_addr, now_ms);
+        let ambient = self.link_dead_ctx(&node_addr, now_ms, why);
         self.advance_peer_machine(
             link,
             PeerEvent::LinkDeadSuspected,
@@ -698,13 +705,13 @@ impl Node {
     }
 
     /// Ambient shell facts for the routed liveness reap. The executor reads only
-    /// `verified_identity` (`InvalidateSendState` → `remove_active_peer` resolves
+    /// `verified_identity` (`InvalidateSendState` → the removal resolves
     /// its `NodeAddr` from it, so it must equal `node_addr`). `ReportLost` →
     /// `note_link_dead` schedules the reconnect on the peering clock, not on
     /// `now_ms`. The transport/index/direction fields are unused by these two
     /// arms and are populated best-effort for coherence; `now_ms` is threaded in
-    /// as the caller's hoisted wall-clock.
-    fn link_dead_ctx(&self, node_addr: &NodeAddr, now_ms: u64) -> PeerActionCtx {
+    /// as the caller's hoisted wall-clock, and `why` as the caller decided it.
+    fn link_dead_ctx(&self, node_addr: &NodeAddr, now_ms: u64, why: Why) -> PeerActionCtx {
         let peer = &self.peers[node_addr];
         PeerActionCtx {
             verified_identity: *peer.identity(),
@@ -719,6 +726,7 @@ impl Node {
             interval_ms: Self::interval_ms(),
             is_outbound: false,
             pending_outbound_key: None,
+            why: Some(why),
         }
     }
 }

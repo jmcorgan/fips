@@ -76,6 +76,7 @@ fn promoted_peer(is_initiator: bool, link_stats: LinkStats) -> ActivePeer {
         None,
         NodeProfile::Full,
         NodeProfile::Full,
+        None,
         &mut caps,
     );
     let Ok((peer, _outputs)) = built else {

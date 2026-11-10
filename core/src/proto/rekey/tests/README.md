@@ -107,7 +107,8 @@ oracles.
   seeded random byte strings of every input kind (which must change
   nothing and panic nowhere) and then healed to O1. A machine cannot be
   cloned (its leases are linear), so each state is rebuilt by replaying
-  its path. Depths are 5 or 6; the scenarios run on threads of their own.
+  its path. Depths are 5 or 6; the scenarios run on threads of their own,
+  four at a time (`bounded` in `core/src/testutil.rs`).
 - `regress.rs`: scripted schedules of historical defects and adversarial
   traces, each run with a zero O2 bound and each asserting that it reached
   the state it targets, so a schedule that drifts tests nothing loudly.

@@ -16,6 +16,13 @@ mod bounds;
 mod carry;
 mod clock;
 mod crossing;
+// Not built on next: next's link handshake is Noise XX, three messages, and
+// the real-node explorer, its schedules, the shared trace it is held to and
+// its reference model are written for master's two-message IK handshake.
+// The gap is tracked; `src/node/tests/settle/explore/README.md` says what
+// does not run here.
+#[cfg(any())]
+mod explore;
 mod fsp;
 mod lane;
 mod live;

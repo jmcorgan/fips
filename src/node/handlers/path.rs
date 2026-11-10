@@ -17,13 +17,15 @@ use std::time::{Duration, Instant};
 use fips_core::proto::path::wire::{PathAck, PathClose, PathProbe};
 use fips_core::proto::path::{
     Class, Config, Env, Facts, Input, Kind, Medium, Output, Outputs, Params, PathRef, PathState,
-    Role, Switch, Why,
+    Role, Why,
 };
+use fips_core::proto::settle::join::Step;
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 
 use crate::NodeAddr;
 use crate::config::{NodeConfig, PathKind, TransportRole};
+use crate::node::settle::exec::{PathSteps, Run, pathed};
 use crate::node::{Node, TICK};
 use crate::peer::{PeerBundle, PeerInstant, UdpSlot, peer_now};
 use crate::transport::{
@@ -284,6 +286,18 @@ impl PathDriver {
         self.wake.is_some() || !self.connecting.is_empty() || !self.closing.is_empty()
     }
 
+    /// Queue the connection at `to`, which a released path of `node`'s link
+    /// held, to close once the step that released it is done; `removed`
+    /// says the release is part of the peer's removal.
+    pub(in crate::node) fn close_later(&mut self, to: PathRef, node: NodeAddr, removed: bool) {
+        self.closing.push(Closing {
+            transport: to.transport,
+            addr: to.addr,
+            node,
+            removed,
+        });
+    }
+
     /// Record a connection `node`'s machine waits for at `to`, as a
     /// `Connect` does, for tests of the tick's arming.
     #[cfg(test)]
@@ -358,16 +372,6 @@ impl PathDriver {
 pub(in crate::node) struct Ran {
     /// The machine was orphaned and its peer removed.
     pub(in crate::node) orphaned: bool,
-}
-
-/// The name of a change of active path's reason, for the log.
-fn switch_name(why: Switch) -> &'static str {
-    match why {
-        Switch::Mandatory => "mandatory",
-        Switch::Handover => "handover",
-        Switch::Discretionary => "discretionary",
-        Switch::Pinned => "pinned",
-    }
 }
 
 impl Node {
@@ -455,6 +459,7 @@ impl Node {
             return Ran::default();
         };
         let cost = peer.live_cost();
+        let link = self.links.no(&peer.link_id());
         let Some(bundle) = peer.bundle_mut() else {
             return Ran::default();
         };
@@ -468,7 +473,10 @@ impl Node {
         };
         let out = bundle.step(peer_now(), input, &mut env);
         self.paths.fold(bundle.next_wake());
-        self.run_outputs(node_addr, out, why).await
+        let Some(steps) = pathed(*node_addr, out, Some(bundle), link) else {
+            return Ran::default();
+        };
+        self.run_outputs(node_addr, steps, why).await
     }
 
     /// Run the links' path machines' timers (draft Section 5.6): settle the
@@ -537,17 +545,31 @@ impl Node {
     }
 
     /// Carry out the outputs of `node_addr`'s path machine, front to back,
-    /// then close the connections left to close. `why` says, for the log,
+    /// then close the connections left to close. Each comes through the
+    /// settlement core's join with the core input it stands for after it,
+    /// which goes to the core's record of the link. `why` says, for the log,
     /// why an orphaned link's peer is removed.
     async fn run_outputs(
         &mut self,
         node_addr: &NodeAddr,
-        out: Outputs<UdpSlot>,
+        steps: PathSteps,
         why: &'static str,
     ) -> Ran {
         let mut ran = Ran::default();
         let link = self.peers.get(node_addr).map(|p| p.link_id());
-        for output in out {
+        for step in steps {
+            let output = match step {
+                Step::Path(output) => output,
+                // An orphaning is acted on as the path output beside it.
+                Step::Core(input) => {
+                    self.feed(&input);
+                    continue;
+                }
+                Step::Rekey(_) | Step::Replace(_) => {
+                    debug_assert!(false, "the join gave a bundle's step a rekey step");
+                    continue;
+                }
+            };
             match output {
                 Output::Send { to, bytes } => {
                     match self.send_via(node_addr, &bytes, false, Some(&to)).await {
@@ -584,25 +606,22 @@ impl Node {
                     }
                     self.paths.connecting.push((*node_addr, to));
                 }
-                Output::Switched { from, to, why } => self.switched(node_addr, from, &to, why),
+                // Read afresh: an earlier output of this step may have
+                // removed the peer.
+                Output::Switched { from, to, why } => {
+                    if let Some(link) = self.peers.get(node_addr).map(|p| p.link_id()) {
+                        let mut run = Run::switched(*node_addr, link, from, to, why);
+                        self.run_now(&mut run);
+                    }
+                }
                 Output::Released { to, driver, keep } => match link {
                     Some(link) => self.release_path(node_addr, link, to, driver, keep, false),
                     None => clear_slot(driver),
                 },
                 Output::Moved { from, to, driver } => {
                     clear_slot(driver);
-                    if let Some(link) = link {
-                        let old = (from.transport, from.addr.clone());
-                        self.links
-                            .follow(link, &old, (to.transport, to.addr.clone()));
-                    }
-                    debug!(
-                        peer = %self.peer_display_name(node_addr),
-                        from = %from.addr,
-                        to = %to.addr,
-                        transport_id = %to.transport,
-                        "Path moved to a new address"
-                    );
+                    let mut run = Run::followed(*node_addr, link, from, to);
+                    self.run_now(&mut run);
                 }
                 Output::State {
                     to,
@@ -631,7 +650,8 @@ impl Node {
                         peer = %self.peer_display_name(node_addr),
                         "Removing peer: {why}"
                     );
-                    self.route_link_dead(*node_addr, Self::now_ms()).await;
+                    let why = crate::proto::settle::output::Why::Orphaned;
+                    self.route_link_dead(*node_addr, Self::now_ms(), why).await;
                     ran.orphaned = true;
                 }
             }
@@ -665,11 +685,27 @@ impl Node {
     /// Carry out what `node_addr`'s path machine handed back when its link
     /// started again at a won crossed handshake ([`PeerBundle::renew`]):
     /// each path's change of state is logged, and each path released is
-    /// disposed of while the link lives. The connections left to close are
+    /// disposed of while the link lives. Each comes through the settlement
+    /// core's join with the core input it stands for after it, which goes to
+    /// the core's record of the link. The connections left to close are
     /// closed at the next tick.
     pub(in crate::node) fn run_renewed(&mut self, node_addr: &NodeAddr, out: Outputs<UdpSlot>) {
         let link = self.peers.get(node_addr).map(|p| p.link_id());
-        for output in out {
+        let no = link.and_then(|link| self.links.no(&link));
+        let bundle = self.peers.get(node_addr).and_then(|p| p.bundle());
+        let steps = pathed(*node_addr, out, bundle, no);
+        for step in steps.into_iter().flatten() {
+            let output = match step {
+                Step::Path(output) => output,
+                Step::Core(input) => {
+                    self.feed(&input);
+                    continue;
+                }
+                Step::Rekey(_) | Step::Replace(_) => {
+                    debug_assert!(false, "the join gave a bundle's step a rekey step");
+                    continue;
+                }
+            };
             match output {
                 Output::State {
                     to,
@@ -677,7 +713,11 @@ impl Node {
                     from,
                     next,
                     why,
-                } => self.log_state(node_addr, &to, path_id, from, next, why),
+                } => {
+                    if !node_fault!(RenewedStateDropped) {
+                        self.log_state(node_addr, &to, path_id, from, next, why);
+                    }
+                }
                 Output::Released { to, driver, keep } => {
                     if let Some(link) = link {
                         self.release_path(node_addr, link, to, driver, keep, false);
@@ -688,65 +728,15 @@ impl Node {
         }
     }
 
-    /// The link to `node_addr` now sends on `to`, its machine having left
-    /// `from` for `why`: the link's address lookup gains `to`; the peer's
-    /// path MTU is seeded from `to` as a move to a new link seeds it, so a
-    /// tighter value learned on the old path does not carry over; every
-    /// session whose next hop is the peer is tightened to `to`'s MTU at
-    /// once; and the old path's connected UDP socket is dropped, the new
-    /// path's being opened at the next tick.
-    fn switched(&mut self, node_addr: &NodeAddr, from: Option<PathRef>, to: &PathRef, why: Switch) {
-        let Some(peer) = self.peers.get_mut(node_addr) else {
-            return;
-        };
-        let link = peer.link_id();
-        let key = crate::ipv6tun::link::PeerKey::from_xonly(&peer.identity().pubkey());
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if let Some(old) = from.as_ref()
-            && let Some(bundle) = peer.bundle_mut()
-            && let Some(i) = bundle.paths().find(old.transport, &old.addr)
-            && let Some(slot) = bundle.driver_mut(i)
-        {
-            slot.clear_connected_udp();
-        }
-        self.links.claim(link, (to.transport, to.addr.clone()));
-        self.seed_mtu(node_addr, key, to.transport, &to.addr, true);
-        if let Some(mtu) = self
-            .transports
-            .get(&to.transport)
-            .map(|t| t.link_mtu(&to.addr))
-        {
-            let dests: Vec<NodeAddr> = self.sessions.keys().copied().collect();
-            for dest in dests {
-                let via_peer = self
-                    .find_next_hop(&dest)
-                    .is_some_and(|hop| hop.node_addr() == node_addr);
-                if via_peer
-                    && let Some(mmp) = self.sessions.get_mut(&dest).and_then(|s| s.mmp_mut())
-                {
-                    mmp.path_mtu.seed_source_mtu(mtu);
-                }
-            }
-        }
-        info!(
-            peer = %self.peer_display_name(node_addr),
-            from = %from.as_ref().map_or_else(|| "none".to_string(), |f| f.addr.to_string()),
-            to = %to.addr,
-            transport_id = %to.transport,
-            why = switch_name(why),
-            "Path switched"
-        );
-    }
-
     /// Dispose of the path `to` of `node_addr`'s link `link`, which its
     /// machine handed back with its driver slot (draft Section 5.8): the
-    /// slot's connected UDP socket and its drain go, drain first; while the
-    /// link lives (`removed` false) its address lookup loses `to`, unless
-    /// `to` is the link record's own pair, which keeps naming the link while
-    /// it lives, as for every live link, and which the anonymous-beacon
-    /// dedup reads; and unless `keep` says the peer may still send on it, or
-    /// another peer's link uses it, the connection at `to` is queued to
-    /// close.
+    /// slot's connected UDP socket and its drain go, drain first; then the
+    /// release runs through the executor: while the link lives (`removed`
+    /// false) its address lookup loses `to`, unless `to` is the link record's
+    /// own pair, which keeps naming the link while it lives, as for every
+    /// live link, and which the anonymous-beacon dedup reads; and unless
+    /// `keep` says the peer may still send on it, or another peer's link uses
+    /// it, the connection at `to` is queued to close.
     pub(in crate::node) fn release_path(
         &mut self,
         node_addr: &NodeAddr,
@@ -757,23 +747,8 @@ impl Node {
         removed: bool,
     ) {
         clear_slot(driver);
-        let key = (to.transport, to.addr.clone());
-        let at_record = self
-            .links
-            .get(&link)
-            .is_some_and(|k| k.transport_id() == to.transport && *k.remote_addr() == to.addr);
-        if !removed && !at_record {
-            self.links.unclaim(link, &key);
-        }
-        if keep || self.addr_carries_other_peer(to.transport, &to.addr, link) {
-            return;
-        }
-        self.paths.closing.push(Closing {
-            transport: to.transport,
-            addr: to.addr,
-            node: *node_addr,
-            removed,
-        });
+        let mut run = Run::released(*node_addr, link, to, keep, removed);
+        self.run_now(&mut run);
     }
 
     /// Close every connection a released path left, and on a transport

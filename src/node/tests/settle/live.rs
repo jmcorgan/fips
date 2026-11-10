@@ -398,3 +398,213 @@ async fn an_anonymous_connects_link_is_named_by_its_pending_connect_until_its_le
     );
     assert!(count > 0, "defect: the live audit never checked the dialer");
 }
+
+/// The core's record of the link `nodes[at]` holds `nodes[peer]` on: each
+/// path as `(transport, address, state)`, in the record's order.
+fn record(
+    nodes: &[TestNode],
+    at: usize,
+    peer: usize,
+) -> Vec<(
+    TransportId,
+    TransportAddr,
+    crate::proto::settle::links::Proven,
+)> {
+    let links = &nodes[at].node.links;
+    let no = links
+        .no(&held(nodes, at, peer))
+        .expect("precondition: the held link has a core record");
+    links
+        .core()
+        .get(no)
+        .expect("precondition: the record is there")
+        .paths
+        .iter()
+        .map(|(p, s)| (p.transport, p.addr.clone(), *s))
+        .collect()
+}
+
+/// A dial through the writers, with multipath set as `on`: the core's record
+/// of each end's link holds the link's original path Live, which is all its
+/// bundle holds, so `links-mirror` passes; the same record with that path's
+/// state changed past the feed fails it, naming the peer.
+async fn dialed_record(on: bool) {
+    use crate::proto::settle::links::Proven;
+    let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    pump(&mut nodes).await;
+    let tid = nodes[0].transport_id;
+    let to = (tid, nodes[1].addr.clone());
+    let peer = *nodes[1].node.node_addr();
+    let link = held(&nodes, 0, 1);
+    let at_dial = record(&nodes, 0, 1);
+    let at_answer = record(&nodes, 1, 0);
+    let clean = crate::node::settle::audit::links_mirror(&nodes[0].node).bad;
+    nodes[0].node.links.plant_path(&link, &to, Proven::Probing);
+    let off = crate::node::settle::audit::links_mirror(&nodes[0].node).bad;
+    nodes[0].node.links.plant_path(&link, &to, Proven::Live);
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        at_dial,
+        vec![(tid, to.1.clone(), Proven::Live)],
+        "defect: the dialer's record does not hold the original path Live"
+    );
+    assert_eq!(
+        at_answer.len(),
+        1,
+        "defect: the answerer's record: {at_answer:?}"
+    );
+    assert_eq!(at_answer[0].2, Proven::Live, "defect: {at_answer:?}");
+    assert!(
+        clean.is_empty(),
+        "defect: links-mirror failed a fed record: {clean:?}"
+    );
+    assert!(
+        off.len() == 1 && off[0].starts_with(&peer.to_string()),
+        "defect: links-mirror passed a record off its bundle: {off:?}"
+    );
+}
+
+/// [`dialed_record`] with multipath off.
+#[tokio::test]
+async fn a_dialed_links_record_holds_its_original_path_live_and_one_off_its_bundle_fails() {
+    dialed_record(false).await;
+}
+
+/// [`dialed_record`] with multipath on.
+#[tokio::test]
+async fn a_dialed_links_record_holds_its_original_path_live_and_one_off_its_bundle_fails_with_multipath_on()
+ {
+    dialed_record(true).await;
+}
+
+/// A heartbeat from a new address of the peer's on the same transport roams
+/// the one path of the link, with multipath set as `on`; the bundle reports
+/// no roam, and the frame tells the core's record, which then holds the path
+/// at the new address, Live, and `links-mirror` passes.
+async fn roam_mirrored(on: bool) {
+    use crate::proto::settle::links::Proven;
+    let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    pump(&mut nodes).await;
+    let tid = nodes[0].transport_id;
+    let moved = super::super::spanning_tree::add_loopback_alias(&nodes[1].addr, tid);
+    let to = *nodes[0].node.node_addr();
+    let peer = *nodes[1].node.node_addr();
+    nodes[1]
+        .node
+        .send_encrypted_link_message(
+            &to,
+            &[crate::proto::link::LinkMessageType::Heartbeat.to_byte()],
+        )
+        .await
+        .expect("precondition: node 1 sends a heartbeat");
+    super::super::paths::deliver_from(&mut nodes[0], &moved).await;
+    let active = nodes[0]
+        .node
+        .get_peer(&peer)
+        .and_then(|p| p.active_path())
+        .map(|p| (p.transport_id(), p.addr().clone()));
+    let rec = record(&nodes, 0, 1);
+    let bad = crate::node::settle::audit::links_mirror(&nodes[0].node).bad;
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        active,
+        Some((tid, moved.clone())),
+        "precondition: the frame roamed the link's path"
+    );
+    assert_eq!(
+        rec,
+        vec![(tid, moved, Proven::Live)],
+        "defect: the record did not follow the roam"
+    );
+    assert!(bad.is_empty(), "defect: links-mirror after a roam: {bad:?}");
+}
+
+/// [`roam_mirrored`] with multipath off.
+#[tokio::test]
+async fn a_roam_keeps_the_records_mirror() {
+    roam_mirrored(false).await;
+}
+
+/// [`roam_mirrored`] with multipath on.
+#[tokio::test]
+async fn a_roam_keeps_the_records_mirror_with_multipath_on() {
+    roam_mirrored(true).await;
+}
+
+/// A link of two Live paths, p (t1) active and q (t2): p's carrier goes, so
+/// p turns Suspect, still acknowledged, and the link switches to q. The core
+/// records p acknowledged, as its bundle holds it, and `links-mirror` lets
+/// no acknowledged path off but the active one: the same record with p Live
+/// fails. Then q's transport goes, and the link switches back to p: the core
+/// records p Live, as a switch does, where the bundle holds it acknowledged,
+/// and `links-mirror` lets that one difference off, naming the peer.
+#[tokio::test]
+async fn a_switch_to_an_acked_path_is_recorded_live_and_is_let_off_with_multipath_on() {
+    use super::super::paths::{active_of, carrier, state_at, t2, two_transports};
+    use crate::proto::settle::links::Proven;
+    let (mut nodes, b, _, b2) = two_transports(1280).await;
+    let (t1, b1) = (nodes[0].transport_id, nodes[1].addr.clone());
+    let link = held(&nodes, 0, 1);
+    carrier(&mut nodes, t1, false).await;
+    let p_lost = state_at(&nodes[0], &b, t1, &b1);
+    let on_q = active_of(&nodes[0], &b);
+    let standby = record(&nodes, 0, 1);
+    nodes[0]
+        .node
+        .links
+        .plant_path(&link, &(t1, b1.clone()), Proven::Live);
+    let standby_live = crate::node::settle::audit::links_mirror(&nodes[0].node);
+    nodes[0]
+        .node
+        .links
+        .plant_path(&link, &(t1, b1.clone()), Proven::Acked);
+    nodes[0].node.path_removed(t2()).await;
+    let on_p = active_of(&nodes[0], &b);
+    let p_back = state_at(&nodes[0], &b, t1, &b1);
+    let switched = record(&nodes, 0, 1);
+    let found = crate::node::settle::audit::links_mirror(&nodes[0].node);
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        p_lost,
+        Some(crate::peer::PathState::Suspect),
+        "precondition: p turned Suspect"
+    );
+    assert_eq!(
+        on_q,
+        (t2(), b2.clone()),
+        "precondition: the link moved to q"
+    );
+    assert!(
+        standby.contains(&(t1, b1.clone(), Proven::Acked)),
+        "precondition: the core records the standby p acknowledged: {standby:?}"
+    );
+    assert_eq!(
+        standby_live.bad.len(),
+        1,
+        "defect: links-mirror let off an acknowledged path that is not active: {:?}",
+        standby_live.bad
+    );
+    assert_eq!(
+        on_p,
+        (t1, b1.clone()),
+        "precondition: the link switched to p"
+    );
+    assert_eq!(
+        p_back,
+        Some(crate::peer::PathState::Suspect),
+        "precondition: p is still Suspect"
+    );
+    assert_eq!(
+        switched,
+        vec![(t1, b1, Proven::Live)],
+        "defect: a switch to an acknowledged path is not recorded Live"
+    );
+    assert!(found.bad.is_empty(), "defect: {:?}", found.bad);
+    assert_eq!(
+        found.letoff,
+        vec![b],
+        "defect: links-mirror did not let the switched path off"
+    );
+}

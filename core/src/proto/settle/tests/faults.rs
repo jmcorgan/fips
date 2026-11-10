@@ -54,6 +54,7 @@ const JOINT_PARTY: &str = "proto::settle::tests::joint::party::";
 const JOINT_EXPLORE: &str = "proto::settle::tests::joint::explore::";
 const JOINT_FEEDS: &str = "proto::settle::tests::joint::feeds::";
 const JOINT_ORACLE: &str = "proto::settle::tests::joint::oracle::";
+const JOINT_PARITY: &str = "proto::settle::tests::joint::parity::";
 const JOINT_RUNS: &str = "proto::settle::tests::joint::runs::";
 const JOINT_STARTS: &str = "proto::settle::tests::joint::starts::";
 
@@ -120,6 +121,12 @@ const AGED: Test = (
     "against_a_model_of_master_a_dial_on_the_peers_aged_link_leaves_a_pending_the_peer_cannot_adopt",
 );
 
+/// The table and a shell's record reading the bundle's reports one way.
+const MIRROR: Test = (
+    TABLE,
+    "the_table_and_the_record_read_the_mirror_the_same_way",
+);
+
 /// A joint node's machines carried across a cross-connection move.
 const MOVED: Test = (
     JOINT_MACHINES,
@@ -173,6 +180,19 @@ const JOINT_ORPHANED: Test = (
 const JOINT_DEFECTS: Test = (
     JOINT_PARTY,
     "starts_6_and_7_show_their_two_defects_on_real_machines",
+);
+
+/// The shared schedules on the model of the node, against the trace.
+const PARITY_MODEL: Test = (
+    JOINT_PARITY,
+    "every_shared_schedule_gives_its_trace_on_the_model_of_the_node",
+);
+
+/// The shared schedules on joint nodes, against the trace and its `core`
+/// lines.
+const PARITY_JOINT: Test = (
+    JOINT_PARITY,
+    "every_shared_schedule_gives_its_trace_on_joint_nodes",
 );
 
 /// Every start's script with its heal, joint nodes at Off at both ends.
@@ -508,6 +528,7 @@ pub const ROWS: &[Row] = &[
                 TABLE,
                 "a_path_moved_rekeys_the_links_index_entry_to_the_new_pair",
             ),
+            MIRROR,
             (
                 JOINT_STARTS,
                 "a_nat_rebound_of_the_second_path_moves_it_in_the_link_record",
@@ -516,7 +537,10 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::SwitchIgnored,
-        &[(TABLE, "a_path_switched_adds_the_new_pair_to_the_index")],
+        &[
+            (TABLE, "a_path_switched_adds_the_new_pair_to_the_index"),
+            MIRROR,
+        ],
     ),
     (
         Fault::ReleaseKeepsPair,
@@ -525,6 +549,7 @@ pub const ROWS: &[Row] = &[
                 TABLE,
                 "a_path_released_drops_its_pair_and_closes_unless_in_use_or_kept",
             ),
+            MIRROR,
             (
                 JOINT_STARTS,
                 "a_path_removed_at_the_peer_leaves_the_link_record",
@@ -538,6 +563,7 @@ pub const ROWS: &[Row] = &[
                 TABLE,
                 "a_path_state_change_to_probing_stops_it_counting_as_in_use",
             ),
+            MIRROR,
             JOINT_MIRRORED,
             (
                 JOINT_RUNS,
@@ -868,6 +894,8 @@ pub const ROWS: &[Row] = &[
                 JOINT_STARTS,
                 "a_crossing_while_capability_probes_are_out_renews_the_bundle_and_keeps_both_ends_mirrored",
             ),
+            PARITY_MODEL,
+            PARITY_JOINT,
         ],
     ),
     (
@@ -940,7 +968,11 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::MoveBuildsStale,
-        &[(JOINT_ORACLE, "one_view_reads_the_session_a_move_built_from")],
+        &[
+            (JOINT_ORACLE, "one_view_reads_the_session_a_move_built_from"),
+            PARITY_MODEL,
+            PARITY_JOINT,
+        ],
     ),
     (Fault::ReplaceKeepsMachine, &[JOINT_RESTART]),
     (
@@ -997,6 +1029,10 @@ pub const SELF_CHECKED: &[&str] = &[
     "no_joint_source_allows_a_wildcard_arm_and_the_scan_finds_a_planted_one",
     "the_cores_record_of_where_a_peer_is_is_read_only_for_the_oracles_and_the_scan_finds_a_planted_read",
     "no_settlement_test_names_the_retired_rekey_transcription_and_the_scan_finds_a_planted_one",
+    "a_trace_reads_back_as_it_was_written",
+    "a_script_names_no_node_or_transport_it_does_not_hold",
+    "every_script_has_its_lines_and_every_line_its_script",
+    "a_core_line_names_a_listed_cause",
 ];
 
 /// Why a sweep that only the slow explorers' build runs is characterisation.
@@ -1013,12 +1049,32 @@ const COLD: &str = "the cold start's reach at its stated depth, through the reac
 const HAND: &str =
     "its break is a scratch edit with no switch of its own, run by hand and logged with the commit";
 
+/// Why a test of the join function, whose break no switch makes, is
+/// characterisation; its doc comment names its break.
+const JOIN_HAND: &str = "its break is a scratch edit of the join function where no switch sits; run by hand and logged with the commit";
+
 /// Why a run of a joint node against a model of a deployed node beside the
 /// one on `IgnoreOwnDial`'s row is characterisation.
 const LEGACY_RUN: &str = "the same oracles and list as the run on `IgnoreOwnDial`'s row, a whole set of sweeps past a row's cost; the list's own check is run by hand and logged";
 
 /// The tests that characterise behaviour no switch breaks, each with why.
 pub const CHARACTERISATION: &[(&str, &str)] = &[
+    (
+        "each_rekey_output_routes_to_the_core_or_the_shell",
+        JOIN_HAND,
+    ),
+    ("each_bundle_output_mirrors_to_its_input", JOIN_HAND),
+    ("a_bundle_output_at_a_removal_reaches_no_link", JOIN_HAND),
+    ("a_released_path_goes_to_the_link_moved_off", JOIN_HAND),
+    ("a_roam_is_moved_and_a_bind_is_a_live_path", JOIN_HAND),
+    ("a_steps_outputs_come_back_in_order", JOIN_HAND),
+    ("a_rekey_step_through_join_allocates_nothing", JOIN_HAND),
+    ("a_start_mirrors_the_original_path_as_live", JOIN_HAND),
+    (
+        "a_move_refused_for_another_key_leaves_both_machines_as_they_were",
+        JOIN_HAND,
+    ),
+    ("a_stop_files_what_the_rekey_machine_carried", JOIN_HAND),
     (
         "every_explored_interleaving_of_the_core_keeps_the_properties_and_heals",
         "a whole sweep of joint nodes at multipath off and against the model on every start, minutes a child on two cores and past the meta-test's limit; each of its switches reds a cheaper test of its row",

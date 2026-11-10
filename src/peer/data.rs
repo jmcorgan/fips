@@ -201,7 +201,7 @@ impl PeerData {
                     // test lists them.
                     DataCell::Reset => {
                         if let Some(mmp) = mmp.as_mut()
-                            && !skips_mmp_reset(t)
+                            && !skips_reset(t)
                         {
                             mmp.reset_for_rekey(now_ms);
                         }
@@ -293,7 +293,6 @@ impl PeerData {
 /// the record ends: whether a frame arrived, the replays refused since the
 /// last session reset, the handshake lines withheld, and the MMP state its
 /// teardown logs.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct Departed {
     /// Whether an authenticated frame arrived since the promotion
@@ -313,7 +312,6 @@ impl PeerData {
     /// it. Names every field: a new one does not compile until it is read or
     /// dropped here. A decrypt worker's clone of the replay total lives on
     /// until the worker is revoked; this record's is dropped.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn depart(self) -> Departed {
         let PeerData {
             declaration: _,
@@ -386,7 +384,7 @@ fn unsettled(row: DataRow, t: &Transition) {
 
 /// Whether the mutation lane's break for `t` skips the MMP reset: at a
 /// cutover, or at a move.
-fn skips_mmp_reset(t: &Transition) -> bool {
+fn skips_reset(t: &Transition) -> bool {
     match t {
         Transition::Cutover { .. } => node_fault!(CutoverSkipsMmpReset),
         Transition::Move { .. } => node_fault!(MoveSkipsMmpReset),

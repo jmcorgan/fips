@@ -1,10 +1,11 @@
 //! One held peer's rekey machine and path bundle, for a test shell.
 //!
 //! [`Machines`] builds, carries and closes a peer's `Rekey<Ik>` and
-//! `Bundle` as the node does (`src/peer/active.rs`: `new_bundle`,
-//! `move_session`), steps them, and returns what they asked for as
-//! [`Event`]s, in order. It holds no settlement state: what the core is
-//! told of each event is the shell's.
+//! `Bundle` through the settlement core's join function (`settle::join`:
+//! its start, move and stop), steps them, and returns what
+//! they asked for as [`Event`]s, in order. It holds no settlement state:
+//! what the core is told of each event is the shell's, which asks the join
+//! function (`route.rs`).
 //!
 //! Two outputs need nothing but the machine and the node's own
 //! capabilities, and are carried out here: a prompt is sealed at once, as
@@ -34,16 +35,19 @@ use crate::proto::rekey::tests::stub::{
     Ik, Kid, Local, Mid, Pool, frame, hint, kid, read_msg1, seal_to,
 };
 use crate::proto::rekey::{
-    self, Arrival, Bond, Carry, Close, Completed, Ids, IndexLease, Input, Output, Record, Rekey,
-    SetupFacts, TagSource, Wire,
+    self, Arrival, Carry, Close, Completed, IndexLease, Input, Output, Record, Rekey, SetupFacts,
+    TagSource, Wire,
 };
+use crate::proto::settle::input::Input as In;
+use crate::proto::settle::join::{self, Caps, Joined, Step, join};
+use crate::proto::settle::links::LinkNo;
 use crate::testutil::{TestClock, TestInstant};
 
 use super::super::super::model::history::{Addr, Epoch, Hs, Node};
 use super::super::world::{Kind, Ms};
 use super::Mode;
 use super::facts::{Draw, Stream, Transports, at, pair};
-use super::names::{answerer, key, local, opener};
+use super::names::{addr, answerer, key, local, opener};
 
 /// A peer's rekey machine.
 pub type Machine = Rekey<Ik, TestClock>;
@@ -88,15 +92,32 @@ impl Kit {
     /// A rekey machine's `Env` over these capabilities, for a link on
     /// transport `transport`. No decrypt worker is modelled.
     fn env(&mut self, transport: u8) -> rekey::Env<'_, Ik> {
-        rekey::Env {
-            indices: &mut self.pool,
+        self.lent(transport).0
+    }
+
+    /// The capabilities split for one call of the join function: a rekey
+    /// machine's `Env` for a link on transport `transport`, the transports'
+    /// facts a bundle reads, and the stream its draws are lent from.
+    fn lent(&mut self, transport: u8) -> (rekey::Env<'_, Ik>, &Transports, &mut Stream) {
+        let Self {
+            local,
+            pool,
+            tags,
+            jitter,
+            scratch,
+            draws,
+            facts,
+        } = self;
+        let env = rekey::Env {
+            indices: pool,
             transport,
-            tags: &mut self.tags,
+            tags,
             workers: false,
-            jitter: &mut self.jitter,
-            local: &self.local,
-            scratch: &mut self.scratch,
-        }
+            jitter,
+            local,
+            scratch,
+        };
+        (env, facts, draws)
     }
 }
 
@@ -205,6 +226,25 @@ impl Machines {
         at: Addr,
         from: Addr,
     ) -> (Self, Vec<Event>) {
+        let (m, events, _) = Self::held(kit, now, peer, mode, setup, record, at, from, None);
+        (m, events)
+    }
+
+    /// The machines [`Self::fresh`] builds, for a peer the core holds on
+    /// `link`, if given: with the core inputs the join function gives for
+    /// the start, which on a link are its original path, Live.
+    #[allow(clippy::too_many_arguments)]
+    pub fn held(
+        kit: &mut Kit,
+        now: Ms,
+        peer: Node,
+        mode: Mode,
+        setup: Setup,
+        record: Record,
+        at: Addr,
+        from: Addr,
+        link: Option<LinkNo>,
+    ) -> (Self, Vec<Event>, Vec<In>) {
         let facts = SetupFacts {
             peer_epoch: Some(setup.done.epoch),
             k: false,
@@ -214,7 +254,7 @@ impl Machines {
             last_rx: None,
             record,
         };
-        Self::founded(kit, now, peer, mode, setup, facts, at, from)
+        Self::founded(kit, now, peer, mode, setup, facts, (at, from), link)
     }
 
     /// The machines of the session a candidate rule moves the peer onto at
@@ -225,7 +265,8 @@ impl Machines {
     /// what a cross-connection move would carry, and a new bundle whose
     /// original path is the peer's pair `to`, reached from `from`. This
     /// one stays as it is, to open frames under the session kept. A test's
-    /// choice: the node has no second machine for one peer.
+    /// choice: the node has no second machine for one peer. With the core
+    /// inputs the join function gives for the start on `link`.
     pub fn beside(
         &self,
         kit: &mut Kit,
@@ -233,7 +274,8 @@ impl Machines {
         setup: Setup,
         to: Addr,
         from: Addr,
-    ) -> (Self, Vec<Event>) {
+        link: LinkNo,
+    ) -> (Self, Vec<Event>, Vec<In>) {
         let v = self.rekey.view();
         let (peer_k, record) = self.rekey.memory();
         let cur = v.current.as_ref();
@@ -246,12 +288,23 @@ impl Machines {
             last_rx: v.last_rx,
             record: record.clone(),
         };
-        Self::founded(kit, now, self.peer, self.mode, setup, facts, to, from)
+        Self::founded(
+            kit,
+            now,
+            self.peer,
+            self.mode,
+            setup,
+            facts,
+            (to, from),
+            Some(link),
+        )
     }
 
     /// The machines of a link to `peer` set up at `now` on `setup` with
     /// the rekey facts `facts`, and a bundle whose original path is the
-    /// peer's pair `at`, reached from `from`, Live, acked and active.
+    /// peer's pair `at`, reached from `from`, Live, acked and active: both
+    /// built by the join function's start, with the core inputs it gives
+    /// for a peer held on `link`.
     #[allow(clippy::too_many_arguments)]
     fn founded(
         kit: &mut Kit,
@@ -260,10 +313,9 @@ impl Machines {
         mode: Mode,
         setup: Setup,
         facts: SetupFacts<TestInstant>,
-        at: Addr,
-        from: Addr,
-    ) -> (Self, Vec<Event>) {
-        let (rekey, out) = build(kit, now, peer, mode, setup, facts, at.transport);
+        (at, from): (Addr, Addr),
+        link: Option<LinkNo>,
+    ) -> (Self, Vec<Event>, Vec<In>) {
         let params = if fault!(ModeIgnored) {
             // The defect's shape: the bundle built enabled whatever the
             // node's setting.
@@ -272,9 +324,40 @@ impl Machines {
             mode.path()
         };
         let p = pair(at);
-        let Kit { draws, facts, .. } = kit;
-        let env = path::Env { facts, cost: 1.0 };
-        let bundle = draws.lend(|| Paths::new(TestInstant(now), p.transport, p.addr, params, &env));
+        let me = kit.local.addr();
+        let (mut rekey, mut bundle): (Option<Machine>, Option<Paths>) = (None, None);
+        let joined = {
+            let (mut renv, facts_of, draws) = kit.lent(at.transport);
+            let env = path::Env {
+                facts: facts_of,
+                cost: 1.0,
+            };
+            let mut caps = Caps {
+                params: mode.rekey(),
+                me,
+                now: TestInstant(now),
+                env: &mut renv,
+            };
+            let start = join::Event::Start {
+                rekey: &mut rekey,
+                bundle: &mut bundle,
+                key: key(peer),
+                setup: setup.joined(at.transport),
+                facts,
+                caps: &mut caps,
+                to: (p.transport, p.addr),
+                params,
+                env: &env,
+                link,
+            };
+            draws.lend(|| join(addr(peer), start))
+        };
+        let joined = joined.unwrap_or_else(|lease| {
+            kit.pool.free(lease.release());
+            panic!("the setup authenticated {peer:?}'s key")
+        });
+        let rekey = rekey.expect("a start that returned built the rekey machine");
+        let bundle = bundle.expect("a start that returned built the bundle");
         let first = bundle
             .paths()
             .get(0)
@@ -295,15 +378,15 @@ impl Machines {
             checks: Checked(Checks::new(mode.config(), first, 0)),
             failed: Vec::new(),
         };
-        let events = m.rekeyed(kit, now, out);
-        (m, events)
+        let (events, told) = sorted(kit, Some(&mut m.rekey), now, joined);
+        (m, events, told)
     }
 
     /// Move the peer onto `setup` at `now`, as a cross-connection move
-    /// does: the rekey machine closed and built again from what it carried
-    /// (its link age, key-epoch bits, last frame heard and replay record),
-    /// then the bundle started again at the peer's pair `to`, reached from
-    /// `from`.
+    /// does, through the join function's move: the rekey machine closed
+    /// and built again from what it carried (its link age, key-epoch bits,
+    /// last frame heard and replay record), then the bundle started again
+    /// at the peer's pair `to`, reached from `from`.
     pub fn moved(
         self,
         kit: &mut Kit,
@@ -316,7 +399,7 @@ impl Machines {
             peer,
             mode,
             rekey,
-            bundle,
+            mut bundle,
             locals,
             offered: _,
             checks,
@@ -340,88 +423,128 @@ impl Machines {
             let events = m.renewed(kit, now, to, from, locals);
             return (m, events);
         }
-        let (closed, carry) = rekey.close(Close::CrossConnectionMove);
-        let carry = carry.expect("an established machine carries what a move needs");
-        let facts = if fault!(MoveBuildsFresh) {
-            // The defect's shape: the moved session built as a new link's.
-            SetupFacts {
-                peer_epoch: Some(setup.done.epoch),
-                k: false,
-                link_since: TestInstant(now),
-                started: TestInstant(now),
-                peer_k: None,
-                last_rx: None,
-                record: Record::new(),
-            }
-        } else {
-            SetupFacts::from(carry)
+        // The defect's shape where the switch is on: the bundle is not
+        // started again, so it is withheld from the move.
+        let renew = !fault!(RenewSkipped);
+        let p = pair(to);
+        let me = kit.local.addr();
+        let mut slot = Some(rekey);
+        let joined = {
+            let (mut renv, facts_of, draws) = kit.lent(to.transport);
+            let env = path::Env {
+                facts: facts_of,
+                cost: 1.0,
+            };
+            let mut caps = Caps {
+                params: mode.rekey(),
+                me,
+                now: TestInstant(now),
+                env: &mut renv,
+            };
+            let shift = join::Event::Shift {
+                rekey: &mut slot,
+                bundle: renew.then_some(&mut bundle),
+                setup: setup.joined(to.transport),
+                caps: &mut caps,
+                to: (p.transport, p.addr),
+                env: &env,
+            };
+            draws.lend(|| join(addr(peer), shift))
         };
-        let (rekey, built) = build(kit, now, peer, mode, setup, facts, to.transport);
+        let joined = joined.unwrap_or_else(|_| unreachable!("only a start is refused"));
+        assert!(
+            joined.built,
+            "a move of {peer:?}'s machines carried them onto a setup of its key"
+        );
         let mut m = Self {
             peer,
             mode,
-            rekey,
+            rekey: slot.expect("a move that built holds the machine built"),
             bundle,
             locals: Vec::new(),
             offered: Vec::new(),
             checks,
             failed,
         };
-        let mut events: Vec<Event> = closed
-            .into_iter()
-            .map(|o| carried(kit, None, now, o))
-            .collect();
-        events.extend(m.rekeyed(kit, now, built));
-        events.extend(m.renewed(kit, now, to, from, locals));
+        let (events, told) = sorted(kit, Some(&mut m.rekey), now, joined);
+        assert!(told.is_empty(), "a move tells the core nothing: {told:?}");
+        if renew {
+            m.kept(to, from, locals);
+        } else {
+            m.locals = locals;
+        }
         (m, events)
     }
 
     /// Start the bundle again at the peer's pair `to`, reached from
     /// `from`, as a cross-connection move does, keeping of `locals` only
-    /// the address for `to`.
+    /// the address for `to`. Only the machine kept stale by a switch takes
+    /// this way; a move goes through the join function.
     fn renewed(
         &mut self,
         kit: &mut Kit,
         now: Ms,
         to: Addr,
         from: Addr,
-        mut locals: Vec<(Addr, Addr)>,
+        locals: Vec<(Addr, Addr)>,
     ) -> Vec<Event> {
         let mut events = Vec::new();
-        if !fault!(RenewSkipped) {
+        if fault!(RenewSkipped) {
+            self.locals = locals;
+        } else {
             let p = pair(to);
             let Kit { draws, facts, .. } = kit;
             let env = path::Env { facts, cost: 1.0 };
             let bundle = &mut self.bundle;
             let out = draws.lend(|| bundle.renew(TestInstant(now), &env, (p.transport, p.addr)));
             events.extend(kept(out).into_iter().map(Event::Path));
-            self.checks.0.renewed(&self.bundle);
-            locals.retain(|(a, _)| *a == to);
-            if locals.is_empty() {
-                locals.push((to, from));
-            }
+            self.kept(to, from, locals);
         }
-        self.locals = locals;
         events
     }
 
-    /// Close both machines as the peer is removed: the rekey machine with
-    /// `why`, and the bundle, handing back every path's slot. Returns the
-    /// events and what the rekey machine carried, for the node's record
-    /// store.
+    /// After the bundle started again at the peer's pair `to`, reached
+    /// from `from`: the path shell's checks told, and of `locals` only the
+    /// address for `to` kept.
+    fn kept(&mut self, to: Addr, from: Addr, mut locals: Vec<(Addr, Addr)>) {
+        self.checks.0.renewed(&self.bundle);
+        locals.retain(|(a, _)| *a == to);
+        if locals.is_empty() {
+            locals.push((to, from));
+        }
+        self.locals = locals;
+    }
+
+    /// Close both machines as the peer is removed, through the join
+    /// function's stop: the bundle, handing back every path's slot, then
+    /// the rekey machine with `why`. Returns the events and what the rekey
+    /// machine carried, for the node's record store.
     pub fn close(
         self,
         kit: &mut Kit,
         now: Ms,
         why: Close,
     ) -> (Vec<Event>, Option<Carry<TestInstant>>) {
-        let Self { rekey, bundle, .. } = self;
-        let (out, carry) = rekey.close(why);
-        let mut events: Vec<Event> = out
-            .into_iter()
-            .map(|o| carried(kit, None, now, o))
-            .collect();
-        events.extend(kept(bundle.close()).into_iter().map(Event::Path));
+        let Self {
+            peer,
+            rekey,
+            bundle,
+            ..
+        } = self;
+        let (mut rekey, mut bundle) = (Some(rekey), Some(bundle));
+        let stop = join::Event::Stop {
+            rekey: &mut rekey,
+            bundle: &mut bundle,
+            why,
+        };
+        let mut joined = join::<Ik, TestClock, Draw, Slot>(addr(peer), stop)
+            .unwrap_or_else(|_| unreachable!("only a start is refused"));
+        let carry = joined.carry.take();
+        let (events, told) = sorted(kit, None, now, joined);
+        assert!(
+            told.is_empty(),
+            "a removal tells the core nothing: {told:?}"
+        );
         (events, carry)
     }
 
@@ -922,33 +1045,42 @@ fn carried(kit: &mut Kit, machine: Option<&mut Machine>, now: Ms, o: Output<Ik>)
     }
 }
 
-/// A rekey machine for `peer` built at `now` on `setup`, with `facts`, on
-/// transport `transport`.
-fn build(
+/// The steps of one call of the join function as events, in order, and
+/// the core inputs among them: a rekey machine output carried as
+/// [`carried`] carries it, with `machine` to seal a prompt, and a bundle
+/// output with each driver slot by its serial. A machine call asks the
+/// core's gates for no replacement: the rekey machine asks for one only at
+/// a msg1.
+fn sorted(
     kit: &mut Kit,
+    mut machine: Option<&mut Machine>,
     now: Ms,
-    peer: Node,
-    mode: Mode,
-    setup: Setup,
-    facts: SetupFacts<TestInstant>,
-    transport: u8,
-) -> (Machine, Vec<Output<Ik>>) {
-    let bond = Bond::Key(key(peer));
-    let bonded = bond
-        .check(setup.done)
-        .unwrap_or_else(|_| panic!("the setup authenticated {peer:?}'s key"));
-    let ids = Ids::new(setup.lease, setup.theirs, transport);
-    let me = kit.local.addr();
-    Machine::established(
-        mode.rekey(),
-        bond,
-        me,
-        bonded,
-        ids,
-        facts,
-        TestInstant(now),
-        &mut kit.env(transport),
-    )
+    joined: Joined<Ik, Slot, TestInstant>,
+) -> (Vec<Event>, Vec<In>) {
+    let mut events = Vec::new();
+    let mut told = Vec::new();
+    for step in joined {
+        match step {
+            Step::Rekey(o) => events.push(carried(kit, machine.as_deref_mut(), now, o)),
+            Step::Path(o) => events.extend(kept(alloc::vec![o]).into_iter().map(Event::Path)),
+            Step::Core(i) => told.push(i),
+            Step::Replace(_) => panic!("a machine call asked for a replacement"),
+        }
+    }
+    (events, told)
+}
+
+impl Setup {
+    /// The setup as the join function takes it, its index bound on world
+    /// transport `transport`.
+    fn joined(self, transport: u8) -> join::Setup<Ik> {
+        join::Setup {
+            done: self.done,
+            lease: self.lease,
+            theirs: self.theirs,
+            transport,
+        }
+    }
 }
 
 use crate::proto::path::Source;

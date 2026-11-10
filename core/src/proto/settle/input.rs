@@ -161,8 +161,6 @@ pub enum Input {
     Switched {
         /// The link.
         link: LinkNo,
-        /// The pair it switched from.
-        from: Pair,
         /// The pair it switched to.
         to: Pair,
     },

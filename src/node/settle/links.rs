@@ -6,8 +6,11 @@ use std::collections::HashMap;
 #[cfg(any(test, debug_assertions))]
 use std::collections::HashSet;
 
+use crate::NodeAddr;
 use crate::node::AddrKey;
-use crate::transport::{Link, LinkId};
+use crate::proto::settle::input::Input;
+use crate::proto::settle::links::{Dir, Holder, LinkNo, Links, Pair};
+use crate::transport::{Link, LinkDirection, LinkId};
 
 /// Why a link is let off a clause of the audit: a state the node makes today
 /// that the clause would otherwise call a breach. Each is recorded by the code
@@ -71,6 +74,14 @@ pub(in crate::node) enum Waiver {
 /// An inbound handshake that overwrites a key records the link it displaced,
 /// and the key returns to that link, if it is still live, when the handshake's
 /// leg is closed.
+///
+/// Beside them the table keeps the settlement core's link records
+/// ([`Links`]), one for each link, under the core's number for it: opened
+/// with the link, retired with it, held by the peer a promotion installs, and
+/// fed what each link's bundle reports through the core's join. Nothing reads
+/// the records to decide anything yet: the index and the close rule stay the
+/// node's own, and the live audit holds the records to each held link's
+/// bundle.
 #[derive(Default)]
 pub(in crate::node) struct LinkTable {
     links: HashMap<LinkId, Link>,
@@ -79,6 +90,10 @@ pub(in crate::node) struct LinkTable {
     /// the link it named before. `close` hands the key back to that link, if
     /// it is still live, when the leg goes.
     displaced: HashMap<LinkId, (AddrKey, LinkId)>,
+    /// The settlement core's record of each link.
+    core: Links,
+    /// The core's number for each link.
+    nos: HashMap<LinkId, LinkNo>,
     /// The waivers each link carries.
     #[cfg(any(test, debug_assertions))]
     waivers: HashMap<LinkId, HashSet<Waiver>>,
@@ -94,19 +109,26 @@ reads!(LinkTable, links, HashMap<LinkId, Link>);
 impl LinkTable {
     /// A new link: the link is added, and its own pair in the index names
     /// it, whatever link the pair named before.
+    /// The core records the link, set up at its pair, held by its
+    /// handshake leg.
     pub(in crate::node) fn open(&mut self, link: Link) {
         let id = link.link_id();
         let key = (link.transport_id(), link.remote_addr().clone());
+        let no = self.core.open(pair(&key), dir(&link), Holder::Leg);
+        self.nos.insert(id, no);
         self.links.insert(id, link);
         self.index.insert(key, id);
     }
 
     /// An inbound handshake's msg1: the leg's link is added and its pair names
     /// it, as `open` does, and the link the pair named before is recorded for
-    /// `close` to hand the pair back to.
+    /// `close` to hand the pair back to. The core records the link as `open`
+    /// does.
     pub(in crate::node) fn open_leg(&mut self, link: Link) {
         let id = link.link_id();
         let key = (link.transport_id(), link.remote_addr().clone());
+        let no = self.core.open(pair(&key), dir(&link), Holder::Leg);
+        self.nos.insert(id, no);
         self.links.insert(id, link);
         if let Some(prior) = self.index.insert(key.clone(), id) {
             self.displaced.insert(id, (key, prior));
@@ -123,10 +145,12 @@ impl LinkTable {
     /// names it. Entries another link has claimed are left alone. A leg that
     /// took a key at msg1 hands it back to the link it displaced, if that link
     /// is still live and nothing has claimed the key since, and a newer leg
-    /// that displaced this one now displaces that link instead.
+    /// that displaced this one now displaces that link instead. The core's
+    /// record of it is retired.
     pub(in crate::node) fn close(&mut self, id: &LinkId) -> Option<Link> {
         let displaced = self.displaced.remove(id);
         let link = self.links.remove(id)?;
+        self.retire(id);
         #[cfg(any(test, debug_assertions))]
         let taken: Vec<AddrKey> = self
             .index
@@ -161,9 +185,11 @@ impl LinkTable {
     }
 
     /// A dial is abandoned: its link is dropped, and so is the index entry
-    /// at `key`, whichever link that entry names.
+    /// at `key`, whichever link that entry names. The core's record of the
+    /// link is retired.
     pub(in crate::node) fn forget(&mut self, id: &LinkId, key: &AddrKey) {
         self.links.remove(id);
+        self.retire(id);
         let taken = self.index.remove(key).is_some();
         #[cfg(any(test, debug_assertions))]
         {
@@ -200,6 +226,40 @@ impl LinkTable {
         if self.index.get(key) == Some(&id) {
             self.index.remove(key);
         }
+    }
+
+    /// Retire the core's record of the link `id`. The connections the core
+    /// would close are the node's to close, by its own rule, until the core
+    /// decides them.
+    fn retire(&mut self, id: &LinkId) {
+        if let Some(no) = self.nos.remove(id) {
+            let _closes = self.core.retire(no);
+        }
+    }
+
+    /// The core's number for the link `id`, while the link is open.
+    pub(in crate::node) fn no(&self, id: &LinkId) -> Option<LinkNo> {
+        self.nos.get(id).copied()
+    }
+
+    /// The core's link records.
+    #[cfg(any(test, debug_assertions))]
+    pub(in crate::node) fn core(&self) -> &Links {
+        &self.core
+    }
+
+    /// The link `id` is now held by the peer at `peer`.
+    pub(in crate::node) fn hold(&mut self, id: &LinkId, peer: NodeAddr) {
+        if let Some(no) = self.no(id) {
+            self.core.hold(no, Holder::Peer(peer));
+        }
+    }
+
+    /// Apply what a link's bundle reported, `input`, to the core's record of
+    /// the link. The connections a released path leaves to close are the
+    /// node's to close, by its own rule, until the core decides them.
+    pub(in crate::node) fn mirror(&mut self, input: &Input) {
+        let _closes = self.core.mirror(input);
     }
 
     /// The link, to update.
@@ -284,6 +344,22 @@ impl LinkTable {
         self.index.insert(key, id);
     }
 
+    /// Write the core's record of the link `id` as holding a path at `key`
+    /// in state `state`, past the feed and without marking the table: the
+    /// shape of a record that differs from its bundle, for the test that the
+    /// live audit catches one.
+    #[cfg(test)]
+    pub(in crate::node) fn plant_path(
+        &mut self,
+        id: &LinkId,
+        key: &AddrKey,
+        state: crate::proto::settle::links::Proven,
+    ) {
+        if let Some(no) = self.no(id) {
+            self.core.path(no, pair(key), state);
+        }
+    }
+
     /// Count one live audit of the node this table is in.
     #[cfg(test)]
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
@@ -296,5 +372,21 @@ impl LinkTable {
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub(in crate::node) fn audits(&self) -> u64 {
         self.audits.get()
+    }
+}
+
+/// The core's pair for the index key `key`.
+pub(in crate::node) fn pair(key: &AddrKey) -> Pair {
+    Pair {
+        transport: key.0,
+        addr: key.1.clone(),
+    }
+}
+
+/// The core's direction for `link`.
+fn dir(link: &Link) -> Dir {
+    match link.direction() {
+        LinkDirection::Inbound => Dir::Inbound,
+        LinkDirection::Outbound => Dir::Outbound,
     }
 }

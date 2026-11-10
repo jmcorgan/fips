@@ -8,7 +8,9 @@
 //! every state between two node entries, not only once a test has gone
 //! quiet: the checks that hold only at quiescence (the peer's link record at
 //! the peer's pair, every open connection in use, every current session on a
-//! worker) stay with the quiescent audit.
+//! worker) stay with the quiescent audit. The last clause, [`links_mirror`],
+//! holds the settlement core's link records, which nothing reads yet, to the
+//! bundles they are fed from.
 
 // A release test build compiles this module for the quiescent audit, but
 // not `live`, the one caller of the clauses the quiescent audit does not
@@ -17,7 +19,13 @@
 
 use std::collections::{HashMap, HashSet};
 
+use fips_core::proto::path::PathRef;
+
+#[cfg(test)]
+use crate::NodeAddr;
 use crate::node::{AddrKey, Node};
+use crate::proto::settle::join;
+use crate::proto::settle::links::{Pair, Proven};
 use crate::transport::LinkId;
 
 /// `peer-link`: every peer's link is in the link map. The links of the peers
@@ -211,6 +219,108 @@ pub(in crate::node) fn carrier(node: &Node) -> Vec<LinkId> {
         .collect()
 }
 
+/// What `links-mirror` found over a node's held peers.
+#[derive(Debug, Default)]
+pub(in crate::node) struct Mirror {
+    /// The peers whose link's record breaks the clause, each with what the
+    /// record and the bundle hold.
+    pub(in crate::node) bad: Vec<String>,
+    /// The peers let off: the record differs from the bundle only in the
+    /// active path, which the bundle holds acknowledged and the record Live,
+    /// as a switch to it records it (test builds only).
+    #[cfg(test)]
+    pub(in crate::node) letoff: Vec<NodeAddr>,
+    /// The peers not read, since a test changed their bundle past the feed
+    /// (test builds only).
+    #[cfg(test)]
+    pub(in crate::node) unmirrored: Vec<NodeAddr>,
+}
+
+/// `paths` in one order, for a comparison that sets order aside.
+fn sorted(mut paths: Vec<(Pair, Proven)>) -> Vec<(Pair, Proven)> {
+    let rank = |p: &Proven| match p {
+        Proven::Live => 0,
+        Proven::Acked => 1,
+        Proven::Probing => 2,
+    };
+    paths.sort_by(|(a, p), (b, q)| a.cmp(b).then(rank(p).cmp(&rank(q))));
+    paths
+}
+
+/// `links-mirror`: the settlement core's record of each held peer's link
+/// holds exactly the paths of the peer's bundle, order aside, each in the
+/// state the core is told of it (Live for a Live path, acknowledged for
+/// another acknowledged one, probing otherwise), and a peer with no bundle
+/// none. One difference is let off, as the joint world's `Mirrored` oracle
+/// lets it off: the bundle's active path acknowledged and not Live, which a
+/// switch to it records Live. A peer a test changed past the feed is not
+/// read.
+pub(in crate::node) fn links_mirror(node: &Node) -> Mirror {
+    let mut found = Mirror::default();
+    for (addr, peer) in node.peers.iter() {
+        #[cfg(test)]
+        if peer.past_feed() {
+            found.unmirrored.push(*addr);
+            continue;
+        }
+        let link = peer.link_id();
+        let Some(rec) = node
+            .links
+            .no(&link)
+            .and_then(|no| node.links.core().get(no))
+        else {
+            found.bad.push(format!("{addr}: link {link} has no record"));
+            continue;
+        };
+        let held: Vec<(Pair, Proven)> = peer
+            .bundle()
+            .map(|b| {
+                b.paths()
+                    .paths()
+                    .iter()
+                    .map(|p| {
+                        let at = PathRef {
+                            transport: p.transport_id(),
+                            addr: p.addr().clone(),
+                        };
+                        (join::pair(&at), join::proven(b, &at))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let core = sorted(rec.paths.clone());
+        if core == sorted(held.clone()) {
+            continue;
+        }
+        let active = peer
+            .active_path()
+            .map(|p| (p.transport_id(), p.addr().clone()));
+        let switched: Vec<(Pair, Proven)> = held
+            .iter()
+            .map(|(at, q)| {
+                let mine = active
+                    .as_ref()
+                    .is_some_and(|(t, a)| at.transport == *t && at.addr == *a);
+                if *q == Proven::Acked && (mine || node_fault!(MirrorLetsAckedOff)) {
+                    (at.clone(), Proven::Live)
+                } else {
+                    (at.clone(), *q)
+                }
+            })
+            .collect();
+        if sorted(switched) == core {
+            #[cfg(test)]
+            found.letoff.push(*addr);
+        } else {
+            found.bad.push(format!(
+                "{addr}: link {link}'s record holds {core:?}, its bundle {:?}",
+                sorted(held)
+            ));
+        }
+    }
+    found
+}
+
 /// Run every clause on `node`, which has just left the node entry `site`,
 /// and panic, naming the site and the clause, on the first that fails.
 ///
@@ -233,17 +343,27 @@ pub(in crate::node) fn live(node: &Node, site: &str) {
     fail(site, "leg-entry", &leg_entry(node));
     index(node, &format!("audit_live: {site}: index"));
     fail(site, "carrier", &carrier(node));
+    let mirror = links_mirror(node);
+    fail(site, "links-mirror", &mirror.bad);
     #[cfg(test)]
     {
         node.links.count_audit();
         reach::row(node, "audited");
+        if !mirror.unmirrored.is_empty() {
+            reach::row(node, "unmirrored");
+        }
+        if !mirror.letoff.is_empty() {
+            reach::row(node, "letoff");
+        }
     }
 }
 
 /// The audit's reach over a test run: one row per test thread, node and
-/// outcome, `audited <thread> <node>` or `planted <thread> <node>`, appended
-/// to the file `FIPS_AUDIT_REACH` names. `testing/check-audit-reach.py`
-/// counts the pairs. A test runs on a thread named for it when the suite
+/// outcome, appended to the file `FIPS_AUDIT_REACH` names: `audited <thread>
+/// <node>` or `planted <thread> <node>`, and beside an audited row
+/// `unmirrored` where `links-mirror` skipped a peer a test changed past the
+/// feed, and `letoff` where it let a switched path off.
+/// `testing/check-audit-reach.py` counts the pairs. A test runs on a thread named for it when the suite
 /// runs as threads in one process.
 #[cfg(all(test, debug_assertions))]
 mod reach {

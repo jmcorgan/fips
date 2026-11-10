@@ -71,6 +71,13 @@ faults! {
     /// transport and leaves the path bundle as it was, instead of taking
     /// the winning msg2's transport and address.
     MoveKeepsOldPair,
+    /// A crossed dial's move sends the peer a tree announce on the session
+    /// it is about to leave, before the move, as well as after it.
+    MoveAnnouncesFirst,
+    /// The smaller node of a crossed dial keeps the peer on its inbound
+    /// session and closes its own dial, as the larger node does, where the
+    /// tie-break moves it onto its dial.
+    CrossedRunsKeep,
     /// A peer's record keeps its link's MMP counters through a rekey
     /// cutover, whose frame counter starts again at zero.
     CutoverSkipsMmpReset,
@@ -110,6 +117,9 @@ faults! {
     /// the table, so its session finds no peer's total to hand the decrypt
     /// workers and is not delegated.
     OutputsBeforeInstall,
+    /// A crossed dial's move builds the new link machine without offering
+    /// its session to the decrypt workers, though a pool runs.
+    MoveSkipsWorkerOffer,
     /// A newly promoted peer starts as if a tree announce had just been
     /// sent to it, so the rate limit holds back its first one.
     NewPeerStartsRateLimited,
@@ -119,6 +129,12 @@ faults! {
     /// A peer restart found at a rekey leaves the peer in the spanning
     /// tree's state, so the declaration its previous run sent stays held.
     RestartSkipsTreeReset,
+    /// A peer restart the link rekey machine reports is not acted on at
+    /// the node, so what is held about the peer's previous run stays.
+    RestartNotRouted,
+    /// A link rekey machine's teardown is not acted on at the node, so the
+    /// peer whose link it ended stays held.
+    TeardownNotRouted,
     /// A stream transport's close aborts the connection's writer at once
     /// instead of letting it write what was queued.
     DrainAbortsAtOnce,
@@ -143,12 +159,36 @@ faults! {
     /// Following a moved path keeps the link's index entry at the pair the
     /// path left, beside the one at the pair it moved to.
     MovedLeavesEntry,
+    /// A switch of the active path leaves the link's index without an entry
+    /// at the newly active pair.
+    SwitchSkipsClaim,
+    /// A path released while the link lives leaves its connection open,
+    /// though the peer has no further use for it and no other link uses it.
+    ReleaseKeepsPairOpen,
+    /// A crossed dial's renewal of the path machine logs none of its paths'
+    /// changes of state.
+    RenewedStateDropped,
     /// Removing an active peer leaves its link in the link table, with
     /// every index entry naming it.
     RemoveKeepsLink,
     /// An index the link machine unbinds stays in the session-index map,
     /// naming the peer that held it.
     UnbindKept,
+    /// The operator's disconnect leaves the transport connection at the
+    /// peer's pair open once the peer is removed.
+    AdminKeepsConnection,
+    /// A peer that sent a Disconnect is removed with the transport's mark
+    /// at its pair left in place.
+    DisconnectKeepsVerified,
+    /// A link its rekey machine ended schedules a reconnect to the peer.
+    EndedSchedulesRetry,
+    /// The core's record of a link is never told a path's state, so a new
+    /// bundle's original path and every later change of a path's state are
+    /// missing from it.
+    LinksNotFed,
+    /// The live audit lets off any acknowledged path the core records Live,
+    /// not only the active path a switch made Live.
+    MirrorLetsAckedOff,
 }
 
 impl Fault {

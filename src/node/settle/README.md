@@ -29,14 +29,19 @@ field, at once.
   pair named so that `close` hands the pair back; `award`, a crossing's
   winner taking the pair; the path driver's `follow`, `claim` and `unclaim`;
   `get_mut`; `index` for reads of the lookup, and under `cfg(test)`
-  `raw_index`). Its doc carries the warning about the lookup's key form. In
-  test and debug builds it also holds each link's waivers (`Waiver`), the
-  states the audit lets off, recorded at the event: `close` and `forget`
-  record the one `held-entry` honours, on a link their removed entry
-  shadowed; and the two crossing arms, in `handle_msg2` and at msg3 in the
-  executor, record the ones the quiescent audit asks for. Under `cfg(test)` it
-  carries the node's audit count and `plant_entry`, a write past the table that
-  does not mark it, for the test that the audit catches one.
+  `raw_index`). Its doc carries the warning about the lookup's key form.
+  Beside them it keeps the settlement core's record of each link (`Links`),
+  under the core's number for it (`no`): opened by `open` and `open_leg` and
+  retired with the link, held for a promoted peer (`hold`), and fed what the
+  link's bundle reports (`mirror`) from `exec/links.rs`. In test and debug
+  builds it also holds each link's waivers (`Waiver`), the states the audit
+  lets off, recorded at the event: `close` and `forget` record the one
+  `held-entry` honours, on a link their removed entry shadowed; and the two
+  crossing arms, in `handle_msg2` and at msg3 in the executor, record the
+  ones the quiescent audit asks for. Under `cfg(test)` it carries the node's
+  audit count, and `plant_entry` and `plant_path`, writes past the table, to
+  its lookup and to a core record, that do not mark it, for the tests that
+  the audit catches each.
 - `maps.rs`: `MachineMap`, the per-peer control machines with their timer
   store (`add`, `ensure`, `drop`, `get_mut`; `timers`, `arm`, `cancel`);
   `DialMap`, the dials waiting for their msg2 (`note`, `forget`); `LegMap`,
@@ -53,18 +58,27 @@ field, at once.
   is quiet stays there. In a test, `live` skips a node written past its
   writers, counts each audit on the node's link table, and records the
   audit's reach when `FIPS_AUDIT_REACH` names a file
-  (`testing/check-audit-reach.py`).
+  (`testing/check-audit-reach.py`). The last clause, `links-mirror`, holds
+  each held peer's core link record to its bundle, letting off only the
+  active path a switch recorded Live while the bundle holds it
+  acknowledged; it skips a peer a test mutator of the peer's paths changed
+  past the feed (`ActivePeer::past_feed`, test builds only), and records
+  each skip and let-off in the reach file, where the check holds them to a
+  ceiling.
 - `table.rs`: `Transition`, each thing the code does to a held peer; `Row`,
   each piece of what the node holds per peer, with `DataRow` for the peer's
   record; `Cell` and `DataCell`, what a transition does to a row; `Owner` and
   `Facet`, who holds a row; and `cell`, `data_cell` and `owner`, the rule as
   nested total matches. The peer's record settles by `data_cell`, and the
-  rekey handler marks the filter at a cutover by `cell`; the other rows wait
-  for their sites to be routed.
-- `plan.rs`: `Effect`, one step the node takes for a transition, `plan`, the
-  effects of each transition in their order, and `Node::run_plan`, which runs
-  them on a held peer. A restart found at a rekey runs from here; a
-  transition whose list is empty runs its own statements at its site.
+  executor's effects and the rekey handler's cutover read `cell`. Only the
+  tests read `owner`, `Owner` and `Facet`, and the rows no effect reads,
+  which is why those alone keep a dead-code allowance outside test builds.
+  It also defines `listed!`, which gives an
+  enum its list of variants in test builds, and `exec/plan.rs` uses it for
+  `Effect`.
+- `exec/`: the executor, what the node runs for a transition outside the
+  peer's record, as a list of effects in their order (`exec/plan.rs`), and
+  `Node::run`, which runs them. Its own README names each file.
 - `tests/`: the unit tests of this level; its own README names each file.
 
 ## Rules for this level
@@ -91,10 +105,16 @@ field, at once.
   quiescent audit in `../tests/settle/audit.rs`, not here.
 - `table.rs` denies wildcard match arms and holds none, so a new row,
   transition or cause does not compile until it has taken a side at each cell.
+- A peer's rekey and path machines are built, moved and closed only through
+  the settlement core's join, which only `src/peer/active.rs` asks for a
+  change of machines, and only `exec/` asks the active peer, but for a
+  crossing's move at its two sites and `promote_connection`'s unreached
+  tie-break replacement. `tests/scans.rs` holds the code to each, with
+  its exemptions and their reasons.
   Its rule states what the code does today; a cell the code does not match is
   a wrong cell or a wrong site, and a change of what a transition does changes
   the cell and its golden line in the same commit.
-- `plan.rs` denies wildcard arms as `table.rs` does, and a plan lists the
-  statements it stands for in their old order: a reordering is a change of
-  behaviour.
+- `exec/plan.rs` and `exec/mod.rs` deny wildcard arms as `table.rs` does,
+  and a plan lists the statements it stands for in their old order: a
+  reordering is a change of behaviour.
 - Keep the file list in step with the directory.

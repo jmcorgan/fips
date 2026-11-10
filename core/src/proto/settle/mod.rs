@@ -6,10 +6,16 @@
 //! link records ([`links`]), the restart gates ([`gates`]) and the
 //! handshake legs ([`legs`]), with the intervals they read ([`params`]),
 //! and the judgements over them ([`table`]), which take an [`input`] and
-//! return [`output`]s. The reference model ([`model`]) beside it
+//! return [`output`]s. One function ([`join`]) joins a peer's rekey
+//! machine and path bundle to the core: it makes their builds, moves and
+//! closes, and says which of their outputs are core inputs. The reference
+//! model ([`model`]) beside it
 //! is compiled for tests and the `test-hooks` feature alone, with the
 //! deterministic world its tests explore both in. No core file refers to
-//! the model, and the model refers to no core item.
+//! the model, and the model refers to no core item. The schedules a real
+//! node and the joint world both run, with what each end holds after each
+//! step ([`parity`]), are compiled the same way, so the root crate's tests
+//! read them too.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
@@ -33,12 +39,16 @@ macro_rules! fault {
 mod faults;
 pub mod gates;
 pub mod input;
+#[doc(hidden)]
+pub mod join;
 pub mod legs;
 pub mod links;
 #[cfg(any(test, feature = "test-hooks"))]
 pub mod model;
 pub mod output;
 pub mod params;
+#[cfg(any(test, feature = "test-hooks"))]
+pub mod parity;
 pub mod table;
 
 #[cfg(test)]

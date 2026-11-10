@@ -2090,6 +2090,10 @@ impl Party for MasterParty {
         self.s.peers.keys().map(|&k| Node(k)).collect()
     }
 
+    fn heard(&self, peer: Node) -> Option<bool> {
+        self.s.peers.get(&peer.0).map(|p| p.heard)
+    }
+
     fn rekeyable(&self, peer: Node) -> bool {
         self.s.peers.get(&peer.0).is_some_and(|p| {
             p.machines.rekey().view().cycle == CycleView::Idle

@@ -4,7 +4,7 @@
 //! *what* must happen and returns a `Vec<PeerAction>`; this module is the *doing*
 //! half — the thin driver that maps each action onto the exact shell call it
 //! stands for (`build_msg2` + `send_existing`, `send_stored_msg1`,
-//! `promote_connection`, `remove_active_peer`, `index_allocator.free`,
+//! `promote_connection`, the removal, `index_allocator.free`,
 //! `note_link_dead`, …).
 //!
 //! ## Progressive cutover
@@ -16,7 +16,7 @@
 //! connection-oriented dial (`OpenTransport` performs the non-blocking
 //! `transport.connect`; `TransportConnected` drives the connect-resolution msg1
 //! send from `poll_pending_connects`), and the liveness reap (`route_link_dead`
-//! → `LinkDeadSuspected`, driving `InvalidateSendState` → `remove_active_peer`).
+//! → `LinkDeadSuspected`, driving `InvalidateSendState` → the removal).
 //! A link's rekeys do not pass through here: the active peer's link rekey
 //! machine holds them, and its outputs run through `run_link_outputs`.
 //!
@@ -42,14 +42,17 @@
 use crate::PeerIdentity;
 use crate::identity::NodeAddr;
 use crate::node::reject::{HandshakeReject, RejectReason};
+use crate::node::settle::exec::{Removed, Run};
+use crate::node::settle::table::Transition;
 use crate::node::{Node, NodeError};
 use crate::peer::machine::{LostKind, PeerAction, PeerEvent};
+use crate::proto::fmp::PromotionResult;
 use crate::proto::fmp::wire::build_msg2;
-use crate::proto::fmp::{PromotionResult, cross_connection_winner};
+use crate::proto::settle::output::Why;
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use std::collections::VecDeque;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Ambient shell facts a [`PeerAction`] executor needs that the machine's
 /// runtime-agnostic action payloads deliberately omit (verified identity,
@@ -92,6 +95,11 @@ pub(in crate::node) struct PeerActionCtx {
     /// `receiver_idx`); `None` on the inbound and maintenance paths, which have
     /// no `pending_outbound` entry to clear.
     pub(in crate::node) pending_outbound_key: Option<(TransportId, u32)>,
+    /// Why the peer this step removes is removed: the liveness reap says its
+    /// link is dead or its paths are gone, and a handshake that replaces the
+    /// held peer says how, which the replacement's promotion reads too.
+    /// `None` where the step removes no peer.
+    pub(in crate::node) why: Option<Why>,
 }
 
 impl Node {
@@ -119,6 +127,29 @@ impl Node {
             None => return,
         };
         self.execute_peer_actions(link, ambient, actions).await;
+    }
+
+    /// Feed `result`, the outcome of the promotion of `link`, back into the
+    /// leg's surviving machine and fold its follow-up actions onto `queue`,
+    /// for an outcome whose promotion runs no plan. A disposed machine misses
+    /// the lookup, so no machine-side index free can double an inline one.
+    fn promotion_resolved(
+        &mut self,
+        link: LinkId,
+        result: PromotionResult,
+        ambient: &PeerActionCtx,
+        queue: &mut VecDeque<PeerAction>,
+    ) {
+        // Disjoint field borrow: the machine's map and the index allocator.
+        let follow = match self.peer_machines.get_mut(&link) {
+            Some(machine) => machine.step(
+                PeerEvent::PromotionResolved { result },
+                ambient.interval_ms,
+                &mut self.index_allocator,
+            ),
+            None => Vec::new(),
+        };
+        queue.extend(follow);
     }
 
     /// Map each [`PeerAction`] onto its shell call.
@@ -290,85 +321,40 @@ impl Node {
                         ambient.verified_identity,
                         ambient.now_ms,
                     );
-                    let renewed = promote_result
-                        .as_ref()
-                        .ok()
-                        .and_then(PromotionResult::node_addr);
-                    match &promote_result {
+                    match promote_result {
                         Ok(PromotionResult::Promoted(node_addr)) => {
-                            let node_addr = *node_addr;
-                            // Two nodes that dialled each other may share two
-                            // transport connections at this address. Now that
-                            // the handshake has named the peer, tell the
-                            // transport which to keep: the one the smaller
-                            // node dialled, the same rule that settles
-                            // crossed handshakes, so both ends keep the same
-                            // one. First, so the tree announce below goes on
-                            // the connection that stays.
-                            let keep_outbound =
-                                cross_connection_winner(self.node_addr(), &node_addr, true);
-                            if let Some(transport) = self.transports.get(&ambient.transport_id) {
-                                transport
-                                    .settle_link(&ambient.remote_addr, keep_outbound)
-                                    .await;
-                            }
-                            if ambient.is_outbound {
-                                // The outbound promote logs a second line here in
-                                // addition to `promote_connection`'s "Connection
-                                // promoted to active peer". Pin the target so the
-                                // relocated line keeps the module it filtered under.
-                                info!(
-                                    target: "fips::node::handlers::handshake",
-                                    peer = %self.peer_display_name(&node_addr),
-                                    "Peer promoted to active"
-                                );
-                            } else {
-                                // Store msg2 on peer for resend on duplicate msg1
-                                if let (Some(peer), Some(msg2)) =
-                                    (self.peers.get_mut(&node_addr), wire_msg2)
-                                {
-                                    peer.set_handshake_msg2(msg2);
-                                }
-                                // Promotion is logged once by `promote_connection`
-                                // ("Connection promoted to active peer"); no separate
-                                // inbound-path line.
-                            }
+                            // The mutation lane's break: the new peer takes
+                            // the replaced peer's announce stamp. Before the
+                            // plan, whose steps before its tree announce read
+                            // no stamp.
                             if let Some(sent) = carried_announce
                                 && let Some(p) = self.peers.get_mut(&node_addr)
                             {
                                 p.set_last_tree_announce_sent_ms(sent);
                             }
-                            // Send initial tree announce to new peer
-                            if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                                debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
-                            }
-                            // Schedule filter announce (sent on a tick once the peer has sent a frame)
-                            self.bloom_state.mark_update_needed(node_addr);
-                            self.reset_lookup_backoff();
-                            // Clear the pending outbound entry on promote success
-                            // only; a failed promote leaves it for the stale-
-                            // connection reaper.
-                            if let Some(k) = ambient.pending_outbound_key {
-                                self.pending_outbound.forget(&k);
-                            }
-
-                            // Tell the transport which link the new peer uses.
-                            // Only the initiator's promotion does; the
-                            // responder's link is marked by the initiator's
-                            // first authenticated frame, which follows its
-                            // promotion at once.
-                            if ambient.is_outbound {
-                                let link = (ambient.transport_id, ambient.remote_addr.clone());
-                                if !node_fault!(DropInitiatorMark) {
-                                    self.relink(&node_addr, None, Some(link)).await;
-                                }
-                            }
+                            // The table's plan for the promotion runs here:
+                            // the transport told which connection to keep,
+                            // what the promotion of a dial or of an inbound
+                            // leg does, the outcome fed back into the
+                            // machine, and the path feeds told the path
+                            // machine is new. For a replacement this is the
+                            // part of its plan after the removal, which ran
+                            // at its own arm. The machine's follow-up action
+                            // (RegisterDecryptSession, a redundant no-op
+                            // here, see its arm) joins the worklist after it.
+                            let mut run = Run::promotion(
+                                promote_link,
+                                PromotionResult::Promoted(node_addr),
+                                ambient,
+                                wire_msg2,
+                            );
+                            self.run_promotion(&mut run).await;
+                            queue.extend(run.follow());
                         }
                         Ok(PromotionResult::CrossConnectionWon {
                             loser_link_id,
                             node_addr,
                         }) => {
-                            let (loser_link_id, node_addr) = (*loser_link_id, *node_addr);
                             // UNREACHABLE on driven XX establish paths: `Promote`
                             // and `RestartThenPromote` (which removes the old peer
                             // first) both imply no existing peer at promote time, so
@@ -406,9 +392,21 @@ impl Node {
                             }
                             self.bloom_state.mark_update_needed(node_addr);
                             self.reset_lookup_backoff();
+                            self.promotion_resolved(
+                                promote_link,
+                                PromotionResult::CrossConnectionWon {
+                                    loser_link_id,
+                                    node_addr,
+                                },
+                                ambient,
+                                &mut queue,
+                            );
+                            // The promoted peer's path machine is new, with an
+                            // empty candidate table. Boxed: the path steps it
+                            // runs can lead back into this executor.
+                            Box::pin(self.paths_renewed(&node_addr)).await;
                         }
                         Ok(PromotionResult::CrossConnectionLost { winner_link_id }) => {
-                            let winner_link_id = *winner_link_id;
                             // UNREACHABLE on driven XX establish paths (see the Won
                             // arm). Body kept byte-equivalent to next; uses the
                             // ambient transport/addr in place of next's `packet.*`.
@@ -431,6 +429,15 @@ impl Node {
                             debug!(
                                 winner_link_id = %winner_link_id,
                                 "Inbound cross-connection lost, keeping existing"
+                            );
+                            // The losing leg's machine was disposed inside
+                            // `promote_connection`, so the lookup misses and no
+                            // machine-side index free can double the inline one.
+                            self.promotion_resolved(
+                                promote_link,
+                                PromotionResult::CrossConnectionLost { winner_link_id },
+                                ambient,
+                                &mut queue,
                             );
                         }
                         Err(e) if ambient.is_outbound => {
@@ -493,33 +500,6 @@ impl Node {
                                 .record_reject(RejectReason::Handshake(reason));
                         }
                     }
-
-                    // Feed the promotion outcome back into the surviving machine
-                    // and fold the follow-up actions onto the worklist (the
-                    // `Promoted` arm crystallizes the machine in place and emits
-                    // `RegisterDecryptSession`, a redundant no-op here — see its
-                    // arm). Unconditional across Ok variants; on
-                    // `CrossConnectionLost` the losing leg's machine was disposed
-                    // inside `promote_connection`, so the lookup misses and no
-                    // machine-side index free can double the inline one. Disjoint
-                    // field borrow again.
-                    if let Ok(result) = promote_result {
-                        let follow = match self.peer_machines.get_mut(&promote_link) {
-                            Some(machine) => machine.step(
-                                PeerEvent::PromotionResolved { result },
-                                ambient.interval_ms,
-                                &mut self.index_allocator,
-                            ),
-                            None => Vec::new(),
-                        };
-                        queue.extend(follow);
-                    }
-                    // The promoted peer's path machine is new, with an
-                    // empty candidate table. Boxed: the path steps it
-                    // runs can lead back into this executor.
-                    if let Some(node_addr) = renewed {
-                        Box::pin(self.paths_renewed(&node_addr)).await;
-                    }
                 }
                 PeerAction::ResolveCrossConnection { .. } => {
                     // A decision token, not an effect: the outbound msg2
@@ -532,25 +512,46 @@ impl Node {
                     );
                 }
                 PeerAction::InvalidateSendState => {
-                    // The FULL teardown. `remove_active_peer`
-                    // (`dispatch.rs:107`) closes the peer's link rekey machine,
-                    // whose outputs free every index its sessions hold (current,
-                    // pending, previous), drop their `peers_by_index` entries
-                    // and unregister their decrypt workers, frees the rekey
-                    // handshake's index, and removes the FSP `sessions` entry;
-                    // the packets held for the peer stay for its next session.
-                    // The machine emits NO `FreeIndex` for those slots, so
-                    // there is no double-free.
+                    // The FULL teardown. The removal closes the peer's link
+                    // rekey machine, whose outputs free every index its
+                    // sessions hold (current, pending, previous), drop their
+                    // `peers_by_index` entries and unregister their decrypt
+                    // workers, frees the rekey handshake's index, and removes
+                    // the FSP `sessions` entry; the packets held for the peer
+                    // stay for its next session. The machine emits NO
+                    // `FreeIndex` for those slots, so there is no double-free.
+                    //
+                    // Every step that emits this says why: a context that
+                    // does not is one the table does not know.
+                    debug_assert!(
+                        ambient.why.is_some(),
+                        "a peer was removed by its control machine with no cause"
+                    );
                     let gone = *ambient.verified_identity.node_addr();
-                    let held = self.peer_link(&gone);
                     if node_fault!(TreeCarryAcrossRestart) {
                         carried_announce = self
                             .peers
                             .get(&gone)
                             .map(|p| p.last_tree_announce_sent_ms());
                     }
-                    self.remove_active_peer(&gone);
-                    self.relink(&gone, held, None).await;
+                    let why = ambient.why.unwrap_or(Why::Restart);
+                    // The machine notes the loss for a reconnect itself, as
+                    // its next action.
+                    let removed = self.remove(&gone, why).map(|removed| Removed {
+                        noted: true,
+                        ..removed
+                    });
+                    if let Some(removed) = removed {
+                        if matches!(why, Why::Dead | Why::Orphaned) {
+                            self.removed(&gone, removed).await;
+                        } else {
+                            // A replacement's first part. Its promotion runs
+                            // the rest once it succeeds; a refusal stops it
+                            // here with the old peer gone.
+                            let mut run = Run::replacement(link, removed, ambient);
+                            self.run_removal(&mut run).await;
+                        }
+                    }
                 }
                 PeerAction::ResolveInboundCrossConnection {
                     peer,
@@ -594,64 +595,76 @@ impl Node {
                                 transports: &self.transports,
                                 denied: false,
                             };
-                            let (out, paths) = match self.peers.get_mut(&peer) {
-                                Some(peer_ref) => {
-                                    let mut caps = crate::peer::LinkCaps {
-                                        indices: &mut self.index_allocator,
-                                        local: &local,
-                                        me,
-                                        params,
-                                        record: fips_core::proto::rekey::Record::new(),
-                                        workers,
-                                        profile,
-                                        path: crate::peer::PathCaps {
-                                            params: path_params,
-                                            facts: &facts,
-                                        },
-                                    };
-                                    peer_ref.move_session(
-                                        session,
-                                        lease,
-                                        their_index,
-                                        (ambient.transport_id, ambient.remote_addr.clone()),
-                                        link,
-                                        false,
-                                        true,
-                                        &mut caps,
-                                    )
-                                }
-                                None => (vec![crate::peer::LinkOutput::Release(lease)], Vec::new()),
+                            let ours = SessionIndex::new(lease.index());
+                            let Some(peer_ref) = self.peers.get_mut(&peer) else {
+                                // The decision was made on a snapshot that
+                                // held the peer, with nothing awaited since,
+                                // so this is not reached: the leg's index
+                                // goes back and the leg ends.
+                                self.run_link_outputs(
+                                    &peer,
+                                    vec![crate::peer::LinkOutput::Release(lease)],
+                                );
+                                debug!(
+                                    peer = %self.peer_display_name(&peer),
+                                    new_our_index = %our_index,
+                                    new_their_index = %their_index,
+                                    "Simultaneous-init (msg3): swapped to inbound session (our inbound wins)"
+                                );
+                                self.remove_link(&link);
+                                self.remove_peer_machine(link);
+                                return;
                             };
-                            self.run_link_outputs(&peer, out);
-                            let held = self.peers.get(&peer).map(|p| p.link_id());
-                            // Only on a link this node dialed, the state the
-                            // waiver names. A crossing answered late reaches
-                            // this arm holding an inbound link too, and no
-                            // exemption asks for it there.
-                            #[cfg(any(test, debug_assertions))]
-                            if let Some(held) = held
-                                && self.links.get(&held).is_some_and(|l| {
-                                    l.direction() == crate::transport::LinkDirection::Outbound
-                                        && (l.transport_id() != ambient.transport_id
-                                            || *l.remote_addr() != ambient.remote_addr)
-                                })
-                            {
-                                self.links
-                                    .waive(held, crate::node::settle::Waiver::SettledAtMsg3);
-                            }
-                            self.run_renewed(&peer, paths);
-                            // The path machine started again with an empty
-                            // candidate table. Boxed as at the promotion.
-                            if held.is_some() {
-                                Box::pin(self.paths_renewed(&peer)).await;
-                            }
-                            self.follow_move(&ambient.verified_identity, prior).await;
-                            debug!(
-                                peer = %self.peer_display_name(&peer),
-                                new_our_index = %our_index,
-                                new_their_index = %their_index,
-                                "Simultaneous-init (msg3): swapped to inbound session (our inbound wins)"
+                            let mut caps = crate::peer::LinkCaps {
+                                indices: &mut self.index_allocator,
+                                local: &local,
+                                me,
+                                params,
+                                record: fips_core::proto::rekey::Record::new(),
+                                workers,
+                                profile,
+                                path: crate::peer::PathCaps {
+                                    params: path_params,
+                                    facts: &facts,
+                                },
+                            };
+                            let (out, paths) = peer_ref.move_session(
+                                session,
+                                lease,
+                                their_index,
+                                (ambient.transport_id, ambient.remote_addr.clone()),
+                                link,
+                                false,
+                                true,
+                                &mut caps,
                             );
+                            // The machine was rebuilt exactly when the peer is
+                            // on the leg's index.
+                            let built = peer_ref.our_index() == Some(ours);
+                            // The rest of the move, in its order: the machine's
+                            // outputs, the waiver, the path feeds, what follows
+                            // a move to another pair, the note, and the leg.
+                            let mut run = Run::new(
+                                peer,
+                                Transition::Move {
+                                    dial: link,
+                                    own: false,
+                                    built,
+                                    inbound: true,
+                                },
+                            );
+                            run.prior = prior;
+                            let facts = run.crossing();
+                            facts.out = out;
+                            facts.paths = paths;
+                            facts.ours = Some(our_index);
+                            facts.theirs = Some(their_index);
+                            facts.to = Some((ambient.transport_id, ambient.remote_addr.clone()));
+                            facts.key = Some(crate::ipv6tun::link::PeerKey::from_xonly(
+                                &ambient.verified_identity.pubkey(),
+                            ));
+                            self.run(&mut run).await;
+                            return;
                         }
                         (true, _, lease) => {
                             if let Some(lease) = lease {
@@ -667,27 +680,24 @@ impl Node {
                         }
                         (false, _, lease) => {
                             // Smaller node side: keep the existing outbound
-                            // session, release the inbound leg's index.
-                            if let Some(lease) = lease {
-                                let _ = self
-                                    .index_allocator
-                                    .free(SessionIndex::new(lease.release()));
-                            }
-                            debug!(
-                                peer = %self.peer_display_name(&peer),
-                                "Simultaneous-init (msg3): keeping outbound session (our outbound wins)"
+                            // session, release the inbound leg's index, and
+                            // tear down the temporary inbound link via
+                            // `remove_link`, which hands its link index key
+                            // back to the link the leg displaced at msg1 if
+                            // that link is still live, disposing the leg's
+                            // machine (and its embedded connection) with it.
+                            let mut run = Run::new(
+                                peer,
+                                Transition::Keep {
+                                    dial: link,
+                                    inbound: true,
+                                },
                             );
+                            run.crossing().lease = lease;
+                            self.run(&mut run).await;
+                            return;
                         }
                     }
-
-                    // Both branches tear down the temporary inbound link via
-                    // `remove_link`, which hands its link index key back to
-                    // the link the leg displaced at msg1 if that link is still
-                    // live, disposing the leg's machine (and its embedded
-                    // connection) with it.
-                    self.remove_link(&link);
-                    self.remove_peer_machine(link);
-                    return;
                 }
                 PeerAction::RegisterDecryptSession { index } => {
                     let _ = index;
@@ -789,35 +799,6 @@ impl Node {
         {
             transport.clear_verified(addr, node, new.is_none()).await;
         }
-    }
-
-    /// Follow a crossed dial's move of the active peer `identity` off
-    /// `prior`, the pair it was held at before the move, as a roam is
-    /// followed, when the move changed that pair.
-    ///
-    /// The connected UDP socket pinned to the old 5-tuple would keep sending
-    /// where the peer no longer is, and a transport that tracks peers (BLE)
-    /// must learn which link now carries this one, so that link is held as
-    /// the peer's and the one it left is not. The path MTU was seeded from
-    /// the link the peer was promoted on and describes that link, so it is
-    /// seeded again from the one the peer moved to, as promotion does.
-    pub(in crate::node) async fn follow_move(
-        &mut self,
-        identity: &PeerIdentity,
-        prior: Option<(TransportId, TransportAddr)>,
-    ) {
-        let node = *identity.node_addr();
-        let moved = self.peer_link(&node);
-        if moved == prior {
-            return;
-        }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        self.clear_connected_udp_for_peer(&node);
-        if let Some((tid, addr)) = &moved {
-            let key = crate::ipv6tun::link::PeerKey::from_xonly(&identity.pubkey());
-            self.seed_path_mtu_for_link_peer(&node, key, *tid, addr);
-        }
-        self.relink(&node, prior, moved).await;
     }
 
     /// Whether `transport` needs to hear of every authenticated frame's link.

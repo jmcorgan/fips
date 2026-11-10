@@ -4,6 +4,8 @@ use crate::node::Node;
 use crate::node::diag::{KeyView, OrNone, Trial};
 use crate::node::handlers::path_intake::Feed;
 use crate::node::reject::DataplaneReject;
+use crate::node::settle::exec::Run;
+use crate::node::settle::table::Transition;
 use crate::noise::{NoiseError, TAG_SIZE};
 use crate::peer::{ActivePeer, PeerBundle, Roam};
 use crate::proto::fmp::wire::{
@@ -453,10 +455,14 @@ impl Node {
         let mut prior = None;
         let mut wake = None;
         let mut heard_from = false;
+        let mut roamed = None;
         let intake = self.config().node.path.enabled;
         if let Some(peer) = self.peers.get_mut(node_addr) {
             present = true;
             let msg_type = link_message.first().copied().unwrap_or(0);
+            let standby = peer.standby();
+            #[cfg(test)]
+            let fed = peer.past_feed();
             let account = peer.account(
                 now,
                 frame.transport_id,
@@ -464,6 +470,8 @@ impl Node {
                 frame.len,
                 msg_type,
             );
+            #[cfg(test)]
+            peer.set_past_feed(fed);
             let roam = account.roam;
             // An authentic frame from a pair the link holds no path at, that
             // the one-path roam did not follow, makes the pair a candidate,
@@ -484,9 +492,17 @@ impl Node {
                 );
             address_changed = roam.changed();
             // A roam that moved an address may leave the path machine work
-            // to do, which the path tick must not sleep through.
+            // to do, which the path tick must not sleep through. The bundle
+            // reports no roam in its outputs, so the core's record of the
+            // link is told of it below.
             if roam != Roam::Unmoved {
                 wake = peer.bundle().and_then(PeerBundle::next_wake);
+                let from = match &roam {
+                    Roam::Roamed { from } => Some(from.clone()),
+                    Roam::Standby { .. } => standby,
+                    Roam::Bound | Roam::Unmoved => None,
+                };
+                roamed = Some((peer.link_id(), from));
             }
             // Only a link the peer actually left loses its verification. A
             // frame the roaming rule refuses to follow (another transport, or
@@ -519,30 +535,35 @@ impl Node {
             }
         }
         self.paths.fold(wake);
+        if let Some((link, from)) = roamed {
+            let to = (frame.transport_id, frame.remote_addr.clone());
+            self.roamed(*node_addr, link, from, &to);
+        }
         // A session's first authenticated frame clears its identity's
         // silent-session record: one identity has one peer entry, and a
         // record grows only when an unheard session ends.
         if first_frame {
             self.note_peer_heard(node_addr);
         }
-        // Address rotation invalidates the per-peer connect()-ed UDP socket,
-        // which is still pinned to the old 5-tuple. Drop the socket and its
-        // drain so the wildcard listen socket takes over until the new
-        // 5-tuple settles. `netmon`'s first-sight rule rests on this too: it
-        // compares that socket's pinned source against a probe to the peer's
-        // *current* address, and a socket left behind makes those two
-        // disagree for as long as it survives.
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        // A roam: address rotation invalidates the per-peer connect()-ed UDP
+        // socket, which is still pinned to the old 5-tuple, so the executor
+        // drops it and its drain and the wildcard listen socket takes over
+        // until the new 5-tuple settles (`netmon`'s first-sight rule rests on
+        // this too: it compares that socket's pinned source against a probe
+        // to the peer's *current* address); and the link the peer left loses
+        // its mark at the transports. Over BLE every other frame marks the
+        // link it arrived on, so a link re-established at the same address is
+        // recognised. A frame for a peer already removed (the decrypt worker
+        // can finish after a Disconnect) marks nothing: no later removal
+        // would withdraw it.
         if address_changed {
-            self.clear_connected_udp_for_peer(node_addr);
-        }
-        // Tell the transports which link carries the peer: on a roam the old
-        // link loses it, and over BLE every frame marks the link it arrived
-        // on, so a link re-established at the same address is recognised. A
-        // frame for a peer already removed (the decrypt worker can finish
-        // after a Disconnect) marks nothing: no later removal would withdraw
-        // it.
-        if present && (address_changed || self.tracks_peers(frame.transport_id)) {
+            let mut run = Run {
+                prior,
+                moved: Some((frame.transport_id, frame.remote_addr.clone())),
+                ..Run::new(*node_addr, Transition::Roam)
+            };
+            self.run(&mut run).await;
+        } else if present && self.tracks_peers(frame.transport_id) {
             let link = (frame.transport_id, frame.remote_addr.clone());
             self.relink(node_addr, prior, Some(link)).await;
         }

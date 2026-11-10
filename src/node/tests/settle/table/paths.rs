@@ -610,8 +610,7 @@ async fn a_probe_from_a_new_address_moves_a_path_of_a_two_path_link_only_with_mu
 /// there: its index entry follows it, its connected socket goes and `q`'s
 /// stays, and every row does what the moved path's cell says.
 #[tokio::test]
-async fn a_probe_from_a_new_address_moves_a_path_of_a_two_path_link_only_with_multipath_on_with_multipath_on()
- {
+async fn a_probe_from_a_new_address_moves_a_path_of_a_two_path_link_with_multipath_on() {
     let mut pair = two_paths(true).await;
     let link = pair.nodes[0]
         .node

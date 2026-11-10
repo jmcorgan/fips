@@ -176,6 +176,74 @@ async fn test_api_connect_to_a_second_address_of_a_quiet_peer_dials_it_and_leave
     }
 }
 
+/// A crossing moved at the dialer's msg2 sends nothing on the session it
+/// leaves. The smaller node dials a second address of a quiet peer, and both
+/// ends move onto that dial's session. The dialer's msg3 goes out before its
+/// move, so the peer has left the old session, and unbound its index, by the
+/// time a frame sent there after the msg3 arrives, and drops it as naming
+/// an unknown index.
+#[tokio::test]
+async fn a_move_at_the_dialers_msg2_sends_nothing_on_the_session_it_leaves() {
+    use super::rekey_parity::age_link;
+
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    let (d, p) = if nodes[0].node.node_addr() < nodes[1].node.node_addr() {
+        (0, 1)
+    } else {
+        (1, 0)
+    };
+    let dialer_addr = *nodes[d].node.node_addr();
+    let peer_addr = *nodes[p].node.node_addr();
+    let peer_npub = nodes[p].node.npub();
+    age_link(&mut nodes, d, p, Duration::from_secs(31));
+    quieten(&mut nodes[d], &peer_addr);
+    let alternate = add_loopback_alias(&nodes[p].addr, nodes[p].transport_id);
+    let before = (
+        nodes[d]
+            .node
+            .get_peer(&peer_addr)
+            .and_then(|x| x.our_index()),
+        nodes[p]
+            .node
+            .get_peer(&dialer_addr)
+            .and_then(|x| x.our_index()),
+    );
+    let dropped = nodes[p].node.metrics().dataplane.unknown_index.get();
+
+    nodes[d]
+        .node
+        .api_connect(&peer_npub, &alternate.to_string(), "loopback")
+        .await
+        .expect("precondition: api_connect on an alternate path starts a dial");
+    for _ in 0..20 {
+        if process_available_packets(&mut nodes).await == 0 {
+            break;
+        }
+    }
+
+    let after = (
+        nodes[d]
+            .node
+            .get_peer(&peer_addr)
+            .and_then(|x| x.our_index()),
+        nodes[p]
+            .node
+            .get_peer(&dialer_addr)
+            .and_then(|x| x.our_index()),
+    );
+    assert!(
+        before.0.is_some() && after.0 != before.0 && after.1 != before.1,
+        "precondition: both ends moved onto the dial's session: before {before:?}, after {after:?}"
+    );
+    assert_eq!(
+        nodes[p].node.metrics().dataplane.unknown_index.get(),
+        dropped,
+        "defect: the peer dropped a frame the dialer sent on the session its move left"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
 /// Make `tn` see `peer` as quiet: last heard one second past the heartbeat
 /// interval, so its link is no longer live.
 pub(super) fn quieten(tn: &mut TestNode, peer: &NodeAddr) {

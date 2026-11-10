@@ -22,6 +22,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
+use super::input::Input;
 use crate::identity::NodeAddr;
 use crate::transport::{TransportAddr, TransportId};
 
@@ -179,6 +180,38 @@ impl Links {
             }
         }
         self.reindex();
+    }
+
+    /// Apply what a link's bundle reported, `input`, to the link's record:
+    /// the one reading of a path's move, switch, state change and release
+    /// that the table and a shell's record share. Returns the connections a
+    /// released path leaves to close; any other input changes nothing.
+    pub fn mirror(&mut self, input: &Input) -> Vec<Pair> {
+        match input {
+            Input::Moved { link, from, to } => self.moved(*link, from, to.clone()),
+            Input::Switched { link, to, .. } => self.path(*link, to.clone(), Proven::Live),
+            Input::State { link, pair, proven } => self.path(*link, pair.clone(), *proven),
+            Input::Released { link, pair, keep } => return self.release(*link, pair, *keep),
+            Input::Dial(_)
+            | Input::Punched(_)
+            | Input::ConnectFailed { .. }
+            | Input::Arrived { .. }
+            | Input::Msg1 { .. }
+            | Input::Replace(_)
+            | Input::Msg2 { .. }
+            | Input::Restarted { .. }
+            | Input::Ended { .. }
+            | Input::Orphaned { .. }
+            | Input::Heard { .. }
+            | Input::Disconnect { .. }
+            | Input::Dead { .. }
+            | Input::Admin { .. }
+            | Input::Sent { .. }
+            | Input::SendFailed { .. } => {}
+            #[cfg(test)]
+            Input::HeldFrame { .. } | Input::HoldLost { .. } => {}
+        }
+        Vec::new()
     }
 
     /// The index: each live link's setup address and proven paths.

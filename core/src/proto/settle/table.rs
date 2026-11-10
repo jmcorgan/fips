@@ -209,18 +209,20 @@ impl<I: Instant> Table<I> {
             Input::Sent { link } => self.sent(link, now, &mut out),
             Input::SendFailed { link } => self.unsent(link, &mut out),
             Input::Moved { .. } if fault!(PathMoveIgnored) => {}
-            Input::Moved { link, from, to } => self.links.moved(link, &from, to),
             Input::Switched { .. } if fault!(SwitchIgnored) => {}
-            Input::Switched { link, to, .. } => self.links.path(link, to, Proven::Live),
-            Input::Released { link, pair, keep } => {
-                let closes = self.links.release(link, &pair, keep);
-                if fault!(ReleaseKeepsPair) {
+            Input::State { .. } if fault!(StateIgnored) => {}
+            i @ (Input::Moved { .. } | Input::Switched { .. } | Input::State { .. }) => {
+                self.links.mirror(&i);
+            }
+            i @ Input::Released { link, .. } => {
+                let closes = self.links.mirror(&i);
+                if fault!(ReleaseKeepsPair)
+                    && let Input::Released { pair, .. } = i
+                {
                     self.links.path(link, pair, Proven::Live);
                 }
                 out.push(Output::Release { link, closes });
             }
-            Input::State { .. } if fault!(StateIgnored) => {}
-            Input::State { link, pair, proven } => self.links.path(link, pair, proven),
             #[cfg(test)]
             Input::HeldFrame { peer, .. } => self.held_frame(peer, now, &mut out),
             #[cfg(test)]

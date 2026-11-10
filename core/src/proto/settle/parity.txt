@@ -1,0 +1,886 @@
+# What a node holds after each step of each shared schedule, read by
+# `parity.rs` (see its doc for the format and what reads it).
+#
+# A block opens `script <name> <setting per node>`. Each line after it is
+# `<step> n<node> <mark>`: `none`, or `held` and whose dial the current
+# session came from (own, peer), the link record's direction (in, out),
+# the pair it was set up at, the pair the end sends on, and whether the
+# end counts the peering heard. A pair is a transport and which of the
+# peer's addresses it reaches: its home, its second, or `accepted`, the
+# source of a connection the peer opened. A `core` line states a field the
+# settlement core gives differently at that step and end, and the node's
+# defect it comes from.
+#
+# Source of this file's first version, the two crossings (starts 1 and 3 of
+# the settlement tests), each in both address orders and at both settings:
+#
+# - The core's lines: FRC-1201 Section 5.6. The smaller node moves onto its
+#   own dial's session, takes the msg2's source as the peer's address and
+#   holds the link as the link it dialed, set up at the address it dialed;
+#   the larger keeps its inbound handshake. The joint world's
+#   `a_crossing_settles_on_one_session_on_real_machines` and
+#   `a_crossing_on_a_connection_oriented_transport_leaves_the_smaller_node_at_its_dials_pair_on_real_machines`
+#   assert the same.
+# - The node's lines: the model of the node in the settlement tests,
+#   whose crossed dials leave the smaller node on the link the larger
+#   dialed (`legacy/findings.rs`, the two crossings, smaller node first),
+#   at the pair it dialed: the node's own
+#   `crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_*`
+#   pins hold the same of a real node. A move does not set a peering
+#   heard; a peering promoted on a msg1 is unheard until a frame arrives.
+# - Both read line by line against a run of the model of the node and of
+#   joint nodes on these schedules at both settings, which gave these
+#   lines; the joint nodes' `session` there was read from the handshake
+#   their current session came from.
+#
+# Added after it, by the joint world's run of these scripts: start 2's
+# crossing over two transports (start 15 is the same schedule at On),
+# start 4's on BLE, start 5's and start 6's late second dials, start 8's
+# restart, start 18's BLE dials lost to the first's deadline (at On), an
+# own rekey, the peer's rekey, and a rekey after a connection-oriented
+# crossing; each in both address orders and, but start 18's, at both
+# settings. Their lines were taken the same way: the node's from a run of
+# the model of the node, the `core` lines where joint nodes differed, and
+# both read line by line against FRC-1201 Section 5.6 and the model. Joint
+# nodes again differ only at the smaller node of a crossing, from the step
+# it reads its own msg2: its link record's direction, and its setup pair
+# where the two dials' pairs differ. A start no step can express is listed
+# with the reason in `parity.rs`.
+
+script crossing-udp-smaller-first-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held peer in udp-home udp-home unheard
+4 n1 held peer in udp-home udp-home unheard
+5 n0 held own in udp-home udp-home unheard
+5 n1 held peer in udp-home udp-home unheard
+6 n0 held own in udp-home udp-home unheard
+6 n1 held peer in udp-home udp-home unheard
+7 n0 held own in udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+core 5 n0 dir=out cause=crossing-wrong-link
+core 6 n0 dir=out cause=crossing-wrong-link
+core 7 n0 dir=out cause=crossing-wrong-link
+
+script crossing-udp-larger-first-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held peer in udp-home udp-home unheard
+4 n1 held peer in udp-home udp-home unheard
+5 n0 held peer in udp-home udp-home unheard
+5 n1 held peer in udp-home udp-home unheard
+6 n0 held peer in udp-home udp-home unheard
+6 n1 held own in udp-home udp-home unheard
+7 n0 held peer in udp-home udp-home heard
+7 n1 held own in udp-home udp-home heard
+core 6 n1 dir=out cause=crossing-wrong-link
+core 7 n1 dir=out cause=crossing-wrong-link
+
+script crossing-udp-smaller-first-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held peer in udp-home udp-home unheard
+4 n1 held peer in udp-home udp-home unheard
+5 n0 held own in udp-home udp-home unheard
+5 n1 held peer in udp-home udp-home unheard
+6 n0 held own in udp-home udp-home unheard
+6 n1 held peer in udp-home udp-home unheard
+7 n0 held own in udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+core 5 n0 dir=out cause=crossing-wrong-link
+core 6 n0 dir=out cause=crossing-wrong-link
+core 7 n0 dir=out cause=crossing-wrong-link
+
+script crossing-udp-larger-first-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held peer in udp-home udp-home unheard
+4 n1 held peer in udp-home udp-home unheard
+5 n0 held peer in udp-home udp-home unheard
+5 n1 held peer in udp-home udp-home unheard
+6 n0 held peer in udp-home udp-home unheard
+6 n1 held own in udp-home udp-home unheard
+7 n0 held peer in udp-home udp-home heard
+7 n1 held own in udp-home udp-home heard
+core 6 n1 dir=out cause=crossing-wrong-link
+core 7 n1 dir=out cause=crossing-wrong-link
+
+script crossing-tcp-smaller-first-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 held peer in tcp-accepted tcp-accepted unheard
+5 n0 none
+5 n1 held peer in tcp-accepted tcp-accepted unheard
+6 n0 held peer in tcp-accepted tcp-accepted unheard
+6 n1 held peer in tcp-accepted tcp-accepted unheard
+7 n0 held own in tcp-accepted tcp-home unheard
+7 n1 held peer in tcp-accepted tcp-accepted unheard
+8 n0 held own in tcp-accepted tcp-home unheard
+8 n1 held peer in tcp-accepted tcp-accepted unheard
+9 n0 held own in tcp-accepted tcp-home heard
+9 n1 held peer in tcp-accepted tcp-accepted heard
+core 7 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 8 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 9 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+
+script crossing-tcp-larger-first-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 held peer in tcp-accepted tcp-accepted unheard
+5 n0 none
+5 n1 held peer in tcp-accepted tcp-accepted unheard
+6 n0 held peer in tcp-accepted tcp-accepted unheard
+6 n1 held peer in tcp-accepted tcp-accepted unheard
+7 n0 held peer in tcp-accepted tcp-accepted unheard
+7 n1 held peer in tcp-accepted tcp-accepted unheard
+8 n0 held peer in tcp-accepted tcp-accepted unheard
+8 n1 held own in tcp-accepted tcp-home unheard
+9 n0 held peer in tcp-accepted tcp-accepted heard
+9 n1 held own in tcp-accepted tcp-home heard
+core 8 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 9 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+
+script crossing-tcp-smaller-first-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 held peer in tcp-accepted tcp-accepted unheard
+5 n0 none
+5 n1 held peer in tcp-accepted tcp-accepted unheard
+6 n0 held peer in tcp-accepted tcp-accepted unheard
+6 n1 held peer in tcp-accepted tcp-accepted unheard
+7 n0 held own in tcp-accepted tcp-home unheard
+7 n1 held peer in tcp-accepted tcp-accepted unheard
+8 n0 held own in tcp-accepted tcp-home unheard
+8 n1 held peer in tcp-accepted tcp-accepted unheard
+9 n0 held own in tcp-accepted tcp-home heard
+9 n1 held peer in tcp-accepted tcp-accepted heard
+core 7 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 8 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 9 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+
+script crossing-tcp-larger-first-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 held peer in tcp-accepted tcp-accepted unheard
+5 n0 none
+5 n1 held peer in tcp-accepted tcp-accepted unheard
+6 n0 held peer in tcp-accepted tcp-accepted unheard
+6 n1 held peer in tcp-accepted tcp-accepted unheard
+7 n0 held peer in tcp-accepted tcp-accepted unheard
+7 n1 held peer in tcp-accepted tcp-accepted unheard
+8 n0 held peer in tcp-accepted tcp-accepted unheard
+8 n1 held own in tcp-accepted tcp-home unheard
+9 n0 held peer in tcp-accepted tcp-accepted heard
+9 n1 held own in tcp-accepted tcp-home heard
+core 8 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 9 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+
+script crossing-mixed-smaller-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 held peer in tcp-accepted tcp-accepted unheard
+4 n1 none
+5 n0 held peer in tcp-accepted tcp-accepted unheard
+5 n1 held peer in udp-home udp-home unheard
+6 n0 held peer in tcp-accepted tcp-accepted unheard
+6 n1 held peer in udp-home udp-home unheard
+7 n0 held own in tcp-accepted udp-home unheard
+7 n1 held peer in udp-home udp-home unheard
+8 n0 held own in tcp-accepted udp-home heard
+8 n1 held peer in udp-home udp-home heard
+core 7 n0 dir=out setup=udp-home cause=crossing-wrong-link
+core 8 n0 dir=out setup=udp-home cause=crossing-wrong-link
+
+script crossing-mixed-larger-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 held peer in tcp-accepted tcp-accepted unheard
+4 n1 none
+5 n0 held peer in tcp-accepted tcp-accepted unheard
+5 n1 held peer in udp-home udp-home unheard
+6 n0 held peer in tcp-accepted tcp-accepted unheard
+6 n1 held own in udp-home tcp-home unheard
+7 n0 held peer in tcp-accepted tcp-accepted unheard
+7 n1 held own in udp-home tcp-home unheard
+8 n0 held peer in tcp-accepted tcp-accepted heard
+8 n1 held own in udp-home tcp-home heard
+core 6 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 7 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 8 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+
+script crossing-mixed-smaller-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 held peer in tcp-accepted tcp-accepted unheard
+4 n1 none
+5 n0 held peer in tcp-accepted tcp-accepted unheard
+5 n1 held peer in udp-home udp-home unheard
+6 n0 held peer in tcp-accepted tcp-accepted unheard
+6 n1 held peer in udp-home udp-home unheard
+7 n0 held own in tcp-accepted udp-home unheard
+7 n1 held peer in udp-home udp-home unheard
+8 n0 held own in tcp-accepted udp-home heard
+8 n1 held peer in udp-home udp-home heard
+core 7 n0 dir=out setup=udp-home cause=crossing-wrong-link
+core 8 n0 dir=out setup=udp-home cause=crossing-wrong-link
+
+script crossing-mixed-larger-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 held peer in tcp-accepted tcp-accepted unheard
+4 n1 none
+5 n0 held peer in tcp-accepted tcp-accepted unheard
+5 n1 held peer in udp-home udp-home unheard
+6 n0 held peer in tcp-accepted tcp-accepted unheard
+6 n1 held own in udp-home tcp-home unheard
+7 n0 held peer in tcp-accepted tcp-accepted unheard
+7 n1 held own in udp-home tcp-home unheard
+8 n0 held peer in tcp-accepted tcp-accepted heard
+8 n1 held own in udp-home tcp-home heard
+core 6 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 7 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 8 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+
+script crossing-ble-smaller-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 held peer in ble-home ble-home unheard
+5 n0 held peer in ble-home ble-home unheard
+5 n1 held peer in ble-home ble-home unheard
+6 n0 held own in ble-home ble-home unheard
+6 n1 held peer in ble-home ble-home unheard
+7 n0 held own in ble-home ble-home unheard
+7 n1 held peer in ble-home ble-home unheard
+8 n0 held own in ble-home ble-home heard
+8 n1 held peer in ble-home ble-home heard
+core 6 n0 dir=out cause=crossing-wrong-link
+core 7 n0 dir=out cause=crossing-wrong-link
+core 8 n0 dir=out cause=crossing-wrong-link
+
+script crossing-ble-larger-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 held peer in ble-home ble-home unheard
+5 n0 held peer in ble-home ble-home unheard
+5 n1 held peer in ble-home ble-home unheard
+6 n0 held peer in ble-home ble-home unheard
+6 n1 held peer in ble-home ble-home unheard
+7 n0 held peer in ble-home ble-home unheard
+7 n1 held own in ble-home ble-home unheard
+8 n0 held peer in ble-home ble-home heard
+8 n1 held own in ble-home ble-home heard
+core 7 n1 dir=out cause=crossing-wrong-link
+core 8 n1 dir=out cause=crossing-wrong-link
+
+script crossing-ble-smaller-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 held peer in ble-home ble-home unheard
+5 n0 held peer in ble-home ble-home unheard
+5 n1 held peer in ble-home ble-home unheard
+6 n0 held own in ble-home ble-home unheard
+6 n1 held peer in ble-home ble-home unheard
+7 n0 held own in ble-home ble-home unheard
+7 n1 held peer in ble-home ble-home unheard
+8 n0 held own in ble-home ble-home heard
+8 n1 held peer in ble-home ble-home heard
+core 6 n0 dir=out cause=crossing-wrong-link
+core 7 n0 dir=out cause=crossing-wrong-link
+core 8 n0 dir=out cause=crossing-wrong-link
+
+script crossing-ble-larger-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 held peer in ble-home ble-home unheard
+5 n0 held peer in ble-home ble-home unheard
+5 n1 held peer in ble-home ble-home unheard
+6 n0 held peer in ble-home ble-home unheard
+6 n1 held peer in ble-home ble-home unheard
+7 n0 held peer in ble-home ble-home unheard
+7 n1 held own in ble-home ble-home unheard
+8 n0 held peer in ble-home ble-home heard
+8 n1 held own in ble-home ble-home heard
+core 7 n1 dir=out cause=crossing-wrong-link
+core 8 n1 dir=out cause=crossing-wrong-link
+
+script late-dial-in-order-smaller-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home unheard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home unheard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home unheard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home unheard
+8 n0 held own out udp-home udp-home heard
+8 n1 held peer in udp-home udp-home heard
+
+script late-dial-in-order-larger-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home unheard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home unheard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home unheard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home unheard
+8 n0 held own out udp-home udp-home heard
+8 n1 held peer in udp-home udp-home heard
+
+script late-dial-in-order-smaller-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home unheard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home unheard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home unheard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home unheard
+8 n0 held own out udp-home udp-home heard
+8 n1 held peer in udp-home udp-home heard
+
+script late-dial-in-order-larger-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home unheard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home unheard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home unheard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home unheard
+8 n0 held own out udp-home udp-home heard
+8 n1 held peer in udp-home udp-home heard
+
+script late-dial-reordered-smaller-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 held peer in udp-home udp-home unheard
+4 n0 none
+4 n1 held peer in udp-home udp-home unheard
+5 n0 none
+5 n1 held peer in udp-home udp-home unheard
+6 n0 none
+6 n1 held peer in udp-home udp-home unheard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home unheard
+8 n0 held own out udp-home udp-home heard
+8 n1 held peer in udp-home udp-home unheard
+9 n0 held own out udp-home udp-home heard
+9 n1 held peer in udp-home udp-home heard
+
+script late-dial-reordered-larger-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 held peer in udp-home udp-home unheard
+4 n0 none
+4 n1 held peer in udp-home udp-home unheard
+5 n0 none
+5 n1 held peer in udp-home udp-home unheard
+6 n0 none
+6 n1 held peer in udp-home udp-home unheard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home unheard
+8 n0 held own out udp-home udp-home heard
+8 n1 held peer in udp-home udp-home unheard
+9 n0 held own out udp-home udp-home heard
+9 n1 held peer in udp-home udp-home heard
+
+script late-dial-reordered-smaller-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 held peer in udp-home udp-home unheard
+4 n0 none
+4 n1 held peer in udp-home udp-home unheard
+5 n0 none
+5 n1 held peer in udp-home udp-home unheard
+6 n0 none
+6 n1 held peer in udp-home udp-home unheard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home unheard
+8 n0 held own out udp-home udp-home heard
+8 n1 held peer in udp-home udp-home unheard
+9 n0 held own out udp-home udp-home heard
+9 n1 held peer in udp-home udp-home heard
+
+script late-dial-reordered-larger-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 held peer in udp-home udp-home unheard
+4 n0 none
+4 n1 held peer in udp-home udp-home unheard
+5 n0 none
+5 n1 held peer in udp-home udp-home unheard
+6 n0 none
+6 n1 held peer in udp-home udp-home unheard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home unheard
+8 n0 held own out udp-home udp-home heard
+8 n1 held peer in udp-home udp-home unheard
+9 n0 held own out udp-home udp-home heard
+9 n1 held peer in udp-home udp-home heard
+
+script restart-smaller-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 none
+4 n1 held peer in udp-home udp-home unheard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+
+script restart-larger-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 none
+4 n1 held peer in udp-home udp-home unheard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+
+script restart-smaller-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 none
+4 n1 held peer in udp-home udp-home unheard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+
+script restart-larger-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 none
+4 n1 held peer in udp-home udp-home unheard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+
+script rekey-own-smaller-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home heard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home heard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+8 n0 held own out udp-home udp-home heard
+8 n1 held peer in udp-home udp-home heard
+
+script rekey-own-larger-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home heard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home heard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+8 n0 held own out udp-home udp-home heard
+8 n1 held peer in udp-home udp-home heard
+
+script rekey-own-smaller-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home heard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home heard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+8 n0 held own out udp-home udp-home heard
+8 n1 held peer in udp-home udp-home heard
+
+script rekey-own-larger-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home heard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home heard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+8 n0 held own out udp-home udp-home heard
+8 n1 held peer in udp-home udp-home heard
+
+script rekey-peer-smaller-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home heard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home heard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+8 n0 held peer out udp-home udp-home heard
+8 n1 held own in udp-home udp-home heard
+
+script rekey-peer-larger-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home heard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home heard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+8 n0 held peer out udp-home udp-home heard
+8 n1 held own in udp-home udp-home heard
+
+script rekey-peer-smaller-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home heard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home heard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+8 n0 held peer out udp-home udp-home heard
+8 n1 held own in udp-home udp-home heard
+
+script rekey-peer-larger-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home heard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home heard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+8 n0 held peer out udp-home udp-home heard
+8 n1 held own in udp-home udp-home heard
+
+script crossing-tcp-rekey-smaller-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 held peer in tcp-accepted tcp-accepted unheard
+5 n0 none
+5 n1 held peer in tcp-accepted tcp-accepted unheard
+6 n0 held peer in tcp-accepted tcp-accepted unheard
+6 n1 held peer in tcp-accepted tcp-accepted unheard
+7 n0 held own in tcp-accepted tcp-home unheard
+7 n1 held peer in tcp-accepted tcp-accepted unheard
+8 n0 held own in tcp-accepted tcp-home unheard
+8 n1 held peer in tcp-accepted tcp-accepted unheard
+9 n0 held own in tcp-accepted tcp-home heard
+9 n1 held peer in tcp-accepted tcp-accepted heard
+10 n0 held own in tcp-accepted tcp-home heard
+10 n1 held peer in tcp-accepted tcp-accepted heard
+11 n0 held own in tcp-accepted tcp-home heard
+11 n1 held peer in tcp-accepted tcp-accepted heard
+12 n0 held own in tcp-accepted tcp-home heard
+12 n1 held peer in tcp-accepted tcp-accepted heard
+13 n0 held own in tcp-accepted tcp-home heard
+13 n1 held peer in tcp-accepted tcp-accepted heard
+core 7 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 8 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 9 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 10 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 11 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 12 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 13 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+
+script crossing-tcp-rekey-larger-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 held peer in tcp-accepted tcp-accepted unheard
+5 n0 none
+5 n1 held peer in tcp-accepted tcp-accepted unheard
+6 n0 held peer in tcp-accepted tcp-accepted unheard
+6 n1 held peer in tcp-accepted tcp-accepted unheard
+7 n0 held peer in tcp-accepted tcp-accepted unheard
+7 n1 held peer in tcp-accepted tcp-accepted unheard
+8 n0 held peer in tcp-accepted tcp-accepted unheard
+8 n1 held own in tcp-accepted tcp-home unheard
+9 n0 held peer in tcp-accepted tcp-accepted heard
+9 n1 held own in tcp-accepted tcp-home heard
+10 n0 held peer in tcp-accepted tcp-accepted heard
+10 n1 held own in tcp-accepted tcp-home heard
+11 n0 held peer in tcp-accepted tcp-accepted heard
+11 n1 held own in tcp-accepted tcp-home heard
+12 n0 held peer in tcp-accepted tcp-accepted heard
+12 n1 held own in tcp-accepted tcp-home heard
+13 n0 held own in tcp-accepted tcp-accepted heard
+13 n1 held peer in tcp-accepted tcp-home heard
+core 8 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 9 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 10 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 11 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 12 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 13 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+
+script crossing-tcp-rekey-smaller-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 held peer in tcp-accepted tcp-accepted unheard
+5 n0 none
+5 n1 held peer in tcp-accepted tcp-accepted unheard
+6 n0 held peer in tcp-accepted tcp-accepted unheard
+6 n1 held peer in tcp-accepted tcp-accepted unheard
+7 n0 held own in tcp-accepted tcp-home unheard
+7 n1 held peer in tcp-accepted tcp-accepted unheard
+8 n0 held own in tcp-accepted tcp-home unheard
+8 n1 held peer in tcp-accepted tcp-accepted unheard
+9 n0 held own in tcp-accepted tcp-home heard
+9 n1 held peer in tcp-accepted tcp-accepted heard
+10 n0 held own in tcp-accepted tcp-home heard
+10 n1 held peer in tcp-accepted tcp-accepted heard
+11 n0 held own in tcp-accepted tcp-home heard
+11 n1 held peer in tcp-accepted tcp-accepted heard
+12 n0 held own in tcp-accepted tcp-home heard
+12 n1 held peer in tcp-accepted tcp-accepted heard
+13 n0 held own in tcp-accepted tcp-home heard
+13 n1 held peer in tcp-accepted tcp-accepted heard
+core 7 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 8 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 9 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 10 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 11 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 12 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+core 13 n0 dir=out setup=tcp-home cause=crossing-wrong-link
+
+script crossing-tcp-rekey-larger-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 held peer in tcp-accepted tcp-accepted unheard
+5 n0 none
+5 n1 held peer in tcp-accepted tcp-accepted unheard
+6 n0 held peer in tcp-accepted tcp-accepted unheard
+6 n1 held peer in tcp-accepted tcp-accepted unheard
+7 n0 held peer in tcp-accepted tcp-accepted unheard
+7 n1 held peer in tcp-accepted tcp-accepted unheard
+8 n0 held peer in tcp-accepted tcp-accepted unheard
+8 n1 held own in tcp-accepted tcp-home unheard
+9 n0 held peer in tcp-accepted tcp-accepted heard
+9 n1 held own in tcp-accepted tcp-home heard
+10 n0 held peer in tcp-accepted tcp-accepted heard
+10 n1 held own in tcp-accepted tcp-home heard
+11 n0 held peer in tcp-accepted tcp-accepted heard
+11 n1 held own in tcp-accepted tcp-home heard
+12 n0 held peer in tcp-accepted tcp-accepted heard
+12 n1 held own in tcp-accepted tcp-home heard
+13 n0 held own in tcp-accepted tcp-accepted heard
+13 n1 held peer in tcp-accepted tcp-home heard
+core 8 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 9 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 10 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 11 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 12 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+core 13 n1 dir=out setup=tcp-home cause=crossing-wrong-link
+
+script ble-reaped-smaller-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 none
+5 n0 none
+5 n1 none
+6 n0 held own out ble-home ble-home heard
+6 n1 held peer in ble-home ble-home heard
+
+script ble-reaped-larger-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 none
+3 n0 none
+3 n1 none
+4 n0 none
+4 n1 none
+5 n0 none
+5 n1 none
+6 n0 held own out ble-home ble-home heard
+6 n1 held peer in ble-home ble-home heard

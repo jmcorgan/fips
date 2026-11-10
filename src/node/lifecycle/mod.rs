@@ -18,12 +18,14 @@ use super::peering::retry::MAX_RETRY_CONNECTIONS_PER_TICK;
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
 use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
+use crate::node::settle::exec::Removed;
 use crate::nostr::{BootstrapEvent, NostrRendezvous};
 use crate::nostr::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::peer::machine::{DialOrigin, HandshakeCrypto, PeerEvent, PeerMachine};
 use crate::peer::{Match, PathState};
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
+use crate::proto::settle::output::Why;
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
 use crate::utils::onlink::OnLinkPrefixes;
 use crate::{NodeAddr, PeerIdentity};
@@ -685,6 +687,7 @@ impl Node {
                     interval_ms,
                     is_outbound: true,
                     pending_outbound_key: None,
+                    why: None,
                 };
                 self.advance_peer_machine(
                     link_id,
@@ -2025,6 +2028,7 @@ impl Node {
                                 interval_ms,
                                 is_outbound: true,
                                 pending_outbound_key: None,
+                                why: None,
                             };
                             self.advance_peer_machine(
                                 pending.link_id,
@@ -3991,20 +3995,18 @@ impl Node {
             PeerIdentity::from_npub(npub).map_err(|e| format!("invalid npub '{npub}': {e}"))?;
         let node_addr = *peer_identity.node_addr();
 
-        let Some(peer) = self.peers.get(&node_addr) else {
+        if !self.peers.contains_key(&node_addr) {
             return Err(format!("peer not found: {npub}"));
-        };
+        }
 
         // Read the transport path the peer is actually sending over BEFORE the
         // teardown below drops the peer and its link — afterwards there is
         // nothing left to derive it from. `current_addr` rather than the
         // link's remote address, because roaming updates the former and it is
         // the address the pool entry (and its inbound-slot accounting) is
-        // keyed by.
-        let transport_path = match (peer.transport_id(), peer.current_addr()) {
-            (Some(transport_id), Some(addr)) => Some((transport_id, addr.clone())),
-            _ => None,
-        };
+        // keyed by. Read before the notify too, which may fail over to
+        // another path.
+        let held = self.peer_link(&node_addr);
 
         // Notify the peer before we tear down the link, so it drops its own
         // session and re-handshakes symmetrically rather than holding a stale
@@ -4014,27 +4016,18 @@ impl Node {
         self.send_disconnect_to_peer(&node_addr, DisconnectReason::ConfigurationChange)
             .await;
 
-        // Remove the peer (full cleanup: sessions, indices, links, tree, bloom)
-        self.remove_active_peer(&node_addr);
-
-        // Tear down the transport connection, not just the node-side state.
-        // `remove_active_peer` frees every node-side structure but never
-        // touches the transport, so on a connection-oriented transport the
-        // pool entry, the socket and its inbound-slot accounting would
-        // otherwise survive the peer the node has just forgotten — an operator
-        // who disconnects a peer to free a slot would not free the slot. This
-        // mirrors `cleanup_stale_connection`, and the reasoning there applies
-        // verbatim: closing twice is harmless, because every
-        // `close_connection` implementation is `if let Some(conn) =
-        // pool.remove(addr)` and the connectionless default is a no-op.
-        if let Some((transport_id, addr)) = transport_path
-            && let Some(transport) = self.transports.get(&transport_id)
-        {
-            transport.close_connection(&addr).await;
-        }
-
-        // Suppress any pending auto-reconnect
-        self.peering.reconciler.retry_pending.remove(&node_addr);
+        // Remove the peer (full cleanup: sessions, indices, links, tree,
+        // bloom), then close the transport connection at the pair read above
+        // and suppress any pending auto-reconnect, as the table says. Those
+        // two run whether or not the notify's send already had the peer
+        // removed.
+        self.remove(&node_addr, Why::Admin);
+        let removed = Removed {
+            why: Why::Admin,
+            held,
+            noted: false,
+        };
+        self.removed(&node_addr, removed).await;
 
         info!(npub = %npub, "API disconnect completed");
 

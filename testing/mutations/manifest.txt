@@ -11,9 +11,17 @@ MoveKeepsOldPair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_fro
 MoveKeepsOldPair	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	node 0 keeps L2, the link its winning handshake ran on, pooled
 MoveKeepsOldPair	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_another_transport_does_what_the_move_cells_say
 MoveKeepsOldPair	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_a_second_ble_link_relinks_the_mark
+MoveAnnouncesFirst	red	fips-mesh	node::tests::control::a_move_at_the_dialers_msg2_sends_nothing_on_the_session_it_leaves
+CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_over_tcp_does_what_the_move_cells_say_smaller_first
+CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_over_tcp_does_what_the_move_cells_say_smaller_first_with_multipath_on
+CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_over_tcp_does_what_the_move_cells_say_larger_first
+CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_over_tcp_does_what_the_move_cells_say_larger_first_with_multipath_on
+CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::an_own_dial_answered_on_an_aged_link_does_what_the_move_cells_say
+CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::an_own_dial_answered_on_an_aged_link_does_what_the_move_cells_say_with_multipath_on
 ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_garbage_msg2s
 ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_replayed_msg2s
 OutputsBeforeInstall	red	fips-mesh	node::tests::decrypt_replay::a_promoted_session_reaches_the_decrypt_workers_with_the_peers_total
+MoveSkipsWorkerOffer	red	fips-mesh	node::tests::decrypt_replay::a_move_offers_the_session_it_moves_to_to_the_decrypt_workers
 YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::fsp::every_xk_final_cell_takes_its_rows_action	core/src/proto/rekey/tests/fsp.rs:353
 YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::fsp::late_first_handshake_setup_copy_never_moves_the_smaller_node_off_its_confirmed_epoch	core/src/proto/rekey/tests/fsp.rs:1477
 YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::sim::crossing_runs_converge_with_only_the_tie_break_outcomes	reported FinalNoAttempt
@@ -28,6 +36,11 @@ RestartSkipsTreeReset	red	fips-mesh	node::tests::settle::table::rekey::a_restart
 RestartSkipsTreeReset	red	fips-mesh	node::tests::settle::table::rekey::a_restart_found_at_a_rekey_does_what_its_cells_say_with_multipath_on
 RestartKeepsClamp	red	fips-mesh	node::tests::peer_restart::outbound_completion_with_a_changed_epoch_replaces_the_machine	the clamp entry the ended session tightened goes with it
 RestartKeepsClamp	red	fips-mesh	node::tests::settle::table::replace::a_restart_msg3_replaces_the_peer_as_the_table_says
+RestartNotRouted	red	fips-mesh	node::tests::peer_restart::restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions	the cutover a revealed restart caused drops B's previous tree declaration
+RestartNotRouted	red	fips-mesh	node::tests::settle::table::rekey::a_restart_found_at_a_rekey_does_what_its_cells_say
+RestartNotRouted	red	fips-mesh	node::tests::settle::table::rekey::a_restart_found_at_a_rekey_does_what_its_cells_say_with_multipath_on
+TeardownNotRouted	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say
+TeardownNotRouted	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say_with_multipath_on
 RestartKeepsClamp	red	fips-mesh	node::tests::settle::table::remove::a_dead_peer_is_removed_as_its_cells_say
 RestartKeepsClamp	red	fips-mesh	node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say
 RestartKeepsClamp	red	fips-mesh	node::tests::settle::table::remove::a_dead_peer_is_removed_as_its_cells_say_with_multipath_on
@@ -85,7 +98,13 @@ ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::nym::a_frame_above
 ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::nym::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
 BleWriterRemovesByAddress	red	fips-mesh	transport::ble::close_tests::a_writer_whose_write_fails_leaves_the_other_channel_at_its_address_pooled
 MovedLeavesEntry	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	entry-pair
-MovedLeavesEntry	red	fips-mesh	node::tests::settle::table::paths::a_probe_from_a_new_address_moves_a_path_of_a_two_path_link_only_with_multipath_on_with_multipath_on
+MovedLeavesEntry	red	fips-mesh	node::tests::settle::table::paths::a_probe_from_a_new_address_moves_a_path_of_a_two_path_link_with_multipath_on
+SwitchSkipsClaim	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	the new active pair maps to the link
+SwitchSkipsClaim	red	fips-mesh	node::tests::settle::table::paths::the_active_path_closed_by_the_peer_switches_the_link_as_the_table_says_with_multipath_on
+ReleaseKeepsPairOpen	red	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_another_closes_its_connection_as_the_table_says_with_multipath_on
+ReleaseKeepsPairOpen	pass	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_it_keeps_its_connection_as_the_table_says_with_multipath_on
+RenewedStateDropped	red	fips-mesh	node::tests::crossed_dial::a_crossed_dials_renewal_writes_the_old_paths_ending_and_the_new_originals_beginning	the old path's ending is written at the pair the link left
+RenewedStateDropped	pass	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_over_tcp_does_what_the_move_cells_say_smaller_first
 RemoveKeepsLink	red	fips-mesh	node::tests::disconnect::test_disconnect_clears_session	link-named
 RemoveKeepsLink	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_is_reaped	link-named
 RemoveKeepsLink	red	fips-mesh	node::tests::settle::table::remove::a_peer_that_disconnects_is_removed_as_its_cells_say
@@ -97,3 +116,17 @@ UnbindKept	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected
 UnbindKept	red	fips-mesh	node::tests::settle::table::remove::a_peer_that_disconnects_is_removed_as_its_cells_say
 UnbindKept	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say
 UnbindKept	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say_with_multipath_on
+AdminKeepsConnection	red	fips-mesh	node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say
+AdminKeepsConnection	red	fips-mesh	node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say_with_multipath_on
+AdminKeepsConnection	red	fips-mesh	node::tests::tcp::test_api_disconnect_closes_the_tcp_connection	the pooled TCP connection must not outlive the peer
+DisconnectKeepsVerified	red	fips-mesh	node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says
+DisconnectKeepsVerified	red	fips-mesh	node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says_with_multipath_on
+DisconnectKeepsVerified	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_disconnects	the link is still pooled but no longer verified
+EndedSchedulesRetry	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say
+EndedSchedulesRetry	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say_with_multipath_on
+EndedSchedulesRetry	red	fips-mesh	node::tests::settle::table::remove::a_test_removal_runs_no_tail
+LinksNotFed	red	fips-mesh	node::tests::settle::live::a_dialed_links_record_holds_its_original_path_live_and_one_off_its_bundle_fails	links-mirror
+LinksNotFed	red	fips-mesh	node::tests::settle::live::a_dialed_links_record_holds_its_original_path_live_and_one_off_its_bundle_fails_with_multipath_on	links-mirror
+LinksNotFed	red	fips-mesh	node::tests::settle::live::a_healthy_dial_passes_the_live_audit_at_every_entry	links-mirror
+LinksNotFed	red	fips-mesh	node::tests::settle::live::a_healthy_dial_passes_the_live_audit_at_every_entry_with_multipath_on	links-mirror
+MirrorLetsAckedOff	red	fips-mesh	node::tests::settle::live::a_switch_to_an_acked_path_is_recorded_live_and_is_let_off_with_multipath_on	let off an acknowledged path that is not active

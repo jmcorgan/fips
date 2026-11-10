@@ -38,10 +38,12 @@ const SOURCES: &[(&str, &str)] = &[
     ("faults.rs", include_str!("../faults.rs")),
     ("gates.rs", include_str!("../gates.rs")),
     ("input.rs", include_str!("../input.rs")),
+    ("join.rs", include_str!("../join.rs")),
     ("legs.rs", include_str!("../legs.rs")),
     ("links.rs", include_str!("../links.rs")),
     ("output.rs", include_str!("../output.rs")),
     ("params.rs", include_str!("../params.rs")),
+    ("parity.rs", include_str!("../parity.rs")),
     ("table.rs", include_str!("../table.rs")),
 ];
 

@@ -75,7 +75,7 @@ mod silent_replay;
 mod spanning_tree;
 #[cfg(unix)]
 mod status;
-mod survivors;
+pub(in crate::node) mod survivors;
 mod task_wait;
 mod tcp;
 mod traffic_diag;
@@ -201,6 +201,43 @@ pub(super) fn make_node_addr(val: u8) -> NodeAddr {
 pub(super) fn make_peer_identity() -> PeerIdentity {
     let identity = Identity::generate();
     PeerIdentity::from_pubkey(identity.pubkey())
+}
+
+/// A peer of `node` for `remote` on `link_id`, holding a session of an XX
+/// handshake `node` initiated at its own startup epoch: a peer's link-age,
+/// epoch, replay record and timestamp base live in its rekey machine, which
+/// exists only with keys, so a test that sets them stands up a keyed peer.
+/// The index binding is not executed: `peers_by_index` stays as it was.
+pub(in crate::node) fn keyed_peer(
+    node: &Node,
+    remote: &Identity,
+    link_id: LinkId,
+    authenticated_at: u64,
+) -> crate::peer::ActivePeer {
+    let mut initiator = crate::noise::HandshakeState::new_initiator(node.identity().keypair());
+    initiator.set_local_epoch(node.startup_epoch());
+    let mut responder = crate::noise::HandshakeState::new_responder(remote.keypair());
+    responder.set_local_epoch([0x5E; 8]);
+    let msg1 = initiator.write_message_1().unwrap();
+    responder.read_message_1(&msg1).unwrap();
+    let msg2 = responder.write_message_2().unwrap();
+    initiator.read_message_2(&msg2).unwrap();
+    let msg3 = initiator.write_message_3().unwrap();
+    responder.read_message_3(&msg3).unwrap();
+    crate::peer::ActivePeer::with_test_session(
+        PeerIdentity::from_pubkey_full(remote.pubkey_full()),
+        link_id,
+        authenticated_at,
+        initiator.into_session().unwrap(),
+        SessionIndex::new(1),
+        SessionIndex::new(2),
+        TransportId::new(1),
+        TransportAddr::from_string("127.0.0.1:1"),
+        crate::transport::LinkStats::new(),
+        true,
+        &crate::config::MmpConfig::default(),
+        None,
+    )
 }
 
 /// Start `node`'s own rekey of its link to `peer` now, as a trigger that

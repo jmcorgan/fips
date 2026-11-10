@@ -11,12 +11,12 @@ real TCP sockets.
 
 Every test here states `node.path.enabled` and takes nothing from the daemon's
 default, so a change of default changes none of them. The tests of
-`crossing.rs`, `audit.rs` and `table/` run both ways: a test's plain name
-runs multipath off, and its `_with_multipath_on` sibling runs it on. They are
-two tests and not one loop, since a pin that fails in a loop's first pass
-would never reach the second, and each pin has a line of its own in
-`testing/ignored-tests.txt`. `readings.rs` runs on, but for its one test named
-for off. The other files run off, which is what they test.
+`crossing.rs`, `audit.rs`, `explore/` and `table/` run both ways: a test's
+plain name runs multipath off, and its `_with_multipath_on` sibling runs it
+on. They are two tests and not one loop, since a pin that fails in a loop's
+first pass would never reach the second, and each pin has a line of its own
+in `testing/ignored-tests.txt`. `readings.rs` runs on, but for its one test
+named for off. The other files run off, which is what they test.
 
 ## Files
 
@@ -64,6 +64,16 @@ for off. The other files run off, which is what they test.
   dial on the aged link after the smaller node's own rekey, read inside
   the heard floor. Each two-order case is one test per order. It holds
   copies of private helpers of `control.rs`, each naming its original.
+- `explore/`: the real-node explorer and its world: two or three real nodes
+  on the loopback, TCP or the BLE mock, driven by a schedule written as data,
+  every dial through `initiate_connection`, each node's receive channel
+  held by the world; and the core's named starts run on them, each scripted
+  and then varied packet by packet. Its tests show each step does what it
+  says on each transport, and that the explorer reaches each start's target;
+  `src/node/tests/settle/explore/README.md` says what the world models, what
+  it does not, and which starts run. Not built on next: its `mod` line is
+  under `#[cfg(any())]`, since next's link handshake is XX and the explorer
+  is written for master's IK (that README says why).
 - `fsp.rs`: an end-to-end session whose responder restarts before its
   frames reach the initiator. At the smaller address the pair carries data
   within one exchange. At the larger address it recovers when the
@@ -97,8 +107,11 @@ for off. The other files run off, which is what they test.
   table fails at the next frame; the crossing's waiver is recorded at the
   crossing on that link only, and a crossing that keeps the link's entry
   records none; a session a degraded decrypt-worker pool refused, and two
-  started nodes on real pools, pass. Tests that need the audit to run carry
-  `#[cfg(debug_assertions)]`.
+  started nodes on real pools, pass. The settlement core's record of a
+  dialed link holds its original path Live, follows a one-path roam, and
+  records a switch to an acknowledged path Live, which `links-mirror` lets
+  off for the active path alone; a record off its bundle fails the clause.
+  Tests that need the audit to run carry `#[cfg(debug_assertions)]`.
 - `table/`: the transition table checked on real nodes. Its `mod.rs` is
   the harness: a reading of every row of a peer's state on one node
   (`Seen`), a writer that makes every row it can reach differ from a fresh

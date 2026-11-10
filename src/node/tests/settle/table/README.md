@@ -28,6 +28,14 @@ in the `node-synthetic` group with the rest of `settle`.
     script, such as whether the pair moved or the peering was heard; the
     test names each such row in `others` with its outcome, and may name no
     other row, so it cannot overrule the table.
+  - `check_decided(before, after, &t, decide)` holds the rows the same way
+    with each row's outcome given by `decide` from the row, its cell and
+    what the cell says, and leaves a row `decide` gives no outcome
+    unchecked. The real-node explorer's model test (`../explore/model.rs`)
+    decides a stated cell from the reference model's state there, and
+    makes a record's row differ from a fresh one's with `dirty_record`.
+    Next does not build the explorer, so `check_decided` and `Decided` are
+    under `#[cfg(any())]` with it.
   - `peered(on)`, two loopback nodes peered with multipath set as `on`;
     `ble_pair(on)`, the same on the BLE mock; `ble_paths()`, the BLE pair
     with multipath on, paths of mixed kinds, and a loopback path beside the

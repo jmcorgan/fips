@@ -736,20 +736,10 @@ mod checks {
             .into_iter()
             .filter(|s| !matches!(s.number, 7 | 12))
             .collect();
-        let report = std::thread::scope(|sc| {
-            let hs: Vec<_> = all
-                .iter()
-                .map(|st| {
-                    sc.spawn(move || {
-                        let t = std::time::Instant::now();
-                        let swept = sweep(st, st.depth, &by_shape);
-                        (swept, t.elapsed().as_millis())
-                    })
-                })
-                .collect();
-            hs.into_iter()
-                .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-                .collect::<Vec<_>>()
+        let report = crate::testutil::bounded(&all, |st| {
+            let t = std::time::Instant::now();
+            let swept = sweep(st, st.depth, &by_shape);
+            (swept, t.elapsed().as_millis())
         });
         let mut wrong = Vec::new();
         for (st, (swept, ms)) in all.iter().zip(report) {
