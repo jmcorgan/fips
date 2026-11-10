@@ -2063,7 +2063,7 @@ impl Node {
                     // advertised port is deterministic across restarts rather
                     // than dependent on HashMap iteration order. This mirrors
                     // find_udp_transport_for_remote_addr.
-                    let advertised_udp_port = self
+                    let (advertised_udp_port, advertise_ipv6) = self
                         .transports
                         .iter()
                         .filter(|(id, h)| {
@@ -2071,15 +2071,16 @@ impl Node {
                                 && h.is_operational()
                                 && !self.supervisor.nostr_rendezvous.is_bootstrap_transport(id)
                         })
-                        .filter_map(|(id, h)| h.local_addr().map(|addr| (*id, addr.port())))
+                        .filter_map(|(id, h)| h.local_addr().map(|addr| (*id, addr)))
                         .min_by_key(|(id, _)| id.as_u32())
-                        .map(|(_, port)| port)
-                        .unwrap_or(0);
+                        .map(|(_, addr)| (addr.port(), addr.is_ipv6()))
+                        .unwrap_or((0, true));
                     let scope = self.lan_rendezvous_scope();
                     match crate::mdns::LanRendezvous::start(
                         self.identity(),
                         scope,
                         advertised_udp_port,
+                        advertise_ipv6,
                         self.config().node.rendezvous.lan.clone(),
                     )
                     .await

@@ -30,7 +30,7 @@ use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 use std::time::Instant;
 
-use mdns_sd::{ResolvedService, ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{IfKind, ResolvedService, ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -154,12 +154,16 @@ impl LanRendezvous {
     ///
     /// `advertised_port` is the UDP port the operational UDP transport
     /// is bound to — peers receiving our advert will initiate Noise IK
-    /// against that port. `scope` mirrors the Nostr discovery scope and
-    /// is used to filter the browser stream.
+    /// against that port. `advertise_ipv6` is whether that socket receives
+    /// IPv6: when it does not (bound to an IPv4 address), the advert lists
+    /// IPv4 addresses only, since a peer that dials one of the host's IPv6
+    /// addresses would never be answered. `scope` mirrors the Nostr
+    /// discovery scope and is used to filter the browser stream.
     pub async fn start(
         identity: &Identity,
         scope: Option<String>,
         advertised_port: u16,
+        advertise_ipv6: bool,
         config: LanRendezvousConfig,
     ) -> Result<Arc<Self>, LanRendezvousError> {
         if !config.enabled {
@@ -170,6 +174,11 @@ impl LanRendezvous {
         }
 
         let daemon = ServiceDaemon::new().map_err(|e| LanRendezvousError::Daemon(e.to_string()))?;
+        if !advertise_ipv6 {
+            daemon
+                .disable_interface(IfKind::IPv6)
+                .map_err(|e| LanRendezvousError::Daemon(e.to_string()))?;
+        }
 
         let npub = identity.npub();
         let instance_name = advert_label(&npub);
