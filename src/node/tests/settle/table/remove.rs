@@ -462,6 +462,46 @@ async fn a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say() {
     plain(Cause::Ended).await;
 }
 
+/// What node 0's reconnect schedule holds for `peer`: whether an entry is
+/// there, and its retry count and whether it is a reconnect.
+fn scheduled(node: &Node, peer: &NodeAddr) -> Option<(u32, bool)> {
+    node.peering
+        .reconciler
+        .retry_pending
+        .get(peer)
+        .map(|s| (s.retry_count, s.reconnect))
+}
+
+/// A removal a test makes, `remove_active_peer`, is the one whose cause runs
+/// nothing after the removal: on a dirtied peer node 0 is told to reconnect
+/// to, with node 0's own dial in flight, running that removal's tail leaves
+/// the reconnect schedule and every connection as they were. So a test that
+/// removes a peer that way, and runs no tail, leaves nothing out.
+#[tokio::test]
+async fn a_test_removal_runs_no_tail() {
+    let mut nodes = dirtied(false, false).await;
+    let b = *nodes[1].node.node_addr();
+    let at = vec![current(&nodes[0].node, &b)];
+    let removed = nodes[0]
+        .node
+        .remove_active_peer(&b)
+        .expect("precondition: the peer is held");
+    let asked = closes_asked(&nodes[0].node, &at);
+    let before = scheduled(&nodes[0].node, &b);
+    nodes[0].node.removed(&b, removed).await;
+    let after = scheduled(&nodes[0].node, &b);
+    let closed = closes_asked(&nodes[0].node, &at);
+    cleanup_nodes(&mut nodes).await;
+    assert!(
+        before == after,
+        "defect: the tail of a test's removal changed the reconnect schedule: {before:?} to {after:?}"
+    );
+    assert!(
+        asked == closed,
+        "defect: the tail of a test's removal closed a connection: {asked:?} to {closed:?}"
+    );
+}
+
 /// Remove node 1 by `Dead` with the bootstrap mark kept on its transport,
 /// which nothing else uses: the transport is dropped.
 async fn bootstrap_dropped(nodes: &mut [TestNode], unkept: Vec<PathRef>) {

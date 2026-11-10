@@ -478,6 +478,65 @@ async fn a_restart_seen_in_our_msg2_replaces_the_peer_as_the_table_says_with_mul
     own_restart(true).await;
 }
 
+/// Two nodes peered with multipath set as `on`, node 0 having last heard
+/// node 1 a minute ago. Node 1 restarts and dials node 0, which by then
+/// denies node 1 in its ACL. A replacement removes the held peer before the
+/// ACL check, so the msg1 costs node 0 its peering with node 1: the removal
+/// stands and nothing is promoted in its place.
+async fn refused(on: bool) {
+    let mut nodes = super::peered(on).await;
+    let b = *nodes[1].node.node_addr();
+    nodes[0].node.restart_dampener.remove(&b);
+    quiet(&mut nodes[0].node, &b);
+    let old = nodes[0]
+        .node
+        .get_peer(&b)
+        .map(|p| p.link_id())
+        .expect("precondition: node 0 holds node 1");
+    restart_one(&mut nodes, on).await;
+    initiate_handshake(&mut nodes, 1, 0).await;
+    let msg1 = queued_in(&mut nodes[0], PHASE_MSG1)
+        .expect("precondition: the restarted node's msg1 is queued at node 0");
+    let dir = tempfile::tempdir().unwrap();
+    let deny = dir.path().join("peers.deny");
+    std::fs::write(&deny, format!("{}\n", nodes[1].node.npub())).unwrap();
+    // The reloader reads the files it is given when it is made, and a held
+    // peer stays until a handshake asks the ACL about it.
+    nodes[0]
+        .node
+        .isolate_peer_acl_for_test(dir.path().join("peers.allow"), deny);
+    assert!(
+        nodes[0].node.get_peer(&b).is_some(),
+        "precondition: node 0 still holds node 1 once it denies it"
+    );
+    nodes[0].node.handle_msg1(msg1).await;
+    let held = nodes[0].node.get_peer(&b).map(|p| p.link_id());
+    let old_open = nodes[0].node.get_link(&old).is_some();
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        held, None,
+        "defect: node 0 still holds node 1 after a restart's msg1 the ACL refused"
+    );
+    assert!(
+        !old_open,
+        "defect: the refused replacement left the old peering's link open"
+    );
+}
+
+/// A replacement the ACL refuses after its removal keeps the removal, with
+/// multipath off.
+#[tokio::test]
+async fn a_replacement_refused_by_the_acl_after_its_removal_keeps_the_removal() {
+    refused(false).await;
+}
+
+/// [`a_replacement_refused_by_the_acl_after_its_removal_keeps_the_removal`]
+/// with multipath on.
+#[tokio::test]
+async fn a_replacement_refused_by_the_acl_after_its_removal_keeps_the_removal_with_multipath_on() {
+    refused(true).await;
+}
+
 /// A real msg1 from `initiator` to `responder` at the initiator's own epoch,
 /// built on a detached machine.
 #[cfg(ble_available)]

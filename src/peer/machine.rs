@@ -1517,7 +1517,7 @@ impl PeerMachine {
         if !self.is_established_context() {
             return Vec::new();
         }
-        // `InvalidateSendState` maps to the executor's `remove_active_peer`, which
+        // `InvalidateSendState` maps to the node's removal routine, which
         // unregisters the decrypt worker by the REAL current index. The machine's
         // tracked carrier index is deliberately NOT used to unregister here: it
         // can drift to a reused index and wrongly unregister ANOTHER peer's worker

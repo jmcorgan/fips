@@ -919,6 +919,99 @@ async fn a_worker_refusal_after_a_move_reaches_the_same_total() {
     assert_eq!(total, 2, "the new session's refusal reached the total");
 }
 
+/// A worker of the session a move left may still be handling frames the node
+/// dispatched to it before the move, and a refusal there counts into the
+/// total that worker was handed, which has to be the one the peer still
+/// holds. The worker here holds everything it is sent until after the move:
+/// the first session's registration, one of node 1's frames, a copy of it and
+/// a marker.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refusal_by_the_left_sessions_worker_after_a_move_reaches_the_peers_total() {
+    use super::settle::readings::own_dial;
+    use crate::node::decrypt_worker::{DecryptWorkerEvent, DecryptWorkerPool};
+    let mut nodes = linked_pair(rekey_config(60), rekey_config(60)).await;
+    let addr0 = *nodes[0].node.node_addr();
+    let addr1 = *nodes[1].node.node_addr();
+    let (start, held) = std::sync::mpsc::channel();
+    nodes[0].node.supervisor.decrypt_workers = Some(DecryptWorkerPool::held(held));
+    let offer = nodes[0].node.get_peer(&addr1).unwrap().offer_to_workers();
+    nodes[0].node.run_link_outputs(&addr1, offer);
+    let mut events = nodes[0].node.decrypt_fallback_rx.take().unwrap();
+    let first = nodes[0].node.get_peer(&addr1).unwrap().our_index().unwrap();
+    assert!(
+        nodes[0]
+            .node
+            .decrypt_registered_sessions
+            .contains(&first.as_u32()),
+        "precondition: the first session is handed to the worker"
+    );
+
+    heartbeat(&mut nodes[1], &addr0).await;
+    let mut last = None;
+    while let Ok(packet) = nodes[0].packet_rx.try_recv() {
+        last = Some((
+            packet.transport_id,
+            packet.remote_addr.clone(),
+            packet.data.clone(),
+        ));
+        nodes[0].node.process_packet(packet).await;
+    }
+    let (tid, addr, data) = last.expect("precondition: node 1's heartbeat reached node 0");
+    nodes[0]
+        .node
+        .process_packet(ReceivedPacket::new(tid, addr.clone(), data))
+        .await;
+    nodes[0]
+        .node
+        .process_packet(ReceivedPacket::new(
+            tid,
+            addr,
+            forged_frame(first, 1_000_000),
+        ))
+        .await;
+    assert_eq!(
+        nodes[0]
+            .node
+            .get_peer(&addr1)
+            .unwrap()
+            .replay_suppressed_total(),
+        0,
+        "precondition: the held worker has refused nothing yet"
+    );
+
+    own_dial(&mut nodes).await;
+    let second = nodes[0].node.get_peer(&addr1).unwrap().our_index().unwrap();
+    assert_ne!(second, first, "precondition: the move changed the session");
+
+    start
+        .send(())
+        .expect("precondition: the held worker is waiting to start");
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("precondition: the marker's report arrived")
+            .expect("precondition: the worker event channel is open");
+        let done = matches!(event, DecryptWorkerEvent::DecryptFailure(_));
+        nodes[0].node.process_decrypt_worker_event(event).await;
+        if done {
+            break;
+        }
+    }
+
+    let total = nodes[0]
+        .node
+        .get_peer(&addr1)
+        .unwrap()
+        .replay_suppressed_total();
+    nodes[0].node.decrypt_fallback_rx = Some(events);
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        total, 1,
+        "defect: a refusal by the left session's worker after the move did not reach the peer's total"
+    );
+}
+
 /// A restart replaces the peer, and the new peer's total of refusals starts
 /// at nothing: what was refused belonged to the peering that has gone.
 #[tokio::test]

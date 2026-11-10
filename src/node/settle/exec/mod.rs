@@ -21,6 +21,8 @@ mod paths;
 pub(in crate::node) mod plan;
 mod remove;
 
+pub(in crate::node) use remove::Removed;
+
 use crate::NodeAddr;
 use crate::node::settle::table::Transition;
 use crate::node::{AddrKey, Node};

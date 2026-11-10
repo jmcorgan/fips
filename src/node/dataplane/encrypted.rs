@@ -4,6 +4,8 @@ use crate::node::Node;
 use crate::node::diag::{KeyView, OrNone, Trial};
 use crate::node::handlers::path_intake::Feed;
 use crate::node::reject::DataplaneReject;
+use crate::node::settle::exec::Run;
+use crate::node::settle::table::Transition;
 use crate::noise::{NoiseError, TAG_SIZE};
 use crate::peer::{ActivePeer, PeerBundle, Roam};
 use crate::proto::fmp::wire::{
@@ -533,29 +535,30 @@ impl Node {
         if first_frame {
             self.note_peer_heard(node_addr);
         }
-        // Address rotation invalidates the per-peer connect()-ed UDP socket,
-        // which is still pinned to the old 5-tuple. Drop the socket and its
-        // drain so the wildcard listen socket takes over until the new
-        // 5-tuple settles. `netmon`'s first-sight rule rests on this too: it
-        // compares that socket's pinned source against a probe to the peer's
-        // *current* address, and a socket left behind makes those two
-        // disagree for as long as it survives.
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if address_changed {
-            self.clear_connected_udp_for_peer(node_addr);
-        }
         // The first authenticated frame proves the peering live, so the
         // memory of msg1s that promoted it unheard has nothing left to bound.
         if first_heard {
             self.replayed_msg1s.forget(node_addr);
         }
-        // Tell the transports which link carries the peer: on a roam the old
-        // link loses it, and over BLE every frame marks the link it arrived
-        // on, so a link re-established at the same address is recognised. A
-        // frame for a peer already removed (the decrypt worker can finish
-        // after a Disconnect) marks nothing: no later removal would withdraw
-        // it.
-        if present && (address_changed || self.tracks_peers(frame.transport_id)) {
+        // A roam: address rotation invalidates the per-peer connect()-ed UDP
+        // socket, which is still pinned to the old 5-tuple, so the executor
+        // drops it and its drain and the wildcard listen socket takes over
+        // until the new 5-tuple settles (`netmon`'s first-sight rule rests on
+        // this too: it compares that socket's pinned source against a probe
+        // to the peer's *current* address); and the link the peer left loses
+        // its mark at the transports. Over BLE every other frame marks the
+        // link it arrived on, so a link re-established at the same address is
+        // recognised. A frame for a peer already removed (the decrypt worker
+        // can finish after a Disconnect) marks nothing: no later removal
+        // would withdraw it.
+        if address_changed {
+            let mut run = Run {
+                prior,
+                moved: Some((frame.transport_id, frame.remote_addr.clone())),
+                ..Run::new(*node_addr, Transition::Roam)
+            };
+            self.run(&mut run).await;
+        } else if present && self.tracks_peers(frame.transport_id) {
             let link = (frame.transport_id, frame.remote_addr.clone());
             self.relink(node_addr, prior, Some(link)).await;
         }

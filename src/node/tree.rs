@@ -818,7 +818,7 @@ impl Node {
 
     /// Handle tree state cleanup when a peer is removed.
     ///
-    /// Called from `remove_active_peer`. If the removed peer was our parent,
+    /// Called from a peer's removal. If the removed peer was our parent,
     /// attempts to find an alternative or becomes root.
     ///
     /// Returns `true` if our tree state changed (caller should announce).

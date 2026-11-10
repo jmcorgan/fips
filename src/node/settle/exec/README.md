@@ -24,15 +24,38 @@ statements at its site.
   `plan`, the effects of each transition in their order, each list the
   statements its sites ran.
 - `install.rs`: a promotion's effects, and the promotion a replacement
-  ends with, with their `Facts`.
+  ends with, with their `Facts`; `Node::install`, the part of a promotion a
+  test may run alone through `promote_connection`, which builds the peer's
+  machines and puts it in the node's maps; and `Run::promotion`, the run the
+  peer action executor's promotion arm builds once `promote_connection`
+  succeeded, a replacement's where the step says why it removed the held
+  peer. What the leg's control machine returns for the outcome goes back to
+  that arm's worklist, after the plan. A replacement is not one step: the
+  ACL check and the index allocation between its removal and its promotion
+  may stop it with the removal done. So the executor's removal arm runs the
+  removal's part of its plan, through `Run::replacement` and
+  `Node::run_removal`, and the promotion arm the rest, through
+  `Node::run_promotion`, which runs a promotion's whole plan.
 - `cross.rs`: a crossing's effects, moved onto this node's dial or kept on
-  the peer's inbound session, with their `Facts`.
+  the peer's inbound session, with their `Facts`, which the site in
+  `handle_msg2` fills through `Run::crossing`, since this file's module is
+  private to `exec/`. The move itself, `move_session`, stays at the site.
 - `paths.rs`: a followed, switched or released path's effects, which are
   plain functions because a removal reaches a release where it cannot
-  await, with `run_now`, which walks such a plan without awaiting, and
-  their `Facts`.
-- `remove.rs`: a removal's effects, each by the table's cell for the cause,
-  with their `Facts`.
+  await, with `Node::run_now`, which walks such a plan without awaiting;
+  their `Facts`, and the `Run` constructors their sites in
+  `../../handlers/path.rs` build them with. A roam's effects are shared
+  ones, in `mod.rs`, and its site in `../../dataplane/encrypted.rs` runs
+  them through `Node::run`. A release at the peer's removal runs the same
+  plan, and leaves the link's lookup to the removal.
+- `remove.rs`: the one removal routine, `Node::remove`, which every way a
+  peer is removed calls with its cause and which is synchronous because
+  some of them cannot await; `Removed`, what it hands on; and
+  `Node::removed`, which runs the removal's plan, each effect by the
+  table's cell for the cause, with their `Facts`. The same effects run at
+  a replacement's removal, reading its `Removed` from `install.rs`'s
+  `Facts` and the replacement's cells. A loss noted for a reconnect where
+  the removal was decided is not noted again.
 - `links.rs`: the place the settlement core's link records are fed from;
   it holds nothing yet.
 

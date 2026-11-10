@@ -39,6 +39,10 @@ tests.
   That scan reads both files with LF line endings, and a test runs it on
   CRLF copies. The tests read the cases of `table.rs`, so a new case is
   planned here too.
+- `remove.rs`: that every way the node removes a peer runs the one removal
+  routine of `../exec/remove.rs`, by a scan of the node's code outside its
+  tests for a peer taken out of the peer map, with its one exemption and a
+  planted line.
 
 ## Rules for this level
 

@@ -24,10 +24,13 @@ use crate::utils::index::SessionIndex;
 use crate::{Ipv6Address, NodeAddr, PeerIdentity};
 use fips_core::proto::fmp::rekey::ik::{LinkKeys, setup_record};
 use fips_core::proto::path::{Account, Charge, Outputs};
+#[cfg(test)]
+use fips_core::proto::rekey::{Bond, Ids};
 use fips_core::proto::rekey::{
-    Bond, Close, Completed, CycleView, Env, Identity, Ids, IndexLease, Input, PeerKey, Record,
-    Role, SealRefusal, Sealed, SendCopy, SetupFacts, Slot,
+    Close, Completed, CycleView, Env, IndexLease, Input, PeerKey, Record, Role, SealRefusal,
+    Sealed, SendCopy, SetupFacts, Slot,
 };
+use fips_core::proto::settle::join::{Caps, Event, Joined, Setup, Step, join};
 #[cfg(unix)]
 use portable_atomic::AtomicU64;
 use portable_atomic::Ordering;
@@ -74,6 +77,9 @@ impl fmt::Display for ConnectivityState {
 /// record `facts` gives, offered to the decrypt workers at once when
 /// `caps` says a pool runs. Returns the machine and the binding of `ours`. Hands the lease back,
 /// building nothing, when `session` authenticated another key than `bond`.
+/// A test's peer is built with it outside the settlement core's join, which
+/// builds every node's machine (test builds only).
+#[cfg(test)]
 fn link_machine(
     bond: PeerKey,
     session: NoiseSession,
@@ -111,6 +117,62 @@ fn link_machine(
             &mut env,
         )
     }))
+}
+
+/// What the settlement core's join returns to a node: the steps for one
+/// peer, front to back.
+type LinkJoined = Joined<LinkProfile, UdpSlot, PeerInstant>;
+
+/// Run `f` with the capabilities a link's rekey machine is built with,
+/// lent from `caps` for a machine bound on `transport`, now. The epoch tag
+/// source is held for the whole call.
+fn lent<R>(
+    caps: &mut LinkCaps<'_>,
+    transport: TransportId,
+    f: impl FnOnce(&mut Caps<'_, '_, LinkProfile, PeerInstant>) -> R,
+) -> R {
+    let mut scratch = Vec::new();
+    with_tags(|tags| {
+        let mut env = Env {
+            indices: &mut *caps.indices,
+            transport,
+            tags,
+            workers: caps.workers,
+            jitter: &mut ThreadJitter,
+            local: caps.local,
+            scratch: &mut scratch,
+        };
+        f(&mut Caps {
+            params: caps.params,
+            me: caps.me,
+            now: peer_now(),
+            env: &mut env,
+        })
+    })
+}
+
+/// What closing a peer's machines hands the node: every path's driver slot
+/// to release, the rekey machine's outputs, and the peer's startup epoch
+/// with the replay record the machine kept, if it held a session.
+type Stopped = (Outputs<UdpSlot>, LinkOutputs, Option<([u8; 8], Record)>);
+
+/// The steps `joined` holds, as the node carries them out: the rekey
+/// machine's outputs and the bundle's, each in its order. A start without a
+/// link, a move and a removal tell the core nothing, since building and
+/// closing a rekey machine report no restart, teardown or replacement.
+fn split(joined: LinkJoined) -> (LinkOutputs, Outputs<UdpSlot>) {
+    let mut rekey = LinkOutputs::new();
+    let mut paths = Outputs::new();
+    for step in joined {
+        match step {
+            Step::Rekey(o) => rekey.push(o),
+            Step::Path(o) => paths.push(o),
+            Step::Core(_) | Step::Replace(_) => {
+                debug_assert!(false, "a build or close of the machines told the core");
+            }
+        }
+    }
+    (rekey, paths)
 }
 
 /// The path machine of a link established now on (`transport_id`,
@@ -291,9 +353,11 @@ impl ActivePeer {
     /// session becomes the first epoch of the peer's link rekey machine,
     /// under `our_index`, the lease link setup took, and the peer's
     /// `their_index`, bound on `transport_id`; the machine is bonded to the
-    /// identity's key. Returns the outputs the node executes, the binding of
-    /// `our_index` among them. Hands the lease back, building nothing, when
-    /// the session authenticated another key than `identity`'s, which a
+    /// identity's key. The link's path machine is built next, its original
+    /// path at (`transport_id`, `current_addr`); the settlement core's join
+    /// makes both calls. Returns the outputs the node executes, the binding
+    /// of `our_index` among them. Hands the lease back, building nothing,
+    /// when the session authenticated another key than `identity`'s, which a
     /// completed handshake never does.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_session(
@@ -311,20 +375,46 @@ impl ActivePeer {
         remote_epoch: Option<[u8; 8]>,
         caps: &mut LinkCaps<'_>,
     ) -> Result<(Self, LinkOutputs), IndexLease> {
-        let bond = PeerKey::from_xonly(&identity.pubkey());
+        let key = PeerKey::from_xonly(&identity.pubkey());
         let facts = setup_facts(remote_epoch, std::mem::take(&mut caps.record));
-        let bundle = new_bundle(transport_id, current_addr, &caps.path);
-        let (rekey, out) = link_machine(
-            bond,
-            noise_session,
-            our_index,
-            their_index,
-            transport_id,
-            facts,
-            caps,
-        )?;
+        let setup = Setup {
+            done: completed(
+                noise_session,
+                facts.peer_epoch.unwrap_or_default(),
+                their_index,
+            ),
+            lease: our_index,
+            theirs: their_index.as_u32(),
+            transport: transport_id,
+        };
+        let env = fips_core::proto::path::Env {
+            facts: caps.path.facts,
+            cost: 1.0,
+        };
+        let params = caps.path.params;
+        let addr = *identity.node_addr();
+        let (mut rekey, mut bundle) = (None, None);
+        let joined = lent(caps, transport_id, |caps| {
+            join(
+                addr,
+                Event::Start {
+                    rekey: &mut rekey,
+                    bundle: &mut bundle,
+                    key,
+                    setup,
+                    facts,
+                    caps,
+                    to: (transport_id, current_addr),
+                    params,
+                    env: &env,
+                    link: None,
+                },
+            )
+        })?;
+        let (out, paths) = split(joined);
+        debug_assert!(paths.is_empty(), "a new bundle reports nothing");
         let mut send = PeerSendState::new(link_id);
-        send.bundle = Some(bundle);
+        send.bundle = bundle;
         let mut data = PeerData::new(authenticated_at, peer_now(), is_initiator);
         data.link_stats = link_stats;
         data.mmp = Some(MmpPeerState::new(
@@ -337,7 +427,7 @@ impl ActivePeer {
             npub: identity.npub(),
             short_npub: identity.short_npub(),
             identity,
-            rekey: Some(rekey),
+            rekey,
             data,
             send,
         };
@@ -661,11 +751,11 @@ impl ActivePeer {
         (out, paths)
     }
 
-    /// The machine part of [`move_session`](Self::move_session): close the
-    /// rekey machine, build it again on `session`, and renew the bundle at
-    /// `to`. Returns the outputs, the path outputs, and whether the machine
-    /// was rebuilt; on every early return it was not, and the record is left
-    /// to the caller.
+    /// The machine part of [`move_session`](Self::move_session), through the
+    /// settlement core's join: close the rekey machine, build it again on
+    /// `session` from what it carried, and renew the bundle at `to`. Returns
+    /// the outputs, the path outputs, and whether the machine was rebuilt;
+    /// when it was not, the record is left to the caller.
     fn rebuild(
         &mut self,
         session: NoiseSession,
@@ -677,45 +767,42 @@ impl ActivePeer {
         // The mutation lane's break: the link stays on its old transport and
         // its bundle is not renewed.
         let kept = node_fault!(MoveKeepsOldPair).then(|| self.bound_transport());
-        let Some(old) = self.rekey.take() else {
-            return (vec![LinkOutput::Release(ours)], Vec::new(), false);
-        };
-        let remote = PeerKey::from_xonly(&session.remote_static_xonly());
-        let view = old.view();
-        let held = match view.identity {
-            Identity::Proven(key) if key == remote => Some(key),
-            Identity::Proven(_) | Identity::Claimed(_) => None,
-        };
-        let Some(bond) = held else {
-            self.rekey = Some(old);
-            return (vec![LinkOutput::Release(ours)], Vec::new(), false);
-        };
-        let (mut out, carry) = old.close(Close::CrossConnectionMove);
-        let Some(carry) = carry else {
-            out.push(LinkOutput::Release(ours));
-            return (out, Vec::new(), false);
-        };
-        let mut paths = Vec::new();
         let transport = kept.unwrap_or(to.0);
-        match link_machine(bond, session, ours, theirs, transport, carry.into(), caps) {
-            Ok((rekey, bound)) => {
-                out.extend(bound);
-                self.rekey = Some(rekey);
-                let env = fips_core::proto::path::Env {
-                    facts: caps.path.facts,
-                    cost: self.live_cost(),
-                };
-                if kept.is_none()
-                    && let Some(bundle) = self.send.bundle.as_mut()
-                {
-                    paths = bundle.renew(peer_now(), &env, to);
-                }
-                (out, paths, true)
+        // The epoch the closed machine carries; building does not read it.
+        let epoch = self.rekey.as_ref().and_then(|r| r.view().peer_epoch);
+        let setup = Setup {
+            done: completed(session, epoch.unwrap_or_default(), theirs),
+            lease: ours,
+            theirs: theirs.as_u32(),
+            transport,
+        };
+        let env = fips_core::proto::path::Env {
+            facts: caps.path.facts,
+            cost: self.live_cost(),
+        };
+        let addr = *self.identity.node_addr();
+        let rekey = &mut self.rekey;
+        let bundle = self.send.bundle.as_mut().filter(|_| kept.is_none());
+        let joined = lent(caps, transport, |caps| {
+            join(
+                addr,
+                Event::Shift {
+                    rekey,
+                    bundle,
+                    setup,
+                    caps,
+                    to,
+                    env: &env,
+                },
+            )
+        });
+        match joined {
+            Ok(joined) => {
+                let built = joined.built;
+                let (out, paths) = split(joined);
+                (out, paths, built)
             }
-            Err(lease) => {
-                out.push(LinkOutput::Release(lease));
-                (out, paths, false)
-            }
+            Err(lease) => (vec![LinkOutput::Release(lease)], Vec::new(), false),
         }
     }
 
@@ -770,9 +857,10 @@ impl ActivePeer {
         self.send.bundle.as_mut()
     }
 
-    /// Close the link's path machine as the peer is removed, and return
-    /// every path's driver slot to release (draft Section 5.8). The peer
-    /// then holds no path.
+    /// Close the link's path machine, and return every path's driver slot
+    /// to release (draft Section 5.8), for a test that re-points the peer.
+    /// The peer then holds no path (test builds only).
+    #[cfg(test)]
     pub(crate) fn close_paths(&mut self) -> Outputs<UdpSlot> {
         self.send
             .bundle
@@ -1013,6 +1101,7 @@ impl ActivePeer {
     // === Repeated Handshake Lines ===
 
     /// This peer's repeated handshake line counts.
+    #[cfg(test)]
     pub(crate) fn hs_lines(&self) -> &HsLineCounts {
         &self.data.hs_lines
     }
@@ -1758,6 +1847,7 @@ impl ActivePeer {
 
     /// The ephemeral digest of the link-setup msg1 this peering was promoted
     /// from, or `None` for a peering this node dialled.
+    #[cfg(test)]
     pub(crate) fn setup_ephemeral(&self) -> Option<EphemeralDigest> {
         self.data.setup_ephemeral
     }
@@ -1887,23 +1977,32 @@ impl ActivePeer {
             .unwrap_or_default()
     }
 
-    /// End the link's rekey machine as the peer is removed, returning the
-    /// outputs that unbind, revoke and release every index it held (its
-    /// sessions' and its own rekey handshake's), and the peer's startup
-    /// epoch with the replay record the machine kept, for the node to hand
-    /// to a later link with the peer at that epoch. Empty outputs and no
-    /// record for a peer without a session.
-    pub(crate) fn close(&mut self) -> (LinkOutputs, Option<([u8; 8], Record)>) {
+    /// Close the link's machines as the peer is removed, through the
+    /// settlement core's join: the path machine, then the rekey machine.
+    /// Returns every path's driver slot to release (draft Section 5.8); the
+    /// outputs that unbind, revoke and release every index the rekey machine
+    /// held (its sessions' and its own rekey handshake's); and the peer's
+    /// startup epoch with the replay record the machine kept, for the node
+    /// to hand to a later link with the peer at that epoch. A peer without a
+    /// session gives empty outputs and no record. The peer then holds no
+    /// path and no machine.
+    pub(crate) fn stop(&mut self) -> Stopped {
         // The reason only labels an own rekey handshake the machine
         // abandons, which the node counts nowhere.
-        let Some(rekey) = self.rekey.take() else {
-            return (LinkOutputs::new(), None);
+        let event = Event::Stop {
+            rekey: &mut self.rekey,
+            bundle: &mut self.send.bundle,
+            why: Close::Admin,
         };
-        let (out, carry) = rekey.close(fips_core::proto::rekey::Close::Admin);
-        (
-            out,
-            carry.map(|c| (c.peer_epoch.unwrap_or_default(), c.record)),
-        )
+        match join(*self.identity.node_addr(), event) {
+            Ok(mut joined) => {
+                let carry = joined.carry.take();
+                let (out, paths) = split(joined);
+                let kept = carry.map(|c| (c.peer_epoch.unwrap_or_default(), c.record));
+                (paths, out, kept)
+            }
+            Err(lease) => (Outputs::new(), vec![LinkOutput::Release(lease)], None),
+        }
     }
 
     /// Apply `t`'s cells to the peer's record, reading the monotonic clock
@@ -1917,7 +2016,6 @@ impl ActivePeer {
     /// End the peer's record as the peer is removed, handing over what the
     /// removal reads of it. The peer's identity and machines go with it; a
     /// caller closes the machines and the paths first.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn depart(self) -> Departed {
         self.data.depart()
     }

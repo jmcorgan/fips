@@ -65,8 +65,8 @@ release build.
   switch sits in it, `MoveBuildsFresh`, which builds the moved machine as
   a new link's; outside the core's tests it is the literal `false`. The
   joint world's shell (`tests/joint/`) calls it for every machine build,
-  move and close and for every output it routes. The node does not call
-  it yet.
+  move and close and for every output it routes. The node runs each step
+  of a link's rekey machine through it.
 - `output.rs`: what the core asks of the shell, run front to back:
   answers, resends, the hand-off to the rekey machine, installs, the
   per-peer data's transition, removals, retired links with their closes,

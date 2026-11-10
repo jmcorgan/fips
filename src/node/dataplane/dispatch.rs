@@ -1,9 +1,9 @@
-//! Link message dispatch and peer removal.
+//! Link message dispatch, and the Disconnect a peer sends.
 
 use crate::NodeAddr;
 use crate::node::Node;
-use crate::node::diag::OrNone;
-use crate::peer::ActivePeer;
+use crate::node::settle::exec::Removed;
+use crate::proto::settle::output::Why;
 use crate::transport::{TransportAddr, TransportId};
 use std::time::Instant;
 use tracing::{debug, info, trace};
@@ -63,10 +63,8 @@ impl Node {
             0x50 => {
                 // Disconnect. A malformed one keeps the peer, and with it
                 // the peer's claim to its link.
-                let held = self.peer_link(from);
-                self.handle_disconnect(from, payload);
-                if !self.peers.contains_key(from) {
-                    self.relink(from, held, None).await;
+                if let Some(removed) = self.handle_disconnect(from, payload) {
+                    self.removed(from, removed).await;
                 }
             }
             0x51 => {
@@ -100,12 +98,21 @@ impl Node {
     /// Without this, a graceful upstream shutdown orphans auto-connect
     /// entries — other removal paths (link-dead, decrypt failure, peer
     /// restart) all schedule reconnect.
-    pub(in crate::node) fn handle_disconnect(&mut self, from: &NodeAddr, payload: &[u8]) {
+    ///
+    /// Returns the removal, for its caller to run what follows it, which
+    /// here is the transport's mark cleared at the peer's pair; the
+    /// reconnect is noted here, so that a caller that cannot await still
+    /// schedules it. `None` when the message is malformed or no peer is held.
+    pub(in crate::node) fn handle_disconnect(
+        &mut self,
+        from: &NodeAddr,
+        payload: &[u8],
+    ) -> Option<Removed> {
         let disconnect = match crate::proto::fmp::Disconnect::decode(payload) {
             Ok(msg) => msg,
             Err(e) => {
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed disconnect message");
-                return;
+                return None;
             }
         };
 
@@ -116,202 +123,8 @@ impl Node {
         );
 
         let addr = *from;
-        self.remove_active_peer(from);
+        let removed = self.remove(from, Why::Disconnect);
         self.note_link_dead(addr, Self::peering_now());
-    }
-
-    /// Count `peer`'s session, removed without having carried one
-    /// authenticated frame, toward its identity's silent-session back-off,
-    /// and log the refusal this starts or extends, with how many msg1s the
-    /// identity's previous refusal refused.
-    fn note_silent_session(&mut self, node_addr: &NodeAddr, peer: &ActivePeer) {
-        let epoch = peer.remote_epoch();
-        let refusal = self.silent_sessions.ended(
-            *node_addr,
-            epoch,
-            peer.setup_ephemeral(),
-            crate::time::mono_ms(),
-        );
-        if let Some(refusal) = refusal {
-            debug!(
-                peer = %self.peer_display_name(node_addr),
-                startup_epoch = %OrNone(epoch.map(hex::encode)),
-                silent = refusal.backoff.silent,
-                refuse_s = refusal.backoff.remaining_ms / 1000,
-                prior_refused = refusal.prior_refused,
-                "Session ended without a frame, refusing the peer's msg1s at this epoch"
-            );
-        }
-    }
-
-    /// Free every session index `peer` holds as it leaves the node. Its link
-    /// rekey machine is closed and its outputs carried out, which unbind the
-    /// current, pending and previous sessions' indices and its own rekey
-    /// handshake's from `peers_by_index` by index, whichever transport the
-    /// peer is on now, revoke them from the decrypt workers that hold them, and
-    /// free them. The machine's replay record is filed under the peer and
-    /// its startup epoch, for the next link with the peer at that epoch.
-    pub(in crate::node) fn release_peer_indices(
-        &mut self,
-        node_addr: &NodeAddr,
-        peer: &mut crate::peer::ActivePeer,
-    ) {
-        let (out, carried) = peer.close();
-        if let Some((epoch, record)) = carried {
-            self.link_records.file(*node_addr, epoch, record);
-        }
-        self.run_link_outputs(node_addr, out);
-    }
-
-    /// Remove an active peer and clean up all associated state.
-    ///
-    /// Frees session index, removes link and address mappings. Used for
-    /// both graceful disconnect and timeout-based eviction. Ends the
-    /// end-to-end session with the node too, unless the peering was never
-    /// heard from.
-    ///
-    /// Also handles tree state cleanup: if the removed peer was our parent,
-    /// selects an alternative or becomes root, and marks remaining peers
-    /// for pending tree announce (delivered on next tick).
-    pub(in crate::node) fn remove_active_peer(&mut self, node_addr: &NodeAddr) {
-        let mut peer = match self.peers.take(node_addr) {
-            Some(p) => p,
-            None => {
-                debug!(peer = %self.peer_display_name(node_addr), "Peer already removed");
-                return;
-            }
-        };
-
-        if !peer.heard() {
-            self.note_silent_session(node_addr, &peer);
-        }
-
-        // Log suppressed replay detection summary before teardown
-        let suppressed = peer.replay_suppressed_count();
-        if suppressed > 0 {
-            debug!(
-                peer = %self.peer_display_name(node_addr),
-                count = suppressed,
-                "Suppressed replay detections during link transition"
-            );
-        }
-        if let Some(withheld) = peer.hs_lines().unreported() {
-            self.log_withheld(node_addr, &withheld);
-        }
-
-        // MMP teardown log (before we drop the peer)
-        let peer_name = self
-            .peer_aliases
-            .get(node_addr)
-            .cloned()
-            .unwrap_or_else(|| peer.identity().short_npub());
-        if let Some(mmp) = peer.mmp() {
-            Self::log_mmp_teardown(&peer_name, mmp);
-        }
-
-        // Remove any end-to-end session associated with this peer.
-        //
-        // Sessions are tracked separately from peers (self.sessions vs self.peers).
-        // Leaving a stale session alive after removing the peer causes:
-        //   1. check_session_mmp_reports() keeps logging stale "MMP session metrics"
-        //      with frozen counters until purge_idle_sessions() eventually fires.
-        //   2. initiate_session() finds is_established() == true on the stale entry
-        //      and silently returns Ok(()), preventing a new session from being
-        //      established even after the link layer reconnects successfully.
-        //
-        // A peering never heard from is the exception. No frame arrived on
-        // it, so an end-to-end session with the same node runs elsewhere in
-        // the mesh and owes this link nothing. A replayed msg1 can promote
-        // and replace such a peering as often as the replay memory allows,
-        // and ending the session each time would let a replayer end it that
-        // often. The session stays, set aside while the path MTU release
-        // below runs so the estimate it made of its own path is kept too.
-        //
-        // Either way the IPv6 adapter's packets held for the node stay. The
-        // node may still be reachable through another peer, or be back at
-        // once when this removal is a replacement or a restart, so the next
-        // session to it sends them; the held-packet backstop answers them
-        // with no route if nothing can reach it.
-        let kept_session = if peer.is_heard() {
-            if let Some(session_entry) = self.sessions.remove(node_addr)
-                && let Some(mmp) = session_entry.mmp()
-            {
-                Self::log_session_mmp_teardown(&peer_name, mmp);
-            }
-            None
-        } else if node_fault!(KeptSessionNotSetAside) {
-            None
-        } else {
-            self.sessions.remove(node_addr)
-        };
-
-        // Release the path MTU state this peer's promotion seeded: the link it
-        // measured has just gone. The other callers all fire on session state,
-        // so without this a peer that never opened an FSP session leaves both
-        // its `path_mtu_lookup` entry and its seeding-transport record behind
-        // for the life of the process. The peer is already out of `self.peers`
-        // above, so no reseed follows and the two go together, which is what
-        // keeps a peer returning over a wider link from being clamped to the
-        // one it left.
-        if !node_fault!(RestartKeepsClamp) {
-            self.path_mtu_lookup_release(node_addr);
-        }
-        if let Some(entry) = kept_session {
-            self.sessions.insert(*node_addr, entry);
-        }
-
-        let link_id = peer.link_id();
-        let transport_id = peer.transport_id();
-        // Hand back every path's driver slot. After this the peer holds no
-        // path, so `transport_id` is read first, for the bootstrap cleanup
-        // below.
-        for out in peer.close_paths() {
-            if let fips_core::proto::path::Output::Released { to, driver, keep } = out {
-                self.release_path(node_addr, link_id, to, driver, keep, true);
-            }
-        }
-        self.forget_connects(node_addr);
-
-        // Free session indices (current, rekey, pending, previous)
-        self.release_peer_indices(node_addr, &mut peer);
-
-        // Remove link and address mapping
-        if !node_fault!(RemoveKeepsLink) {
-            self.remove_link(&link_id);
-        }
-        // Bound `peer_machines`: drop this peer's machine
-        // entry, keyed by the `link_id` derived above BEFORE the `peers` removal.
-        // This cleans up the OLD peer's machine on an inbound restart and prevents
-        // unbounded growth on the establish success path. NEUTRAL: nothing on the
-        // live path reads `peer_machines` except the establish executor, which only
-        // ever touches the in-flight establish's (distinct) `link_id`; no reader
-        // depends on a stale entry, so removal changes no behavior — it only bounds
-        // the map.
-        self.remove_peer_machine(link_id);
-        if let Some(transport_id) = transport_id {
-            self.cleanup_bootstrap_transport_if_unused(transport_id);
-        }
-
-        // Tree state cleanup
-        let tree_changed = self.handle_peer_removal_tree_cleanup(node_addr);
-        if tree_changed {
-            // Mark all remaining peers for pending tree announce.
-            // These will be sent on the next tick via check_tree_state().
-            for peer in self.peers.values_mut() {
-                peer.mark_tree_announce_pending();
-            }
-        }
-
-        // Bloom filter cleanup: clear state for removed peer, mark all remaining peers
-        self.bloom_state.remove_peer_state(node_addr);
-        let remaining_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
-        self.bloom_state.mark_all_updates_needed(remaining_peers);
-
-        debug!(
-            peer = %self.peer_display_name(node_addr),
-            link_id = %link_id,
-            tree_changed = tree_changed,
-            "Peer removed and state cleaned up"
-        );
+        removed.map(|r| Removed { noted: true, ..r })
     }
 }

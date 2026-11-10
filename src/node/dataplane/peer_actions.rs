@@ -4,7 +4,7 @@
 //! *what* must happen and returns a `Vec<PeerAction>`; this module is the *doing*
 //! half — the thin driver that maps each action onto the exact shell call it
 //! stands for (`build_msg2` + `send_existing`, `send_stored_msg1`,
-//! `promote_connection`, `remove_active_peer`, `index_allocator.free`,
+//! `promote_connection`, the removal, `index_allocator.free`,
 //! `note_link_dead`, …).
 //!
 //! ## Progressive cutover
@@ -17,7 +17,7 @@
 //! connection-oriented dial (`OpenTransport` performs the non-blocking
 //! `transport.connect`; `TransportConnected` drives the connect-resolution msg1
 //! send from `poll_pending_connects`), and the liveness reap (`route_link_dead`
-//! → `LinkDeadSuspected`, driving `InvalidateSendState` → `remove_active_peer`).
+//! → `LinkDeadSuspected`, driving `InvalidateSendState` → the removal).
 //! A link's rekeys do not pass through here: the active peer's link rekey
 //! machine holds them, and its outputs run through `run_link_outputs`.
 //!
@@ -34,9 +34,10 @@
 use crate::PeerIdentity;
 use crate::identity::NodeAddr;
 use crate::node::reject::{HandshakeReject, RejectReason};
+use crate::node::settle::exec::Removed;
+use crate::node::settle::exec::Run;
 use crate::node::{Node, NodeError};
 use crate::peer::machine::{LostKind, PeerAction, PeerEvent};
-use crate::proto::fmp::PromotionResult;
 use crate::proto::fmp::wire::build_msg2;
 use crate::proto::settle::output::Why;
 use crate::transport::{LinkId, TransportAddr, TransportId};
@@ -83,9 +84,10 @@ pub(in crate::node) struct PeerActionCtx {
     /// reject only; leave the dead link and its index entry for the
     /// stale-connection reaper, matching old `handle_msg2`).
     pub(in crate::node) is_outbound: bool,
-    /// Why the peer this step removes is removed, where the caller knows:
-    /// the liveness reap says its link is dead or its paths are gone. `None`
-    /// where the step removes no peer, or the caller has not said.
+    /// Why the peer this step removes is removed: the liveness reap says its
+    /// link is dead or its paths are gone, and a handshake that replaces the
+    /// held peer says how, which the replacement's promotion reads too.
+    /// `None` where the step removes no peer.
     pub(in crate::node) why: Option<Why>,
 }
 
@@ -118,12 +120,12 @@ impl Node {
 
     /// Map each [`PeerAction`] onto its shell call.
     ///
-    /// `PromoteToActive` feeds its [`PromotionResult`](crate::proto::fmp::PromotionResult)
-    /// back into the machine and appends the follow-up actions to the same
-    /// worklist — a queue rather than self-recursion so the async executor stays a
-    /// single flat future (no boxing) and the emitted order is preserved (the
-    /// establish sequences always end in `PromoteToActive`, so its follow-ups run
-    /// after any siblings).
+    /// `PromoteToActive` runs the promotion's plan, which feeds its
+    /// [`PromotionResult`](crate::proto::fmp::PromotionResult) back into the
+    /// machine, and appends the follow-up actions to the same worklist — a
+    /// queue rather than self-recursion, so the emitted order is preserved (the
+    /// establish sequences always end in `PromoteToActive`, so its follow-ups
+    /// run after any siblings). The plan's run is boxed once, in `Node::run`.
     pub(in crate::node) async fn execute_peer_actions(
         &mut self,
         link: LinkId,
@@ -282,49 +284,23 @@ impl Node {
                         ambient.now_ms,
                     ) {
                         Ok(result) => {
-                            let renewed = result.node_addr();
                             // A promotion that created a peer has already
                             // offered its session to the decrypt workers: the
                             // link's rekey machine is built knowing whether a
                             // pool runs, and its offer is carried out with its
-                            // index binding.
-                            // Feed the outcome back into the machine and fold its
-                            // follow-up action (RegisterDecryptSession, now a
-                            // redundant no-op, see its arm) into the worklist.
-                            // Disjoint field borrow again.
-                            let follow = match self.peer_machines.get_mut(&promote_link) {
-                                Some(machine) => machine.step(
-                                    PeerEvent::PromotionResolved { result },
-                                    ambient.interval_ms,
-                                    &mut self.index_allocator,
-                                ),
-                                None => Vec::new(),
-                            };
-                            queue.extend(follow);
-
-                            // Tell the transport which link the new peer uses.
-                            // Only the initiator's promotion does: it follows
-                            // msg2, which answers our own fresh ephemeral key,
-                            // whereas a responder promotes on msg1 alone, and a
-                            // captured msg1 replayed on another link would
-                            // promote there too. The responder's link is marked
-                            // by the initiator's first authenticated frame.
-                            // No old link is cleared: a promotion installs a
-                            // new peer only, so there is none.
-                            if ambient.is_outbound
-                                && let PromotionResult::Promoted(node_addr) = result
-                            {
-                                let link = (ambient.transport_id, ambient.remote_addr.clone());
-                                if !node_fault!(DropInitiatorMark) {
-                                    self.relink(&node_addr, None, Some(link)).await;
-                                }
-                            }
-                            // The promoted peer's path machine is new, with an
-                            // empty candidate table. Boxed: the path steps it
-                            // runs can lead back into this executor.
-                            if let Some(node_addr) = renewed {
-                                Box::pin(self.paths_renewed(&node_addr)).await;
-                            }
+                            // index binding. The table's plan for the
+                            // promotion runs here: the outcome fed back into
+                            // the machine, then what the promotion of a dial
+                            // or of an answered msg1 does, which ran at the
+                            // step's site once this worklist was done. For a
+                            // replacement this is the part of its plan after
+                            // the removal, which ran at its own arm. The
+                            // machine's follow-up action
+                            // (RegisterDecryptSession, now a redundant no-op,
+                            // see its arm) joins the worklist after it.
+                            let mut run = Run::promotion(promote_link, result, ambient);
+                            self.run_promotion(&mut run).await;
+                            queue.extend(run.follow());
                         }
                         Err(e) => {
                             // Every producer of `PromoteToActive` runs with
@@ -401,19 +377,41 @@ impl Node {
                     );
                 }
                 PeerAction::InvalidateSendState => {
-                    // The FULL teardown. `remove_active_peer`
-                    // (`dispatch.rs:107`) closes the peer's link rekey machine,
-                    // whose outputs free every index its sessions hold (current,
-                    // pending, previous), drop their `peers_by_index` entries
-                    // and unregister their decrypt workers, frees the rekey
-                    // handshake's index, and removes the FSP `sessions` entry;
-                    // the packets held for the peer stay for its next session.
-                    // The machine emits NO `FreeIndex` for those slots, so
-                    // there is no double-free.
+                    // The FULL teardown. The removal closes the peer's link
+                    // rekey machine, whose outputs free every index its
+                    // sessions hold (current, pending, previous), drop their
+                    // `peers_by_index` entries and unregister their decrypt
+                    // workers, frees the rekey handshake's index, and removes
+                    // the FSP `sessions` entry; the packets held for the peer
+                    // stay for its next session. The machine emits NO
+                    // `FreeIndex` for those slots, so there is no double-free.
+                    //
+                    // Every step that emits this says why: a context that
+                    // does not is one the table does not know.
+                    debug_assert!(
+                        ambient.why.is_some(),
+                        "a peer was removed by its control machine with no cause"
+                    );
                     let gone = *ambient.verified_identity.node_addr();
-                    let held = self.peer_link(&gone);
-                    self.remove_active_peer(&gone);
-                    self.relink(&gone, held, None).await;
+                    let why = ambient.why.unwrap_or(Why::Replacement);
+                    // The machine notes the loss for a reconnect itself, as
+                    // its next action.
+                    let removed = self.remove(&gone, why).map(|removed| Removed {
+                        noted: true,
+                        ..removed
+                    });
+                    if let Some(removed) = removed {
+                        if matches!(why, Why::Dead | Why::Orphaned) {
+                            self.removed(&gone, removed).await;
+                        } else {
+                            // A replacement's first part. Its promotion runs
+                            // the rest once the ACL check and the index
+                            // allocation pass, either of which may stop it
+                            // here with the old peer gone.
+                            let mut run = Run::replacement(link, removed, ambient);
+                            self.run_removal(&mut run).await;
+                        }
+                    }
                 }
                 PeerAction::RegisterDecryptSession { index } => {
                     let _ = index;
@@ -429,7 +427,7 @@ impl Node {
                 }
                 PeerAction::UnregisterDecryptSession { index } => {
                     // Keyed by index alone, like the link machine's `Revoke`
-                    // outputs that `remove_active_peer` and a drain carry out.
+                    // outputs that a removal and a drain carry out.
                     #[cfg(unix)]
                     self.unregister_decrypt_worker_session(index.as_u32());
                     #[cfg(not(unix))]

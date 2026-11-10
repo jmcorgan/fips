@@ -71,6 +71,9 @@ faults! {
     /// transport and leaves the path bundle as it was, instead of taking
     /// the winning msg2's transport and address.
     MoveKeepsOldPair,
+    /// A crossed dial's move sends the peer a tree announce on the session
+    /// it is about to leave, before the move, as well as after it.
+    MoveAnnouncesFirst,
     /// The FMP decision for an outbound handshake completing beside an
     /// existing peer ignores that the dial was this node's own, so only
     /// the tie-break decides between swapping and keeping.
@@ -149,6 +152,15 @@ faults! {
     /// A peer restart found at a rekey leaves the peer in the spanning
     /// tree's state, so the declaration its previous run sent stays held.
     RestartSkipsTreeReset,
+    /// A peer restart the link rekey machine reports is not acted on at
+    /// the node, so what is held about the peer's previous run stays.
+    RestartNotRouted,
+    /// A link rekey machine's teardown is not acted on at the node, so the
+    /// peer whose link it ended stays held.
+    TeardownNotRouted,
+    /// A link rekey machine's request for the restart gates is not acted
+    /// on at the node, so the msg1 it was given replaces nothing.
+    ReplaceNotRouted,
     /// A stream transport's close aborts the connection's writer at once
     /// instead of letting it write what was queued.
     DrainAbortsAtOnce,
@@ -194,12 +206,29 @@ faults! {
     /// Following a moved path keeps the link's index entry at the pair the
     /// path left, beside the one at the pair it moved to.
     MovedLeavesEntry,
+    /// A switch of the active path leaves the link's index without an entry
+    /// at the newly active pair.
+    SwitchSkipsClaim,
+    /// A path released while the link lives leaves its connection open,
+    /// though the peer has no further use for it and no other link uses it.
+    ReleaseKeepsPairOpen,
+    /// A crossed dial's renewal of the path machine logs none of its paths'
+    /// changes of state.
+    RenewedStateDropped,
     /// Removing an active peer leaves its link in the link table, with
     /// every index entry naming it.
     RemoveKeepsLink,
     /// An index the link machine unbinds stays in the session-index map,
     /// naming the peer that held it.
     UnbindKept,
+    /// The operator's disconnect leaves the transport connection at the
+    /// peer's pair open once the peer is removed.
+    AdminKeepsConnection,
+    /// A peer that sent a Disconnect is removed with the transport's mark
+    /// at its pair left in place.
+    DisconnectKeepsVerified,
+    /// A link its rekey machine ended schedules a reconnect to the peer.
+    EndedSchedulesRetry,
 }
 
 impl Fault {

@@ -660,7 +660,7 @@ impl Node {
     /// interface its one path used goes away. The shell has already
     /// decided by the time this runs, so the machine only CONSUMES the decision
     /// via [`PeerEvent::LinkDeadSuspected`]. The resulting executor arms
-    /// (`InvalidateSendState` → `remove_active_peer`, `ReportLost` →
+    /// (`InvalidateSendState` → the removal, `ReportLost` →
     /// `note_link_dead`) reproduce the pre-refactor inline reap body exactly.
     ///
     /// An established peer always has a `peer_machine`. If the peer vanished
@@ -692,10 +692,9 @@ impl Node {
         };
         if !self.peer_machines.contains_key(&link) {
             debug_assert!(false, "peer machine present for every established peer");
-            let held = self.peer_link(&node_addr);
-            self.remove_active_peer(&node_addr);
-            self.relink(&node_addr, held, None).await;
-            self.note_link_dead(node_addr, Self::peering_now());
+            if let Some(removed) = self.remove(&node_addr, Why::Dead) {
+                self.removed(&node_addr, removed).await;
+            }
             return;
         }
         let ambient = self.link_dead_ctx(&node_addr, now_ms, why);
@@ -709,7 +708,7 @@ impl Node {
     }
 
     /// Ambient shell facts for the routed liveness reap. The executor reads only
-    /// `verified_identity` (`InvalidateSendState` → `remove_active_peer` resolves
+    /// `verified_identity` (`InvalidateSendState` → the removal resolves
     /// its `NodeAddr` from it, so it must equal `node_addr`). `ReportLost` →
     /// `note_link_dead` schedules the reconnect on the peering clock, not on
     /// `now_ms`. The transport/index/direction fields are unused by these two

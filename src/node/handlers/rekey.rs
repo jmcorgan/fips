@@ -10,15 +10,19 @@
 //! from a session handshake message or frame are carried out here.
 
 use crate::NodeAddr;
+use crate::identity::OsEntropy;
 use crate::node::diag::{self, OrNone};
 use crate::node::reject::{RejectReason, SessionReject};
 use crate::node::session::{SessionInstant, SessionOutput, SessionOutputs};
 use crate::node::settle::exec::Run;
 use crate::node::settle::table::{Cell, Row, Transition, cell};
 use crate::node::{Node, TICK};
-use crate::peer::{LinkOutput, LinkOutputs, LinkProfile, peer_now};
+use crate::peer::{LinkOutput, LinkOutputs, LinkProfile, PeerClock, UdpSlot, peer_now};
 use crate::proto::fsp::{SessionAck, SessionMsg3, SessionSetup};
 use crate::proto::link::SessionDatagram;
+use crate::proto::settle::input::Input as In;
+use crate::proto::settle::join::{Event, Step, join};
+use crate::proto::settle::output::Why;
 use crate::proto::stp::{TreeCoordinate, coords_wire_size, encode_coords};
 use crate::utils::index::SessionIndex;
 use fips_core::proto::rekey::{
@@ -264,6 +268,12 @@ impl Node {
     /// from, a frame's delivery, the rejects, and a request for the restart
     /// gates. A send the transport refuses is loss: the machine is never
     /// told, and its deadlines bound what the loss costs.
+    ///
+    /// The outputs go through the settlement core's join, which says which
+    /// of them are the core's: a restart report, a teardown and a
+    /// replacement request. Until the node steps the core, each of those is
+    /// acted on here. The join drops the teardown's reason, so it is read
+    /// before the call for the teardown's log.
     pub(in crate::node) async fn run_link_step(
         &mut self,
         node_addr: &NodeAddr,
@@ -279,8 +289,60 @@ impl Node {
                 }
             )
         });
+        let ended = out.iter().find_map(|o| match o {
+            LinkOutput::Teardown(why) => Some(*why),
+            _ => None,
+        });
+        let Ok(steps) =
+            join::<LinkProfile, PeerClock, OsEntropy, UdpSlot>(*node_addr, Event::Rekey { out })
+        else {
+            debug_assert!(false, "the join refused a rekey machine's step");
+            return report;
+        };
         let mut last_release = None;
-        for output in out {
+        for step in steps {
+            let output = match step {
+                // Reported after the cutover's `Installed`, so the
+                // announces the reset sends are sealed under the session
+                // the restarted peer holds.
+                Step::Core(In::Restarted { epoch, .. }) => {
+                    if !node_fault!(RestartNotRouted) {
+                        self.reset_restarted(node_addr, epoch).await;
+                    }
+                    continue;
+                }
+                Step::Core(In::Ended { .. }) => {
+                    if node_fault!(TeardownNotRouted) {
+                        continue;
+                    }
+                    debug_assert!(ended.is_some(), "an end with no teardown");
+                    if let Some(why) = ended {
+                        warn!(
+                            peer = %self.peer_display_name(node_addr),
+                            reason = ?why,
+                            "Link rekey machine ended the link"
+                        );
+                    }
+                    if let Some(removed) = self.remove(node_addr, Why::Ended) {
+                        self.removed(node_addr, removed).await;
+                    }
+                    report.removed = true;
+                    return report;
+                }
+                Step::Replace(_) => {
+                    report.replace |= !node_fault!(ReplaceNotRouted);
+                    continue;
+                }
+                Step::Core(input) => {
+                    debug_assert!(false, "the join gave a rekey step {input:?}");
+                    continue;
+                }
+                Step::Path(_) => {
+                    debug_assert!(false, "the join gave a rekey step a path output");
+                    continue;
+                }
+                Step::Rekey(output) => output,
+            };
             match output {
                 LinkOutput::Send { msg, kind, route } => match kind {
                     MsgKind::Msg1 => self.send_link_msg1(node_addr, &msg, started).await,
@@ -301,25 +363,8 @@ impl Node {
                         );
                     }
                 }
-                // Reported after the cutover's `Installed`, so the
-                // announces the reset sends are sealed under the session
-                // the restarted peer holds.
-                LinkOutput::PeerRestarted { epoch, .. } => {
-                    self.reset_restarted(node_addr, epoch).await;
-                }
-                LinkOutput::ReplaceRequested { .. } => report.replace = true,
                 LinkOutput::Reject(reason) => report.rejects.push(reason),
                 LinkOutput::Abandoned(cause) => self.log_link_abandon(node_addr, cause),
-                LinkOutput::Teardown(why) => {
-                    warn!(
-                        peer = %self.peer_display_name(node_addr),
-                        reason = ?why,
-                        "Link rekey machine ended the link"
-                    );
-                    self.remove_active_peer(node_addr);
-                    report.removed = true;
-                    return report;
-                }
                 // A msg1 this node answered may be the peer's redial after it
                 // dropped the old peering and this node's filter with it,
                 // which the record of the filter last sent cannot show, so
@@ -345,6 +390,13 @@ impl Node {
                 | LinkOutput::Delegate { .. }
                 | LinkOutput::Revoke { .. } => {
                     self.run_link_outputs(node_addr, vec![output]);
+                }
+                // The core's, which the join never hands back as the
+                // shell's.
+                LinkOutput::PeerRestarted { .. }
+                | LinkOutput::ReplaceRequested { .. }
+                | LinkOutput::Teardown(_) => {
+                    debug_assert!(false, "the join left a core output to the shell");
                 }
             }
         }

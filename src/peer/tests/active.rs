@@ -1111,3 +1111,127 @@ fn a_move_refused_for_a_session_of_another_key_rolls_the_counts_and_changes_noth
         .highest_counter();
     assert_eq!(highest, 199, "defect: a refused move keeps MMP");
 }
+
+/// A start whose setup authenticated another key than the one it is to be
+/// bonded to builds neither machine: both slots stay empty and the lease
+/// comes back. `with_session` holds the two slots in locals, so through it
+/// a bundle built before the bond's check would show nothing; this calls
+/// the join itself.
+#[test]
+fn join_of_a_setup_of_another_key_builds_neither_machine() {
+    let (session, _) = ik_session_pair();
+    let other = PeerKey::from_xonly(&make_peer_identity().pubkey());
+    let local = fips_core::proto::rekey::NodeKeys::new(Identity::generate().keypair(), EPOCH_B);
+    let mut indices = crate::utils::index::IndexAllocator::new();
+    let mut caps = LinkCaps {
+        indices: &mut indices,
+        local: &local,
+        me: make_node_addr(2),
+        params: crate::peer::test_link_params(),
+        record: Record::new(),
+        workers: false,
+        path: crate::peer::test_caps(),
+    };
+    let transport = TransportId::new(1);
+    let setup = Setup {
+        done: completed(session, EPOCH_A, SessionIndex::new(2)),
+        lease: lease(1),
+        theirs: 2,
+        transport,
+    };
+    let env = fips_core::proto::path::Env {
+        facts: caps.path.facts,
+        cost: 1.0,
+    };
+    let params = caps.path.params;
+    let mut rekey: Option<LinkRekey> = None;
+    let mut bundle: Option<PeerBundle> = None;
+
+    let joined = lent(&mut caps, transport, |caps| {
+        join(
+            make_node_addr(1),
+            Event::Start {
+                rekey: &mut rekey,
+                bundle: &mut bundle,
+                key: other,
+                setup,
+                facts: setup_facts(Some(EPOCH_A), Record::new()),
+                caps,
+                to: (transport, TransportAddr::from_string("127.0.0.1:9000")),
+                params,
+                env: &env,
+                link: None,
+            },
+        )
+    });
+
+    let Err(back) = joined else {
+        panic!("defect: a setup of another key was taken");
+    };
+    assert_eq!(
+        back.index(),
+        1,
+        "defect: the refused lease is not the one given"
+    );
+    assert!(
+        rekey.is_none(),
+        "defect: a refused setup built the rekey machine"
+    );
+    assert!(bundle.is_none(), "defect: a refused setup built the bundle");
+}
+
+/// A removal closes the bundle before the rekey machine, and the join says
+/// so in its order: every path the bundle hands back comes before any of
+/// the rekey machine's outputs, and what the closed machine carried comes
+/// back beside them. Both slots are empty after.
+#[test]
+fn a_removal_closes_the_paths_before_the_rekey_machine_in_its_outputs() {
+    let (_a, mut b) = ends();
+    let addr = *b.peer.identity().node_addr();
+
+    let mut joined = join(
+        addr,
+        Event::Stop {
+            rekey: &mut b.peer.rekey,
+            bundle: &mut b.peer.send.bundle,
+            why: Close::Admin,
+        },
+    )
+    .expect("a removal is never refused");
+    let carried = joined.carry.take();
+    let kinds: Vec<&str> = joined
+        .map(|step| match step {
+            Step::Path(_) => "path",
+            Step::Rekey(_) => "rekey",
+            Step::Core(_) => "core",
+            Step::Replace(_) => "replace",
+        })
+        .collect();
+
+    assert!(
+        kinds.contains(&"path") && kinds.contains(&"rekey"),
+        "precondition: the removal closes a path and a session: {kinds:?}"
+    );
+    let first_rekey = kinds.iter().position(|k| *k == "rekey");
+    let last_path = kinds.iter().rposition(|k| *k == "path");
+    assert!(
+        last_path < first_rekey,
+        "defect: a rekey output comes before a closed path: {kinds:?}"
+    );
+    assert!(
+        !kinds.contains(&"core") && !kinds.contains(&"replace"),
+        "defect: closing the machines told the core: {kinds:?}"
+    );
+    assert!(
+        carried.is_some(),
+        "defect: the closed rekey machine carried nothing"
+    );
+    assert!(
+        b.peer.rekey.is_none(),
+        "defect: the rekey machine is still held"
+    );
+    assert!(
+        b.peer.send.bundle.is_none(),
+        "defect: the bundle is still held"
+    );
+}

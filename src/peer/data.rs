@@ -311,7 +311,6 @@ impl PeerData {
 /// the record ends: whether the peering was heard from and whether a frame
 /// arrived, the setup's ephemeral, the replays refused since the last session
 /// reset, the handshake lines withheld, and the MMP state its teardown logs.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct Departed {
     /// Whether the peering was heard from: a frame arrived, or this node
@@ -336,7 +335,6 @@ impl PeerData {
     /// it. Names every field: a new one does not compile until it is read or
     /// dropped here. A decrypt worker's clone of the replay total lives on
     /// until the worker is revoked; this record's is dropped.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn depart(self) -> Departed {
         let PeerData {
             declaration: _,

@@ -838,6 +838,26 @@ impl DecryptWorkerPool {
             crate::node::worker_set::test_spawner(plan, spawn_worker),
         )
     }
+
+    /// A pool of one production worker that holds every message it is sent,
+    /// in order, until `start` is signalled, so that a test chooses when the
+    /// worker handles what was dispatched before. A dropped `start` ends the
+    /// worker without handling anything. Unix only, as are the tests that
+    /// hand sessions to the workers.
+    #[cfg(unix)]
+    pub(crate) fn held(start: std::sync::mpsc::Receiver<()>) -> Self {
+        let mut start = Some(start);
+        Self::start_with(1, move |idx, rx| {
+            let start = start.take().expect("the one worker is started once");
+            std::thread::Builder::new()
+                .name(format!("fips-decrypt-{idx}"))
+                .spawn(move || {
+                    if start.recv().is_ok() {
+                        run_worker(idx, rx);
+                    }
+                })
+        })
+    }
 }
 
 /// The pool's view of its workers: which are live and what a dead one does to
