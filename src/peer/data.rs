@@ -205,7 +205,7 @@ impl PeerData {
                     // test lists them.
                     DataCell::Reset => {
                         if let Some(mmp) = mmp.as_mut()
-                            && !skips_mmp_reset(t)
+                            && !skips_reset(t)
                         {
                             mmp.reset_for_rekey(now_ms);
                         }
@@ -411,7 +411,7 @@ fn unsettled(row: DataRow, t: &Transition) {
 
 /// Whether the mutation lane's break for `t` skips the MMP reset: at a
 /// cutover, or at a move.
-fn skips_mmp_reset(t: &Transition) -> bool {
+fn skips_reset(t: &Transition) -> bool {
     match t {
         Transition::Cutover { .. } => node_fault!(CutoverSkipsMmpReset),
         Transition::Move { .. } => node_fault!(MoveSkipsMmpReset),

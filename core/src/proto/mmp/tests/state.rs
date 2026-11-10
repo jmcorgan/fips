@@ -1155,7 +1155,7 @@ fn every_nested_mmp_state_is_dirtied_in_every_field_new_does_not_take() {
         );
     }
     assert_eq!(
-        ReceiverState::dirtied(DEFAULT_OWD_WINDOW_SIZE).gaps_fresh_diff(),
+        ReceiverState::dirtied(DEFAULT_OWD_WINDOW_SIZE).gap_diff(),
         [
             "expected_next",
             "in_burst",

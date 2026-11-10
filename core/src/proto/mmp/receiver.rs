@@ -686,7 +686,7 @@ impl ReceiverState {
 
     /// The gap tracker's fields that differ from a new tracker's.
     #[cfg(test)]
-    pub(super) fn gaps_fresh_diff(&self) -> alloc::vec::Vec<&'static str> {
+    pub(super) fn gap_diff(&self) -> alloc::vec::Vec<&'static str> {
         self.gap_tracker.fresh_diff(&GapTracker::new())
     }
 }
