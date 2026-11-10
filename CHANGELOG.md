@@ -1518,6 +1518,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Peer and link state
 
+- With multipath enabled, a dial to a peer that times out after the peer came
+  up on another link now leaves its address as a path candidate, where before
+  the address was dropped with the dial. A dial that loses that race, or whose
+  msg1 is answered on the peer's established link rather than on the pair it
+  came from (as for a peer that restarted without saying goodbye), was the
+  only thing holding the address, and a discovery feed that reports only
+  changes never offers it again, so the link never gained that path. Seen with
+  an Android node whose LAN dial to a desktop raced a USB and a BLE dial after
+  a restart: the LAN path stayed missing until the desktop left the LAN and
+  came back. A dial a transport neighbour's key claim started is left out.
+  Nothing on the wire changes.
+
 - At `max_peers`, a msg1 from a node this node is itself dialing is dropped,
   as from any other node it does not hold. Before, the node answered it with
   a msg2 and then refused the peer, and the dialer's link went unanswered
