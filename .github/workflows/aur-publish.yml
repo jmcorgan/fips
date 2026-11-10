@@ -50,7 +50,11 @@ jobs:
       - name: Install build and lint tooling
         run: |
           set -euo pipefail
-          pacman -Sy --noconfirm --needed base-devel namcap git curl jq
+          # -Syu, not -Sy: Arch supports no partial upgrade. Syncing the
+          # databases without upgrading the image pulls the newest libraries
+          # in alongside an image built against older ones, which pacman
+          # refuses outright when a soname moves (openssl 4.1's libcrypto.so).
+          pacman -Syu --noconfirm --needed base-devel namcap git curl jq
 
       # The tree to build, lint and (in the publish job) publish. inputs.tag
       # is empty unless a dispatch names a tag, and an empty ref checks out
