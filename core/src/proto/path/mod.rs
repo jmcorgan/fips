@@ -134,7 +134,7 @@ pub enum Source {
 /// transport's type; none needs I/O. The host answers for the peer whose
 /// bundle it is stepping, and the machine reads the facts again at each
 /// decision that needs them, so a change takes effect at the next one.
-pub trait Facts {
+pub trait Facts: Sync {
     /// The link MTU of `transport` toward `addr`, in frame bytes.
     fn mtu(&self, transport: TransportId, addr: &TransportAddr) -> usize;
     /// The medium of `transport` toward `addr`, for the path limits:
