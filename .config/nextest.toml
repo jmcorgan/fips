@@ -130,3 +130,25 @@ slow-timeout = { period = "60s", terminate-after = 8 }
 [[profile.ci.overrides]]
 filter = 'test(/^(node::tests::(bloom::test_bloom_filter_convergence_100_nodes|discovery::test_discovery_100_nodes|restart_dial::both_ends_dialling_after_a_peer_restart_settle_on_one_session_in_either_message_order|routing::test_routing_reachability_100_nodes|routing::test_routing_source_only_coords_100_nodes|session::test_session_100_nodes|spanning_tree::test_spanning_tree_convergence_100_nodes)|proto::routing::tests::limits::the_map_stays_bounded_when_a_sender_mints_distinct_destination_keys|proto::rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals|proto::settle::tests::explore::every_named_start_reaches_its_target_depth_over_the_model|proto::settle::tests::joint::explore::every_explored_interleaving_of_the_joint_party_keeps_the_properties_off|proto::settle::tests::joint::explore::every_explored_interleaving_of_the_joint_party_keeps_the_properties_on|proto::settle::tests::joint::explore::every_named_start_reaches_its_target_depth_with_the_machines_off|proto::settle::tests::joint::explore::every_named_start_reaches_its_target_depth_with_the_machines_on|proto::settle::tests::joint::explore::every_named_start_reaches_its_target_depth_with_the_machines_on_against_off|proto::settle::tests::joint::explore::every_named_start_reaches_its_target_depth_with_the_machines_off_against_on|proto::settle::tests::joint::explore::the_cold_start_reaches_its_stated_depth_off_with_off|proto::settle::tests::joint::explore::the_cold_start_reaches_its_stated_depth_on_with_on|proto::settle::tests::legacy::findings::the_model_of_master_against_itself_on_every_start_shows_the_three_defects)$/)'
 slow-timeout = { period = "60s", terminate-after = 8 }
+
+# The explorers that run several starts or scenarios at once take four
+# threads each: they run them through `bounded` in core/src/testutil.rs, a
+# fresh thread per start and at most WORKERS (4) at once, and nextest counts
+# a test as one thread unless told otherwise. When each started a thread per
+# start, all at once, and counted as one, the nine of them started together
+# and put about a hundred and fifty runnable threads on twelve cores (a load
+# of 53 from this crate's tests alone), so each took as long as all of them
+# together rather than its own time (186 s for one that takes 78 s alone), and on
+# a four-core runner or a busy host ran past its limit. Counted as four,
+# nextest runs three of them at once on twelve cores, and one at a time with
+# nothing beside it on a four-core runner (a test that requires more threads
+# than test-threads takes them all).
+#
+# Like the known-slow filter above, this one is not package-scoped.
+[[profile.default.overrides]]
+filter = 'test(/^proto::(rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals|settle::tests::explore::every_named_start_reaches_its_target_depth_over_the_model|settle::tests::oracle::checks::model_parties_settle_on_every_start|settle::tests::joint::explore::(every_explored_interleaving_of_the_joint_party_keeps_the_properties_off|every_explored_interleaving_of_the_joint_party_keeps_the_properties_on|every_named_start_reaches_its_target_depth_with_the_machines_off|every_named_start_reaches_its_target_depth_with_the_machines_on|every_named_start_reaches_its_target_depth_with_the_machines_on_against_off|every_named_start_reaches_its_target_depth_with_the_machines_off_against_on))$/)'
+threads-required = 4
+
+[[profile.ci.overrides]]
+filter = 'test(/^proto::(rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals|settle::tests::explore::every_named_start_reaches_its_target_depth_over_the_model|settle::tests::oracle::checks::model_parties_settle_on_every_start|settle::tests::joint::explore::(every_explored_interleaving_of_the_joint_party_keeps_the_properties_off|every_explored_interleaving_of_the_joint_party_keeps_the_properties_on|every_named_start_reaches_its_target_depth_with_the_machines_off|every_named_start_reaches_its_target_depth_with_the_machines_on|every_named_start_reaches_its_target_depth_with_the_machines_on_against_off|every_named_start_reaches_its_target_depth_with_the_machines_off_against_on))$/)'
+threads-required = 4

@@ -22,6 +22,7 @@
 //! healed: faults off, a clean channel, traffic both ways, and O1 must hold
 //! within the liveness bound.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -550,26 +551,22 @@ fn scenarios() -> Scenarios {
 fn every_explored_interleaving_keeps_the_invariants_and_heals() {
     let (ik, xk, frame, xx) = scenarios();
     // The scenarios are independent and deterministic, so they run on
-    // threads of their own.
-    let report: Vec<(&str, Stats)> = std::thread::scope(|s| {
-        let mut handles = Vec::new();
-        for sc in &ik {
-            handles.push(s.spawn(move || (sc.name, explore(sc))));
-        }
-        for sc in &xk {
-            handles.push(s.spawn(move || (sc.name, explore(sc))));
-        }
-        for sc in &frame {
-            handles.push(s.spawn(move || (sc.name, explore(sc))));
-        }
-        for sc in &xx {
-            handles.push(s.spawn(move || (sc.name, explore(sc))));
-        }
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect()
-    });
+    // threads of their own, a few at a time.
+    type Job<'a> = Box<dyn Fn() -> (&'a str, Stats) + Sync + 'a>;
+    let mut jobs: Vec<Job<'_>> = Vec::new();
+    for sc in &ik {
+        jobs.push(Box::new(move || (sc.name, explore(sc))));
+    }
+    for sc in &xk {
+        jobs.push(Box::new(move || (sc.name, explore(sc))));
+    }
+    for sc in &frame {
+        jobs.push(Box::new(move || (sc.name, explore(sc))));
+    }
+    for sc in &xx {
+        jobs.push(Box::new(move || (sc.name, explore(sc))));
+    }
+    let report = crate::testutil::bounded(&jobs, |job| job());
     for (name, s) in &report {
         std::eprintln!(
             "explored {name}: {} states to depth {}, {} healed",

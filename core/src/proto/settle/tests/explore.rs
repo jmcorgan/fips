@@ -427,30 +427,19 @@ pub fn none(_: &World, _: &[Act]) -> Result<(), String> {
     Ok(())
 }
 
-/// Explore every start on a thread of its own, each until its depth or
-/// until it has seen more states than its cap, returning each start's
-/// statistics and wall time in milliseconds, in the order of `starts`.
+/// Explore every start on a thread of its own, a few at a time
+/// ([`crate::testutil::bounded`]), each until its depth or until it has
+/// seen more states than its cap, returning each start's statistics and
+/// wall time in milliseconds, in the order of `starts`.
 pub fn explore_all(
     starts: &[Start],
     depth: impl Fn(&Start) -> usize + Sync,
     check: Check<'_>,
 ) -> Vec<(Stats, u128)> {
-    let depth = &depth;
-    std::thread::scope(|s| {
-        let handles: Vec<_> = starts
-            .iter()
-            .map(|st| {
-                s.spawn(move || {
-                    let t = std::time::Instant::now();
-                    let stats = search(st, depth(st), None, Some(st.cap), check);
-                    (stats, t.elapsed().as_millis())
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect()
+    crate::testutil::bounded(starts, |st| {
+        let t = std::time::Instant::now();
+        let stats = search(st, depth(st), None, Some(st.cap), check);
+        (stats, t.elapsed().as_millis())
     })
 }
 

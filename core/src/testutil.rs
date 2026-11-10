@@ -204,3 +204,58 @@ static COUNTING: Counting = Counting;
 pub(crate) fn allocations() -> u64 {
     ALLOCATIONS.with(core::cell::Cell::get)
 }
+
+/// The most threads [`bounded`] runs at once: what `threads-required`
+/// declares for the explorers that use it in `.config/nextest.toml`, so a
+/// test runner that counts the threads a test takes counts these.
+pub(crate) const WORKERS: usize = 4;
+
+/// Run `job` on each of `items`, each on a fresh thread of its own, at
+/// most [`WORKERS`] at once (fewer on a host with fewer CPUs), and return
+/// the results in the order of `items`. A job that panics frees its place
+/// and the panic is raised once every job has ended.
+///
+/// The explorers' starts differ in cost by a hundredfold, so a thread per
+/// start, all at once, put twenty runnable threads behind each test that
+/// nextest counted as one, and a test's time became that of every explorer
+/// it ran beside. A fresh thread per job keeps each job's thread-local
+/// state (seeded entropy, fault switches, caches) as it was when every job
+/// had a thread of its own from the start.
+pub(crate) fn bounded<T: Sync, R: Send>(
+    items: &[T],
+    job: impl Fn(&T) -> R + Sync,
+) -> alloc::vec::Vec<R> {
+    /// Tells the spawning loop that a job has ended, on return or unwind.
+    struct Done(std::sync::mpsc::Sender<()>);
+    impl Drop for Done {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+    let most = std::thread::available_parallelism().map_or(1, |n| n.get().min(WORKERS));
+    let job = &job;
+    std::thread::scope(|s| {
+        let (done, ended) = std::sync::mpsc::channel();
+        let mut handles = alloc::vec::Vec::with_capacity(items.len());
+        for (i, item) in items.iter().enumerate() {
+            if i >= most {
+                // A place frees only when a job ends, and `done` is held
+                // here, so this returns once one has.
+                let _ = ended.recv();
+            }
+            let done = Done(done.clone());
+            handles.push(s.spawn(move || {
+                let _done = done;
+                job(item)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    })
+}
+
+#[cfg(test)]
+#[path = "tests/testutil.rs"]
+mod tests;

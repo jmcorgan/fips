@@ -52,7 +52,10 @@ changing anything here.
   `seed_entropy` reseeds, and `seeded_keypair`, so a simulation with real
   Noise handshakes replays too; and the test binary's global allocator,
   the system's with a per-thread count of allocations that
-  `allocations()` reads, so a test can show a call allocates nothing).
+  `allocations()` reads, so a test can show a call allocates nothing;
+  and `bounded`, which runs jobs each on a thread of its own, at most
+  `WORKERS` at once, for the explorers whose nextest `threads-required`
+  in `.config/nextest.toml` counts that many).
   Compiled for tests only.
 
 ## Rules for this level

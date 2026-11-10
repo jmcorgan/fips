@@ -107,7 +107,8 @@ oracles.
   seeded random byte strings of every input kind (which must change
   nothing and panic nowhere) and then healed to O1. A machine cannot be
   cloned (its leases are linear), so each state is rebuilt by replaying
-  its path. Depths are 5 or 6; the scenarios run on threads of their own.
+  its path. Depths are 5 or 6; the scenarios run on threads of their own,
+  four at a time (`bounded` in `core/src/testutil.rs`).
 - `legacy/`: executable models of the deployed releases v0.5.0 to
   v0.5.3, the interop simulation of new nodes on the production
   profiles against them, the same for the session node this release
