@@ -308,6 +308,18 @@ impl Candidates {
         }
     }
 
+    /// Forget the entry on (`transport`, `addr`), if any: the transport
+    /// says the pair can never be reached again.
+    pub(super) fn forget_pair(&mut self, transport: TransportId, addr: &TransportAddr) {
+        for e in self.slots.iter_mut() {
+            if e.as_ref()
+                .is_some_and(|e| e.transport == transport && e.addr == *addr)
+            {
+                *e = None;
+            }
+        }
+    }
+
     /// Forget every entry on `transport`, which was removed.
     pub(super) fn forget(&mut self, transport: TransportId) {
         for e in self.slots.iter_mut() {

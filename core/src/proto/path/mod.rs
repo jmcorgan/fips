@@ -276,6 +276,19 @@ pub enum Input {
         /// The local transport.
         transport: TransportId,
     },
+    /// The local transport says (`transport`, `addr`) can never be reached
+    /// again: its address named one attachment, as a USB link's does, and
+    /// that attachment ended. The path on the pair is discarded at once,
+    /// as [`Input::Removed`] discards a transport's, its candidate entry
+    /// forgotten and a pin of it lifted; a capable peer is told on another
+    /// Live path. Left to the probes, a Probing path on such a pair would
+    /// hold its place toward the limits until its discovery probes ran out.
+    Gone {
+        /// The local transport.
+        transport: TransportId,
+        /// The peer's address on it.
+        addr: TransportAddr,
+    },
     /// The connection [`Output::Connect`] asked for to (`transport`,
     /// `addr`) settled: opened (`ok` true) or failed (`ok` false).
     Connected {
@@ -345,7 +358,8 @@ pub enum Why {
     Grace,
     /// The path was discarded to make room for a new one.
     Evicted,
-    /// The path's local transport was removed, or its interface left.
+    /// The path's local transport was removed, or its interface left, or
+    /// the transport reported the path's pair gone for good.
     Removed,
     /// `AUTH_FAIL_LIMIT` frames in a row failed to authenticate on the
     /// path while another path was Live or acked Suspect.

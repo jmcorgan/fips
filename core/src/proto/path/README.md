@@ -457,7 +457,13 @@ its node code steps it and acts on what it decides.
   `Input::Present` with `present` false), has every path on it discarded
   and released at once, the active path included; the interface's return
   is carrier's return. A removed transport's candidates are forgotten; an
-  absent interface's are held back, the discarded pairs among them. With
+  absent interface's are held back, the discarded pairs among them. A
+  pair its transport reports gone for good (`Input::Gone`: an address
+  that named one attachment, as a USB link's does, whose attachment
+  ended) has its one path discarded and released the same way, a
+  capable peer told on another Live path, its candidate entry forgotten
+  and a pin naming it lifted, so it gives up its place toward the limits
+  at once rather than after its discovery probes run out. With
   the active path discarded, the best Live
   path takes its place, else the best acked Suspect path, else the acked
   path most recently Live (`Switch::Handover`). With no original or acked

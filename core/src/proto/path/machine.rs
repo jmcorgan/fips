@@ -179,6 +179,7 @@ fn multipath(input: &Input) -> bool {
         | Input::SendFailed { .. }
         | Input::Present { .. }
         | Input::Removed { .. }
+        | Input::Gone { .. }
         | Input::Pin { .. }
         | Input::Unpin
         | Input::Report => false,
@@ -197,6 +198,7 @@ fn heard(input: &Input) -> bool {
         | Input::SendFailed { .. }
         | Input::Present { .. }
         | Input::Removed { .. }
+        | Input::Gone { .. }
         | Input::Connected { .. }
         | Input::Pin { .. }
         | Input::Unpin
@@ -582,6 +584,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 present: false,
             } => self.removed(transport, true, &mut out),
             Input::Removed { transport } => self.removed(transport, false, &mut out),
+            Input::Gone { transport, addr } => self.gone(PathRef { transport, addr }, &mut out),
             Input::Connected {
                 transport,
                 addr,
@@ -1580,6 +1583,45 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         }
         if !absent {
             self.table.forget(transport);
+        }
+    }
+
+    /// Discard the path on `to`, which its transport says can never be
+    /// reached again, as [`Self::removed`] discards a transport's paths:
+    /// lift a pin naming the pair, tell a capable peer the path is going on another
+    /// Live path, release it and forget its candidate entry. A pair the
+    /// bundle holds no path on only loses its candidate entry.
+    fn gone(&mut self, to: PathRef, out: &mut Outputs<D>) {
+        if self
+            .pin
+            .as_ref()
+            .is_some_and(|pin| pin.transport == to.transport && pin.addr.as_ref() == Some(&to.addr))
+        {
+            self.pin = None;
+        }
+        self.table.forget_pair(to.transport, &to.addr);
+        let Some(i) = self.set.find(to.transport, &to.addr) else {
+            return;
+        };
+        if self.speaks()
+            && let Some(path_id) = self.set.get(i).and_then(|p| p.peer_id())
+            && let Some(via) = self
+                .away(to.transport)
+                .and_then(|j| self.set.get(j))
+                .map(pair)
+        {
+            out.push(Output::Send {
+                to: via,
+                bytes: PathClose {
+                    path_id,
+                    reason: PathCloseReason::InterfaceGone,
+                }
+                .encode()
+                .to_vec(),
+            });
+        }
+        if let Some(p) = self.set.discard(i) {
+            self.release(p, Why::Removed, out);
         }
     }
 
