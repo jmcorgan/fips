@@ -1430,6 +1430,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Linux packages
 
+- The AUR package workflows install their tooling with a full system upgrade
+  (`pacman -Syu`) instead of only syncing the package databases. The sync
+  alone made a partial upgrade inside the `archlinux:base-devel` image, which
+  pacman refused once Arch moved to openssl 4.1: the newer `libcrypto.so`
+  broke the image's own `pacman`, `sudo` and `libarchive`, and every AUR build
+  failed before it reached the tree under test.
+
 - `fips-dns-setup` no longer waits for `fips0`, so on a host whose TUN has
   another name it no longer times out, and upgrading such a host no longer
   leaves the package half-configured with apt exiting 100. Its per-link
