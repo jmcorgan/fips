@@ -1567,6 +1567,8 @@ impl TransportHandle {
     pub fn take_closed_links(&self) -> Vec<TransportAddr> {
         match self {
             TransportHandle::Usb(t) => t.take_closed_links(),
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.take_closed_links(),
             _ => Vec::new(),
         }
     }
