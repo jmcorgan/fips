@@ -339,3 +339,33 @@ async fn a_far_end_that_sends_no_hello_is_dropped_unpooled_at_the_hello_timeout(
     assert_eq!(a.transport.stats().snapshot().hello_failures, 1);
     assert!(!a.transport.has_connection(&at).await);
 }
+
+/// Dropping a link over a descriptor whose read never returns — an
+/// accessory session that ended before it was opened — closes the
+/// descriptor: the reader is interrupted instead of holding it until the
+/// next unplug, which Android needs free to start the next session.
+/// Mutation: leave the reader blocked when the writer ends.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn a_dropped_link_frees_a_descriptor_whose_read_never_returns() {
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+
+    let (ours, mut theirs) = UnixStream::pair().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let link = rt.block_on(async { UsbLink::from_fd(ours.into(), "accessory-test") });
+    // Let the reader block in its read.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    drop(link);
+
+    theirs
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    let mut buf = [0u8; 1];
+    let n = theirs
+        .read(&mut buf)
+        .expect("the far end sees the descriptor closed, not a timeout");
+    assert_eq!(n, 0, "end of file: the link's descriptor is closed");
+}

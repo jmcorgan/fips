@@ -13,6 +13,8 @@
 
 use std::collections::VecDeque;
 use std::pin::Pin;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -71,9 +73,14 @@ impl UsbLink {
     /// returns `EIO` the moment the cable is pulled — or end of file closes
     /// the link.
     ///
-    /// A link the transport drops leaves its reader blocked until the device
-    /// errors, which on an accessory is the next unplug; the descriptor is
-    /// closed when both threads have ended.
+    /// The accessory driver's read waits for the accessory to be online, so
+    /// a read on a session that has already ended — opened as the cable
+    /// came out, say — blocks until the next one starts. Holding the
+    /// descriptor meanwhile is what stops the next one starting: Android
+    /// opens the same device to start accessory mode, and it admits one
+    /// opener. So when the writer ends — the link was dropped, or a write
+    /// failed — it interrupts the reader with [`wake_reader`]; the reader
+    /// ends and the descriptor is closed when both threads have.
     #[cfg(unix)]
     pub fn from_fd(fd: std::os::fd::OwnedFd, label: impl Into<String>) -> UsbLink {
         use std::io::{Read, Write};
@@ -83,12 +90,15 @@ impl UsbLink {
         let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>(LINK_QUEUE_DEPTH);
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(LINK_QUEUE_DEPTH);
 
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
         let reader = Arc::clone(&file);
         let reader_label = label.clone();
+        let (reader_stop, reader_done) = (Arc::clone(&stop), Arc::clone(&done));
         let spawned = std::thread::Builder::new()
             .name(format!("fips-usb-rd-{label}"))
             .spawn(move || {
-                loop {
+                while !reader_stop.load(Ordering::Acquire) {
                     let mut buf = vec![0u8; USB_TRANSFER_MAX];
                     match (&*reader).read(&mut buf) {
                         Ok(0) => break,
@@ -105,10 +115,15 @@ impl UsbLink {
                         }
                     }
                 }
+                reader_done.store(true, Ordering::Release);
             });
-        if let Err(e) = spawned {
-            tracing::warn!(link = %label, error = %e, "could not start USB link reader");
-        }
+        let reader_thread = match spawned {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                tracing::warn!(link = %label, error = %e, "could not start USB link reader");
+                None
+            }
+        };
 
         let writer = file;
         let writer_label = label.clone();
@@ -123,6 +138,11 @@ impl UsbLink {
                         break;
                     }
                 }
+                drop(writer);
+                if let Some(reader) = reader_thread {
+                    wake_reader(&reader, &stop, &done, &writer_label);
+                    let _ = reader.join();
+                }
             });
         if let Err(e) = spawned {
             tracing::warn!(link = %label, error = %e, "could not start USB link writer");
@@ -134,6 +154,92 @@ impl UsbLink {
             tx: out_tx,
         }
     }
+}
+
+/// Stop the reader thread `reader` of a link whose writer has ended: set
+/// `stop`, then interrupt its blocking read with [`WAKE_SIGNAL`] until it
+/// reports `done`. A signal that lands between reads is lost, so it is sent
+/// again until the reader has seen `stop`. The reader is joined only after
+/// this, so its thread id stays valid for every signal.
+///
+/// Without a wake signal — the platform has none, or the signal already has
+/// a handler that is not ours — the reader is left to end on its own, as it
+/// did before.
+#[cfg(unix)]
+fn wake_reader(
+    reader: &std::thread::JoinHandle<()>,
+    stop: &AtomicBool,
+    done: &AtomicBool,
+    label: &str,
+) {
+    stop.store(true, Ordering::Release);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::os::unix::thread::JoinHandleExt;
+        let Some(signal) = wake_signal() else {
+            return;
+        };
+        let thread = reader.as_pthread_t();
+        for _ in 0..WAKE_TRIES {
+            if done.load(Ordering::Acquire) {
+                return;
+            }
+            // SAFETY: the reader is not joined yet, so `thread` names a
+            // live or exited-but-unjoined thread, either of which
+            // `pthread_kill` accepts.
+            unsafe {
+                libc::pthread_kill(thread, signal);
+            }
+            std::thread::sleep(WAKE_INTERVAL);
+        }
+        if !done.load(Ordering::Acquire) {
+            tracing::debug!(link = %label, "USB link reader did not wake; leaving it to the next unplug");
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _ = (reader, done, label);
+}
+
+/// How many times, and how far apart, a link's reader is signalled.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const WAKE_TRIES: usize = 50;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const WAKE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// The signal that interrupts a link reader's blocking read, with a handler
+/// that does nothing, installed without `SA_RESTART` so the read returns
+/// `EINTR`; `None` when it cannot be installed. Installed once, and only
+/// over the default action: a handler someone else installed is left alone.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn wake_signal() -> Option<libc::c_int> {
+    static SIGNAL: std::sync::OnceLock<Option<libc::c_int>> = std::sync::OnceLock::new();
+    *SIGNAL.get_or_init(|| {
+        extern "C" fn ignore(_: libc::c_int) {}
+        // A real-time signal near the top of the range, clear of the ones
+        // the C libraries reserve at the bottom.
+        let signal = libc::SIGRTMAX() - 2;
+        // SAFETY: plain sigaction calls on a zeroed, then filled, struct.
+        unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(signal, std::ptr::null(), &mut old) != 0
+                || old.sa_sigaction != libc::SIG_DFL
+            {
+                tracing::warn!(
+                    signal,
+                    "USB link wake signal is taken; readers end on unplug only"
+                );
+                return None;
+            }
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = ignore as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            libc::sigemptyset(&mut action.sa_mask);
+            action.sa_flags = 0;
+            if libc::sigaction(signal, &action, std::ptr::null_mut()) != 0 {
+                return None;
+            }
+        }
+        Some(signal)
+    })
 }
 
 /// Join `first` with whatever is already queued behind it, up to one
