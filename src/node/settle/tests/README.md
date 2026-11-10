@@ -1,6 +1,7 @@
 # src/node/settle/tests
 
-Unit tests for the files of `src/node/settle/`. `mod.rs` is the module
+Unit tests for the files of `src/node/settle/` and of `exec/` below it.
+`mod.rs` is the module
 `node::settle::tests`, declared in `../mod.rs`, and a file's own tests are
 that file's child module, by `#[path]`. They run with the crate's other library
 tests.
@@ -30,10 +31,14 @@ tests.
   default configuration, at each multipath setting, against the ones
   `fips_core::proto::settle::parity` states for the schedules a real node
   and the joint world both run, so the two run alike.
-- `plan.rs`: a restart's plan against the statements it ran before, in their
-  order; that every other transition's plan is empty; and the scan that
-  `../plan.rs` denies wildcard arms and holds none, through `table.rs`'s. That
-  scan reads the file with LF line endings, and a test runs it on a CRLF copy.
+- `plan.rs`: each transition's plan against the statements its sites ran,
+  in their order, written beside each effect; that every transition but a
+  cutover has a list and every effect is in one; each announcing
+  transition's failure line; and the scan that `../exec/plan.rs` and
+  `../exec/mod.rs` deny wildcard arms and hold none, through `table.rs`'s.
+  That scan reads both files with LF line endings, and a test runs it on
+  CRLF copies. The tests read the cases of `table.rs`, so a new case is
+  planned here too.
 
 ## Rules for this level
 

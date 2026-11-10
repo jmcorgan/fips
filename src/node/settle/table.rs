@@ -34,6 +34,7 @@ macro_rules! listed {
         }
     };
 }
+pub(super) use listed;
 
 /// One thing the code does to a held peer.
 #[derive(Clone, Copy, Debug)]

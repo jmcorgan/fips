@@ -13,6 +13,7 @@ use crate::NodeAddr;
 use crate::node::diag::{self, OrNone};
 use crate::node::reject::{RejectReason, SessionReject};
 use crate::node::session::{SessionInstant, SessionOutput, SessionOutputs};
+use crate::node::settle::exec::Run;
 use crate::node::settle::table::{Cell, Row, Transition, cell};
 use crate::node::{Node, TICK};
 use crate::peer::{LinkOutput, LinkOutputs, LinkProfile, peer_now};
@@ -367,7 +368,8 @@ impl Node {
             epoch = %hex::encode(epoch),
             "Peer restart detected during FMP rekey, resetting what was held for its previous run"
         );
-        self.run_plan(node_addr, &Transition::Restarted).await;
+        let mut run = Run::new(*node_addr, Transition::Restarted);
+        self.run(&mut run).await;
     }
 
     /// Close the end-to-end session with `addr` and what describes it: the

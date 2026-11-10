@@ -11,7 +11,7 @@ use super::*;
 /// One way each transition is reached: each column of the table, and each cause
 /// inside it that a cell tells apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Case {
+pub(crate) enum Case {
     PromoteInitiator,
     PromoteResponder,
     ReplaceRestart,
@@ -38,7 +38,7 @@ enum Case {
 }
 
 /// Every case, in the table's column order.
-const CASES: &[Case] = &[
+pub(crate) const CASES: &[Case] = &[
     Case::PromoteInitiator,
     Case::PromoteResponder,
     Case::ReplaceRestart,
@@ -83,7 +83,7 @@ fn link() -> LinkId {
 }
 
 /// The transition `case` stands for.
-fn transition(case: Case) -> Transition {
+pub(crate) fn transition(case: Case) -> Transition {
     let replace = |initiator, why| Transition::Replace {
         link: link(),
         initiator,

@@ -38,6 +38,7 @@ use crate::node::{Node, NodeError};
 use crate::peer::machine::{LostKind, PeerAction, PeerEvent};
 use crate::proto::fmp::PromotionResult;
 use crate::proto::fmp::wire::build_msg2;
+use crate::proto::settle::output::Why;
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use std::collections::VecDeque;
@@ -82,6 +83,10 @@ pub(in crate::node) struct PeerActionCtx {
     /// reject only; leave the dead link and its index entry for the
     /// stale-connection reaper, matching old `handle_msg2`).
     pub(in crate::node) is_outbound: bool,
+    /// Why the peer this step removes is removed, where the caller knows:
+    /// the liveness reap says its link is dead or its paths are gone. `None`
+    /// where the step removes no peer, or the caller has not said.
+    pub(in crate::node) why: Option<Why>,
 }
 
 impl Node {

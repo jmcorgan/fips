@@ -722,6 +722,7 @@ async fn the_executor_asserts_that_no_held_identity_reaches_a_promotion() {
         now_ms: 4000,
         interval_ms: Node::interval_ms(),
         is_outbound: true,
+        why: None,
     };
     node.execute_peer_actions(
         second,

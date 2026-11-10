@@ -663,6 +663,7 @@ impl Node {
                 now_ms: Self::now_ms(),
                 interval_ms,
                 is_outbound: true,
+                why: None,
             };
             self.advance_peer_machine(
                 link_id,
@@ -696,6 +697,7 @@ impl Node {
                 now_ms: Self::now_ms(),
                 interval_ms,
                 is_outbound: true,
+                why: None,
             };
             self.advance_peer_machine(
                 link_id,
@@ -1767,6 +1769,7 @@ impl Node {
                         now_ms: Self::now_ms(),
                         interval_ms,
                         is_outbound: true,
+                        why: None,
                     };
                     self.advance_peer_machine(
                         pending.link_id,

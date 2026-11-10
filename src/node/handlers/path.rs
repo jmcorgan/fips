@@ -631,7 +631,8 @@ impl Node {
                         peer = %self.peer_display_name(node_addr),
                         "Removing peer: {why}"
                     );
-                    self.route_link_dead(*node_addr, Self::now_ms()).await;
+                    let why = crate::proto::settle::output::Why::Orphaned;
+                    self.route_link_dead(*node_addr, Self::now_ms(), why).await;
                     ran.orphaned = true;
                 }
             }

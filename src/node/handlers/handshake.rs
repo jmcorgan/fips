@@ -1254,6 +1254,7 @@ impl Node {
                     now_ms: packet.timestamp_ms,
                     interval_ms,
                     is_outbound: false,
+                    why: None,
                 };
                 let carried_announce = if node_fault!(TreeCarryAcrossRestart) {
                     self.peers
@@ -1339,6 +1340,7 @@ impl Node {
                     now_ms: packet.timestamp_ms,
                     interval_ms,
                     is_outbound: false,
+                    why: None,
                 };
                 self.execute_peer_actions(link_id, &ambient, promote_actions)
                     .await;
@@ -1478,6 +1480,7 @@ impl Node {
                     now_ms: packet.timestamp_ms,
                     interval_ms,
                     is_outbound: false,
+                    why: None,
                 };
                 self.execute_peer_actions(link_id, &ambient, promote_actions)
                     .await;
@@ -1556,6 +1559,7 @@ impl Node {
             now_ms: packet.timestamp_ms,
             interval_ms,
             is_outbound: false,
+            why: None,
         };
         self.advance_peer_machine(
             link,
@@ -2533,6 +2537,7 @@ impl Node {
             now_ms: packet.timestamp_ms,
             interval_ms,
             is_outbound: true,
+            why: None,
         };
         self.execute_peer_actions(link_id, &ambient, actions).await;
 
