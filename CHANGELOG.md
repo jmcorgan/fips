@@ -1418,6 +1418,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### macOS
 
+- Upgrading with the macOS package no longer leaves the daemon without UDP.
+  The preinstall's `launchctl bootout` returns while the daemon is still
+  shutting down, so the package wrote the new binary over the running one and
+  bootstrapped the new daemon before the old process had gone. The new
+  daemon's UDP bind failed with "Address already in use", and the old socket
+  stayed bound after the old process was gone, so every later start failed too
+  until a reboot or a port change. Both package scripts now wait for the old
+  daemon's process to exit, and kill it after 30 s, before going on.
+
 - The macOS daemon's log, `/usr/local/var/log/fips/fips.log`, no longer grows
   without bound (717 MB on a node at debug level). launchd appends stdout to a
   file forever and gives the daemon no way to reopen one rotated away, so the
