@@ -1122,22 +1122,39 @@ impl JointParty {
             theirs,
         };
         let old = self.s.peers.remove(&peer.0);
-        let renewed = matches!((i.rekey, &old), (Build::FromCarry, Some(_)));
         let beside =
             i.rekey == Build::FromCarry && old.is_none() && self.s.kept.contains_key(&peer.0);
         // The record a move carries keeps what it owes.
         let mut owed = Owed::default();
-        let (machines, events, answered, beat, heard, off) = match (i.rekey, old) {
+        // What the core is told after the events: at a start on the link,
+        // its original path, Live, which the join function gives, since a
+        // new bundle reports nothing.
+        let (machines, events, told, answered, beat, heard, off) = match (i.rekey, old) {
             (Build::Fresh, Some(old)) if fault!(ReplaceKeepsMachine) => {
                 // The defect's shape: the replaced peering's machines run
-                // on, and the new handshake's lease goes unused.
+                // on, and the new handshake's lease goes unused. The core
+                // is still told of the original path, as a start tells it.
                 self.s.kit.pool.free(setup.lease.release());
-                (old.machines, Vec::new(), false, now, now, None)
+                let live = In::State {
+                    link: i.link,
+                    pair: i.pair.clone(),
+                    proven: Proven::Live,
+                };
+                (
+                    old.machines,
+                    Vec::new(),
+                    alloc::vec![live],
+                    false,
+                    now,
+                    now,
+                    None,
+                )
             }
             (Build::FromCarry, Some(old)) => {
                 owed = old.owed;
                 let (m, ev) = old.machines.moved(&mut self.s.kit, now, setup, to, local);
-                (m, ev, old.answered, old.beat, old.heard, Some(old.link))
+                let off = Some(old.link);
+                (m, ev, Vec::new(), old.answered, old.beat, old.heard, off)
             }
             (Build::FromCarry, None) if beside => {
                 // A candidate rule kept the session moved off: its machines
@@ -1146,8 +1163,8 @@ impl JointParty {
                 let State { kept, kit, .. } = &mut self.s;
                 let k = kept.get(&peer.0).expect("a kept session, checked above");
                 owed = k.owed.clone();
-                let (m, ev) = k.machines.beside(kit, now, setup, to, local);
-                (m, ev, k.answered, k.beat, k.heard, None)
+                let (m, ev, told) = k.machines.beside(kit, now, setup, to, local, i.link);
+                (m, ev, told, k.answered, k.beat, k.heard, None)
             }
             (rebuilt, old) => {
                 if let Some(old) = old {
@@ -1165,7 +1182,7 @@ impl JointParty {
                     }
                     None => filed,
                 };
-                let (m, ev) = Machines::fresh(
+                let (m, ev, told) = Machines::held(
                     &mut self.s.kit,
                     now,
                     peer,
@@ -1174,8 +1191,9 @@ impl JointParty {
                     record,
                     to,
                     local,
+                    Some(i.link),
                 );
-                (m, ev, false, now, now, None)
+                (m, ev, told, false, now, now, None)
             }
         };
         self.s.peers.insert(
@@ -1198,14 +1216,7 @@ impl JointParty {
         self.s.retry.remove(&peer.0);
         self.named(peer, Some(hs));
         let mut r = self.route(peer, Some(i.link), off, events);
-        if !renewed {
-            // A new bundle reports nothing: its original path is Live.
-            r.inputs.push(In::State {
-                link: i.link,
-                pair: i.pair,
-                proven: Proven::Live,
-            });
-        }
+        r.inputs.extend(told);
         self.inputs(net, r.inputs, fx);
         // The bundle started again with no candidate: the configuration's
         // pairs for the peer are offered to it, as `paths_renewed` does.

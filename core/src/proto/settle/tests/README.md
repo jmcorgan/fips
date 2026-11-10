@@ -175,8 +175,9 @@ can rebuild any state by replaying the path that reached it.
   `#[path]`: the path events, attribution by a proven path, a punched
   dial, a failed msg2 send, the stored msg2 drawn by any msg1 from its
   address, an orphaned bundle, the admission cap, the
-  links a crossing and a late second dial retire, and the reset a move
-  hands the per-peer data.
+  links a crossing and a late second dial retire, the reset a move
+  hands the per-peer data, and the table and a record of its own reading
+  the bundle's reports the same way through `Links::mirror`.
 - `links.rs`: the unit tests of `../links.rs`, attached from it with
   `#[path]` (so it is that module's child, not declared in `mod.rs`): the
   derived index, and the close rule's cases with a link a leg holds, a
@@ -186,11 +187,30 @@ can rebuild any state by replaying the path that reached it.
   the silent-session refusal and its doubling, the frame that forgets
   both, the default intervals against the model's, and the gates run
   beside a model `Judge` on the model's own gate histories.
+- `join.rs`: the unit tests of `../join.rs`, attached from it with
+  `#[path]`: what each rekey output and each bundle output becomes, a
+  removal's outputs reaching no link, a released path going to the link
+  the peer moved off, a roam and a bind, the order of a step's outputs,
+  and a rekey step allocating nothing, counted by the crate's test
+  allocator; and on stub keys, a move refused for a setup of another key
+  leaving both machines as they were, a removal handing back what the
+  rekey machine carried, and a start on a link telling the core of the
+  original path as Live. None of those has a switch of its own, so each
+  test's break is a scratch edit of the function, named in its doc
+  comment.
 - `legs.rs`: the unit tests of `../legs.rs`, attached from it with
   `#[path]`: a leg reaped at its deadline with its lease, the resend
   schedule within and past the deadline, the stored answer to a resend,
   a poll before the next wake, a deadline at the end of a short clock's
   range, and `close` returning every lease with no leak.
+- `parity.rs`: the unit tests of `../parity.rs` and its trace, attached
+  from it with `#[path]`: the committed trace reads back exactly as
+  written, and a line short of a field or with two fields exchanged does
+  not; every shared script names only the nodes and transports it holds;
+  the scripts and the trace's blocks match one to one, with a line for
+  each step and end, a header with the script's settings and no `core`
+  line restating the node's value; and every `core` line names a listed
+  cause. Each plants its own bad input.
 - `legacy/`: models of deployed settlement as nodes of the world. See its
   README.
 - `joint/`: the joint world, whose nodes run the core, a real rekey

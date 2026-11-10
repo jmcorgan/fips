@@ -198,8 +198,9 @@ pub(crate) enum Fault {
     /// The world's digest prints a packet's wire index in place of its
     /// bytes.
     WireByNumber,
-    /// A joint node's machine after a cross-connection move is built as a
-    /// new link's, keeping neither the link's age nor the replay record.
+    /// The join function builds the rekey machine after a
+    /// cross-connection move as a new link's, keeping neither the link's
+    /// age nor the replay record.
     MoveBuildsFresh,
     /// A joint node does not start the bundle again at a cross-connection
     /// move.

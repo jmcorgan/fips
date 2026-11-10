@@ -26,6 +26,10 @@ tests.
   sources are read with LF line endings, and a test reads and plants in a
   CRLF copy, as a Windows checkout has. The census cannot tell a field put on
   the exempt list wrongly.
+- `defaults.rs`: the link rekey and path settings the node derives at the
+  default configuration, at each multipath setting, against the ones
+  `fips_core::proto::settle::parity` states for the schedules a real node
+  and the joint world both run, so the two run alike.
 - `plan.rs`: a restart's plan against the statements it ran before, in their
   order; that every other transition's plan is empty; and the scan that
   `../plan.rs` denies wildcard arms and holds none, through `table.rs`'s. That

@@ -10,9 +10,12 @@
 //! handshake message, a prompt, a path message to seal, or a connection
 //! the bundle asks for.
 //!
-//! The bundle reports a one-path roam in no output, so its
-//! [`Event::Roamed`] is a core input of its own, as each bundle output is:
-//! the core mirrors the bundle's paths, and only through these inputs.
+//! Which events are core inputs, and which input each stands for, is the
+//! core's join function's rule (`settle::join`): each event goes through
+//! it, and only what it gives as the shell's own is carried out here. The
+//! bundle reports a one-path roam in no output, so its [`Event::Roamed`]
+//! is a core input of its own, as each bundle output is: the core mirrors
+//! the bundle's paths, and only through these inputs.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -23,21 +26,26 @@ use core::ops::Range;
 use crate::identity::NodeAddr;
 use crate::proto::fmp::EphemeralDigest;
 use crate::proto::path::tests::shell::Out;
-use crate::proto::path::{Output as PathOutput, PathRef, PathState};
+use crate::proto::path::{Output as PathOutput, PathRef};
 use crate::proto::rekey::tests::stub::{Ik, Kid, Msg1};
 use crate::proto::rekey::{
     Abandon, Authentic, Completed, EpochTag, Msg1Read, MsgKind, Output, Reason, Record, Replayable,
     Route, Wire, allocate,
 };
 use crate::proto::settle::input::{Hello, Input as In};
-use crate::proto::settle::links::{LinkNo, Pair, Proven};
+use crate::proto::settle::join::{self, Joined, Step, join};
+use crate::proto::settle::links::{LinkNo, Proven};
 use crate::proto::settle::output::Output as CoreOutput;
+use crate::testutil::{TestClock, TestInstant};
 
 use super::super::super::model::history::{Addr, Hs, Node};
 use super::super::super::model::judge::Class;
 use super::super::drive;
+use super::facts::Draw;
 use super::machines::{Event, Kit, Machines};
 use super::names;
+
+pub use crate::proto::settle::join::pair;
 
 /// A message the shell is to send for a peer's machines.
 #[derive(Debug)]
@@ -118,14 +126,6 @@ pub struct Ctx<'a> {
     pub bound: &'a mut BTreeMap<u32, u8>,
 }
 
-/// The core's pair for path `p`.
-pub fn pair(p: &PathRef) -> Pair {
-    Pair {
-        transport: p.transport,
-        addr: p.addr.clone(),
-    }
-}
-
 /// The world address of path `p`.
 pub fn at(p: &PathRef) -> Addr {
     drive::addr(&pair(p))
@@ -133,19 +133,9 @@ pub fn at(p: &PathRef) -> Addr {
 
 /// What the core is told of the path to `p`, read from the bundle: `Live`
 /// for a Live path, `Acked` for another acked one, `Probing` otherwise,
-/// and for one the bundle no longer holds.
+/// and for one the bundle no longer holds; the join function's reading.
 pub fn proven(m: &Machines, p: &PathRef) -> Proven {
-    let paths = m.bundle().paths();
-    let Some(path) = paths.find(p.transport, &p.addr).and_then(|i| paths.get(i)) else {
-        return Proven::Probing;
-    };
-    if path.state() == PathState::Live {
-        Proven::Live
-    } else if path.acked() {
-        Proven::Acked
-    } else {
-        Proven::Probing
-    }
+    join::proven(m.bundle(), p)
 }
 
 /// A msg1's answer built before the core decides on it: the completed
@@ -269,33 +259,57 @@ pub fn class(
     }
 }
 
-/// Route the events of one call of a peer's machines.
+/// Route the events of one call of a peer's machines, each through the
+/// join function.
 pub fn route(events: Vec<Event>, mut ctx: Ctx<'_>) -> Routed {
     let mut r = Routed::default();
     for e in events {
         match e {
-            Event::Rekey(o) => rekeyed(o, &mut ctx, &mut r),
+            Event::Rekey(o) => {
+                let steps = joined(
+                    ctx.key,
+                    join::Event::Rekey {
+                        out: alloc::vec![o],
+                    },
+                );
+                stepped(steps, &mut ctx, &mut r);
+            }
             Event::Prompt { tag, wire } => r.sends.push(Send::Prompt { tag, wire }),
             Event::Freed(_) => {}
-            Event::Path(o) => pathed(o, &ctx, &mut r),
+            Event::Path(o) => {
+                let m = ctx.machines;
+                let read = |p: &PathRef| proven(m, p);
+                let steps = joined(
+                    ctx.key,
+                    join::Event::Paths {
+                        out: alloc::vec![o],
+                        read: &read,
+                        link: ctx.link,
+                        released: ctx.released,
+                    },
+                );
+                stepped(steps, &mut ctx, &mut r);
+            }
             Event::Roamed { from, to } => {
                 if let Some(link) = ctx.link
                     && !fault!(PathsUnmirrored)
                 {
-                    r.inputs.push(In::Moved {
+                    let roam = join::Event::Roam {
                         link,
-                        from: drive::pair(from),
+                        from: Some(drive::pair(from)),
                         to: drive::pair(to),
-                    });
+                    };
+                    stepped(joined(ctx.key, roam), &mut ctx, &mut r);
                 }
             }
             Event::Bound { at } => {
                 if let Some(link) = ctx.link {
-                    r.inputs.push(In::State {
+                    let bind = join::Event::Roam {
                         link,
-                        pair: drive::pair(at),
-                        proven: Proven::Live,
-                    });
+                        from: None,
+                        to: drive::pair(at),
+                    };
+                    stepped(joined(ctx.key, bind), &mut ctx, &mut r);
                 }
             }
         }
@@ -303,7 +317,42 @@ pub fn route(events: Vec<Event>, mut ctx: Ctx<'_>) -> Routed {
     r
 }
 
-/// One rekey machine output.
+/// The steps the join function gives for `peer`'s `event`.
+fn joined(
+    peer: NodeAddr,
+    event: join::Event<'_, '_, '_, Ik, TestClock, Draw, u64>,
+) -> Joined<Ik, u64, TestInstant> {
+    join(peer, event).unwrap_or_else(|_| unreachable!("only a start is refused"))
+}
+
+/// Carry out `steps`: a core input taken in order, a replacement for the
+/// core's gates noted, and each machine output that is the shell's own
+/// routed as it is.
+fn stepped(steps: Joined<Ik, u64, TestInstant>, ctx: &mut Ctx<'_>, r: &mut Routed) {
+    for step in steps {
+        match step {
+            Step::Core(i) => {
+                // The defects' shapes: the core never told of a restart
+                // its rekey machine found, or of a bundle with no path left
+                // to send on, which it then keeps.
+                let dropped = (matches!(i, In::Restarted { .. }) && fault!(RestartDropped))
+                    || (matches!(i, In::Orphaned { .. }) && fault!(OrphanKept));
+                if !dropped {
+                    r.inputs.push(i);
+                }
+            }
+            Step::Replace(tok) => {
+                if !fault!(ReplaceDropped) {
+                    r.replace = Some(tok);
+                }
+            }
+            Step::Rekey(o) => rekeyed(o, ctx, r),
+            Step::Path(o) => pathed(o, r),
+        }
+    }
+}
+
+/// One rekey machine output the join function gave as the shell's own.
 fn rekeyed(o: Output<Ik>, ctx: &mut Ctx<'_>, r: &mut Routed) {
     match o {
         Output::Send { msg, kind, route } => match kind {
@@ -338,20 +387,7 @@ fn rekeyed(o: Output<Ik>, ctx: &mut Ctx<'_>, r: &mut Routed) {
         )),
         Output::Deliver { range, .. } => r.delivered = Some(range),
         Output::Installed { .. } | Output::Retired { .. } | Output::Reverted { .. } => {}
-        Output::PeerRestarted { epoch, .. } => {
-            if !fault!(RestartDropped) {
-                r.inputs.push(In::Restarted {
-                    peer: ctx.key,
-                    epoch,
-                });
-            }
-        }
         Output::Rekeyed { .. } => r.cut = true,
-        Output::ReplaceRequested { tok } => {
-            if !fault!(ReplaceDropped) {
-                r.replace = Some(tok);
-            }
-        }
         Output::Reject(why) => r.reject = Some(why),
         Output::Abandoned(a) => match a {
             Abandon::Unanswered => r.abandoned = true,
@@ -364,61 +400,19 @@ fn rekeyed(o: Output<Ik>, ctx: &mut Ctx<'_>, r: &mut Routed) {
             | Abandon::Superseded
             | Abandon::Closed(_) => {}
         },
-        Output::Teardown(_) => r.inputs.push(In::Ended { peer: ctx.key }),
+        Output::PeerRestarted { .. } | Output::ReplaceRequested { .. } | Output::Teardown(_) => {
+            r.broken.push(format!(
+                "{:?}: the join function gave the core's output {o:?} to the shell",
+                ctx.peer
+            ));
+        }
     }
 }
 
-/// One bundle output.
-fn pathed(o: Out, ctx: &Ctx<'_>, r: &mut Routed) {
+/// One bundle output the join function gave back: the sends are the
+/// shell's, and the core inputs it stands for came with it.
+fn pathed(o: Out, r: &mut Routed) {
     match o {
-        PathOutput::State { next: None, .. } => {}
-        PathOutput::State { to, .. } => {
-            if let Some(link) = ctx.link {
-                r.inputs.push(In::State {
-                    link,
-                    pair: pair(&to),
-                    proven: proven(ctx.machines, &to),
-                });
-            }
-        }
-        PathOutput::Moved { from, to, .. } => {
-            if let Some(link) = ctx.link {
-                r.inputs.push(In::Moved {
-                    link,
-                    from: pair(&from),
-                    to: pair(&to),
-                });
-            }
-        }
-        PathOutput::Switched { from, to, .. } => {
-            if let Some(link) = ctx.link {
-                // The core never reads `from`; a discarded old active path
-                // gives none, so the pair switched to stands in.
-                let from = from.as_ref().unwrap_or(&to);
-                r.inputs.push(In::Switched {
-                    link,
-                    from: pair(from),
-                    to: pair(&to),
-                });
-            }
-        }
-        PathOutput::Released { to, keep, .. } => {
-            if let Some(link) = ctx.released.or(ctx.link) {
-                r.inputs.push(In::Released {
-                    link,
-                    pair: pair(&to),
-                    keep,
-                });
-            }
-        }
-        PathOutput::Orphaned => {
-            // The defect's shape: the core never told, so it keeps a peer
-            // whose bundle has no path left to send on.
-            if ctx.link.is_some() && !fault!(OrphanKept) {
-                r.inputs.push(In::Orphaned { peer: ctx.key });
-            }
-        }
-        PathOutput::Capable | PathOutput::NotCapable | PathOutput::Refused { .. } => {}
         PathOutput::Send { to, bytes } => r.sends.push(Send::Path {
             to: drive::addr(&pair(&to)),
             bytes,
@@ -426,5 +420,13 @@ fn pathed(o: Out, ctx: &Ctx<'_>, r: &mut Routed) {
         PathOutput::Connect { to } => r.sends.push(Send::Connect {
             to: drive::addr(&pair(&to)),
         }),
+        PathOutput::State { .. }
+        | PathOutput::Moved { .. }
+        | PathOutput::Switched { .. }
+        | PathOutput::Released { .. }
+        | PathOutput::Orphaned
+        | PathOutput::Capable
+        | PathOutput::NotCapable
+        | PathOutput::Refused { .. } => {}
     }
 }

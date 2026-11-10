@@ -186,11 +186,7 @@ fn indexed(table: &Table<TestInstant>, port: u16, link: LinkNo) -> bool {
 }
 
 fn switched(link: LinkNo, to: u16) -> Input {
-    Input::Switched {
-        link,
-        from: pair(1),
-        to: pair(to),
-    }
+    Input::Switched { link, to: pair(to) }
 }
 
 #[test]
@@ -456,4 +452,85 @@ fn a_move_resets_peer_data() {
         transition: Transition::Move,
     };
     assert!(out.contains(&reset));
+}
+
+/// The connections the table's outputs `out` close for a released path.
+fn released(out: &[Output]) -> Vec<Pair> {
+    out.iter()
+        .find_map(|o| {
+            if let Output::Release { closes, .. } = o {
+                Some(closes.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+/// The table and a shell's record of a link read each bundle report the
+/// same way, through `Links::mirror`: a switch adds the path Live, a state
+/// change sets its state, a move keeps its state at the new pair, and a
+/// release drops it and closes its connection. Each record is held to the
+/// paths stated here, so each of the table's switches over those reports
+/// turns this red.
+#[test]
+fn the_table_and_the_record_read_the_mirror_the_same_way() {
+    let (mut table, link) = dialer(1);
+    let mut record = Links::new();
+    let at = record.open(pair(1), Dir::Outbound, Holder::Peer(large()));
+    let reports = |l: LinkNo| {
+        [
+            switched(l, 5),
+            Input::State {
+                link: l,
+                pair: pair(5),
+                proven: Proven::Probing,
+            },
+            Input::Moved {
+                link: l,
+                from: pair(5),
+                to: pair(6),
+            },
+            Input::State {
+                link: l,
+                pair: pair(6),
+                proven: Proven::Live,
+            },
+            Input::Released {
+                link: l,
+                pair: pair(6),
+                keep: false,
+            },
+        ]
+    };
+    let expected = [
+        (alloc::vec![(pair(5), Proven::Live)], alloc::vec![]),
+        (alloc::vec![(pair(5), Proven::Probing)], alloc::vec![]),
+        (alloc::vec![(pair(6), Proven::Probing)], alloc::vec![]),
+        (alloc::vec![(pair(6), Proven::Live)], alloc::vec![]),
+        (alloc::vec![], alloc::vec![pair(6)]),
+    ];
+    for ((to_table, to_record), (paths, closes)) in
+        reports(link).into_iter().zip(reports(at)).zip(expected)
+    {
+        let shown = alloc::format!("{to_record:?}");
+        let out = go(&mut table, to_table, 0);
+        let closed = record.mirror(&to_record);
+        assert_eq!(
+            record.get(at).expect("the record holds the link").paths,
+            paths,
+            "the record after {shown}"
+        );
+        assert_eq!(closed, closes, "the record's closes after {shown}");
+        assert_eq!(
+            table
+                .links()
+                .get(link)
+                .expect("the table holds the link")
+                .paths,
+            paths,
+            "the table after {shown}"
+        );
+        assert_eq!(released(&out), closes, "the table's closes after {shown}");
+    }
 }

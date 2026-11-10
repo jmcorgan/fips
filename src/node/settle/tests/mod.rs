@@ -11,6 +11,7 @@ use crate::{Identity, NodeAddr, PeerIdentity};
 use std::time::Duration;
 
 mod census;
+mod defaults;
 mod plan;
 
 /// An inbound machine for `link`, with no handshake started.

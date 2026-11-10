@@ -11,9 +11,10 @@ builds, and changes no line of the core, the machine or the bundle.
 - `mod.rs`: declares the files below, and holds `Mode`, a joint node's
   multipath setting (`node.path.enabled`), with the rekey and path
   settings the node derives from it at the default configuration
-  (`link_params`, `path_params`): the answer on a msg1's arrival path
-  and the bundle's `enabled` follow the mode, everything else is the
-  default's. It also holds the makers of a start's joint nodes (all at
+  (`link_params`, `path_params`), read from their one statement in
+  `../../parity.rs`, which a root test ties to the node's: the answer on
+  a msg1's arrival path and the bundle's `enabled` follow the mode,
+  everything else is the default's. It also holds the makers of a start's joint nodes (all at
   `Off`, all at `On`, and node 0 at one setting with the rest at the
   other), and the world's transports a node's facts are built over.
 - `names.rs`: the world's identities on stub keys, and `NINTH`, the larger
@@ -45,13 +46,18 @@ builds, and changes no line of the core, the machine or the bundle.
 - `machines.rs`: `Machines`, one held peer's rekey machine and bundle,
   and `Kit`, the node's capabilities they borrow per call (stub keys,
   index pool, epoch tags, jitter, scratch, path identifiers, transport
-  facts). `fresh` builds both at a link's setup, as the node does at
-  promotion; `moved` closes the rekey machine, builds it again from what
-  it carried and starts the bundle again at the pair moved to, as a
+  facts). Every build, move and close goes through the core's join
+  function (`../../join.rs`), which makes the machine calls in their
+  order: `fresh` builds both at a link's setup, as the node does at
+  promotion, and `held` does the same for a peer the core holds on a
+  link, with the core input the join function gives for it (the original
+  path, Live); `moved` closes the rekey machine, builds it again from
+  what it carried and starts the bundle again at the pair moved to, as a
   cross-connection move does; `beside` builds the machines of a session a
   candidate rule moves the peer onto while it keeps this one, from what
   this one's rekey machine shows and a copy of its record, leaving it as
-  it is; `close` closes both at removal; `msg1`,
+  it is, with the same core input as `held`; `close` closes both at
+  removal, the bundle first; `msg1`,
   `reply`, `frame`, `poll`, `trigger`, `account` and `path` step them,
   and `message` decodes a path message the peer sent, after its frame was
   accounted, and steps it into the bundle;
@@ -380,9 +386,11 @@ builds, and changes no line of the core, the machine or the bundle.
 - `route.rs`: `route`, which turns one call's machine events into what
   the shell sends (an own msg1, a reply by its route, a sealed prompt, a
   path message, a connection the bundle asks for),
-  the core inputs they stand for, in order (a bundle output as the path
-  input it mirrors, a one-path roam as `Moved`, a restart revealed as
-  `Restarted`, a teardown as `Ended`), and what the call decided (a
+  the core inputs they stand for, in order, each as the core's join
+  function (`../../join.rs`) gives it (a bundle output as the path input
+  it mirrors, a one-path roam as `Moved` and a bind as a Live path, a
+  restart revealed as `Restarted`, a teardown as `Ended`), and what the
+  call decided (a
   replacement asked for, a cutover, a refusal, a yield, a frame's
   plaintext); it keeps the node's index map as `Bind` and `Unbind` say,
   and holds no party state. An orphaned bundle becomes `Orphaned` (switch
