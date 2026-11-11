@@ -32,8 +32,10 @@ fn connection(t: &BleTransport<MockBleIo>) -> (BleConnection<Arc<MockBleStream>>
     let stream = Arc::new(near);
     let id = next_conn_id();
     let (send_tx, send_rx) = tokio::sync::mpsc::channel(pool::SEND_QUEUE_DEPTH);
+    let (path_tx, path_rx) = tokio::sync::mpsc::channel(pool::PATH_QUEUE_DEPTH);
     let send_task = tokio::spawn(send_loop(
         Arc::clone(&stream),
+        path_rx,
         send_rx,
         at(),
         id,
@@ -44,6 +46,7 @@ fn connection(t: &BleTransport<MockBleIo>) -> (BleConnection<Arc<MockBleStream>>
     let conn = BleConnection {
         stream,
         send_tx,
+        path_tx,
         send_task: Some(send_task),
         recv_task: None,
         send_mtu: 2048,

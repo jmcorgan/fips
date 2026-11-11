@@ -637,7 +637,7 @@ impl Node {
             };
             match output {
                 Output::Send { to, bytes } => {
-                    match self.send_via(node_addr, &bytes, false, Some(&to)).await {
+                    match self.send_path(node_addr, &bytes, &to).await {
                         // The first byte is the message type (0x52 probe,
                         // 0x53 ack, 0x54 close) and `len` the encoded
                         // message, before the padding added at send.

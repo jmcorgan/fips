@@ -19,6 +19,14 @@ can reach that file's private items.
   and the close itself returns without waiting for the writer. The file
   builds pool entries with the real writer task behind them, over mock
   stream pairs whose far end the test holds.
+- `lane.rs`, declared from `mod.rs` as `mod lane_tests`: the path-message
+  lane. A connection whose data queue is full still takes a path message;
+  the writer sends a waiting path message before the data queued ahead of
+  it; and a connection that has stopped draining refuses path messages once
+  their own queue is full, so its path still fails. The file pools one
+  connection with the real writer behind it, over a mock stream pair that
+  holds one frame each way, so a far end the test does not read is a
+  stalled link.
 
 `pool.rs` and `mod.rs` still carry inline `mod tests` blocks. Those blocks
 predate the rule that unit tests live in this directory, and are due to move

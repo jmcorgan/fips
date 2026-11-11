@@ -12,6 +12,8 @@ mod app_tun;
 mod ble;
 #[cfg(ble_available)]
 mod ble_lifecycle;
+#[cfg(ble_available)]
+mod ble_queue;
 mod bloom;
 mod bloom_echo;
 mod bloom_hold;

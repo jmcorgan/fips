@@ -227,6 +227,10 @@ faults! {
     /// The BLE transport does not restart the timeout of a channel the
     /// node holds.
     BleUnprovenIgnoresHeld,
+    /// A queueing transport puts path messages in the connection's data
+    /// queue, behind the data and refused when it is full, instead of in
+    /// their own queue, which its writer drains first.
+    PathLaneShared,
     /// A moved path's old pair stays in the link's record, so the index
     /// derived from it keeps an entry there, beside the one at the pair it
     /// moved to.

@@ -88,7 +88,7 @@ use crate::transport::tcp::TcpTransport;
 use crate::transport::tor::TorTransport;
 use crate::transport::udp::UdpTransport;
 use crate::transport::{
-    Link, LinkDirection, LinkId, PacketRx, PacketTx, TransportAddr, TransportError,
+    Lane, Link, LinkDirection, LinkId, PacketRx, PacketTx, TransportAddr, TransportError,
     TransportHandle, TransportId,
 };
 use crate::utils::index::IndexAllocator;
@@ -4455,9 +4455,35 @@ impl Node {
         ce_flag: bool,
         via: Option<&fips_core::proto::path::PathRef>,
     ) -> Result<(), NodeError> {
+        self.send_on(Lane::Data, node_addr, plaintext, ce_flag, via)
+            .await
+    }
+
+    /// Send the path message `bytes` to `node_addr` on the path `to`, as
+    /// [`Self::send_via`] does, in the transport's path-message lane, so a
+    /// send queue full of data does not refuse it.
+    pub(in crate::node) async fn send_path(
+        &mut self,
+        node_addr: &NodeAddr,
+        bytes: &[u8],
+        to: &fips_core::proto::path::PathRef,
+    ) -> Result<(), NodeError> {
+        self.send_on(Lane::Path, node_addr, bytes, false, Some(to))
+            .await
+    }
+
+    /// [`Self::send_via`] in the transport's send queue for `lane`.
+    async fn send_on(
+        &mut self,
+        lane: Lane,
+        node_addr: &NodeAddr,
+        plaintext: &[u8],
+        ce_flag: bool,
+        via: Option<&fips_core::proto::path::PathRef>,
+    ) -> Result<(), NodeError> {
         let mut failed = None;
         let sent = self
-            .send_frame(node_addr, plaintext, ce_flag, via, &mut failed)
+            .send_frame(lane, node_addr, plaintext, ce_flag, via, &mut failed)
             .await;
         if let Some(to) = failed {
             // Boxed: the step may send path messages through here again.
@@ -4466,11 +4492,12 @@ impl Node {
         sent
     }
 
-    /// The send of [`Self::send_via`]. A transport error that says the
-    /// address is unreachable leaves the pair the frame went to in
-    /// `failed`.
+    /// The send of [`Self::send_via`], in the transport's send queue for
+    /// `lane` where it has one. A transport error that says the address is
+    /// unreachable leaves the pair the frame went to in `failed`.
     async fn send_frame(
         &mut self,
+        lane: Lane,
         node_addr: &NodeAddr,
         plaintext: &[u8],
         ce_flag: bool,
@@ -4723,7 +4750,7 @@ impl Node {
         // after starting a background connect if the address is one this
         // node dialed; a later send uses the connection once it is up.
         let bytes_sent = self
-            .send_nowait(transport, link_id, &remote_addr, &wire_packet)
+            .nowait_on(lane, transport, link_id, &remote_addr, &wire_packet)
             .await
             .map_err(&mut send_err)?;
 
@@ -4760,7 +4787,20 @@ impl Node {
         addr: &TransportAddr,
         data: &[u8],
     ) -> Result<usize, TransportError> {
-        let sent = transport.send_existing(addr, data).await;
+        self.nowait_on(Lane::Data, transport, link_id, addr, data)
+            .await
+    }
+
+    /// [`Self::send_nowait`] in the transport's send queue for `lane`.
+    async fn nowait_on(
+        &self,
+        lane: Lane,
+        transport: &TransportHandle,
+        link_id: LinkId,
+        addr: &TransportAddr,
+        data: &[u8],
+    ) -> Result<usize, TransportError> {
+        let sent = transport.send_lane(lane, addr, data).await;
         if matches!(sent, Err(TransportError::NotConnected))
             && self.may_dial(link_id, transport.transport_id(), addr)
             && let Err(e) = transport.connect(addr).await

@@ -27,6 +27,12 @@ use super::addr::BleAddr;
 /// backlog rather than a burst.
 pub const SEND_QUEUE_DEPTH: usize = 16;
 
+/// How many path messages may be queued for one BLE connection, apart from
+/// its data, before sends of them fail: the number of probes a path keeps
+/// outstanding. Bounded, so a connection that has stopped draining still
+/// refuses its probes and the path still fails.
+pub const PATH_QUEUE_DEPTH: usize = 8;
+
 /// A single BLE connection in the pool.
 pub struct BleConnection<S> {
     /// The L2CAP stream for this connection.
@@ -36,6 +42,10 @@ pub struct BleConnection<S> {
     /// held by a peer that has stopped draining — and, on this transport in
     /// particular, no caller holds the pool lock while it happens.
     pub send_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    /// Path messages queued for the writer task, which sends them before
+    /// anything in [`Self::send_tx`], so a queue full of data neither
+    /// refuses nor holds them back.
+    pub path_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     /// Writer task for this connection.
     pub send_task: Option<JoinHandle<()>>,
     /// Background receive task handle.
@@ -524,6 +534,7 @@ mod tests {
         BleConnection {
             stream: (),
             send_tx: tokio::sync::mpsc::channel(1).0,
+            path_tx: tokio::sync::mpsc::channel(1).0,
             send_task: None,
             recv_task: None,
             send_mtu: 2048,

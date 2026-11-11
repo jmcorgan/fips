@@ -75,7 +75,7 @@ pub mod stream_read;
 
 use super::framing::{StreamError, read_fmp_packet};
 use super::{
-    ConnectionState, DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr,
+    ConnectionState, DiscoveredPeer, Lane, PacketTx, ReceivedPacket, Transport, TransportAddr,
     TransportError, TransportId, TransportState, TransportType,
 };
 use crate::config::BleConfig;
@@ -497,6 +497,19 @@ impl<I: BleIo> BleTransport<I> {
         addr: &TransportAddr,
         data: &[u8],
     ) -> Result<usize, TransportError> {
+        self.send_lane(Lane::Data, addr, data).await
+    }
+
+    /// [`send_async`](Self::send_async) in the connection's queue for
+    /// `lane`: path messages go in their own queue, which the writer drains
+    /// first, so a queue full of data does not refuse them.
+    pub async fn send_lane(
+        &self,
+        lane: Lane,
+        addr: &TransportAddr,
+        data: &[u8],
+    ) -> Result<usize, TransportError> {
+        let path = lane == Lane::Path && !node_fault!(PathLaneShared);
         // Take the MTU and the connection's send queue, then release the pool
         // lock. Everything after this point must be lock-free: the previous
         // shape awaited the L2CAP write while still holding this guard, so a
@@ -504,8 +517,10 @@ impl<I: BleIo> BleTransport<I> {
         // other BLE operation — connect, eviction, the receive loops' teardown.
         let found = {
             let pool = self.pool.lock().await;
-            pool.get(addr)
-                .map(|c| (c.effective_mtu() as usize, c.send_tx.clone()))
+            pool.get(addr).map(|c| {
+                let tx = if path { &c.path_tx } else { &c.send_tx };
+                (c.effective_mtu() as usize, tx.clone())
+            })
         };
         let (mtu, send_tx) = match found {
             Some(pair) => pair,
@@ -536,7 +551,8 @@ impl<I: BleIo> BleTransport<I> {
                 self.stats.record_send_error();
                 debug!(
                     addr = %addr,
-                    depth = pool::SEND_QUEUE_DEPTH,
+                    lane = ?lane,
+                    depth = if path { pool::PATH_QUEUE_DEPTH } else { pool::SEND_QUEUE_DEPTH },
                     "BLE outbound queue full; peer is not draining"
                 );
                 Err(TransportError::SendFailed(
@@ -953,7 +969,7 @@ impl<I: BleIo> BleTransport<I> {
         } else {
             conn.send_task.take()
         };
-        // Aborts the receive task, and drops the queue's sender, so the
+        // Aborts the receive task, and drops both queues' senders, so the
         // writer ends once it has written what was queued.
         drop(conn);
         if let Some(writer) = writer {
@@ -1057,6 +1073,7 @@ impl BleTransport<io::MockBleIo> {
         let conn = BleConnection {
             stream: Arc::new(near),
             send_tx: tokio::sync::mpsc::channel(1).0,
+            path_tx: tokio::sync::mpsc::channel(1).0,
             send_task: Some(tokio::spawn(async move {
                 let _guard = guard_tx;
                 let _far = far;
@@ -1419,8 +1436,10 @@ fn spawn_connection<S: BleStream + 'static>(
 
     let id = next_conn_id();
     let (send_tx, send_rx) = tokio::sync::mpsc::channel(pool::SEND_QUEUE_DEPTH);
+    let (path_tx, path_rx) = tokio::sync::mpsc::channel(pool::PATH_QUEUE_DEPTH);
     let send_task = tokio::spawn(send_loop(
         Arc::clone(&stream),
+        path_rx,
         send_rx,
         ta.clone(),
         id,
@@ -1431,6 +1450,7 @@ fn spawn_connection<S: BleStream + 'static>(
     let conn = BleConnection {
         stream,
         send_tx,
+        path_tx,
         send_task: Some(send_task),
         recv_task: None,
         send_mtu,
@@ -1846,17 +1866,27 @@ async fn admit_inbound<S>(
 /// alone. Dropping the pool entry aborts this task and the receive task
 /// through `BleConnection`'s `Drop`, except on a deliberate close, which
 /// takes this task out of the entry first and lets it finish the queue:
-/// the loop then ends when the queue's sender has gone and the queue is
-/// empty.
+/// the loop then ends when both queues' senders have gone and both queues
+/// are empty.
+///
+/// Path messages (`paths`) are taken before data (`frames`) whenever both
+/// are waiting, so a probe waits behind at most the frame being written.
 async fn send_loop<S: BleStream + 'static>(
     stream: Arc<S>,
+    mut paths: tokio::sync::mpsc::Receiver<Vec<u8>>,
     mut frames: tokio::sync::mpsc::Receiver<Vec<u8>>,
     addr: TransportAddr,
     id: ConnId,
     pool: Arc<Mutex<ConnectionPool<Arc<S>>>>,
     stats: Arc<BleStats>,
 ) {
-    while let Some(frame) = frames.recv().await {
+    loop {
+        let frame = tokio::select! {
+            biased;
+            Some(frame) = paths.recv() => frame,
+            Some(frame) = frames.recv() => frame,
+            else => return,
+        };
         match stream.send(&frame).await {
             Ok(()) => stats.record_send(frame.len()),
             Err(e) => {
@@ -2405,6 +2435,10 @@ async fn scan_probe_loop<I: io::BleIo>(
 mod close_tests;
 
 #[cfg(test)]
+#[path = "tests/lane.rs"]
+mod lane_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::framing::build_established_frame;
@@ -2716,11 +2750,13 @@ mod tests {
 
         let (near, _far) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
         let (send_tx, _send_rx) = tokio::sync::mpsc::channel(pool::SEND_QUEUE_DEPTH);
+        let (path_tx, _path_rx) = tokio::sync::mpsc::channel(pool::PATH_QUEUE_DEPTH);
         let outcome = transport.pool.lock().await.insert(
             ta.clone(),
             BleConnection {
                 stream: Arc::new(near),
                 send_tx,
+                path_tx,
                 send_task: None,
                 recv_task: None,
                 send_mtu: 2048,
@@ -2770,8 +2806,10 @@ mod tests {
         let ta = TransportAddr::from_string("AA:BB:CC:DD:EE:02");
 
         let (send_tx, send_rx) = tokio::sync::mpsc::channel(pool::SEND_QUEUE_DEPTH);
+        let (path_tx, path_rx) = tokio::sync::mpsc::channel(pool::PATH_QUEUE_DEPTH);
         let send_task = tokio::spawn(send_loop(
             Arc::clone(&stream),
+            path_rx,
             send_rx,
             ta.clone(),
             next_conn_id(),
@@ -2784,6 +2822,7 @@ mod tests {
             BleConnection {
                 stream,
                 send_tx,
+                path_tx,
                 send_task: Some(send_task),
                 recv_task: None,
                 send_mtu: 2048,
@@ -3030,6 +3069,7 @@ mod tests {
             BleConnection {
                 stream: Arc::new(parked),
                 send_tx: tokio::sync::mpsc::channel(1).0,
+                path_tx: tokio::sync::mpsc::channel(1).0,
                 send_task: None,
                 recv_task: None,
                 send_mtu: 2048,
@@ -4636,6 +4676,7 @@ mod tests {
             BleConnection {
                 stream: Arc::new(parked),
                 send_tx: tokio::sync::mpsc::channel(1).0,
+                path_tx: tokio::sync::mpsc::channel(1).0,
                 send_task: None,
                 recv_task: None,
                 send_mtu: 64,
@@ -6130,6 +6171,7 @@ mod tests {
             BleConnection {
                 stream: (),
                 send_tx: tokio::sync::mpsc::channel(1).0,
+                path_tx: tokio::sync::mpsc::channel(1).0,
                 send_task: None,
                 recv_task: None,
                 send_mtu: 2048,

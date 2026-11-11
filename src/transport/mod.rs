@@ -842,6 +842,27 @@ pub enum ConnectionState {
 }
 
 // ============================================================================
+// Send Lanes
+// ============================================================================
+
+/// Which of a connection's send queues a frame joins.
+///
+/// A transport that queues frames for a writer task keeps path messages
+/// (probes, acks and closes) apart from everything else, so a queue full of
+/// the node's own data cannot refuse them, and its writer sends them first.
+/// The node marks the lane where it knows a frame is a path message; a
+/// transport cannot tell from the ciphertext. Transports that send at once,
+/// with no queue of their own, ignore it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lane {
+    /// Data and every other link message.
+    #[default]
+    Data,
+    /// Path messages: probes, acks and closes.
+    Path,
+}
+
+// ============================================================================
 // Transport Congestion
 // ============================================================================
 
@@ -989,6 +1010,19 @@ impl TransportHandle {
         addr: &TransportAddr,
         data: &[u8],
     ) -> Result<usize, TransportError> {
+        self.send_lane(Lane::Data, addr, data).await
+    }
+
+    /// [`send_existing`](Self::send_existing) on the connection's send
+    /// queue for `lane`.
+    pub async fn send_lane(
+        &self,
+        lane: Lane,
+        addr: &TransportAddr,
+        data: &[u8],
+    ) -> Result<usize, TransportError> {
+        // Read only by a transport that queues; unused where none is built.
+        let _ = lane;
         match self {
             TransportHandle::Udp(t) => t.send_async(addr, data).await,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -997,7 +1031,7 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.send_existing(addr, data).await,
             TransportHandle::Nym(t) => t.send_existing(addr, data).await,
             #[cfg(ble_available)]
-            TransportHandle::Ble(t) => t.send_async(addr, data).await,
+            TransportHandle::Ble(t) => t.send_lane(lane, addr, data).await,
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.send_async(addr, data).await,
         }
