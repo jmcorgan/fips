@@ -13,7 +13,11 @@
 //! [`mapped`], and each row of the peer's state, read before and after, is
 //! held to that transition's cell (`table::check_decided`). Where the model
 //! changes nothing, the node must not change which session or link it
-//! holds the peer on.
+//! holds the peer on. The model holds one path per link, so its roam at a
+//! peer the node holds on more than one path is held as a change of
+//! nothing: the node, whose roaming rule moves a link's one path only,
+//! must keep the session and link, and the roam's cells are listed, not
+//! held.
 //!
 //! What a cell says of a row is held where it can be seen ([`decide`]): a
 //! row the cell keeps must read the same; a row the cell changes is held to
@@ -54,6 +58,10 @@ const BASE: Ms = 3_600_000;
 /// numbers it gives the links msg1s arrive on.
 const DIALS: u32 = 1 << 16;
 
+/// Why the model's roam's cells are not held against a peer the node held
+/// on more than one path.
+const SEVERAL: &str = "the model holds one path per link and roams it to the frame's pair, where the node, holding the peer on more than one path, accounts the frame to its path and moves none (the roaming rule moves a link's one path only)";
+
 /// The event of the model's history that made a change, which decides the
 /// node's transition it maps onto.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +93,8 @@ struct Watch {
     also: Vec<PathRef>,
     /// Whether the node did not hold the peer before.
     absent: bool,
+    /// Whether the node held the peer on more than one path before.
+    several: bool,
     /// The rows of the record made to differ from a fresh one's before.
     dirtied: Vec<DataRow>,
     /// Which session and link the node held the peer on before.
@@ -451,6 +461,7 @@ impl Tap {
             before,
             also,
             absent,
+            several: node.get_peer(&addr).is_some_and(|p| p.paths().len() > 1),
             dirtied,
             held: identity(node.get_peer(&addr)),
             session,
@@ -492,6 +503,19 @@ impl Tap {
             }
             [(step, cause)] => {
                 let change = step.change.expect("filtered on a change");
+                if change == Change::Roam && w.several {
+                    let now = identity(held);
+                    if now != w.held {
+                        self.found.push(format!(
+                            "node {at} changed peer {peer} from {:?} to {now:?} at the model's {change:?} at a {cause:?}, holding it on more than one path",
+                            w.held
+                        ));
+                    }
+                    self.passed.push(format!(
+                        "node {at} peer {peer}: the model's {change:?} at a {cause:?}: {SEVERAL}"
+                    ));
+                    return;
+                }
                 let link = held.map(ActivePeer::link_id).unwrap_or(LinkId::new(0));
                 let t = match mapped(change, *cause, step, link) {
                     Ok(t) => t,

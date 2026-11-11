@@ -27,11 +27,13 @@
 //!   and panics with its own `{step}:` message rather than reporting. A
 //!   `peers_by_index` or lease clause here would be unreachable behind it.
 //! - `ConnectionsInUse` ([`Breach::ConnectionsInUse`]): every open TCP
-//!   connection is in use by a live link, as its setup address (on master no
-//!   link has a bundle). The TCP pool exposes only its counts outside the
-//!   transport, so this compares the count of open connections with the
-//!   count of distinct live-link setup addresses at which the transport holds
-//!   one; it cannot name the connection left over.
+//!   connection is in use by a live link, as its setup address, or by a
+//!   path of a held peer that holds more than one, in any state: each path
+//!   past the link's own opens its own connection, which no link names. A
+//!   peer's one path is the link's own and is not counted. The TCP pool
+//!   exposes only its counts outside the transport, so this compares the
+//!   count of open connections with the count of distinct such addresses at
+//!   which the transport holds one; it cannot name the connection left over.
 //!
 //! Exemptions are listed in [`Exempt`], each with a plain reason and the
 //! change that removes it. One applies only when the test passes it; the
@@ -57,16 +59,12 @@ use std::fmt;
 /// A waiver of one property for one node, passed by the test that makes the
 /// state it waives.
 ///
-/// Listed, not coded, because nothing on master can name it yet:
-///
-/// - a candidate path of multipath's bundle, whose connection is open but
-///   not yet in use: added with multipath's rebase, waiving
-///   `ConnectionsInUse` for the candidate's address;
-/// - an accepted TCP connection awaiting its msg1, inside the handshake
-///   timeout: a healthy state, but the TCP pool cannot name or age a
-///   connection from outside the transport, so it is not coded until the
-///   audit can tell it from a leaked one. Every audited test delivers until
-///   the nodes are idle first, so none holds one.
+/// Listed, not coded, because nothing on master can name it yet: an
+/// accepted TCP connection awaiting its msg1, inside the handshake timeout.
+/// A healthy state, but the TCP pool cannot name or age a connection from
+/// outside the transport, so it is not coded until the audit can tell it
+/// from a leaked one. Every audited test delivers until the nodes are idle
+/// first, so none holds one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::node::tests) enum Exempt {
     /// After crossed dials the smaller node, `node`, moves to its own
@@ -505,6 +503,13 @@ async fn connections_in_use(
             .filter(|k| k.transport_id() == *tid)
             .map(|k| k.remote_addr().clone())
             .collect();
+        for p in node.peers.values().filter(|p| p.paths().len() > 1) {
+            for path in p.paths() {
+                if path.transport_id() == *tid {
+                    addrs.insert(path.addr().clone());
+                }
+            }
+        }
         for e in exempt {
             let Exempt::CrossedInbound { node: n, peer } = *e else {
                 continue;

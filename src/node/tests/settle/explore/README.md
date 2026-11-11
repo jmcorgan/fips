@@ -188,9 +188,12 @@ configured peer is redialed, and time moves on a second, for at most 25 s:
 short of the 30 s handshake and link-dead timeouts, so a split is judged
 before either reaps it, and past the 15 s heard floor, so a restarted node's
 dial can be answered. Once every pair agrees, time moves on while any node
-still has a dial in progress, for at most 31 s, past the handshake timeout,
-every pair still agreeing after each delivery: the shell audit holds only
-once no dial is out.
+still has a dial in progress, or a connection a path machine asked for
+still opening, for at most 31 s, past the handshake timeout, every pair
+still agreeing after each delivery: the shell audit holds only once no dial
+is out and no path's connection is half open. With multipath on, a dial to
+a live peer that times out leaves its address a path candidate, whose
+connection opens after the timeout.
 
 Then, at the leaf:
 
@@ -242,7 +245,11 @@ The tree announce's own send writes two rows of the record at a transition
 that announces, which is not the transition's cell, so those two are not
 held there. A change the mapping has no node transition for is listed and
 not checked: the model's return, at a frame, to the session a later dial
-moved off, and a restart found at a rekey.
+moved off, a restart found at a rekey, and the model's roam at a frame to
+a peer the node held on more than one path. The model holds one path per
+link; the node's roaming rule moves a link's one path only, so it accounts
+such a frame to its path and moves none. That roam is held as a step where
+the model changes nothing: the node must keep the session and link.
 
 Measured at the first run, 2026-11-10: every start's scripted path gives
 four changes per order (six for start 11) and every one is held, at either
