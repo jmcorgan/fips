@@ -1648,6 +1648,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stats, so the "Kernel recv drops first observed" warning covers a cable, and a
   dropping Ethernet transport counts as congestion for ECN marking, as UDP does.
 
+- On macOS the Ethernet transport reports its kernel drops too, read from the
+  BPF descriptor with `BIOCGSTATS`. `kernel_drops` was always 0 there, so a
+  BPF buffer overflowing went unseen, and neither the warning nor ECN marking
+  could react to it.
+
 - A beacon heard just before an Ethernet interface went away no longer makes the
   node dial that neighbour on the interface it has just lost.
 

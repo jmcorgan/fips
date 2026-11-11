@@ -12,6 +12,7 @@
 use crate::transport::TransportError;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Ethernet header size: dst(6) + src(6) + ethertype(2).
 const ETH_HDRLEN: usize = 14;
@@ -58,6 +59,9 @@ pub struct PacketSocket {
     ethertype: u16,
     local_mac: [u8; 6],
     bpf_buflen: usize,
+    /// The kernel's drop count at the last `take_drops`. `BIOCGSTATS` counts
+    /// from the descriptor's open and does not reset.
+    drops_seen: AtomicU32,
     read_state: Mutex<BpfReadState>,
     /// Write end of the shutdown pipe. Writing a byte wakes the reader
     /// thread's `select()` loop so it can exit promptly.
@@ -115,6 +119,7 @@ impl PacketSocket {
             ethertype,
             local_mac,
             bpf_buflen,
+            drops_seen: AtomicU32::new(0),
             read_state: Mutex::new(BpfReadState {
                 buf: vec![0u8; bpf_buflen],
                 offset: 0,
@@ -150,6 +155,17 @@ impl PacketSocket {
     /// Get the BPF read buffer length.
     pub fn bpf_buflen(&self) -> usize {
         self.bpf_buflen
+    }
+
+    /// Take the count of frames the kernel dropped at this descriptor since
+    /// the previous call, because its buffer was full: the Linux twin's
+    /// contract. `BIOCGSTATS` counts from the open and does not reset, so the
+    /// count seen last is kept and the difference returned; a wrapped 32-bit
+    /// counter still gives the right difference.
+    pub fn take_drops(&self) -> std::io::Result<u64> {
+        let now = bpf_drop_count(self.fd)?;
+        let before = self.drops_seen.swap(now, Ordering::Relaxed);
+        Ok(u64::from(now.wrapping_sub(before)))
     }
 
     /// Get the read end of the shutdown pipe (for the reader thread).
@@ -344,6 +360,30 @@ const BIOCIMMEDIATE: libc::c_ulong = 0x80044270;
 const BIOCSHDRCMPLT: libc::c_ulong = 0x80044275;
 const BIOCSETF: libc::c_ulong = 0x80104267;
 const BIOCGBLEN: libc::c_ulong = 0x40044266;
+const BIOCGSTATS: libc::c_ulong = 0x4008426F;
+
+/// BPF statistics (matches `struct bpf_stat` from `<net/bpf.h>`).
+#[repr(C)]
+struct BpfStat {
+    bs_recv: libc::c_uint,
+    bs_drop: libc::c_uint,
+}
+
+const _: () = assert!(std::mem::size_of::<BpfStat>() == 8);
+
+/// The count of frames the kernel has dropped at a BPF descriptor since it
+/// was opened, because its buffer was full (`BIOCGSTATS`).
+fn bpf_drop_count(fd: RawFd) -> std::io::Result<u32> {
+    let mut stats = BpfStat {
+        bs_recv: 0,
+        bs_drop: 0,
+    };
+    let ret = unsafe { libc::ioctl(fd, BIOCGSTATS, &mut stats) };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(stats.bs_drop)
+}
 
 /// BPF instruction.
 #[repr(C)]
@@ -576,6 +616,21 @@ fn get_mac_addr(interface: &str) -> Result<[u8; 6], TransportError> {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // BPF statistics
+    // -----------------------------------------------------------------------
+
+    /// `BIOCGSTATS` answers on a bound descriptor, so the drop count the
+    /// congestion sample reads is the kernel's and not an ioctl error. Run
+    /// with `sudo cargo test --lib bpf_drop_count -- --ignored`.
+    #[test]
+    #[ignore = "needs root: opens a BPF device"]
+    fn bpf_drop_count_reads_a_bound_descriptor() {
+        let fd = FdGuard(open_bpf_device().expect("open a BPF device"));
+        bind_to_interface(fd.0, "lo0").expect("bind to lo0");
+        assert_eq!(bpf_drop_count(fd.0).expect("BIOCGSTATS"), 0);
+    }
 
     // -----------------------------------------------------------------------
     // bpf_wordalign
