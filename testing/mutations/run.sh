@@ -105,6 +105,8 @@ BLE_ONLY=(
     "node::tests::settle::table::crossing::a_crossing_won_on_a_second_ble_link_relinks_the_mark"
     "node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says"
     "node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says_with_multipath_on"
+    "node::tests::settle::crossing::a_reaped_ble_dial_leaves_the_channel_another_dial_in_flight_uses"
+    "node::tests::settle::crossing::a_reaped_ble_dial_leaves_the_channel_another_dial_in_flight_uses_with_multipath_on"
 )
 
 # The manifest's lines: break, expectation, crate, test, anchor.

@@ -217,9 +217,19 @@ faults! {
     /// A path released while the link lives leaves its connection open,
     /// though the peer has no further use for it and no other link uses it.
     ReleaseKeepsPairOpen,
+    /// A queued close is drained without asking the close rule again, so it
+    /// closes a connection a link took up after the close was queued.
+    DrainReadsNothing,
     /// A crossed dial's renewal of the path machine logs none of its paths'
     /// changes of state.
     RenewedStateDropped,
+    /// A connection that opens for a pair the link's bundle no longer
+    /// holds is stepped into the bundle and left open, though no link
+    /// uses it.
+    ConnectLeftOpen,
+    /// A connection that opens for a pair is closed when no other link
+    /// uses it, even when the link's own bundle still holds the pair.
+    ConnectClosesHeld,
     /// Removing an active peer leaves its link in the link table, with
     /// every index entry naming it.
     RemoveKeepsLink,
@@ -229,6 +239,12 @@ faults! {
     /// The operator's disconnect leaves the transport connection at the
     /// peer's pair open once the peer is removed.
     AdminKeepsConnection,
+    /// The node's close rule counts only the proven paths of peers on
+    /// other links, so a handshake leg in flight keeps no connection open.
+    CloseByPeerAddress,
+    /// The node's close rule answers a link a peer holds by the pair it was
+    /// set up at, whatever paths its bundle has proven.
+    CloseBySetupAddress,
     /// A peer that sent a Disconnect is removed with the transport's mark
     /// at its pair left in place.
     DisconnectKeepsVerified,

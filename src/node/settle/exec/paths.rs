@@ -309,8 +309,8 @@ pub(super) fn close_queued(node: &mut Node, r: &mut Run) {
     }
     if let Some(f) = of(r)
         && let (Some(link), Some(to)) = (f.link, &f.to)
-        && !node.addr_carries_other_peer(to.transport, &to.addr, link)
+        && !node.in_use(to.transport, &to.addr, link)
     {
-        node.paths.close_later(to.clone(), r.peer, f.removed);
+        node.paths.close_later(to.clone(), r.peer, link, f.removed);
     }
 }

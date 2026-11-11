@@ -183,7 +183,7 @@ pub(super) async fn machine_crossed(node: &mut Node, r: &mut Run) {
 /// runs on (BLE).
 pub(super) async fn dial_close(node: &mut Node, r: &mut Run) {
     if let Some((link, _)) = dial(&r.t) {
-        node.close_handshake_link_connection(link).await;
+        node.close_unused(link).await;
     }
 }
 

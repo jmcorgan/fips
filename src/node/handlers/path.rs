@@ -205,6 +205,9 @@ pub(in crate::node) struct Closing {
     addr: TransportAddr,
     /// The peer.
     node: NodeAddr,
+    /// The link whose path was released, which the close rule leaves out
+    /// when the drain asks it again.
+    link: LinkId,
     /// Whether the peer was removed, which a transport that tracks peers
     /// needs to clear the connection's verification.
     removed: bool,
@@ -287,13 +290,20 @@ impl PathDriver {
     }
 
     /// Queue the connection at `to`, which a released path of `node`'s link
-    /// held, to close once the step that released it is done; `removed`
-    /// says the release is part of the peer's removal.
-    pub(in crate::node) fn close_later(&mut self, to: PathRef, node: NodeAddr, removed: bool) {
+    /// `link` held, to close once the step that released it is done;
+    /// `removed` says the release is part of the peer's removal.
+    pub(in crate::node) fn close_later(
+        &mut self,
+        to: PathRef,
+        node: NodeAddr,
+        link: LinkId,
+        removed: bool,
+    ) {
         self.closing.push(Closing {
             transport: to.transport,
             addr: to.addr,
             node,
+            link,
             removed,
         });
     }
@@ -303,6 +313,23 @@ impl PathDriver {
     #[cfg(test)]
     pub(in crate::node) fn wait(&mut self, node: NodeAddr, to: PathRef) {
         self.connecting.push((node, to));
+    }
+
+    /// The addresses on `transport` a connect or a close is waiting on, for
+    /// tests that account for every open connection.
+    #[cfg(test)]
+    pub(in crate::node) fn waiting(&self, transport: TransportId) -> Vec<TransportAddr> {
+        let connects = self
+            .connecting
+            .iter()
+            .filter(|(_, to)| to.transport == transport)
+            .map(|(_, to)| to.addr.clone());
+        let closes = self
+            .closing
+            .iter()
+            .filter(|c| c.transport == transport)
+            .map(|c| c.addr.clone());
+        connects.chain(closes).collect()
     }
 
     /// How many carrier readings are kept, for tests of when they go.
@@ -520,7 +547,9 @@ impl Node {
     /// Step each connection a machine waits for that has settled: opened,
     /// or failed, or gone with its transport; one still opening waits for
     /// the next tick. A connection the transport has no attempt for has
-    /// failed to start.
+    /// failed to start. A connection that opened for a pair the bundle no
+    /// longer holds, which a move's renewal can release while the connect
+    /// is out, is closed instead, unless another live link uses it.
     async fn poll_connects(&mut self) {
         for (node_addr, to) in std::mem::take(&mut self.paths.connecting) {
             let state = self
@@ -535,6 +564,18 @@ impl Node {
                 Some(ConnectionState::Connected) => true,
                 Some(ConnectionState::None | ConnectionState::Failed(_)) | None => false,
             };
+            if ok && self.unwanted(&node_addr, &to) {
+                if let Some(transport) = self.transports.get(&to.transport) {
+                    transport.close_connection(&to.addr).await;
+                }
+                debug!(
+                    peer = %self.peer_display_name(&node_addr),
+                    transport_id = %to.transport,
+                    remote_addr = %to.addr,
+                    "Closed a connection that opened for a path no longer held"
+                );
+                continue;
+            }
             let input = Input::Connected {
                 transport: to.transport,
                 addr: to.addr,
@@ -542,6 +583,30 @@ impl Node {
             };
             self.step_path(&node_addr, input).await;
         }
+    }
+
+    /// Whether the connection that opened at `to` for `node_addr`'s bundle
+    /// is one nothing wants: the bundle no longer holds the pair, and no
+    /// live link but the peer's own uses it, by the close rule. A peer no
+    /// longer held holds no pair, and its connect is answered by the rule
+    /// alone.
+    fn unwanted(&self, node_addr: &NodeAddr, to: &PathRef) -> bool {
+        let peer = self.peers.get(node_addr);
+        let held = peer.is_some_and(|p| {
+            !matches!(
+                p.path_match(to.transport, &to.addr),
+                crate::peer::Match::None
+            )
+        });
+        if node_fault!(ConnectLeftOpen) {
+            return false;
+        }
+        if held && !node_fault!(ConnectClosesHeld) {
+            return false;
+        }
+        // Link ids are numbered from 1, so 0 excepts no link.
+        let own = peer.map_or(LinkId::new(0), |p| p.link_id());
+        !self.in_use(to.transport, &to.addr, own)
     }
 
     /// Carry out the outputs of `node_addr`'s path machine, front to back,
@@ -750,9 +815,21 @@ impl Node {
     }
 
     /// Close every connection a released path left, and on a transport
-    /// that tracks peers clear the connection's verification.
+    /// that tracks peers clear the connection's verification. The close rule
+    /// is asked again first, since a link may have taken the connection up
+    /// between the release and the drain: a restart's teardown queues its
+    /// paths' closes before the new link is promoted at one of their pairs.
     pub(in crate::node) async fn drain_closes(&mut self) {
         for job in std::mem::take(&mut self.paths.closing) {
+            if !node_fault!(DrainReadsNothing) && self.in_use(job.transport, &job.addr, job.link) {
+                debug!(
+                    peer = %self.peer_display_name(&job.node),
+                    transport_id = %job.transport,
+                    remote_addr = %job.addr,
+                    "Kept a released path's connection, which a link now uses"
+                );
+                continue;
+            }
             let Some(transport) = self.transports.get(&job.transport) else {
                 continue;
             };

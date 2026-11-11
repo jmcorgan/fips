@@ -26,14 +26,18 @@
 //!   checked by `link_index_audit::audit`, which runs first for every node
 //!   and panics with its own `{step}:` message rather than reporting. A
 //!   `peers_by_index` or lease clause here would be unreachable behind it.
-//! - `ConnectionsInUse` ([`Breach::ConnectionsInUse`]): every open TCP
-//!   connection is in use by a live link, as its setup address, or by a
-//!   path of a held peer that holds more than one, in any state: each path
-//!   past the link's own opens its own connection, which no link names. A
-//!   peer's one path is the link's own and is not counted. The TCP pool
-//!   exposes only its counts outside the transport, so this compares the
-//!   count of open connections with the count of distinct such addresses at
-//!   which the transport holds one; it cannot name the connection left over.
+//! - `ConnectionsInUse`, two clauses, each its own [`Breach`] variant.
+//!   First ([`Breach::ConnectionsInUse`]): every open TCP connection is
+//!   accounted for, at the setup address of a link no peer holds, at any
+//!   path of a held peer's bundle in any state (a probing path's connection
+//!   is open on purpose), or at a connect or a close the path driver is
+//!   waiting on. The TCP pool exposes only its counts outside the transport,
+//!   so this compares the count of open connections with the count of
+//!   distinct such addresses at which the transport holds one; it cannot
+//!   name the connection left over. Second ([`Breach::Unconnected`]): no
+//!   connection in use is closed, so each held peer's active path on TCP has
+//!   one. It is read before the audit's own heartbeats, which could dial the
+//!   path again.
 //!
 //! Exemptions are listed in [`Exempt`], each with a plain reason and the
 //! change that removes it. One applies only when the test passes it; the
@@ -59,21 +63,20 @@ use std::fmt;
 /// A waiver of one property for one node, passed by the test that makes the
 /// state it waives.
 ///
-/// Listed, not coded, because nothing on master can name it yet: an
-/// accepted TCP connection awaiting its msg1, inside the handshake timeout.
-/// A healthy state, but the TCP pool cannot name or age a connection from
-/// outside the transport, so it is not coded until the audit can tell it
-/// from a leaked one. Every audited test delivers until the nodes are idle
-/// first, so none holds one.
+/// Listed, not coded: an accepted TCP connection awaiting its msg1, inside
+/// the handshake timeout. A healthy state, but the TCP pool cannot name or
+/// age a connection from outside the transport, so it is not coded until
+/// the audit can tell it from a leaked one. Every audited test delivers
+/// until the nodes are idle first, so none holds one. A candidate path of
+/// a bundle, whose connection is open before the path is in use, needs no
+/// waiver: `ConnectionsInUse` counts every path of a held peer's bundle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::node::tests) enum Exempt {
     /// After crossed dials the smaller node, `node`, moves to its own
     /// outbound session but keeps the inbound link it promoted `peer` on as
-    /// the peer's link record, and the connection it dialed is no live
-    /// link's setup address. Waives `RightLink` for `node`'s record of
-    /// `peer`, and `ConnectionsInUse` for `node`'s connection at `peer`'s
-    /// current address. Removed when a crossing moves the smaller node onto
-    /// the link it dialed.
+    /// the peer's link record. Waives `RightLink` for `node`'s record of
+    /// `peer`. Removed when a crossing moves the smaller node onto the link
+    /// it dialed.
     CrossedInbound { node: usize, peer: usize },
     /// A node, `node`, whose own later dial to `peer` completed while it
     /// held the peer moves the session, its indices and its address onto
@@ -130,14 +133,24 @@ pub(super) enum Breach {
         link: LinkId,
         what: &'static str,
     },
-    /// `ConnectionsInUse`: `node`'s TCP transport `transport` holds `open`
-    /// connections, (inbound, outbound), but only `used` distinct live-link
-    /// setup addresses with a connection.
+    /// `ConnectionsInUse`, first clause: `node`'s TCP transport `transport`
+    /// holds `open` connections, (inbound, outbound), but only `used`
+    /// distinct addresses its links, paths, connects and closes account for
+    /// with a connection.
     ConnectionsInUse {
         node: usize,
         transport: TransportId,
         open: (u64, u64),
         used: u64,
+    },
+    /// `ConnectionsInUse`, second clause: `node` holds `peer` on its TCP
+    /// transport `transport` at `addr`, its active path, where the transport
+    /// holds no connection.
+    Unconnected {
+        node: usize,
+        peer: usize,
+        transport: TransportId,
+        addr: TransportAddr,
     },
 }
 
@@ -150,7 +163,8 @@ impl Breach {
             | Breach::Unadoptable { node, .. }
             | Breach::RightLink { node, .. }
             | Breach::MapsAgree { node, .. }
-            | Breach::ConnectionsInUse { node, .. } => *node,
+            | Breach::ConnectionsInUse { node, .. }
+            | Breach::Unconnected { node, .. } => *node,
         }
     }
 }
@@ -220,6 +234,18 @@ impl fmt::Debug for Breach {
                 .field("open", open)
                 .field("used", used)
                 .finish(),
+            Breach::Unconnected {
+                node,
+                peer,
+                transport,
+                addr,
+            } => f
+                .debug_struct("Unconnected")
+                .field("node", node)
+                .field("peer", peer)
+                .field("transport", transport)
+                .field("addr", addr)
+                .finish(),
         }
     }
 }
@@ -233,11 +259,14 @@ pub(super) async fn audit(nodes: &mut [TestNode], exempt: &[Exempt]) -> Vec<Brea
         link_index_audit::audit(&tn.node, &format!("node {i}"));
     }
     let mut breaches = Vec::new();
+    for i in 0..nodes.len() {
+        unconnected(nodes, i, &mut breaches).await;
+    }
     one_session(nodes, &mut breaches).await;
     for i in 0..nodes.len() {
         right_link(nodes, i, exempt, &mut breaches);
         maps_agree(nodes, i, &mut breaches);
-        connections_in_use(nodes, i, exempt, &mut breaches).await;
+        connections_in_use(nodes, i, &mut breaches).await;
     }
     breaches
 }
@@ -446,14 +475,10 @@ fn maps_agree(nodes: &[TestNode], i: usize, breaches: &mut Vec<Breach>) {
     }
 }
 
-/// `ConnectionsInUse` for each TCP transport of `nodes[i]`.
-async fn connections_in_use(
-    nodes: &[TestNode],
-    i: usize,
-    exempt: &[Exempt],
-    breaches: &mut Vec<Breach>,
-) {
+/// `ConnectionsInUse`, first clause, for each TCP transport of `nodes[i]`.
+async fn connections_in_use(nodes: &[TestNode], i: usize, breaches: &mut Vec<Breach>) {
     let node = &nodes[i].node;
+    let held: HashSet<LinkId> = node.peers.values().map(|p| p.link_id()).collect();
     for (tid, handle) in node.transports.iter() {
         let TransportHandle::Tcp(tcp) = handle else {
             continue;
@@ -462,32 +487,18 @@ async fn connections_in_use(
         let open = (s.pool_inbound, s.pool_outbound);
         let mut addrs: HashSet<TransportAddr> = node
             .links
-            .values()
-            .filter(|k| k.transport_id() == *tid)
-            .map(|k| k.remote_addr().clone())
+            .iter()
+            .filter(|(id, k)| k.transport_id() == *tid && !held.contains(id))
+            .map(|(_, k)| k.remote_addr().clone())
             .collect();
-        for p in node.peers.values().filter(|p| p.paths().len() > 1) {
+        for p in node.peers.values() {
             for path in p.paths() {
                 if path.transport_id() == *tid {
                     addrs.insert(path.addr().clone());
                 }
             }
         }
-        for e in exempt {
-            let Exempt::CrossedInbound { node: n, peer } = *e else {
-                continue;
-            };
-            if n != i {
-                continue;
-            }
-            let peer_addr = *nodes[peer].node.node_addr();
-            if let Some(p) = node.get_peer(&peer_addr)
-                && p.transport_id() == Some(*tid)
-                && let Some(at) = p.current_addr()
-            {
-                addrs.insert(at.clone());
-            }
-        }
+        addrs.extend(node.paths.waiting(*tid));
         let mut used = 0;
         for addr in &addrs {
             if handle.has_connection(addr).await {
@@ -500,6 +511,31 @@ async fn connections_in_use(
                 transport: *tid,
                 open,
                 used,
+            });
+        }
+    }
+}
+
+/// `ConnectionsInUse`, second clause, for each peer `nodes[i]` holds among
+/// the test's nodes on a TCP transport.
+async fn unconnected(nodes: &[TestNode], i: usize, breaches: &mut Vec<Breach>) {
+    let node = &nodes[i].node;
+    for (addr, peer) in node.peers.iter() {
+        let Some(p) = index_of(nodes, addr) else {
+            continue;
+        };
+        let (Some(tid), Some(at)) = (peer.transport_id(), peer.current_addr()) else {
+            continue;
+        };
+        let Some(handle @ TransportHandle::Tcp(_)) = node.transports.get(&tid) else {
+            continue;
+        };
+        if !handle.has_connection(at).await {
+            breaches.push(Breach::Unconnected {
+                node: i,
+                peer: p,
+                transport: tid,
+                addr: at.clone(),
             });
         }
     }
@@ -589,9 +625,10 @@ fn at_node(breaches: &[Breach], node: usize) -> Vec<&Breach> {
 }
 
 /// After crossed TCP dials, with no exemption passed, the audit flags the
-/// smaller node's link record for the larger node (the inbound link it was
-/// promoted on, at another pair than the one it holds the peer at), and its
-/// connection to the peer, which no live link uses.
+/// smaller node's link record for the larger node: the inbound link it was
+/// promoted on, at another pair than the one it holds the peer at. Its
+/// connection to the peer is the peer's active path, which the audit
+/// counts.
 async fn exemption_needed(on: bool) {
     let (mut nodes, s, l) = crossed_tcp(on, true).await;
     let breaches = audit(&mut nodes, &[]).await;
@@ -602,17 +639,6 @@ async fn exemption_needed(on: bool) {
             Breach::RightLink { peer, record: Some((LinkDirection::Inbound, _, _)), .. } if *peer == l
         )),
         "defect: the smaller node's inbound record for the larger is not flagged: {breaches:#?}"
-    );
-    assert!(
-        at_s.iter().any(|b| matches!(
-            b,
-            Breach::ConnectionsInUse {
-                open: (0, 1),
-                used: 0,
-                ..
-            }
-        )),
-        "defect: the smaller node's unused connection is not flagged: {breaches:#?}"
     );
     cleanup_nodes(&mut nodes).await;
 }
@@ -630,9 +656,8 @@ async fn the_audit_without_its_crossing_exemption_flags_the_smaller_nodes_inboun
     exemption_needed(true).await;
 }
 
-/// The crossing exemption waives the named node's record and connection
-/// only: naming the smaller node clears its breaches, naming the larger
-/// node leaves them.
+/// The crossing exemption waives the named node's record only: naming the
+/// smaller node clears its breaches, naming the larger node leaves them.
 async fn exemption_scoped(on: bool) {
     let (mut nodes, s, l) = crossed_tcp(on, true).await;
     let named = audit(&mut nodes, &[Exempt::CrossedInbound { node: s, peer: l }]).await;
@@ -779,6 +804,53 @@ async fn the_audit_flags_an_open_connection_no_link_uses() {
 #[tokio::test]
 async fn the_audit_flags_an_open_connection_no_link_uses_with_multipath_on() {
     open_flagged(true).await;
+}
+
+/// A held peer's active path on TCP whose connection the node closed by
+/// hand is flagged at that node, before the audit's own heartbeats can dial
+/// it again.
+async fn path_unconnected(on: bool) {
+    let mut nodes = single_tcp_dial(on, true, 0).await;
+    let b = *nodes[1].node.node_addr();
+    let tid = nodes[0].transport_id;
+    let at = nodes[0]
+        .node
+        .get_peer(&b)
+        .and_then(|p| p.current_addr().cloned())
+        .expect("precondition: node 0 holds node 1 at an address");
+    let Some(TransportHandle::Tcp(tcp)) = nodes[0].node.transports.get(&tid) else {
+        panic!("precondition: node 0 has its TCP transport");
+    };
+    assert!(
+        tcp.has_connection(&at).await,
+        "precondition: the active path has its connection"
+    );
+    tcp.close_connection_async(&at).await;
+    assert!(
+        !tcp.has_connection(&at).await,
+        "precondition: the connection is closed"
+    );
+    let breaches = audit(&mut nodes, &[]).await;
+    assert!(
+        breaches.iter().any(|x| matches!(
+            x,
+            Breach::Unconnected { node: 0, peer: 1, transport, addr } if *transport == tid && *addr == at
+        )),
+        "defect: the held peer's path with no connection is not flagged: {breaches:#?}"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// [`path_unconnected`] with multipath off.
+#[tokio::test]
+async fn the_audit_flags_a_held_peers_path_with_no_connection() {
+    path_unconnected(false).await;
+}
+
+/// [`path_unconnected`] with multipath on.
+#[tokio::test]
+async fn the_audit_flags_a_held_peers_path_with_no_connection_with_multipath_on() {
+    path_unconnected(true).await;
 }
 
 /// A rekey stopped with both ends pending, the initiator on its pending

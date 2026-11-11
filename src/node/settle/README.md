@@ -27,15 +27,19 @@ field, at once.
   `(transport, address)` pair to the link at it (`open`, `close`, `forget`;
   the path driver's `follow`, `claim` and `unclaim`; `get_mut`; `index` for
   reads of the lookup, and under `cfg(test)` `raw_index`). Its doc carries
-  the warning about the lookup's key form. The lookup is derived from the
-  settlement core's record of each link (`Links`), kept under the core's
-  number for it (`no`): opened and retired with the link, held for a
-  promoted peer (`hold`), and fed what the link's bundle reports (`mirror`)
-  from `exec/links.rs`. It names each live link at its setup pair, unless
-  the bundle released the path there, and at each Live or acknowledged path
-  of its record, the newest link where several use a pair. The table keeps
-  it as a cache that every writer rebuilds; `derived` computes it afresh for
-  the audit. Under `cfg(test)` it carries the node's
+  the warning about the lookup's key form. `used` is the node's close rule:
+  whether a live link other than the one closing uses a pair, a held link by
+  its bundle's proven paths and any other by its setup pair. `Node::in_use`
+  asks it with each held peer's bundle, and `Node::close_unused` closes a
+  link's setup pair only when it answers no. The lookup is
+  derived from the settlement core's record of each link (`Links`), kept
+  under the core's number for it (`no`): opened and retired with the link,
+  held for a promoted peer (`hold`), and fed what the link's bundle reports
+  (`mirror`) from `exec/links.rs`. It names each live link at its setup
+  pair, unless the bundle released the path there, and at each Live or
+  acknowledged path of its record, the newest link where several use a pair.
+  The table keeps it as a cache that every writer rebuilds; `derived`
+  computes it afresh for the audit. Under `cfg(test)` it carries the node's
   audit count; `raw_index`, whose entries are put back at every rebuild
   until their link closes; and `plant_entry` and `plant_path`, writes past
   the table, to its lookup and to a core record, that do not mark it, for

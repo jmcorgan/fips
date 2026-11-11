@@ -47,7 +47,7 @@ fn clause(breach: &Breach) -> Clause {
         Breach::Unadoptable { .. } => Clause::Unadoptable,
         Breach::RightLink { .. } => Clause::RightLink,
         Breach::MapsAgree { .. } => Clause::MapsAgree,
-        Breach::ConnectionsInUse { .. } => Clause::ConnectionsInUse,
+        Breach::ConnectionsInUse { .. } | Breach::Unconnected { .. } => Clause::ConnectionsInUse,
     }
 }
 

@@ -2552,7 +2552,7 @@ async fn an_acked_standby_of_another_peer_keeps_a_handshake_links_connection_ope
         id
     };
     let other = leg(a, &stranger);
-    a.close_handshake_link_connection(other).await;
+    a.close_unused(other).await;
     assert_eq!(
         loopback(&nodes[0], t1).closed(),
         vec![stranger.clone()],
@@ -2560,7 +2560,7 @@ async fn an_acked_standby_of_another_peer_keeps_a_handshake_links_connection_ope
     );
     let a = &mut nodes[0].node;
     let shared = leg(a, &standby);
-    a.close_handshake_link_connection(shared).await;
+    a.close_unused(shared).await;
     assert_eq!(
         loopback(&nodes[0], t1).closed(),
         vec![stranger],

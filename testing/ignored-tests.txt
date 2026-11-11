@@ -127,5 +127,3 @@ known-defect  fips-mesh  node::tests::settle::crossing::a_crossed_msg1_on_the_sa
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::restart::a_rekey_msg1_of_the_peers_previous_run_read_late_by_the_restarted_node_leaves_one_session  src/node/tests/settle/restart.rs
-known-defect  fips-mesh  node::tests::settle::readings::a_connect_in_flight_across_a_move_leaves_no_connection_with_no_path  src/node/tests/settle/readings.rs
-known-defect  fips-mesh  node::tests::settle::readings::a_close_queued_at_a_restart_teardown_spares_the_new_link_at_that_pair  src/node/tests/settle/readings.rs

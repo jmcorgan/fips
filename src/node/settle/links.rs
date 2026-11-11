@@ -158,6 +158,31 @@ impl LinkTable {
         self.rebuild();
     }
 
+    /// Whether a live link other than `except` uses the connection at
+    /// `key`. A link a peer holds uses each pair its bundle has proven,
+    /// which `held` answers for it with `Some`; a link no peer holds, for
+    /// which `held` answers `None`, uses its own setup pair. That counts a
+    /// handshake leg still in flight, whose connection another leg's close
+    /// must not take.
+    pub(in crate::node) fn used(
+        &self,
+        key: &AddrKey,
+        except: LinkId,
+        held: impl Fn(LinkId) -> Option<bool>,
+    ) -> bool {
+        self.links
+            .iter()
+            .filter(|(id, _)| **id != except)
+            .any(|(id, link)| {
+                let setup = link.transport_id() == key.0 && link.remote_addr() == &key.1;
+                match held(*id) {
+                    Some(_) if node_fault!(CloseBySetupAddress) => setup,
+                    Some(proven) => proven,
+                    None => setup,
+                }
+            })
+    }
+
     /// Retire the core's record of the link `id`, and drop any entry a test
     /// wrote naming it. The connections the core would close are the node's
     /// to close, by its own rule, until the core decides them.

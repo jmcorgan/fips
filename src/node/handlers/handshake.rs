@@ -2390,7 +2390,7 @@ impl Node {
             // Close the losing leg's connection: a separate socket on TCP, a
             // no-op when connectionless, and left open when it is the very
             // connection the promoted peer runs on (BLE).
-            self.close_handshake_link_connection(link_id).await;
+            self.close_unused(link_id).await;
             self.remove_link(&link_id);
 
             // Send TreeAnnounce now that sessions are aligned

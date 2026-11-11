@@ -82,9 +82,11 @@ named for off. The other files run off, which is what they test.
   defects); a crossed msg1 the smaller node reads after installing from its
   own dial and hearing nothing for longer than the heard floor, from another
   transport and on the same one (known defects, with a control inside the
-  floor); and a larger node's dial on the aged link after the smaller
-  node's own rekey, past the heard floor (a known defect, with the same
-  control). Each two-order case is one test per order. It holds copies of
+  floor); a larger node's dial on the aged link after the smaller node's
+  own rekey, past the heard floor (a known defect, with the same control);
+  and two dials to one address with no peer held, the first reaped,
+  leaving open the connection the second runs on, on loopback and on the
+  BLE mock. Each two-order case is one test per order. It holds copies of
   private helpers of `crossed_dial.rs` and `control.rs`, each naming its
   original.
 - `explore/`: the real-node explorer and its world: two or three real nodes
@@ -102,14 +104,16 @@ named for off. The other files run off, which is what they test.
   completes, an accepted ceiling the test asserts (32 s at the defaults,
   counted on a frozen clock); a sooner recovery passes too.
 - `readings.rs`: what a move or a restart does with multipath on to state
-  outside the peer's record. A connect still out when a move releases its path
-  stays open with no path naming it, and a close queued at a restart's teardown
-  is drained at the pair the new link runs on (both known defects), with the
+  outside the peer's record. A connect still out when a move releases its
+  path is closed as it opens, unless another live link uses the pair, and a
+  connect the bundle still holds a path for is stepped into it as before. A
+  close queued at a restart's teardown is spared by the drain at the pair the
+  new link runs on, and still made where nothing uses the pair, with the
   control that with multipath off the teardown queues none. A no-carrier
-  reading stays across a move and goes with the peer. A characterisation test
-  (`chartest_`, as in `cells.rs`) holds what a restart found at a rekey keeps of
-  the bundle, and that the pin ends. Its `own_dial` and `restart_dial` also
-  serve the replay tests of `decrypt_replay.rs`.
+  reading stays across a move and goes with the peer. A characterisation
+  test (`chartest_`, as in `cells.rs`) holds what a restart found at a rekey
+  keeps of the bundle, and that the pin ends. Its `own_dial` and
+  `restart_dial` also serve the replay tests of `decrypt_replay.rs`.
 - `restart.rs`: a restarted node that reads a late rekey msg1 of its
   peer's previous run, past the unheard floor, after the peer has moved
   onto its new run: one session in every placement of the peer (a known

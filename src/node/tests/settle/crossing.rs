@@ -15,6 +15,9 @@
 //! - A larger node's dial on a quiet peer's aged link, which the peer set
 //!   up: its next rekey is answered, and no pending is left that it cannot
 //!   adopt (known defects).
+//! - Two dials to one address with no peer held, the first reaped: the
+//!   connection the second runs on stays open, on loopback by its record of
+//!   closes and on the BLE mock by its pool.
 //!
 //! Each test is run once per address order, so each order has its own
 //! verdict, and once per setting of `node.path.enabled`: a test's plain name
@@ -1306,4 +1309,114 @@ async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_in
  {
     let out = aged_rekey(true, Duration::ZERO).await;
     assert!(out.is_ok(), "defect: {out:?}");
+}
+
+// ---------------------------------------------------------------------------
+// A dial reaped while another dial at its pair is in flight
+// ---------------------------------------------------------------------------
+
+/// Two dials from node 0 to node 1's one address, neither answered, so no
+/// peer is held: the first dial's link is returned, with the second's link
+/// still at the same pair.
+async fn two_dials(nodes: &mut [TestNode]) -> LinkId {
+    initiate_handshake(nodes, 0, 1).await;
+    let first: Vec<LinkId> = nodes[0].node.links.keys().copied().collect();
+    assert_eq!(first.len(), 1, "precondition: the first dial has one link");
+    initiate_handshake(nodes, 0, 1).await;
+    assert_eq!(
+        nodes[0].node.links.len(),
+        2,
+        "precondition: two dials in flight at one pair"
+    );
+    assert!(
+        nodes[0].node.peers.is_empty(),
+        "precondition: no peer is held, so no peer's path keeps the connection"
+    );
+    first[0]
+}
+
+/// Reap the dial whose link is `first` at node 0, as its handshake timeout
+/// does.
+async fn reap(nodes: &mut [TestNode], first: LinkId) {
+    nodes[0].node.cleanup_stale_connection(first, 0).await;
+    assert!(
+        !nodes[0].node.links.contains_key(&first),
+        "precondition: the first dial is reaped"
+    );
+}
+
+/// On loopback, which records each close: reaping one of two dials at one
+/// pair does not close the connection the other dial is running on.
+async fn reaped_dial(on: bool) {
+    let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
+    let t1 = nodes[0].transport_id;
+    let b1 = nodes[1].addr.clone();
+    let first = two_dials(&mut nodes).await;
+    reap(&mut nodes, first).await;
+    let closed = match nodes[0].node.transports.get(&t1) {
+        Some(TransportHandle::Loopback(t)) => t.closed(),
+        _ => panic!("precondition: node 0's transport is loopback"),
+    };
+    cleanup_nodes(&mut nodes).await;
+    assert!(
+        !closed.contains(&b1),
+        "defect: reaping a dial closed the connection another dial in flight uses: {closed:?}"
+    );
+}
+
+/// [`reaped_dial`] with multipath off.
+#[tokio::test]
+async fn a_reaped_dial_leaves_a_connection_another_dial_in_flight_uses() {
+    reaped_dial(false).await;
+}
+
+/// [`reaped_dial`] with multipath on.
+#[tokio::test]
+async fn a_reaped_dial_leaves_a_connection_another_dial_in_flight_uses_with_multipath_on() {
+    reaped_dial(true).await;
+}
+
+/// On the BLE mock, whose pool holds one channel per address and closes it
+/// when asked: reaping one of two dials on a channel leaves the channel
+/// pooled for the other. Read with the pool's lock awaited, so a lock held
+/// by the transport's own tasks cannot pass for a closed channel.
+#[cfg(ble_available)]
+async fn ble_reaped(on: bool) {
+    use super::super::ble::{base_config, larger_second, link_genuinely, make_test_node_ble_from};
+    let config = with_path(Config::new(), on);
+    let mut nodes = vec![
+        make_test_node_ble_from(1, base_config(), config.clone()).await,
+        make_test_node_ble_from(2, base_config(), config).await,
+    ];
+    larger_second(&mut nodes);
+    let _bank = link_genuinely(&nodes).await;
+    let tid = nodes[0].transport_id;
+    let b = nodes[1].addr.clone();
+    let pooled = async |nodes: &[TestNode]| match nodes[0].node.transports.get(&tid) {
+        Some(TransportHandle::Ble(t)) => t.is_verified(&b).await.is_some(),
+        _ => panic!("precondition: node 0's transport is BLE"),
+    };
+    assert!(pooled(&nodes).await, "precondition: the BLE channel is up");
+    let first = two_dials(&mut nodes).await;
+    reap(&mut nodes, first).await;
+    let kept = pooled(&nodes).await;
+    cleanup_nodes(&mut nodes).await;
+    assert!(
+        kept,
+        "defect: reaping a dial closed the BLE channel another dial in flight uses"
+    );
+}
+
+/// [`ble_reaped`] with multipath off.
+#[cfg(ble_available)]
+#[tokio::test]
+async fn a_reaped_ble_dial_leaves_the_channel_another_dial_in_flight_uses() {
+    ble_reaped(false).await;
+}
+
+/// [`ble_reaped`] with multipath on.
+#[cfg(ble_available)]
+#[tokio::test]
+async fn a_reaped_ble_dial_leaves_the_channel_another_dial_in_flight_uses_with_multipath_on() {
+    ble_reaped(true).await;
 }

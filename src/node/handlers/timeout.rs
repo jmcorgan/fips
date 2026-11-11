@@ -213,7 +213,7 @@ impl Node {
         // then drop a link cannot be disturbed by this. A connection an active
         // peer also runs on (both legs of a BLE handshake share one) is left
         // open: it is that peer's, not the stale handshake's.
-        self.close_handshake_link_connection(link_id).await;
+        self.close_unused(link_id).await;
 
         // Remove the link and its index entries
         self.remove_link(&link_id);

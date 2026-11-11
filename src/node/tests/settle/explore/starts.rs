@@ -104,7 +104,8 @@ pub(super) enum Clause {
     RightLink,
     /// The shell audit's `MapsAgree`: `Breach::MapsAgree`.
     MapsAgree,
-    /// The shell audit's `ConnectionsInUse`: `Breach::ConnectionsInUse`.
+    /// The shell audit's `ConnectionsInUse`: `Breach::ConnectionsInUse` or
+    /// `Breach::Unconnected`.
     ConnectionsInUse,
     /// The leaf's heal: the nodes went quiet and every pair came to hold
     /// each other on one session within the heal's time.
@@ -698,20 +699,6 @@ pub(super) const PINS: &[(&str, bool, Reach)] = &[
         false,
         Reach::None(
             "the restarted node must read the late rekey msg1 with its new peering about 1 s old, so not eligible as a rekey; the world's rekey step ages the peer's end of the session past the 30 s floor, which makes that msg1 an eligible rekey, and a rekey reached by time alone starts at a jittered moment no schedule names",
-        ),
-    ),
-    (
-        "node::tests::settle::readings::a_connect_in_flight_across_a_move_leaves_no_connection_with_no_path",
-        true,
-        Reach::None(
-            "a path offered on a third, TCP transport whose connect is still out when a later dial of the node's own moves the peer; the world offers no path and runs one medium",
-        ),
-    ),
-    (
-        "node::tests::settle::readings::a_close_queued_at_a_restart_teardown_spares_the_new_link_at_that_pair",
-        true,
-        Reach::None(
-            "its oracle is the loopback transport's record of the connections a drain closed, which no oracle here reads, and it needs a capable link of two paths with the peer active on the second, which no start builds",
         ),
     ),
 ];

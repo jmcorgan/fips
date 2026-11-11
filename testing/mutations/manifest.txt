@@ -163,8 +163,14 @@ BleUnprovenIgnoresHeld	red	fips-mesh	node::tests::ble_lifecycle::a_channel_whose
 MovedLeavesEntry	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	entry-pair
 ReleaseKeepsPairOpen	red	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_another_closes_its_connection_as_the_table_says_with_multipath_on
 ReleaseKeepsPairOpen	pass	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_it_keeps_its_connection_as_the_table_says_with_multipath_on
+ReleaseKeepsPairOpen	red	fips-mesh	node::tests::settle::readings::a_close_queued_with_nothing_on_its_pair_still_closes
+DrainReadsNothing	red	fips-mesh	node::tests::settle::readings::a_close_queued_at_a_restart_teardown_spares_the_new_link_at_that_pair
+DrainReadsNothing	pass	fips-mesh	node::tests::settle::readings::a_close_queued_with_nothing_on_its_pair_still_closes
 RenewedStateDropped	red	fips-mesh	node::tests::crossed_dial::a_crossed_dials_renewal_writes_the_old_paths_ending_and_the_new_originals_beginning	the old path's ending is written at the pair the link left
 RenewedStateDropped	pass	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first
+ConnectLeftOpen	red	fips-mesh	node::tests::settle::readings::a_connect_in_flight_across_a_move_leaves_no_connection_with_no_path
+ConnectClosesHeld	red	fips-mesh	node::tests::settle::readings::a_connect_for_a_path_still_held_steps_the_bundle
+ConnectClosesHeld	pass	fips-mesh	node::tests::settle::readings::a_connect_at_a_pair_another_link_uses_stays_open
 RemoveKeepsLink	red	fips-mesh	node::tests::disconnect::test_disconnect_clears_session	link-named
 RemoveKeepsLink	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_is_reaped	link-named
 RemoveKeepsLink	red	fips-mesh	node::tests::settle::table::remove::a_peer_that_disconnects_is_removed_as_its_cells_say
@@ -181,6 +187,15 @@ UnbindKept	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_m
 AdminKeepsConnection	red	fips-mesh	node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say
 AdminKeepsConnection	red	fips-mesh	node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say_with_multipath_on
 AdminKeepsConnection	red	fips-mesh	node::tests::tcp::test_api_disconnect_closes_the_tcp_connection	the pooled TCP connection must not outlive the peer
+CloseByPeerAddress	red	fips-mesh	node::tests::settle::crossing::a_reaped_dial_leaves_a_connection_another_dial_in_flight_uses
+CloseByPeerAddress	red	fips-mesh	node::tests::settle::crossing::a_reaped_dial_leaves_a_connection_another_dial_in_flight_uses_with_multipath_on
+CloseByPeerAddress	red	fips-mesh	node::tests::settle::crossing::a_reaped_ble_dial_leaves_the_channel_another_dial_in_flight_uses
+CloseByPeerAddress	red	fips-mesh	node::tests::settle::crossing::a_reaped_ble_dial_leaves_the_channel_another_dial_in_flight_uses_with_multipath_on
+CloseByPeerAddress	pass	fips-mesh	node::tests::ble::reaping_a_handshake_leg_keeps_the_peer_link_it_shares
+CloseByPeerAddress	red	fips-mesh	node::tests::settle::readings::a_connect_at_a_pair_another_link_uses_stays_open	defect: the connection a handshake leg uses
+CloseBySetupAddress	red	fips-mesh	node::tests::paths::an_acked_standby_of_another_peer_keeps_a_handshake_links_connection_open	the peer's acked standby keeps the connection open
+CloseBySetupAddress	pass	fips-mesh	node::tests::ble::reaping_a_handshake_leg_keeps_the_peer_link_it_shares
+CloseBySetupAddress	red	fips-mesh	node::tests::settle::readings::a_connect_at_a_pair_another_link_uses_stays_open	defect: the connection another peer's acked path uses
 DisconnectKeepsVerified	red	fips-mesh	node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says
 DisconnectKeepsVerified	red	fips-mesh	node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says_with_multipath_on
 DisconnectKeepsVerified	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_disconnects	the link is still pooled but no longer verified
