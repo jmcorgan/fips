@@ -57,7 +57,8 @@ fn stray_ack() -> Vec<u8> {
 /// The roam's cells the test states: a roam re-addresses the one path, and
 /// with it drops the connected socket aimed at the address left and moves
 /// the BLE mark, which loopback does not read.
-const ROAMED: [(Row, Outcome); 3] = [
+const ROAMED: [(Row, Outcome); 4] = [
+    (Row::Index, Outcome::Changed),
     (Row::Paths, Outcome::Changed),
     (Row::ConnectedUdp, Outcome::Changed),
     (Row::BleMark, Outcome::Changed),
@@ -610,8 +611,8 @@ async fn a_probe_from_a_new_address_moves_a_path_of_a_two_path_link_only_with_mu
 }
 
 /// With multipath on, node 1's probe on `p` from a new address moves `p`
-/// there: its index entry follows it, its connected socket goes and `q`'s
-/// stays, and every row does what the moved path's cell says.
+/// there: the new pair is named, and so is `p`'s, since the link was set up
+/// there; its connected socket goes and `q`'s stays, and every row does what the moved path's cell says.
 #[tokio::test]
 async fn a_probe_from_a_new_address_moves_a_path_of_a_two_path_link_with_multipath_on() {
     let mut pair = two_paths(true).await;
@@ -633,8 +634,8 @@ async fn a_probe_from_a_new_address_moves_a_path_of_a_two_path_link_with_multipa
     cleanup_nodes(&mut pair.nodes).await;
     assert_eq!(
         entries,
-        (None, Some(link)),
-        "defect: the moved path's index entry did not follow it from p's pair to the new one"
+        (Some(link), Some(link)),
+        "defect: the moved path's new pair is not named, or p's pair, where the link was set up, no longer is"
     );
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert!(
@@ -721,12 +722,13 @@ impl Cause {
     }
 }
 
-/// The switch's cells the test states, at `p`'s link moved to `q`: the new
-/// pair claimed, the active path changed, the old active path's socket
+/// The switch's cells the test states, at `p`'s link moved to `q`: the
+/// index kept, since `q` is a proven path and so named already, the active
+/// path changed, the old active path's socket
 /// cleared, the rekey machine's indices kept, the path MTU seeded from `q`,
 /// and the cost hold started.
 const SWITCHED: [(Row, Outcome); 6] = [
-    (Row::Index, Outcome::Changed),
+    (Row::Index, Outcome::Kept),
     (Row::Paths, Outcome::Changed),
     (Row::ConnectedUdp, Outcome::Changed),
     (Row::RekeyMachine, Outcome::Kept),
@@ -762,8 +764,14 @@ async fn a_switch(cause: Cause) {
     }
     match cause {
         Cause::Handover => {
-            let mut others = SWITCHED.to_vec();
+            // The release of `p`, the link's setup pair, takes it out of the
+            // index.
+            let mut others: Vec<(Row, Outcome)> = SWITCHED
+                .into_iter()
+                .filter(|(r, _)| *r != Row::Index)
+                .collect();
             others.extend([
+                (Row::Index, Outcome::Changed),
                 (Row::PathFailures, Outcome::Changed),
                 (Row::Capability, Outcome::Changed),
             ]);

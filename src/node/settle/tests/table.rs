@@ -860,7 +860,7 @@ const GOLDEN: &[(Row, Case, Cell)] = &[
     (Row::Index, Case::CutoverInitiator, Cell::Keep),
     (Row::Index, Case::CutoverResponder, Cell::Keep),
     (Row::Index, Case::Restarted, Cell::Keep),
-    (Row::Index, Case::Roam, Cell::Keep),
+    (Row::Index, Case::Roam, Cell::SetupKeptRoamedAdded),
     (Row::Index, Case::Follow, Cell::Followed),
     (Row::Index, Case::Switch, Cell::Claimed),
     (Row::Index, Case::ReleaseKept, Cell::Unclaimed),

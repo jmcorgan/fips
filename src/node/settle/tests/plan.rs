@@ -151,7 +151,6 @@ const MOVE: &[(Effect, &str)] = &[
         Effect::MoveNote,
         "debug!(.., \"Suppressed replay detections during link transition\"); debug!(.., the swap line)",
     ),
-    (Effect::WaiverIfNoEntry, "self.links.waive(held, waiver)"),
     (
         Effect::MachineCrossed,
         "self.observe_cross_conn_resolved(&peer_node_addr, outcome)",

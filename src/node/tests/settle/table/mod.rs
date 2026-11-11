@@ -164,6 +164,7 @@ pub(super) fn expect(cell: Cell) -> Expect {
         | Cell::ReleasedUnclaimedDialDropped
         | Cell::DialDropped
         | Cell::Followed
+        | Cell::SetupKeptRoamedAdded
         | Cell::Claimed
         | Cell::Unclaimed
         | Cell::NewAtSource
@@ -1326,7 +1327,27 @@ async fn reds_a_planted_change_of_each_row(on: bool) {
             .filter(|r| expect(cell(*r, &keeping)) == Expect::Stated)
             .map(|r| (r, Outcome::Kept))
             .collect();
-        assert_cells(&before, &before, &keeping, &others);
+        // The unchanged reading passes at the keeping transition. Where that
+        // transition changes another row whatever the script, as a cutover
+        // resets the record's counters, only the planted row is read: the
+        // index is derived from the link records, so a roam, once the quiet
+        // transition that kept it, now adds the roamed pair.
+        if Row::all()
+            .into_iter()
+            .any(|r| expect(cell(r, &keeping)) == Expect::Changed)
+        {
+            let quiet = check_cells(&before, &before, &keeping, &others);
+            assert!(
+                !quiet
+                    .breaches
+                    .iter()
+                    .any(|b| b.starts_with(&format!("{row:?} "))),
+                "precondition: the unchanged reading of {row:?} passes at {keeping:?}: {:?}",
+                quiet.breaches
+            );
+        } else {
+            assert_cells(&before, &before, &keeping, &others);
+        }
         let checked = check_cells(&before, &after, &keeping, &others);
         if !checked
             .breaches

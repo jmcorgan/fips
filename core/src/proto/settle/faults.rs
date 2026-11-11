@@ -38,6 +38,8 @@ pub(crate) enum Fault {
     ProbingCounts,
     /// A path released with keep is closed anyway.
     KeepIgnored,
+    /// A setup address whose path the bundle released stays in the index.
+    ReleasedSetupIndexed,
     /// The unheard floor refuses at exactly its age as well.
     UnheardInclusive,
     /// The heard floor counts from the peering's installation only.
@@ -260,6 +262,7 @@ impl Fault {
         Self::CloseBySetupAddress,
         Self::ProbingCounts,
         Self::KeepIgnored,
+        Self::ReleasedSetupIndexed,
         Self::UnheardInclusive,
         Self::HeardFromInstall,
         Self::HeardNeedsFrame,

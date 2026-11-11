@@ -74,9 +74,6 @@ listed! {
         UnpinIfOwn,
         /// Log the replays suppressed during the move and the move itself.
         MoveNote,
-        /// Waive the live audit's entry check for a moved link left with no
-        /// entry, naming the move; test and debug builds only.
-        WaiverIfNoEntry,
         /// Tell the peer's control machine how the crossing resolved.
         MachineCrossed,
         /// Close the dial's connection unless the peer runs on it.
@@ -209,7 +206,6 @@ pub(in crate::node) fn plan(t: &Transition) -> &'static [Effect] {
             Effect::RelinkIfMoved,
             Effect::UnpinIfOwn,
             Effect::MoveNote,
-            Effect::WaiverIfNoEntry,
             Effect::MachineCrossed,
             Effect::DialForget,
             Effect::DialClose,

@@ -7,7 +7,7 @@
 //! - through the shell audit (`settle::audit::audit`): one
 //!   session and nothing left unadoptable, the right link record, the maps
 //!   agreeing, every open connection in use, with the start's waivers
-//!   passed where the node recorded them;
+//!   passed;
 //! - the node's live audit, inherited: in a debug build every packet a node
 //!   is handed runs it, and a breach panics there, naming its clause.
 //!
@@ -26,7 +26,6 @@ use super::model::Tap;
 use super::starts::pooled;
 use super::starts::{Clause, Order, PINS, Reach, Start, Waive, starts};
 use super::world::{Medium, World};
-use crate::node::settle::Waiver;
 use std::sync::{Arc, Mutex};
 
 /// What an oracle found at a leaf.
@@ -52,53 +51,26 @@ fn clause(breach: &Breach) -> Clause {
     }
 }
 
-/// The waivers of `start` that the node they name recorded in `world`, in
-/// the world's indices for `order`.
-fn recorded(world: &World, start: &Start, order: Order) -> Vec<Exempt> {
-    let mut out = Vec::new();
-    for waive in start.waivers {
-        let (exempt, at, peer, waiver) = match *waive {
-            Waive::CrossedInbound(a, b) => {
-                let (node, peer) = (order.node(a), order.node(b));
-                (
-                    Exempt::CrossedInbound { node, peer },
-                    node,
-                    peer,
-                    Waiver::CrossedInbound,
-                )
-            }
-            Waive::MovedOwnDial(a, b) => {
-                let (node, peer) = (order.node(a), order.node(b));
-                (
-                    Exempt::MovedOwnDial { node, peer },
-                    node,
-                    peer,
-                    Waiver::MovedOwnDial,
-                )
-            }
-            Waive::HeldLinkEntry(a, b) => {
-                let (node, peer) = (order.node(a), order.node(b));
-                (
-                    Exempt::HeldLinkEntry { node, peer },
-                    node,
-                    peer,
-                    Waiver::HeldLinkEntry,
-                )
-            }
-        };
-        let node = &world.nodes[at].node;
-        if node
-            .get_peer(world.nodes[peer].node.node_addr())
-            .is_some_and(|p| node.links.carries(&p.link_id(), waiver))
-        {
-            out.push(exempt);
-        }
-    }
-    out
+/// The waivers of `start`, in the world's indices for `order`.
+fn exempted(start: &Start, order: Order) -> Vec<Exempt> {
+    start
+        .waivers
+        .iter()
+        .map(|waive| match *waive {
+            Waive::CrossedInbound(a, b) => Exempt::CrossedInbound {
+                node: order.node(a),
+                peer: order.node(b),
+            },
+            Waive::MovedOwnDial(a, b) => Exempt::MovedOwnDial {
+                node: order.node(a),
+                peer: order.node(b),
+            },
+        })
+        .collect()
 }
 
 /// Heal `world`, a leaf of `start` in `order`, and check it: every pair the
-/// start dials is settled, then the shell audit, with the start's recorded
+/// start dials is settled, then the shell audit, with the start's
 /// waivers passed unless `lifted`. Every finding, in that order.
 pub(super) async fn judge(
     world: &mut World,
@@ -127,7 +99,7 @@ pub(super) async fn judge(
     let exempt = if lifted {
         Vec::new()
     } else {
-        recorded(world, start, order)
+        exempted(start, order)
     };
     for breach in audit(&mut world.nodes, &exempt).await {
         out.push(Finding {

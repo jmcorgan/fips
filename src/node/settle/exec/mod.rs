@@ -176,7 +176,6 @@ impl Node {
             Effect::SeedMtuIfMoved => cross::seed_mtu(self, r).await,
             Effect::UnpinIfOwn => cross::unpin_own(self, r).await,
             Effect::MoveNote => cross::move_note(self, r).await,
-            Effect::WaiverIfNoEntry => cross::waiver(self, r).await,
             Effect::MachineCrossed => cross::machine_crossed(self, r).await,
             Effect::DialClose => cross::dial_close(self, r).await,
             Effect::DialLinkRemoved => cross::dial_removed(self, r).await,

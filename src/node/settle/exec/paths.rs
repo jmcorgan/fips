@@ -144,7 +144,6 @@ impl Node {
                 | Effect::SeedMtuIfMoved
                 | Effect::UnpinIfOwn
                 | Effect::MoveNote
-                | Effect::WaiverIfNoEntry
                 | Effect::MachineCrossed
                 | Effect::DialClose
                 | Effect::DialLinkRemoved
@@ -180,13 +179,10 @@ fn key(path: &PathRef) -> AddrKey {
     (path.transport, path.addr.clone())
 }
 
-/// Move the link's lookup entry from the path's old pair to its new.
-pub(super) fn link_follow(node: &mut Node, r: &mut Run) {
-    if let Some(f) = of(r)
-        && let (Some(link), Some(from), Some(to)) = (f.link, &f.from, &f.to)
-    {
-        node.links.follow(link, &key(from), key(to));
-    }
+/// Rebuild the link's lookup at the path's move; the link's record follows
+/// the move when the feed applies it.
+pub(super) fn link_follow(node: &mut Node, _: &mut Run) {
+    node.links.follow();
 }
 
 /// Log the path's move.
@@ -223,9 +219,6 @@ pub(super) fn clear_old(node: &mut Node, r: &mut Run) {
 
 /// Claim the newly active pair for the link in the lookup.
 pub(super) fn link_claim(node: &mut Node, r: &mut Run) {
-    if node_fault!(SwitchSkipsClaim) {
-        return;
-    }
     if let Some(f) = of(r)
         && let (Some(link), Some(to)) = (f.link, &f.to)
     {

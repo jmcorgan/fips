@@ -161,9 +161,6 @@ BleUnprovenIgnoresHandshake	red	fips-mesh	transport::conformance::ble::a_channel
 BleUnprovenIgnoresHeld	red	fips-mesh	transport::conformance::ble::a_channel_the_node_holds_is_kept_a_full_timeout_after_it_lets_go	defect: a channel was closed less than a timeout after the node last held it
 BleUnprovenIgnoresHeld	red	fips-mesh	node::tests::ble_lifecycle::a_channel_whose_first_msg1_comes_late_is_kept_a_full_timeout_after_it	defect: a channel was closed 15 s after its first msg1
 MovedLeavesEntry	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	entry-pair
-MovedLeavesEntry	red	fips-mesh	node::tests::settle::table::paths::a_probe_from_a_new_address_moves_a_path_of_a_two_path_link_with_multipath_on
-SwitchSkipsClaim	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	the new active pair maps to the link
-SwitchSkipsClaim	red	fips-mesh	node::tests::settle::table::paths::the_active_path_closed_by_the_peer_switches_the_link_as_the_table_says_with_multipath_on
 ReleaseKeepsPairOpen	red	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_another_closes_its_connection_as_the_table_says_with_multipath_on
 ReleaseKeepsPairOpen	pass	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_it_keeps_its_connection_as_the_table_says_with_multipath_on
 RenewedStateDropped	red	fips-mesh	node::tests::crossed_dial::a_crossed_dials_renewal_writes_the_old_paths_ending_and_the_new_originals_beginning	the old path's ending is written at the pair the link left
@@ -195,3 +192,17 @@ LinksNotFed	red	fips-mesh	node::tests::settle::live::a_dialed_links_record_holds
 LinksNotFed	red	fips-mesh	node::tests::settle::live::a_healthy_dial_passes_the_live_audit_at_every_entry	links-mirror
 LinksNotFed	red	fips-mesh	node::tests::settle::live::a_healthy_dial_passes_the_live_audit_at_every_entry_with_multipath_on	links-mirror
 MirrorLetsAckedOff	red	fips-mesh	node::tests::settle::live::a_switch_to_an_acked_path_is_recorded_live_and_is_let_off_with_multipath_on	let off an acknowledged path that is not active
+ReleasedSetupIndexed	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	a released pair no longer maps to the link
+ShadowLosesEntry	red	fips-mesh	node::tests::settle::links::a_crossed_dial_from_another_address_keeps_an_index_entry_for_its_link	held-entry
+ShadowLosesEntry	red	fips-mesh	node::tests::settle::links::a_crossed_dial_from_another_address_keeps_an_index_entry_for_its_link_with_multipath_on	held-entry
+ShadowLosesEntry	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_another_transport_keeps_an_index_entry_for_its_link	held-entry
+ShadowLosesEntry	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_another_transport_keeps_an_index_entry_for_its_link_with_multipath_on	held-entry
+ShadowLosesEntry	red	fips-mesh	node::tests::settle::cells::a_second_own_dial_to_the_held_links_address_leaves_a_link_named_there	held-entry
+ForgetTakesKey	red	fips-mesh	node::settle::tests::links::forgetting_a_dial_leaves_the_held_links_entry
+IndexOldestWins	red	fips-mesh	node::settle::tests::a_pair_two_links_are_set_up_at_names_the_newest_and_then_the_one_left	the pair names the link opened last
+IndexOldestWins	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_lost_at_a_proven_pair_does_what_the_keep_cells_say
+IndexOldestWins	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_lost_at_a_proven_pair_does_what_the_keep_cells_say_with_multipath_on
+IndexNotRebuilt	red	fips-mesh	node::tests::settle::links::a_second_path_proven_through_frames_is_named_in_the_link_index_with_multipath_on	index-cache
+IndexNotRebuilt	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays	index-cache
+RoamNotFed	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays	links-mirror
+RoamNotFed	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays_with_multipath_on	links-mirror

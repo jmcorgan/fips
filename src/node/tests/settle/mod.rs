@@ -20,6 +20,7 @@ mod crossing;
 mod explore;
 mod fsp;
 mod lane;
+mod links;
 mod live;
 pub(super) mod readings;
 mod restart;

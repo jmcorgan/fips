@@ -264,6 +264,9 @@ pub(super) fn jobs(medium: Medium, settings: &[bool]) -> Vec<Job> {
     out
 }
 
+/// The stack of a walk's thread.
+const WALK_STACK: usize = 8 * 1024 * 1024;
+
 /// Run `f` on each job, each on a thread of its own with its own runtime,
 /// and so its own test clock, side by side, and return what they found. A
 /// job names the path it is on in the string it is given; a panic in a
@@ -278,13 +281,19 @@ where
     for job in jobs {
         let at = Arc::new(Mutex::new(String::new()));
         let seen = Arc::clone(&at);
-        let run = std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("precondition: a runtime for the walk")
-                .block_on(f(job, seen))
-        });
+        // A walk runs a node's handlers to their full depth in a debug
+        // build, which on the loopback starts alone comes within a few per
+        // cent of the default 2 MiB thread stack, so each walk takes more.
+        let run = std::thread::Builder::new()
+            .stack_size(WALK_STACK)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("precondition: a runtime for the walk")
+                    .block_on(f(job, seen))
+            })
+            .expect("precondition: a thread for the walk");
         runs.push((run, at));
     }
     let mut found = Vec::new();

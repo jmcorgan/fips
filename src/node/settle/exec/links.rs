@@ -99,6 +99,10 @@ impl Node {
         let Some(link) = self.links.no(&link) else {
             return;
         };
+        // The mutation lane's break: the roam never reaches the record.
+        if node_fault!(RoamNotFed) {
+            return;
+        }
         let event = Event::Roam {
             link,
             from: from.as_ref().map(pair),

@@ -78,7 +78,8 @@ helper that seeds a handshake machine by hand.
   path per variation, `walk` runs one path to its leaf (`build` and
   `walk_from` are its two halves, for a world a test made itself), and
   `heal` heals the leaf (below); `parallel` runs walks on threads of their
-  own. Its
+  own, each with an 8 MiB stack, since a walk in a debug build comes within
+  a few per cent of the default 2 MiB. Its
   tests: the map covers every pinned defect and every core start number,
   and every start reaches its target: its scripted path runs to its end on
   its transport, and the explorer walks the number of paths the start
@@ -198,10 +199,8 @@ connection opens after the timeout.
 Then, at the leaf:
 
 - `settle::settled` for every pair the start dials;
-- the shell audit, `settle::audit::audit`, with the start's
-  waivers passed only where the node recorded them on the link it holds the
-  peer on (a start names what may be waived, and the node says whether it
-  is);
+- the shell audit, `settle::audit::audit`, with the start's waivers
+  passed;
 - the node's live audit, inherited: in a debug build it runs at every packet
   a node is handed and panics on a breach. A walk runs on a thread of its
   own, so the property test reports such a panic, with the path it was

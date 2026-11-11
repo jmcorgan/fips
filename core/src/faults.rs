@@ -210,12 +210,10 @@ faults! {
     /// The BLE transport does not restart the timeout of a channel the
     /// node holds.
     BleUnprovenIgnoresHeld,
-    /// Following a moved path keeps the link's index entry at the pair the
-    /// path left, beside the one at the pair it moved to.
+    /// A moved path's old pair stays in the link's record, so the index
+    /// derived from it keeps an entry there, beside the one at the pair it
+    /// moved to.
     MovedLeavesEntry,
-    /// A switch of the active path leaves the link's index without an entry
-    /// at the newly active pair.
-    SwitchSkipsClaim,
     /// A path released while the link lives leaves its connection open,
     /// though the peer has no further use for it and no other link uses it.
     ReleaseKeepsPairOpen,
@@ -243,6 +241,24 @@ faults! {
     /// The live audit lets off any acknowledged path the core records Live,
     /// not only the active path a switch made Live.
     MirrorLetsAckedOff,
+    /// A link's setup address stays in the index derived from the link
+    /// records after its bundle released the path there.
+    ReleasedSetupIndexed,
+    /// Closing a link takes the index's entry at each pair it was named at
+    /// from any other link that uses the pair, as the written index did.
+    ShadowLosesEntry,
+    /// Abandoning a dial takes the index's entry at the dial's pair from
+    /// whichever link it named, as the written index did.
+    ForgetTakesKey,
+    /// A pair several links use names the link opened first, not the one
+    /// opened last.
+    IndexOldestWins,
+    /// Applying a bundle's report to a link's record leaves the index as it
+    /// was, so a path the record gains or loses is not reflected in it.
+    IndexNotRebuilt,
+    /// A one-path roam or a bind, which the bundle reports in no output, is
+    /// not told to the core, so the link's record keeps the old pair.
+    RoamNotFed,
 }
 
 impl Fault {

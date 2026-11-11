@@ -711,11 +711,13 @@ async fn working_peering(late: &mut LateDial) -> Result<(), String> {
 /// second dial.
 #[derive(Clone, Copy)]
 enum Kept {
-    /// The held link loses its index entry to the retired dial's link.
+    /// None: the held link keeps its index entry, since the retired dial's
+    /// link no longer takes it.
     Entry,
-    /// The peer's link record stays on the first transport, and the move's
+    /// The peer's link record stays on the first transport. The move's
     /// renewal of the link's paths on the dial's pair releases the record's
-    /// index entry.
+    /// setup pair, which then leaves the index, as a released setup pair
+    /// does.
     Record,
 }
 
@@ -730,41 +732,22 @@ async fn late_dial_works(on: bool, dialer_larger: bool, second: Second, kept: Ke
     let (d, r) = (late.d, late.r);
     let unexempt = audit(&mut late.nodes, &[]).await;
     let (expected, exempt) = match kept {
-        Kept::Entry => (
+        Kept::Entry => (unexempt.is_empty(), None),
+        Kept::Record => (
             unexempt.len() == 1
                 && matches!(
                     &unexempt[0],
-                    Breach::MapsAgree { node, what, .. } if *node == d && what.starts_with("a live link with no index entry")
+                    Breach::RightLink { node, peer, .. } if *node == d && *peer == r
                 ),
-            Exempt::HeldLinkEntry { node: d, peer: r },
+            Some(Exempt::MovedOwnDial { node: d, peer: r }),
         ),
-        Kept::Record => {
-            let record = late.nodes[d]
-                .node
-                .get_peer(late.nodes[r].node.node_addr())
-                .map(|p| p.link_id());
-            (
-                unexempt.len() == 2
-                    && unexempt.iter().any(
-                        |b| matches!(b, Breach::RightLink { node, peer, .. } if *node == d && *peer == r),
-                    )
-                    && unexempt.iter().any(|b| {
-                        matches!(
-                            b,
-                            Breach::MapsAgree { node, link, what }
-                                if *node == d && Some(*link) == record
-                                    && what.starts_with("a live link with no index entry")
-                        )
-                    }),
-                Exempt::MovedOwnDial { node: d, peer: r },
-            )
-        }
     };
     assert!(
         expected,
         "defect: the audit finds only the dialer's documented breach: {unexempt:#?}"
     );
-    assert_coherent(&mut late.nodes, &[exempt], "the end of a late second dial").await;
+    let exempt: Vec<Exempt> = exempt.into_iter().collect();
+    assert_coherent(&mut late.nodes, &exempt, "the end of a late second dial").await;
     cleanup_nodes(&mut late.nodes).await;
 }
 

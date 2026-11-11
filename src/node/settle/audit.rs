@@ -96,8 +96,8 @@ pub(in crate::node) fn entry_pair(node: &Node) -> Vec<(AddrKey, LinkId)> {
 }
 
 /// `held-entry`: every link a peer is held on is named by at least one index
-/// entry, or its own pair names another live link, or it carries a waiver
-/// (`settle::Waiver`). The held links that break it.
+/// entry, or its own pair names another live link. The held links that break
+/// it.
 pub(in crate::node) fn held_entry(node: &Node) -> Vec<LinkId> {
     let held: HashSet<LinkId> = node.peers.values().map(|p| p.link_id()).collect();
     let mut bad = Vec::new();
@@ -111,7 +111,7 @@ pub(in crate::node) fn held_entry(node: &Node) -> Vec<LinkId> {
         let other = index
             .get(&key)
             .is_some_and(|named| node.links.contains_key(named));
-        if !some && !other && !node.links.waived(&link) {
+        if !some && !other {
             bad.push(link);
         }
     }
@@ -140,6 +140,25 @@ pub(in crate::node) fn leg_entry(node: &Node) -> Vec<LinkId> {
         }
     }
     bad
+}
+
+/// `index-cache`: the index the link table keeps is the one its link
+/// records give now. The pairs where the two differ, each with the link the
+/// cache names there and the link the records do.
+pub(in crate::node) fn index_cache(node: &Node) -> Vec<(AddrKey, Option<LinkId>, Option<LinkId>)> {
+    let cache = node.links.index();
+    let derived = node.links.derived();
+    let keys: HashSet<&AddrKey> = cache.keys().chain(derived.keys()).collect();
+    keys.into_iter()
+        .filter(|key| cache.get(*key) != derived.get(*key))
+        .map(|key| {
+            (
+                key.clone(),
+                cache.get(key).copied(),
+                derived.get(key).copied(),
+            )
+        })
+        .collect()
 }
 
 /// `index`: `peers_by_index` maps exactly the indices the peers' link
@@ -339,6 +358,7 @@ pub(in crate::node) fn live(node: &Node, site: &str) {
     fail(site, "entry-pair", &entry_pair(node));
     fail(site, "held-entry", &held_entry(node));
     fail(site, "leg-entry", &leg_entry(node));
+    fail(site, "index-cache", &index_cache(node));
     index(node, &format!("audit_live: {site}: index"));
     fail(site, "carrier", &carrier(node));
     let mirror = links_mirror(node);

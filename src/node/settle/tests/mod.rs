@@ -167,7 +167,7 @@ fn link(id: u64, addr: &str) -> Link {
 }
 
 #[test]
-fn opening_a_link_at_a_taken_key_overwrites_it_and_closing_it_leaves_the_key_empty() {
+fn a_pair_two_links_are_set_up_at_names_the_newest_and_then_the_one_left() {
     let (one, two) = (LinkId::new(1), LinkId::new(2));
     let mut table = LinkTable::default();
     table.open(link(1, "10.0.0.1:2121"));
@@ -177,15 +177,16 @@ fn opening_a_link_at_a_taken_key_overwrites_it_and_closing_it_leaves_the_key_emp
     assert_eq!(
         table.index().get(&key("10.0.0.1:2121")),
         Some(&two),
-        "the second link's open overwrites the key"
+        "the pair names the link opened last"
     );
     assert!(table.contains_key(&one), "the first link stays open");
 
     let closed = table.close(&two).expect("the link is open");
     assert_eq!(closed.link_id(), two, "close hands back the link");
-    assert!(
-        table.index().is_empty(),
-        "closing the second link leaves the key empty, not naming the first"
+    assert_eq!(
+        table.index().get(&key("10.0.0.1:2121")),
+        Some(&one),
+        "closing the second link leaves the pair naming the first"
     );
     assert!(table.contains_key(&one) && !table.contains_key(&two));
     assert!(table.close(&two).is_none(), "a second close finds nothing");
@@ -217,7 +218,7 @@ fn closing_a_link_drops_every_entry_naming_it_and_leaves_other_links_entries() {
 }
 
 #[test]
-fn forgetting_a_link_drops_the_entry_at_its_key_whichever_link_it_names() {
+fn forgetting_a_link_retires_it_and_leaves_the_entry_naming_another_link() {
     let (one, two) = (LinkId::new(1), LinkId::new(2));
     let mut table = LinkTable::default();
     table.open(link(1, "10.0.0.1:2121"));
@@ -232,56 +233,65 @@ fn forgetting_a_link_drops_the_entry_at_its_key_whichever_link_it_names() {
     table.forget(&one, &key("10.0.0.1:2121"));
     assert!(!table.contains_key(&one), "the link is dropped");
     assert!(table.contains_key(&two), "the other link stays");
-    assert!(
-        !table.index().contains_key(&key("10.0.0.1:2121")),
-        "the entry at the key goes though it named the other link"
-    );
     assert_eq!(
-        table.index().get(&key("10.0.0.3:2121")),
-        Some(&one),
-        "an entry at another key is left, even naming the forgotten link"
+        table.index().get(&key("10.0.0.1:2121")),
+        Some(&two),
+        "the entry at the key still names the other link"
+    );
+    assert!(
+        !table.index().contains_key(&key("10.0.0.3:2121")),
+        "the forgotten link is named nowhere"
     );
 }
 
 #[test]
-fn a_followed_path_moves_only_an_entry_that_names_the_link() {
-    let (one, two, three) = (LinkId::new(1), LinkId::new(2), LinkId::new(3));
+fn a_moved_path_moves_the_links_entry_with_its_record_and_its_setup_pair_stays() {
+    let (one, three) = (LinkId::new(1), LinkId::new(3));
     let mut table = LinkTable::default();
     table.open(link(1, "10.0.0.1:2121"));
     table.open(link(2, "10.0.0.2:2121"));
     table.open(link(3, "10.0.0.3:2121"));
+    let no = table.no(&one).expect("precondition: the link has a number");
+    let at = |addr: &str| {
+        let (transport, addr) = key(addr);
+        crate::proto::settle::links::Pair { transport, addr }
+    };
+    table.claim(one, key("10.0.0.1:2121"));
+    let moved = |from: &str, to: &str| crate::proto::settle::input::Input::Moved {
+        link: no,
+        from: at(from),
+        to: at(to),
+    };
 
-    table.follow(one, &key("10.0.0.1:2121"), key("10.0.0.4:2121"));
-    assert!(
-        !table.index().contains_key(&key("10.0.0.1:2121")),
-        "the old pair's entry goes"
-    );
+    table.mirror(&moved("10.0.0.1:2121", "10.0.0.4:2121"));
     assert_eq!(
         table.index().get(&key("10.0.0.4:2121")),
         Some(&one),
         "the new pair names the link"
     );
-
-    table.follow(one, &key("10.0.0.2:2121"), key("10.0.0.5:2121"));
     assert_eq!(
-        table.index().get(&key("10.0.0.2:2121")),
-        Some(&two),
-        "an old pair naming another link is left"
+        table.index().get(&key("10.0.0.1:2121")),
+        Some(&one),
+        "the setup pair the path roamed from stays named"
     );
+
+    table.claim(one, key("10.0.0.5:2121"));
+    table.mirror(&moved("10.0.0.5:2121", "10.0.0.6:2121"));
     assert!(
         !table.index().contains_key(&key("10.0.0.5:2121")),
-        "and the new pair gets no entry"
+        "another pair the path left goes"
+    );
+    assert_eq!(
+        table.index().get(&key("10.0.0.6:2121")),
+        Some(&one),
+        "and the pair it moved to names the link"
     );
 
-    table.follow(one, &key("10.0.0.4:2121"), key("10.0.0.3:2121"));
-    assert!(
-        !table.index().contains_key(&key("10.0.0.4:2121")),
-        "the old pair's entry goes"
-    );
+    table.mirror(&moved("10.0.0.6:2121", "10.0.0.3:2121"));
     assert_eq!(
         table.index().get(&key("10.0.0.3:2121")),
         Some(&three),
-        "a new pair another link holds keeps naming it"
+        "a pair a newer link was set up at keeps naming it"
     );
 }
 
@@ -355,7 +365,7 @@ fn only_the_ways_past_the_writers_mark_a_map_planted() {
     let mut links = LinkTable::default();
     links.open(self::link(1, "10.0.0.1:2121"));
     links.claim(link, key("10.0.0.2:2121"));
-    links.follow(link, &key("10.0.0.2:2121"), key("10.0.0.3:2121"));
+    links.follow();
     links.unclaim(link, &key("10.0.0.3:2121"));
     if let Some(l) = links.get_mut(&link) {
         l.set_connected();
@@ -434,7 +444,9 @@ fn the_live_audit_fails_a_pending_dial_whose_link_is_not_in_the_link_map() {
 fn the_live_audit_fails_an_index_entry_naming_no_live_link() {
     let mut node = bare();
     node.links.open(link(1, "10.0.0.1:2121"));
-    node.links.forget(&LinkId::new(1), &key("10.0.0.2:2121"));
+    node.pending_outbound
+        .note((TransportId::new(1), 5), LinkId::new(1));
+    node.links.plant_entry(key("10.0.0.2:2121"), LinkId::new(2));
     audit::live(&node, "test");
 }
 

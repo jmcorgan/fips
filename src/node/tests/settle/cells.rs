@@ -5,7 +5,8 @@
 //! None of these is coverage of a behaviour the code means to keep; each
 //! records a value that was read from the code and is checked here by a
 //! run. A change that means to move one replaces its test with one asserting
-//! the new value, with a reproduction of why.
+//! the new value, with a reproduction of why: the index cell's test is one,
+//! and it has no `chartest_` prefix.
 //!
 //! Coverage map, by what each cell covers:
 //!
@@ -13,7 +14,7 @@
 //! | --- | --- |
 //! | heard-from after a crossing moves the smaller node | `chartest_a_crossing_leaves_the_smaller_node_unheard_until_the_peers_first_frame` |
 //! | the end-to-end session at a restart found in this node's own msg2 | `chartest_a_restart_seen_in_our_msg2_keeps_the_fsp_session_of_an_unheard_peering` |
-//! | the address index after a second own dial to the held link's address | `chartest_a_second_own_dial_to_the_held_links_address_leaves_that_link_without_an_index_entry` |
+//! | the address index after a second own dial to the held link's address | `a_second_own_dial_to_the_held_links_address_leaves_a_link_named_there` |
 //! | the path MTU of a BLE peer that frames move to another link | `chartest_a_ble_peer_moved_by_its_frames_keeps_the_path_mtu_of_its_first_link` |
 //! | the spin-bit role after a crossing | `chartest_after_a_crossing_both_ends_hold_the_spin_responder_role` |
 
@@ -116,11 +117,13 @@ async fn chartest_a_restart_seen_in_our_msg2_keeps_the_fsp_session_of_an_unheard
 }
 
 /// A dialer's second dial to the address of the link it holds the peer on
-/// completes and moves the session; the held link is then left with no
-/// `(transport, address)` entry.
+/// completes and moves the session; the held link is still named at its
+/// pair. The index used to lose the entry: the dial's link overwrote it and
+/// took it when the dial's link closed. It is now derived from the link
+/// records, where the pair names the newest link that uses it, so when the
+/// dial's link goes the pair names the held link again.
 #[tokio::test]
-async fn chartest_a_second_own_dial_to_the_held_links_address_leaves_that_link_without_an_index_entry()
- {
+async fn a_second_own_dial_to_the_held_links_address_leaves_a_link_named_there() {
     let mut late = second_msg1_late(false, true, Second::InOrder).await;
     let (d, r) = (late.d, late.r);
     let r_addr = *late.nodes[r].node.node_addr();
@@ -139,8 +142,9 @@ async fn chartest_a_second_own_dial_to_the_held_links_address_leaves_that_link_w
     let entry = late.nodes[d].node.links.index().get(&key).copied();
     cleanup_nodes(&mut late.nodes).await;
     assert_eq!(
-        entry, None,
-        "defect: master now keeps an index entry for the held link {link:?}"
+        entry,
+        Some(link),
+        "defect: the held link {link:?} has no index entry at its pair"
     );
 }
 

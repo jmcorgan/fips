@@ -170,24 +170,6 @@ pub(super) async fn move_note(node: &mut Node, r: &mut Run) {
     );
 }
 
-/// Waive the live audit's entry check for a moved link left with no entry,
-/// naming which move made the state; test and debug builds only.
-pub(super) async fn waiver(node: &mut Node, r: &mut Run) {
-    #[cfg(any(test, debug_assertions))]
-    if let Some(held) = node.peers.get(&r.peer).map(|p| p.link_id())
-        && !node.links.index().values().any(|named| *named == held)
-    {
-        let waiver = if dial(&r.t).is_some_and(|(_, own)| own) {
-            crate::node::settle::Waiver::MovedOwnDial
-        } else {
-            crate::node::settle::Waiver::CrossedInbound
-        };
-        node.links.waive(held, waiver);
-    }
-    #[cfg(not(any(test, debug_assertions)))]
-    let _ = (node, r);
-}
-
 /// Tell the peer's control machine how the crossing resolved, so its shadow
 /// session indices track the move (updated) or the keep (unchanged).
 pub(super) async fn machine_crossed(node: &mut Node, r: &mut Run) {

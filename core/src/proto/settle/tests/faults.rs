@@ -264,6 +264,13 @@ pub const ROWS: &[Row] = &[
         &[(LINKS, "a_released_path_marked_keep_closes_nothing")],
     ),
     (
+        Fault::ReleasedSetupIndexed,
+        &[(
+            LINKS,
+            "a_released_setup_address_leaves_the_index_and_a_roamed_one_stays",
+        )],
+    ),
+    (
         Fault::UnheardInclusive,
         &[
             (

@@ -70,6 +70,32 @@ fn the_core_records_a_link_from_its_open_to_its_close_or_its_forget() {
     );
 }
 
+/// A dial to the pair of a link a peer is held on is abandoned: the pair
+/// names the dial's link, the newest there, while the dial lives, and the
+/// held link again once it is forgotten. The written index dropped the entry
+/// at the dial's pair whichever link it named, leaving the held link with
+/// none.
+#[test]
+fn forgetting_a_dial_leaves_the_held_links_entry() {
+    let (held, dial) = (LinkId::new(1), LinkId::new(2));
+    let mut table = LinkTable::default();
+    table.open(link(1, "10.0.0.1:2121"));
+    let (peer, _) = super::peer(held);
+    table.hold(&held, peer);
+    table.open(link(2, "10.0.0.1:2121"));
+    assert_eq!(
+        table.index().get(&key("10.0.0.1:2121")),
+        Some(&dial),
+        "precondition: the pair names the dial's link while it lives"
+    );
+    table.forget(&dial, &key("10.0.0.1:2121"));
+    assert_eq!(
+        table.index().get(&key("10.0.0.1:2121")),
+        Some(&held),
+        "defect: forgetting the dial took the held link's entry"
+    );
+}
+
 /// A node holding two peers on links opened through the writers, neither
 /// with a bundle: the first bound past the feed by a test mutator, so its
 /// record holds none of the path its bundle now holds, and the second's

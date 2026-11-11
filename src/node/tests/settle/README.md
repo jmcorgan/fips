@@ -51,8 +51,9 @@ named for off. The other files run off, which is what they test.
   redial answered as a rekey resends the filter (both orders), a restart's
   msg1 releases the clamp entry of the session it clears, and, over the BLE
   mock, the initiator's link is verified when it promotes on its msg2.
-- `cells.rs`: characterisation tests (`chartest_`) of five per-peer cells a
-  settlement change has to decide, each asserting what master does today,
+- `cells.rs`: five per-peer cells a settlement change has to decide:
+  characterisation tests (`chartest_`) of four, each asserting what master
+  does today, and the test that replaced the fifth's when the index moved,
   with a coverage map in its module doc. They are evidence, not coverage: a
   red one means the reading of master was wrong, and a change that moves a
   cell replaces its test with a reproduction.
@@ -125,13 +126,18 @@ named for off. The other files run off, which is what they test.
   it a miss. Each is ignored and inventoried as `helper`. The known-defect
   lane pins three of the file's line numbers, so a new test goes last. They
   are not tests of the node.
+- `links.rs`: the `(transport, address)` index derived from the link
+  records, on real nodes: after a crossed dial won from another address or
+  on another transport, the smaller node's link is named at the msg2's
+  pair; a one-path roam names the new pair and keeps the setup pair named;
+  and a second path proven by the peer's answers to its probes is named
+  with no writer called after its state reached the record, the cache
+  matching the records.
 - `live.rs`: the node's live map audit on real nodes. A loopback and a TCP
   dial audit both nodes; a node a test wrote past the map writers is not
   audited and one written through them is; an index entry put in past the
-  table fails at the next frame; the crossing's waiver is recorded at the
-  crossing on that link only, and a crossing that keeps the link's entry
-  records none; a session a degraded decrypt-worker pool refused, and two
-  started nodes on real pools, pass. The settlement core's record of a
+  table fails at the next frame; a session a degraded decrypt-worker pool
+  refused, and two started nodes on real pools, pass. The settlement core's record of a
   dialed link holds its original path Live, follows a one-path roam, and
   records a switch to an acknowledged path Live, which `links-mirror` lets
   off for the active path alone; a record off its bundle fails the clause.
@@ -172,10 +178,7 @@ elsewhere would go unseen.
 
 An exemption waives one property for one node, and applies only when the
 test passes it; the audit never infers one from state. Each is listed in
-`audit.rs`'s `Exempt` with its reason and the change that removes it. The
-node records its own waiver for the same state at the event that makes it
-(`settle::Waiver`, in test and debug builds), and `assert_coherent` fails
-on a passed exemption its node did not record, so the two cannot drift. A new
+`audit.rs`'s `Exempt` with its reason and the change that removes it. A new
 one needs a test that constructs it in the same change (an enum variant no
 code constructs fails clippy), and a test showing it waives only what it
 names. A green test that the audit reds is a finding to report, not a

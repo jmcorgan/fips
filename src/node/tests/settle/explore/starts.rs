@@ -78,18 +78,14 @@ impl Order {
 }
 
 /// A waiver of the shell audit a start may need, by the script's nodes: the
-/// node that holds the breach and its peer. It is passed at a leaf only
-/// where that node recorded the matching waiver (`settle::Waiver`) on the
-/// link it holds the peer on, so a start names what may be waived and the
-/// node says whether it is.
+/// node that holds the breach and its peer. It is passed at every leaf of
+/// the start's paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Waive {
     /// `Exempt::CrossedInbound`.
     CrossedInbound(usize, usize),
     /// `Exempt::MovedOwnDial`.
     MovedOwnDial(usize, usize),
-    /// `Exempt::HeldLinkEntry`.
-    HeldLinkEntry(usize, usize),
 }
 
 /// What an oracle reads at a leaf: whether each pair settled, a breach of
@@ -139,7 +135,7 @@ pub(super) struct Start {
     /// The schedule from the start to its target. The explorer varies each
     /// of its handshake packets.
     pub(super) script: &'static [Step],
-    /// The waivers a leaf may pass, where the node recorded them.
+    /// The waivers a leaf passes.
     pub(super) waivers: &'static [Waive],
     /// How many paths the explorer walks: the scripted path and each
     /// variation that applies, in either order and at either setting, as
@@ -300,7 +296,7 @@ const THREE_SCRIPT: &[Step] = &[msg1(1, 0), msg1(0, 0), msg1(0, 0), msg2(0, 0)];
 const CROSSING_WAIVERS: &[Waive] = &[Waive::CrossedInbound(0, 1), Waive::CrossedInbound(1, 0)];
 
 /// A dialer's later dial moving its held peer: node 0 dials.
-const LATE_WAIVERS: &[Waive] = &[Waive::HeldLinkEntry(0, 1), Waive::MovedOwnDial(0, 1)];
+const LATE_WAIVERS: &[Waive] = &[Waive::MovedOwnDial(0, 1)];
 
 /// Every named start a real pair runs on this build.
 pub(super) fn starts() -> Vec<Start> {

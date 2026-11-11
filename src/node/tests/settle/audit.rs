@@ -70,32 +70,19 @@ pub(in crate::node::tests) enum Exempt {
     /// After crossed dials the smaller node, `node`, moves to its own
     /// outbound session but keeps the inbound link it promoted `peer` on as
     /// the peer's link record, and the connection it dialed is no live
-    /// link's setup address. The move renews the link's paths on the pair
-    /// the winning msg2 came from, releasing the inbound link's original
-    /// path, and with it that link's `(transport, address)` entry. Waives
-    /// `RightLink` for `node`'s record of `peer`, `MapsAgree`'s missing
-    /// entry for that record's link, and `ConnectionsInUse` for `node`'s
-    /// connection at `peer`'s current address. Removed when a crossing
-    /// moves the smaller node onto the link it dialed.
+    /// link's setup address. Waives `RightLink` for `node`'s record of
+    /// `peer`, and `ConnectionsInUse` for `node`'s connection at `peer`'s
+    /// current address. Removed when a crossing moves the smaller node onto
+    /// the link it dialed.
     CrossedInbound { node: usize, peer: usize },
     /// A node, `node`, whose own later dial to `peer` completed while it
     /// held the peer moves the session, its indices and its address onto
     /// that dial, but keeps the link the peer was promoted on as the peer's
     /// link record. On another transport or address the record is then at
-    /// another pair, and the move's renewal of the link's paths on the
-    /// dial's pair releases the record's original path and its
-    /// `(transport, address)` entry. Waives `RightLink` for `node`'s record
-    /// of `peer`, and `MapsAgree`'s missing entry for that record's link.
+    /// another pair. Waives `RightLink` for `node`'s record of `peer`.
     /// Removed when that move re-keys the peer's link record to the dial's
     /// link.
     MovedOwnDial { node: usize, peer: usize },
-    /// After `node`'s own later dial to `peer` at the address of the link
-    /// it holds the peer on completes and moves the session, the dial's
-    /// link is retired and takes the `(transport, address)` entry with it,
-    /// so the held link is left with none. Waives `MapsAgree`'s missing
-    /// entry for the link `node` holds `peer` on. Removed when retiring the
-    /// dial's link leaves the held link's entry in place.
-    HeldLinkEntry { node: usize, peer: usize },
 }
 
 /// One breach of a property, naming the node (by index in the test's
@@ -249,45 +236,24 @@ pub(super) async fn audit(nodes: &mut [TestNode], exempt: &[Exempt]) -> Vec<Brea
     one_session(nodes, &mut breaches).await;
     for i in 0..nodes.len() {
         right_link(nodes, i, exempt, &mut breaches);
-        maps_agree(nodes, i, exempt, &mut breaches);
+        maps_agree(nodes, i, &mut breaches);
         connections_in_use(nodes, i, exempt, &mut breaches).await;
     }
     breaches
 }
 
 /// Fail the test, marked as the defect, if [`audit`] reports any breach at
-/// `step`, or if an exemption passed names a state its node did not record
-/// a waiver for (`settle::Waiver`) on the link it holds the peer on.
+/// `step`.
 pub(in crate::node::tests) async fn assert_coherent(
     nodes: &mut [TestNode],
     exempt: &[Exempt],
     step: &str,
 ) {
-    for e in exempt {
-        assert!(
-            recorded(nodes, *e),
-            "defect: incoherent at {step}: {e:?} was passed, and the node recorded no such waiver"
-        );
-    }
     let breaches = audit(nodes, exempt).await;
     assert!(
         breaches.is_empty(),
         "defect: incoherent at {step}: {breaches:#?}"
     );
-}
-
-/// Whether the node an exemption names recorded the matching waiver on the
-/// link it holds the exemption's peer on.
-fn recorded(nodes: &[TestNode], exempt: Exempt) -> bool {
-    use crate::node::settle::Waiver;
-    let (node, peer, waiver) = match exempt {
-        Exempt::CrossedInbound { node, peer } => (node, peer, Waiver::CrossedInbound),
-        Exempt::MovedOwnDial { node, peer } => (node, peer, Waiver::MovedOwnDial),
-        Exempt::HeldLinkEntry { node, peer } => (node, peer, Waiver::HeldLinkEntry),
-    };
-    let at = &nodes[node].node;
-    at.get_peer(nodes[peer].node.node_addr())
-        .is_some_and(|p| at.links.carries(&p.link_id(), waiver))
 }
 
 /// The index in `nodes` of the node whose address is `addr`.
@@ -423,27 +389,14 @@ fn right_link(nodes: &[TestNode], i: usize, exempt: &[Exempt], breaches: &mut Ve
 
 /// `MapsAgree` for `node`: every link is named by a peer or a handshake
 /// leg; every peer's and leg's link is in the link map; and the
-/// `(transport, address)` index names each live link at its own pair and
-/// nothing else. The first two are the node's `link-named` and `dial-link`
-/// clauses; the index checks are stricter than the node's live ones on
-/// purpose, since a quiet node's index has no handshake in flight to
-/// shadow an entry.
-fn maps_agree(nodes: &[TestNode], i: usize, exempt: &[Exempt], breaches: &mut Vec<Breach>) {
+/// `(transport, address)` index names each live link at its own pair,
+/// unless its bundle released the path there, and names a link nowhere but
+/// at its own pair or at a path its peer's bundle holds. The first two are
+/// the node's `link-named` and `dial-link` clauses; the index checks are
+/// stricter than the node's live ones on purpose, since a quiet node's
+/// index has no handshake in flight to shadow an entry.
+fn maps_agree(nodes: &[TestNode], i: usize, breaches: &mut Vec<Breach>) {
     let node = &nodes[i].node;
-    let waived: HashSet<LinkId> = exempt
-        .iter()
-        .filter_map(|e| match *e {
-            Exempt::HeldLinkEntry { node: n, peer }
-            | Exempt::CrossedInbound { node: n, peer }
-            | Exempt::MovedOwnDial { node: n, peer }
-                if n == i =>
-            {
-                node.get_peer(nodes[peer].node.node_addr())
-                    .map(|p| p.link_id())
-            }
-            _ => None,
-        })
-        .collect();
     for link in settle::link_named(node) {
         breaches.push(Breach::MapsAgree {
             node: i,
@@ -459,21 +412,31 @@ fn maps_agree(nodes: &[TestNode], i: usize, exempt: &[Exempt], breaches: &mut Ve
         });
     }
     for ((tid, remote), link) in node.links.index().iter() {
-        let right = node
+        let setup = node
             .links
             .get(link)
             .is_some_and(|k| k.transport_id() == *tid && k.remote_addr() == remote);
-        if !right {
+        let path = node.peers.values().any(|p| {
+            p.link_id() == *link
+                && p.bundle()
+                    .is_some_and(|b| b.paths().find(*tid, remote).is_some())
+        });
+        if !setup && !path {
             breaches.push(Breach::MapsAgree {
                 node: i,
                 link: *link,
-                what: "an index entry naming a link not at its pair",
+                what: "an index entry naming a link off its pair and its paths",
             });
         }
     }
     for (link, k) in node.links.iter() {
         let key = (k.transport_id(), k.remote_addr().clone());
-        if node.links.index().get(&key) != Some(link) && !waived.contains(link) {
+        let released = node
+            .links
+            .no(link)
+            .and_then(|no| node.links.core().get(no))
+            .is_some_and(|r| r.released);
+        if node.links.index().get(&key) != Some(link) && !released {
             breaches.push(Breach::MapsAgree {
                 node: i,
                 link: *link,
@@ -857,47 +820,4 @@ async fn the_audit_passes_a_rekey_left_at_both_ends_pending() {
 #[tokio::test]
 async fn the_audit_passes_a_rekey_left_at_both_ends_pending_with_multipath_on() {
     pending_passes(true).await;
-}
-
-/// An exemption passed for a state its node never recorded a waiver for
-/// fails the audit, whatever the maps show: a single coherent loopback dial,
-/// passed the crossing's exemption.
-#[tokio::test]
-#[should_panic(expected = "was passed, and the node recorded no such waiver")]
-async fn a_passed_exemption_the_node_did_not_record_fails_the_audit() {
-    let mut nodes = vec![loopback_node(false).await, loopback_node(false).await];
-    initiate_handshake(&mut nodes, 0, 1).await;
-    pump(&mut nodes).await;
-    assert!(
-        nodes[0].node.get_peer(nodes[1].node.node_addr()).is_some(),
-        "precondition: the dial promoted the peer"
-    );
-    assert_coherent(
-        &mut nodes,
-        &[Exempt::CrossedInbound { node: 0, peer: 1 }],
-        "a single loopback dial",
-    )
-    .await;
-}
-
-/// A dialer's second dial to its held link's address completes: the move
-/// records its waiver on the held link, and retiring the dial's link records
-/// the lost entry's, so the link carries both, and an exemption naming
-/// either one alone is recorded.
-#[tokio::test]
-async fn a_link_holding_two_waivers_answers_for_either() {
-    use super::crossing::{Second, second_msg1_late};
-    let mut late = second_msg1_late(false, true, Second::InOrder).await;
-    let (d, r) = (late.d, late.r);
-    let moved = recorded(&late.nodes, Exempt::MovedOwnDial { node: d, peer: r });
-    let entry = recorded(&late.nodes, Exempt::HeldLinkEntry { node: d, peer: r });
-    cleanup_nodes(&mut late.nodes).await;
-    assert!(
-        moved,
-        "defect: the held link does not answer for the move's waiver"
-    );
-    assert!(
-        entry,
-        "defect: the held link does not answer for the lost entry's waiver"
-    );
 }

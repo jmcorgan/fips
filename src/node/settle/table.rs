@@ -164,7 +164,9 @@ macro_rules! rows {
 rows! {
     /// The link record and the peer's `link_id`.
     Link,
-    /// The reverse lookup's entries for the peer's link.
+    /// The reverse lookup's entries for the peer's link, derived from the
+    /// link records: each live link's setup pair, unless its path there was
+    /// released, and its proven paths.
     Index,
     /// The bundle's paths and which is active.
     Paths,
@@ -291,9 +293,12 @@ pub(crate) enum Cell {
     ReleasedUnclaimedDialDropped,
     /// The dial's entry dropped.
     DialDropped,
-    /// The entry moved, if it names the link.
+    /// The moved path's new pair named, and the pair it left unnamed but
+    /// where the link was set up.
     Followed,
-    /// The new pair claimed, if free.
+    /// The setup pair's entry kept, and the roamed pair's added.
+    SetupKeptRoamedAdded,
+    /// The new pair named, which a proven path already is.
     Claimed,
     /// The entry unclaimed, only if it names the link.
     Unclaimed,
@@ -667,7 +672,8 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
             }
             T::Move { built: true, .. } => Cell::ReleasedUnclaimedDialDropped,
             T::Move { built: false, .. } | T::Keep { .. } => Cell::DialDropped,
-            T::Cutover { .. } | T::Restarted | T::Roam => Cell::Keep,
+            T::Cutover { .. } | T::Restarted => Cell::Keep,
+            T::Roam => Cell::SetupKeptRoamedAdded,
             T::Follow => Cell::Followed,
             T::Switch => Cell::Claimed,
             T::Release { .. } => Cell::Unclaimed,

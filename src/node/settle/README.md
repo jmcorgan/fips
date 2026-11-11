@@ -27,18 +27,19 @@ field, at once.
   `(transport, address)` pair to the link at it (`open`, `close`, `forget`;
   the path driver's `follow`, `claim` and `unclaim`; `get_mut`; `index` for
   reads of the lookup, and under `cfg(test)` `raw_index`). Its doc carries
-  the warning about the lookup's key form. Beside them it keeps the
-  settlement core's record of each link (`Links`), under the core's number
-  for it (`no`): opened and retired with the link, held for a promoted peer
-  (`hold`), and fed what the link's bundle reports (`mirror`) from
-  `exec/links.rs`. In test and debug builds it also
-  holds each link's waivers (`Waiver`), the states the live audit's
-  `held-entry` clause lets off, recorded at the event: `close` and `forget`
-  record one on a link their removed entry shadowed, and the crossing's
-  swap arm in `handle_msg2` the other two. Under `cfg(test)` it carries the
-  node's audit count, and `plant_entry` and `plant_path`, writes past the
-  table, to its lookup and to a core record, that do not mark it, for the
-  tests that the audit catches each.
+  the warning about the lookup's key form. The lookup is derived from the
+  settlement core's record of each link (`Links`), kept under the core's
+  number for it (`no`): opened and retired with the link, held for a
+  promoted peer (`hold`), and fed what the link's bundle reports (`mirror`)
+  from `exec/links.rs`. It names each live link at its setup pair, unless
+  the bundle released the path there, and at each Live or acknowledged path
+  of its record, the newest link where several use a pair. The table keeps
+  it as a cache that every writer rebuilds; `derived` computes it afresh for
+  the audit. Under `cfg(test)` it carries the node's
+  audit count; `raw_index`, whose entries are put back at every rebuild
+  until their link closes; and `plant_entry` and `plant_path`, writes past
+  the table, to its lookup and to a core record, that do not mark it, for
+  the tests that the audit catches each.
 - `maps.rs`: `MachineMap`, the per-peer control machines with their timer
   store (`add`, `ensure`, `drop`, `get_mut`; `timers`, `arm`, `cancel`);
   `DialMap`, the dials waiting for their msg2 (`note`, `forget`); `PeerMap`,
@@ -53,7 +54,9 @@ field, at once.
   is quiet stays there. In a test, `live` skips a node written past its
   writers, counts each audit on the node's link table, and records the
   audit's reach when `FIPS_AUDIT_REACH` names a file
-  (`testing/check-audit-reach.py`). The last clause, `links-mirror`, holds
+  (`testing/check-audit-reach.py`). The `index-cache` clause, after the
+  other index clauses, holds the link table's cached lookup to the one its
+  records give now. The last clause, `links-mirror`, holds
   each held peer's core link record to its bundle, letting off only the
   active path a switch recorded Live while the bundle holds it
   acknowledged; it skips a peer a test mutator of the peer's paths changed
@@ -84,17 +87,17 @@ field, at once.
 - A new write to a map is a new writer here, named for the event, not a
   wider accessor. A writer transcribes; a change of what an event does to a
   map is a change of behaviour and is made, and tested, as one.
-- The link table's lookup is written, not derived from the links: its
-  single-valued keys and its gaps (an entry a later dial overwrote, a pair a
-  forgotten dial emptied) are today's behaviour, and a writer keeps them.
+- The link table's lookup is derived from the core's link records, not
+  written: each of the table's writers changes the records, through the
+  core, and rebuilds the lookup before it returns, and the records are
+  private to the table, so nothing else can change them. A new way to
+  change a record is a new writer that rebuilds.
 - `raw` and the other `raw_*` methods are for tests that build a state no
   writer builds. They set the wrapper's `planted` flag, which marks the node
   as written past its writers, and the live audit skips a marked node for
   the rest of the test. A test that can build its state through the writers
   uses them: every mark costs the audit that node. `testing/check-audit-reach.py`
   holds the share of audited nodes to a floor.
-- A waiver is recorded where the state is made, computed from the maps at
-  that event, never inferred by the audit.
 - A clause states a rule that holds between any two node entries, mid
   handshake included. A rule that holds only at quiescence belongs to the
   quiescent audit in `../tests/settle/audit.rs`, not here.
