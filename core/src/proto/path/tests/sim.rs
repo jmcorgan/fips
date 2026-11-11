@@ -73,7 +73,10 @@
 //!   Live active path, in one direction or both, for longer than the bound,
 //!   and another of the end's paths is Live on a wire that stays clean
 //!   through it, the end switches within three active probe intervals, a
-//!   probe timeout and `2d`;
+//!   probe timeout and `2d`. When the rule drops only what the end sends,
+//!   the peer's data frames still arrive on the wire and its probes' verdicts
+//!   may wait for them up to the verdict cap, so the cap stands in the
+//!   bound in place of the probe timeout when it is the larger;
 //! - **orphan**: no end is orphaned while a wire delivers both ways;
 //! - **fixed**: no frame roams a path and no path message moves one, since
 //!   no end's address on a wire ever changes;
@@ -867,9 +870,17 @@ impl World {
     }
 
     /// The **switch** oracle's bound for a wire whose larger one-way delay
-    /// is `d`: three active probe intervals, a probe timeout and `2d`.
-    fn detect(&self, d: u64) -> u64 {
-        3 * ms(self.cfg.active_interval) + self.timeout(d) + 2 * d
+    /// is `d`: three active probe intervals, a probe timeout and `2d`. For
+    /// an end whose own sending alone is cut (`own`), the peer's data frames
+    /// still arrive and may hold its verdicts to the verdict cap, which then
+    /// stands in place of the probe timeout when it is the larger.
+    fn detect(&self, d: u64, own: bool) -> u64 {
+        let wait = if own {
+            self.timeout(d).max(ms(self.cfg.verdict_cap))
+        } else {
+            self.timeout(d)
+        };
+        3 * ms(self.cfg.active_interval) + wait + 2 * d
     }
 
     /// The probe timeout of a path whose round trip is `2d`.
@@ -900,11 +911,12 @@ impl World {
             .copied()
             .collect();
         for r in starting {
-            let by = self.now + self.detect(self.wires[r.wire].worst());
-            if r.end <= by {
-                continue;
-            }
             for end in ENDS {
+                let own = r.from == Some(end);
+                let by = self.now + self.detect(self.wires[r.wire].worst(), own);
+                if r.end <= by {
+                    continue;
+                }
                 let on = self.active(end) == Some(r.wire)
                     && self
                         .path(end, r.wire)
@@ -1630,7 +1642,7 @@ fn a_failure_in_one_direction_moves_traffic_while_the_peers_frames_still_arrive(
         w.rules.push(cut(0, Some(mute), start, end));
         w.run(start);
         let before = w.wires[0].delivered[mute];
-        let by = start + w.detect(w.wires[0].worst());
+        let by = start + w.detect(w.wires[0].worst(), false);
         w.run(by);
         assert!(
             w.wires[0].delivered[mute] > before,

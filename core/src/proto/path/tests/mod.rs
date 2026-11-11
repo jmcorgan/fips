@@ -24,6 +24,7 @@ mod renew;
 pub(crate) mod shell;
 mod sim;
 mod stub;
+mod verdict;
 mod view;
 
 #[test]
@@ -110,6 +111,7 @@ const TESTS: &[(&str, &str)] = &[
     ("shell.rs", include_str!("shell.rs")),
     ("sim.rs", include_str!("sim.rs")),
     ("stub.rs", include_str!("stub.rs")),
+    ("verdict.rs", include_str!("verdict.rs")),
     ("view.rs", include_str!("view.rs")),
     ("wire.rs", include_str!("wire.rs")),
 ];

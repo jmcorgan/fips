@@ -10,6 +10,15 @@
 //! a receiver that drops a frame of the sender's link MTU is still
 //! proven, by a probe of the smallest size, which proves no MTU.
 //!
+//! A probe's timeout is the largest of the floor, three times the latest
+//! round trip, and three times the largest round trip in the window, that
+//! last term capped at the verdict cap. A probe whose timeout has passed
+//! after a session datagram arrived on the path since it was sent is not
+//! judged yet: its verdict waits until the cap from its sending, while the
+//! peer's traffic shows the path still carries data and the probe may only
+//! be queued behind it. The peer's probes, heartbeats and other link
+//! control hold no verdict.
+//!
 //! A path's silence clock is the send instant of the earliest probe no
 //! matching answer has followed. Once the path has stopped answering
 //! (draft Section 5.6), its stop holds the instant from which its next
@@ -143,6 +152,8 @@ pub struct Liveness<I> {
     bytes: u32,
     /// When the latest of them arrived.
     heard_at: Option<I>,
+    /// When the latest of them that was a session datagram arrived.
+    data_at: Option<I>,
     /// When the path last left Live.
     live_at: Option<I>,
     /// Frames of the link that failed to authenticate on the path since
@@ -192,6 +203,7 @@ impl<I: Instant> Liveness<I> {
             frames: 0,
             bytes: 0,
             heard_at: None,
+            data_at: None,
             live_at: None,
             fails: 0,
             trip: None,
@@ -226,6 +238,11 @@ impl<I: Instant> Liveness<I> {
         self.rtts.iter().flatten().map(|&(_, rtt)| rtt).min()
     }
 
+    /// The largest round trip among the window's samples.
+    pub fn max_rtt(&self) -> Option<Duration> {
+        self.rtts.iter().flatten().map(|&(_, rtt)| rtt).max()
+    }
+
     /// Round-trip samples in the window.
     pub fn samples(&self) -> usize {
         self.rtts.iter().flatten().count()
@@ -257,6 +274,11 @@ impl<I: Instant> Liveness<I> {
     /// When the latest authentic frame attributed to the path arrived.
     pub fn heard_at(&self) -> Option<I> {
         self.heard_at
+    }
+
+    /// When the latest session datagram attributed to the path arrived.
+    pub fn data_at(&self) -> Option<I> {
+        self.data_at
     }
 
     /// When the next probe is due; `None` for at once, once the path is
@@ -388,10 +410,26 @@ impl<I: Instant> Liveness<I> {
         self.next_at = at;
     }
 
-    /// The probe timeout: the larger of `floor` and three times the latest
-    /// round trip (draft Section 5.6).
-    pub(super) fn timeout(&self, floor: Duration) -> Duration {
-        floor.max(self.rtt.map_or(Duration::ZERO, |r| r.saturating_mul(3)))
+    /// The probe timeout, a local choice (draft Section 5.6): the largest
+    /// of `floor`, three times the latest round trip, and three times the
+    /// largest round trip in the window capped at `cap`. Capping only the
+    /// last term keeps a path whose latest round trip is long on today's
+    /// timeout, and lets a path whose round trip has just jumped under load
+    /// wait for the answers queued behind the data.
+    pub(super) fn timeout(&self, floor: Duration, cap: Duration) -> Duration {
+        let latest = self.rtt.map_or(Duration::ZERO, |r| r.saturating_mul(3));
+        if node_fault!(TimeoutFromLatest) {
+            return floor.max(latest);
+        }
+        let largest = self
+            .max_rtt()
+            .map_or(Duration::ZERO, |r| r.saturating_mul(3));
+        let largest = if node_fault!(VerdictUncapped) {
+            largest
+        } else {
+            largest.min(cap)
+        };
+        floor.max(latest).max(largest)
     }
 
     /// Whether another probe may go out with at most `cap` outstanding.
@@ -466,11 +504,23 @@ impl<I: Instant> Liveness<I> {
     /// the late record. Returns whether it counted as unanswered: it does
     /// unless a probe sent after it has been answered in time, or it was
     /// sent before the path last left Dead ([`Self::thaw`]).
-    pub(super) fn expire(&mut self, now: I, overdue: bool) -> Option<bool> {
-        let slot = self
-            .ring
-            .iter()
-            .position(|s| s.is_some_and(|s| s.due < now || (!overdue && s.due == now)))?;
+    ///
+    /// A probe due then after whose sending a session datagram has arrived
+    /// on the path is not timed out while `cap` from its sending is still
+    /// ahead: it becomes due at that instant instead ([`Self::defer`]).
+    pub(super) fn expire(&mut self, now: I, overdue: bool, cap: Duration) -> Option<bool> {
+        let passed = |due: I| due < now || (!overdue && due == now);
+        let slot = loop {
+            let slot = self
+                .ring
+                .iter()
+                .position(|s| s.is_some_and(|s| passed(s.due)))?;
+            let sent = self.ring[slot]?;
+            match self.defer(&sent, cap).filter(|&until| !passed(until)) {
+                Some(until) => self.ring[slot] = Some(Sent { due: until, ..sent }),
+                None => break slot,
+            }
+        };
         let sent = self.ring[slot].take()?;
         self.compact();
         self.remember(sent);
@@ -484,6 +534,26 @@ impl<I: Instant> Liveness<I> {
             self.misses = self.misses.saturating_add(1);
         }
         Some(counted)
+    }
+
+    /// The instant a probe whose timeout has passed waits to before it is
+    /// judged, when a session datagram has arrived on the path since it
+    /// was sent: `cap` from its sending. The peer's traffic arriving shows
+    /// the path still carries data, and the probe or its answer may be
+    /// queued behind it; at the cap the probe is judged as any other, so a
+    /// failure of this node's own direction is still found while the
+    /// peer's traffic arrives (draft Section 5.6).
+    fn defer(&self, sent: &Sent<I>, cap: Duration) -> Option<I> {
+        if node_fault!(VerdictIgnoresData) {
+            return None;
+        }
+        let data = self.data_at.filter(|&at| at > sent.at)?;
+        if node_fault!(VerdictUncapped) {
+            // The defect's shape: judged only once the peer has sent
+            // nothing on the path for the cap.
+            return Some(deadline(data, cap));
+        }
+        Some(deadline(sent.at, cap))
     }
 
     /// Start the unanswered count again, as every change of state does
@@ -577,6 +647,12 @@ impl<I: Instant> Liveness<I> {
         self.bytes = self.bytes.wrapping_add(len as u32);
         self.heard_at = Some(now);
         self.fails = 0;
+    }
+
+    /// Record that a session datagram attributed to the path arrived at
+    /// `now`, after [`Self::heard`] counted its frame.
+    pub(super) fn carried(&mut self, now: I) {
+        self.data_at = Some(now);
     }
 
     /// Take back one frame of `len` bytes from the counts, as a path

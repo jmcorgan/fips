@@ -5,7 +5,8 @@ tests module, `proto::path::tests`, declared from the module root, and
 declares `shell.rs`, `exchange.rs`, `account.rs`, `liveness.rs`,
 `active.rs`, `admit.rs`, `capability.rs`, `close.rs`, `charge.rs`,
 `choice.rs`, `connect.rs`, `disabled.rs`, `floor.rs`, `hold.rs`,
-`intake.rs`, `pin.rs`, `renew.rs`, `sim.rs`, `stub.rs` and `view.rs`,
+`intake.rs`, `pin.rs`, `renew.rs`, `sim.rs`, `stub.rs`, `verdict.rs`
+and `view.rs`,
 which drive
 the machine, `Bundle`,
 through its public interface only. Every other file is attached from
@@ -362,8 +363,8 @@ module of that file, sees its private items and keeps its test names.
   is dropped once no probe before it is outstanding.
 - `mod.rs`: declares `shell`, `exchange`, `account`, `liveness`,
   `active`, `admit`, `capability`, `close`, `charge`, `choice`, `connect`,
-  `disabled`, `floor`, `hold`, `intake`, `pin`, `renew`, `sim`, `stub`
-  and `view`, and
+  `disabled`, `floor`, `hold`, `intake`, `pin`, `renew`, `sim`, `stub`,
+  `verdict` and `view`, and
   checks the module's source (`proto::path::tests::...`): the module
   root still denies
   wildcard match arms; no source file defines a `set_` setter, with a
@@ -580,8 +581,11 @@ module of that file, sees its private items and keeps its test names.
   at both ends; that an end whose Live active path's wire is cut in one
   direction or both switches within three active probe intervals, a
   probe timeout and two one-way delays, when another of its paths is
-  Live on a clean wire; that no end is orphaned while a wire delivers
-  both ways; that no frame roams a path and no path message moves one,
+  Live on a clean wire, the verdict cap standing in place of the probe
+  timeout, when larger, for an end whose own sending alone is cut, since
+  the peer's data frames still arrive on the wire; that no end is
+  orphaned while a wire delivers both ways; that no frame roams a path
+  and no path message moves one,
   since no address on a wire changes; and that between two acks of one
   path the difference of their `rx_frames` equals the frames the path's
   wire delivered to that end. Before every step each end is given its
@@ -700,6 +704,17 @@ module of that file, sees its private items and keeps its test names.
   path, and a pair not held. The other tests
   run on a set over test-clock instants (`testutil::TestInstant`) with no
   driver state (`()`).
+- `verdict.rs`: a probe's verdict under load
+  (`proto::path::tests::verdict::...`), driven through `Bundle`'s inputs
+  in the shell with every probe on the active path lost from 1 s: with a
+  session datagram arriving every 50 ms the probes are counted only at
+  the verdict cap from their sending, Suspect at 4.4 s; with heartbeats,
+  sender reports and the peer's probes arriving instead, or nothing, at
+  the timeout floor, Suspect at 1.8 s; the timeout follows three times the
+  largest round trip in the window, capped, while a latest round trip
+  above the cap keeps three times it and a sample older than the window
+  no longer counts (on `Liveness` directly); and a probe sent after a
+  late answer of 900 ms in the window is counted at 2.7 s, not 400 ms.
 - `view.rs`: the operator's view of a link's paths
   (`proto::path::tests::view::...`) through `Bundle::view`, driven as
   `choice.rs` drives its tests and with its helpers and `pin.rs`'s `pin`

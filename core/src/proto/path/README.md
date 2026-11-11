@@ -69,10 +69,11 @@ its node code steps it and acts on what it decides.
   unanswered probes in a row, where a timeout counts only if no later
   probe was answered in time; when the next probe is due and whether one
   is asked for at once; whether the peer marks the path `ACTIVE`; the
-  latest round trip and the window of samples its minimum is taken over,
-  the smoothed ETX, the proven MTU, and the frames and bytes received on
-  the path (modulo 2^32, the `rx_frames` and `rx_bytes` its acks report)
-  with when the latest arrived, when the path last left Live, and the
+  latest round trip and the window of samples its minimum and maximum are
+  taken over, the smoothed ETX, the proven MTU, and the frames and bytes
+  received on the path (modulo 2^32, the `rx_frames` and `rx_bytes` its
+  acks report) with when the latest arrived and when the latest session
+  datagram arrived, when the path last left Live, and the
   count of frames that failed to authenticate on it since the latest
   authentic one, with the instant of a trip not yet applied, and whether
   the path has the connection its probes need, needs one, or has one
@@ -170,13 +171,23 @@ its node code steps it and acts on what it decides.
   every path of a link whose peer is not known to be capable: such a
   link keeps every connection, as FMP v1 does (Section 9.2).
   Liveness (Section 5.6): a step runs the expiry of every probe whose
-  timeout passed before the step's instant (the larger of 400 ms and
-  three round trips), the capability probe's among them, then the peer
+  timeout passed before the step's instant, the capability probe's among
+  them, then the peer
   turning capable on a path message, then the input, then the expiry of
   every probe due by the instant, then the choice of the active path,
   then the grace of Dead paths, then the capability probe and the probes
   due, so an answer after its
-  probe's timeout is late whether or not the host polled between. A Live
+  probe's timeout is late whether or not the host polled between. The
+  timeout, a local choice, is the largest of 400 ms, three times the
+  latest round trip, and three times the largest round trip in the window
+  capped at the verdict cap (`verdict_cap`, 3 s). A probe whose timeout
+  passes after a session datagram has arrived on its path since it was
+  sent is not judged yet: it becomes due at the cap from its sending, and
+  is judged then as any other. The peer's traffic arriving shows the path
+  still carries data and the probe may be queued behind it; heartbeats,
+  reports and path messages hold no verdict, so on an idle link a failure
+  of this node's own direction is found as fast as before, and under
+  load at most the cap after the probe went. A Live
   or Suspect path keeps up to eight probes outstanding, a Probing or Dead
   path one. Our active path and a path the peer marks `ACTIVE` are probed
   every 200 ms, a standby every second, a Probing path from 200 ms

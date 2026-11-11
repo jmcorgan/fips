@@ -236,6 +236,20 @@ fn signal(msg_type: u8) -> bool {
     )
 }
 
+/// Whether a frame of link message type `msg_type` is the peer's tunnel
+/// traffic, which holds a probe's verdict on its path: a session datagram.
+/// The peer's path messages go on paths it has left, and its heartbeats,
+/// reports and other link control on an idle link, so neither shows that
+/// the path carries data.
+fn carries(msg_type: u8) -> bool {
+    match LinkMessageType::from_byte(msg_type) {
+        Some(LinkMessageType::SessionDatagram) => true,
+        // The defect's shape: every frame but a path message holds it.
+        _ if node_fault!(VerdictCountsControl) => !signal(msg_type),
+        _ => false,
+    }
+}
+
 /// What [`Bundle::account`] did with one authentic frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
@@ -671,6 +685,9 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         let id = path.and_then(|i| self.set.get(i)).map(PeerPath::path_id);
         if let Some(p) = path.and_then(|i| self.set.path_mut(i)) {
             p.live_mut().heard(len, now);
+            if carries(msg_type) {
+                p.live_mut().carried(now);
+            }
         }
         if marks(msg_type) {
             self.peer_active = id;
@@ -1858,7 +1875,9 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     }
 
     /// Time out every probe due by `now`, or with `overdue` only those due
-    /// before `now`, oldest first on each path, and apply the state changes
+    /// before `now`, oldest first on each path, except one whose verdict
+    /// waits for the verdict cap while the peer's session datagrams arrive
+    /// on its path (`Liveness::expire`), and apply the state changes
     /// the counts cause (draft Section 5.6): a Live path with `suspect` in
     /// a row becomes Suspect, a Suspect one with `retire` becomes Dead, and
     /// a Probing one with `discovery` becomes Dead. A Dead path's count
@@ -1874,7 +1893,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 };
                 let state = path.state();
                 let live = path.live_mut();
-                let Some(counted) = live.expire(now, overdue) else {
+                let Some(counted) = live.expire(now, overdue, cfg.verdict_cap) else {
                     break;
                 };
                 if !counted {
@@ -2284,7 +2303,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         let to = pair(path);
         let path_id = path.path_id();
         let live = path.live_mut();
-        let timeout = live.timeout(cfg.timeout);
+        let timeout = live.timeout(cfg.timeout, cfg.verdict_cap);
         let probe_id = live.take_id(draw::<E>);
         self.record.send(now, path_id, probe_id, timeout, &cfg);
         let msg = PathProbe::new(probe_id, path_id, flags, caps()).with_len(PATH_PROBE_MIN_SIZE);
@@ -2332,6 +2351,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         let flags = self.flags(i);
         let interval = self.interval(i);
         let floor = self.params.cfg.timeout;
+        let cap = self.params.cfg.verdict_cap;
         let Some(path) = self.set.path_mut(i) else {
             return;
         };
@@ -2347,7 +2367,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         };
         let path_id = path.path_id();
         let live = path.live_mut();
-        let due = deadline(now, live.timeout(floor));
+        let due = deadline(now, live.timeout(floor, cap));
         let Some(probe_id) = live.send(now, due, len, draw::<E>) else {
             return;
         };

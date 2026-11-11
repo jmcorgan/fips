@@ -144,9 +144,17 @@ answered but do not decide this node's view.
 - **Dead:** ten more unanswered, or given up. An acked path is probed from
   one second, doubling to 30 seconds. A path never acked is not probed.
 
-A probe goes unanswered at the larger of 400 ms and three round trips. A
-late answer gives a round-trip sample and nothing else: it does not revive
-a path or end a backoff. The standby interval is fixed; it does not stretch
+A probe goes unanswered at the largest of 400 ms, three times the latest
+round trip, and three times the largest round trip in the path's window,
+that last term capped at 3 s. A probe whose time passes after the peer's
+session datagrams have arrived on the path since it went is judged only 3 s
+after it went: under load the probes wait behind the data in the send queue,
+and the peer's traffic still arriving shows the path carries it. The peer's
+probes, heartbeats and reports do not count, so on an idle link a failure in
+this node's own direction is still found in about a second; under load it
+takes up to the cap, or three times the latest round trip where that is
+longer. A late answer gives a round-trip sample and nothing else: it does
+not revive a path or end a backoff. The standby interval is fixed; it does not stretch
 with a path's round trip. A link whose one path is Live is not probed,
 because the FMP heartbeat already covers it and there is nowhere to move
 to.

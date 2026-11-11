@@ -296,6 +296,23 @@ faults! {
     /// A one-path roam or a bind, which the bundle reports in no output, is
     /// not told to the core, so the link's record keeps the old pair.
     RoamNotFed,
+    /// A probe's verdict does not wait while the peer's session datagrams
+    /// arrive on its path: a probe queued behind the data is counted
+    /// unanswered at its timeout.
+    VerdictIgnoresData,
+    /// A probe's timeout is the larger of the floor and three times the
+    /// latest round trip only, as before, so the probes sent as a queue
+    /// builds time out before their answers can arrive.
+    TimeoutFromLatest,
+    /// The verdict cap bounds neither the wait nor the timeout's term from
+    /// the largest round trip: a probe is judged only once the peer has
+    /// sent nothing on its path for the cap, so a failure of this node's
+    /// own direction is not found while the peer's traffic arrives.
+    VerdictUncapped,
+    /// Every frame but a path message holds a probe's verdict, heartbeats
+    /// and other link control too, so on an idle link the peer's heartbeats
+    /// delay finding a failure of this node's own direction.
+    VerdictCountsControl,
 }
 
 impl Fault {

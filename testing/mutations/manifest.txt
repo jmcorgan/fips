@@ -280,3 +280,22 @@ IndexNotRebuilt	red	fips-mesh	node::tests::settle::links::a_second_path_proven_t
 IndexNotRebuilt	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays	index-cache
 RoamNotFed	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays	links-mirror
 RoamNotFed	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays_with_multipath_on	links-mirror
+VerdictIgnoresData	red	fips-mesh	node::tests::path_load::a_pinned_lane_whose_queue_jumps_to_two_seconds_under_two_way_traffic_keeps_the_link
+VerdictIgnoresData	red	fips-mesh	node::tests::path_load::a_pinned_lane_whose_load_restarts_after_the_window_keeps_the_link_at_the_restart
+VerdictIgnoresData	red	fips-mesh	node::tests::path_load::an_unpinned_lane_whose_queue_grows_past_the_cap_goes_suspect_only_after_it_does
+VerdictIgnoresData	red	fips-core	proto::path::tests::verdict::a_probe_whose_timeout_passes_while_session_datagrams_keep_arriving_is_counted_only_at_the_cap
+VerdictIgnoresData	pass	fips-mesh	node::tests::path_load::a_one_way_failure_under_load_is_left_within_the_cap_while_the_peers_traffic_still_arrives
+TimeoutFromLatest	red	fips-mesh	node::tests::path_load::a_pinned_lane_whose_queue_jumps_to_two_seconds_one_way_leaves_at_most_one_excursion
+TimeoutFromLatest	red	fips-core	proto::path::tests::verdict::the_timeout_follows_the_largest_round_trip_in_the_window_up_to_the_cap
+TimeoutFromLatest	red	fips-core	proto::path::tests::verdict::a_probe_sent_after_a_long_round_trip_in_the_window_is_counted_at_three_times_it
+VerdictUncapped	red	fips-mesh	node::tests::path_load::a_one_way_failure_under_load_is_left_within_the_cap_while_the_peers_traffic_still_arrives
+VerdictUncapped	red	fips-mesh	node::tests::path_load::a_one_way_failure_under_a_queue_past_a_third_of_the_cap_is_left_within_three_round_trips
+VerdictUncapped	red	fips-core	proto::path::tests::verdict::a_probe_whose_timeout_passes_while_session_datagrams_keep_arriving_is_counted_only_at_the_cap
+VerdictUncapped	red	fips-core	proto::path::tests::verdict::the_timeout_follows_the_largest_round_trip_in_the_window_up_to_the_cap
+VerdictUncapped	red	fips-core	proto::path::tests::sim::the_receive_counts_of_each_path_match_the_frames_its_wire_delivered	switch:
+VerdictUncapped	red	fips-core	proto::path::tests::sim::the_cost_seen_by_the_tree_is_held_across_every_switch	switch:
+VerdictUncapped	red	fips-core	proto::path::tests::sim::two_nodes_prove_every_path_at_both_ends_once_healed	switch:
+VerdictUncapped	red	fips-core	proto::path::tests::sim::a_run_replays_byte_for_byte_from_its_seed	switch:
+VerdictCountsControl	red	fips-mesh	node::tests::path_accept::a_path_that_stops_carrying_our_frames_but_still_brings_the_peers_is_left_after_k_unanswered_probes	A left p within 3 s of the cut
+VerdictCountsControl	red	fips-core	proto::path::tests::liveness::three_unanswered_probes_make_a_live_path_suspect_while_frames_still_arrive_on_it	assertion `left == right` failed
+VerdictCountsControl	red	fips-core	proto::path::tests::verdict::heartbeats_reports_and_the_peers_probes_arriving_after_a_probe_do_not_hold_its_verdict

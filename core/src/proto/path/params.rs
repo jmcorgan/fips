@@ -64,6 +64,12 @@ pub struct Config {
     pub mix_kinds: bool,
     /// The floor of the probe timeout (`PATH_PROBE_TIMEOUT_MIN`).
     pub timeout: Duration,
+    /// The verdict cap, a local choice the draft gives no value: the
+    /// longest a probe's verdict waits after the probe is sent while the
+    /// peer's session datagrams arrive on its path, and the cap on the
+    /// probe timeout's term from the largest round trip in the path's
+    /// window (draft Section 5.6 leaves the timeout to the node).
+    pub verdict_cap: Duration,
     /// Consecutive unanswered probes before a Live path becomes Suspect
     /// (`PATH_TIMEOUT_K`).
     pub suspect: u8,
@@ -103,7 +109,8 @@ pub struct Config {
 }
 
 impl Config {
-    /// The values of the multipath v1 draft (Appendix A).
+    /// The values of the multipath v1 draft (Appendix A), and for the
+    /// verdict cap, which the draft leaves to the node, 3 s.
     pub const fn draft() -> Self {
         Self {
             enabled: true,
@@ -114,6 +121,7 @@ impl Config {
             standby_interval: Duration::from_secs(1),
             mix_kinds: false,
             timeout: Duration::from_millis(400),
+            verdict_cap: Duration::from_secs(3),
             suspect: 3,
             retire: 10,
             discovery: 8,
@@ -183,6 +191,7 @@ impl Params {
             (cfg.active_interval, "the active probe interval"),
             (cfg.standby_interval, "the standby probe interval"),
             (cfg.timeout, "the probe timeout floor"),
+            (cfg.verdict_cap, "the verdict cap"),
             (cfg.heartbeat, "the heartbeat interval"),
             (cfg.dead_interval, "the Dead probe interval cap"),
             (cfg.grace, "the Dead grace"),
