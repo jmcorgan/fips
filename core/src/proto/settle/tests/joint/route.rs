@@ -427,6 +427,7 @@ fn pathed(o: Out, r: &mut Routed) {
         | PathOutput::Orphaned
         | PathOutput::Capable
         | PathOutput::NotCapable
-        | PathOutput::Refused { .. } => {}
+        | PathOutput::Refused { .. }
+        | PathOutput::Proven { .. } => {}
     }
 }

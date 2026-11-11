@@ -5,10 +5,13 @@
 //!
 //! On a Probing or Dead path, a path's probes are padded to the link MTU
 //! until a padded one sent in its current state goes unanswered; from
-//! then on, until its state changes, each probe takes the other size
-//! from the one before it, the smallest after a padded one. So a path to
-//! a receiver that drops a frame of the sender's link MTU is still
-//! proven, by a probe of the smallest size, which proves no MTU.
+//! then on, until its state changes, each probe steps down a short ladder
+//! from the one before it: the link MTU, three quarters of it, half of it,
+//! then the smallest size, and back to the link MTU after the smallest. So
+//! a path across a hop narrower than the link MTU, or to a receiver whose
+//! buffer is smaller, proves the first size of the ladder it carries; one
+//! that carries only the smallest is still proven, by a probe that proves
+//! no MTU.
 //!
 //! A probe's timeout is the largest of the floor, three times the latest
 //! round trip, and three times the largest round trip in the window, that
@@ -18,6 +21,18 @@
 //! peer's traffic shows the path still carries data and the probe may only
 //! be queued behind it. The peer's probes, heartbeats and other link
 //! control hold no verdict.
+//!
+//! On a Live path on a connectionless transport whose proven size is
+//! above the smallest and below the link MTU, the machine searches upward:
+//! a padded search probe at most once per gap, held outside the ring, the
+//! link MTU first and then halfway between the largest size proven and the
+//! smallest lost, until the two lie within `SEEK_STEP` bytes; the search
+//! starts again from the size proven `SEEK_RAISE` later, and afresh at
+//! every change of state. A search probe's loss is no miss and no loss
+//! sample, and neither is its answer a matching answer: it only proves a
+//! size. It is lost once its timeout has passed and a probe sent after it
+//! has been answered in time; while none has, its loss says nothing about
+//! its size and it waits.
 //!
 //! A path's silence clock is the send instant of the earliest probe no
 //! matching answer has followed. Once the path has stopped answering
@@ -43,6 +58,40 @@ const SAMPLES: usize = 32;
 /// Timed-out probes a path remembers, so that a late answer to one still
 /// gives a round-trip sample.
 const LATE: usize = 4;
+
+/// The resolution of the upward size search: it ends once the largest size
+/// proven and the smallest lost lie within this many bytes.
+const SEEK_STEP: usize = 32;
+
+/// How long a size search that ended below the link MTU waits before it
+/// starts again from the size proven.
+const SEEK_RAISE: Duration = Duration::from_secs(600);
+
+/// The padded rungs of the ladder below the link MTU, as fractions of it,
+/// largest first. The smallest size follows the last.
+const LADDER: [(usize, usize); 2] = [(3, 4), (1, 2)];
+
+/// The size a probe of a Probing or Dead path takes after one of `last`
+/// bytes, once a padded probe of the path's current state has timed out,
+/// with the padded size `full`: the largest of `full` and the rungs of the
+/// ladder below `last`, the smallest size after the last rung, and `full`
+/// after the smallest. A rung no larger than the smallest size is skipped.
+fn rung(full: usize, last: usize) -> usize {
+    if node_fault!(DiscoveryAlternates) {
+        return if last > PATH_PROBE_MIN_SIZE {
+            PATH_PROBE_MIN_SIZE
+        } else {
+            full
+        };
+    }
+    if last <= PATH_PROBE_MIN_SIZE {
+        return full;
+    }
+    core::iter::once(full)
+        .chain(LADDER.iter().map(|&(num, den)| full * num / den))
+        .find(|&len| len < last && len > PATH_PROBE_MIN_SIZE)
+        .unwrap_or(PATH_PROBE_MIN_SIZE)
+}
 
 /// One probe sent on a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +143,38 @@ struct Stop<I> {
     /// Whether the latest slot counted went to a connection asked for in
     /// place of a probe, not yet settled.
     owed: bool,
+}
+
+/// A Live path's upward search for the size it carries, kept small: sizes
+/// as `u16`, with 0 for none, since every path's record moves by value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Seek<I> {
+    /// With a search probe outstanding, its send instant; otherwise the
+    /// instant from which the next may go, `None` for at once.
+    at: Option<I>,
+    /// The outstanding search probe's `probe_id`.
+    probe_id: u32,
+    /// The outstanding search probe's length; 0 when none is outstanding.
+    len: u16,
+    /// The smallest size lost in this search; 0 when none is.
+    lost: u16,
+}
+
+impl<I> Seek<I> {
+    /// A search not started.
+    const fn new() -> Self {
+        Self {
+            at: None,
+            probe_id: 0,
+            len: 0,
+            lost: 0,
+        }
+    }
+}
+
+/// `len` as a `u16`, saturating.
+fn short(len: usize) -> u16 {
+    u16::try_from(len).unwrap_or(u16::MAX)
 }
 
 /// Whether a path has the connection its probes need.
@@ -173,6 +254,8 @@ pub struct Liveness<I> {
     /// last changed state; `None` before its first probe, when every
     /// probe is of the current state.
     epoch: Option<u32>,
+    /// The upward search for the size the path carries.
+    seek: Seek<I>,
     /// Whether a padded probe sent in the current state has timed out.
     fallen: bool,
     /// The length of the latest probe sent in the current state.
@@ -211,6 +294,7 @@ impl<I: Instant> Liveness<I> {
             quiet: None,
             stop: None,
             epoch: None,
+            seek: Seek::new(),
             fallen: false,
             last: None,
             since: None,
@@ -558,12 +642,14 @@ impl<I: Instant> Liveness<I> {
 
     /// Start the unanswered count again, as every change of state does
     /// (draft Section 5.6, path lifetime), and start the choice of probe
-    /// size again ([`Self::small`]): a probe sent before the change, still
+    /// size again ([`Self::size`]): a probe sent before the change, still
     /// outstanding, is not of the new state, so its timeout does not
-    /// count toward that choice.
+    /// count toward that choice. The size search starts afresh, and its
+    /// outstanding probe is given up: an answer to it matches nothing.
     pub(super) fn fresh(&mut self) {
         self.misses = 0;
         self.epoch = self.next_id;
+        self.seek = Seek::new();
         self.fallen = false;
         self.last = None;
     }
@@ -584,14 +670,19 @@ impl<I: Instant> Liveness<I> {
         self.since.is_none_or(|s| !after(s, probe_id))
     }
 
-    /// Whether the next probe of a Probing or Dead path goes at the
-    /// smallest size rather than padded: once a padded probe sent in its
-    /// current state has timed out, its probes alternate, the smallest
-    /// after a padded one and padded after the smallest, until its state
-    /// changes. A receiver whose buffer is smaller than our link MTU drops
-    /// every padded probe, and the smallest one still proves the path.
-    pub(super) fn small(&self) -> bool {
-        self.fallen && self.last.is_some_and(|len| len > PATH_PROBE_MIN_SIZE)
+    /// The length of the next probe of a Probing or Dead path whose
+    /// padded size is `full`: `full` until a padded probe sent in its
+    /// current state has timed out, and from then on, until its state
+    /// changes, the next size of the ladder after the probe before it
+    /// ([`rung`]). A hop narrower than our link MTU, or a receiver whose
+    /// buffer is smaller, drops every probe over its size, and the first
+    /// rung it carries proves that size; the smallest still proves the
+    /// path, though no MTU.
+    pub(super) fn size(&self, full: usize) -> usize {
+        match self.last {
+            Some(last) if self.fallen => rung(full, last),
+            Some(_) | None => full,
+        }
     }
 
     /// Give up every outstanding probe, as a path entering Dead does. The
@@ -634,9 +725,137 @@ impl<I: Instant> Liveness<I> {
         self.etx = (1.0 / next.max(0.01)).clamp(1.0, 100.0);
     }
 
-    /// Record `mtu` bytes as proven.
-    pub(super) fn prove(&mut self, mtu: usize) {
+    /// Record `mtu` bytes as proven. Returns whether the proven MTU
+    /// changed.
+    pub(super) fn prove(&mut self, mtu: usize) -> bool {
+        let changed = self.mtu != Some(mtu);
         self.mtu = Some(mtu);
+        changed
+    }
+
+    /// The length of the next search probe of a Live path whose padded size
+    /// is `full`, if one may go at `now`: none while one is outstanding,
+    /// before the search's next instant, while no size above the smallest
+    /// is proven, once `full` is, or once the search has ended. The first
+    /// of a search is `full`; each later one lies halfway between the size
+    /// proven and the smallest lost.
+    pub(super) fn seek_size(&self, full: usize, now: I) -> Option<usize> {
+        if self.seek.len != 0 || self.seek.at.is_some_and(|at| now < at) {
+            return None;
+        }
+        let proven = self.mtu?;
+        let full = usize::from(short(full));
+        if proven >= full {
+            return None;
+        }
+        match usize::from(self.seek.lost) {
+            0 => Some(full),
+            lost if lost > proven + SEEK_STEP => Some(proven + (lost - proven) / 2),
+            _ => None,
+        }
+    }
+
+    /// Record a search probe of `len` bytes sent at `at`, held outside the
+    /// ring, and return its `probe_id`, the path's next.
+    pub(super) fn seek_send(&mut self, at: I, len: usize, draw: impl FnOnce() -> u32) -> u32 {
+        let probe_id = self.take_id(draw);
+        self.seek.at = Some(at);
+        self.seek.probe_id = probe_id;
+        self.seek.len = short(len);
+        probe_id
+    }
+
+    /// Record a search probe of `len` bytes in the ring, as an ordinary
+    /// probe unanswered at `due`, for the switch that puts back a search
+    /// counted as loss. The next search probe may go `gap` after `at`.
+    pub(super) fn seek_ring(
+        &mut self,
+        at: I,
+        due: I,
+        gap: Duration,
+        len: usize,
+        draw: impl FnOnce() -> u32,
+    ) -> Option<u32> {
+        let probe_id = self.send(at, due, len, draw)?;
+        self.seek.at = Some(deadline(at, gap));
+        Some(probe_id)
+    }
+
+    /// Match an answer to the outstanding search probe `probe_id`, taking
+    /// it, and return its length. The next search probe may go `gap` after
+    /// it was sent.
+    pub(super) fn seek_answer(&mut self, probe_id: u32, gap: Duration) -> Option<usize> {
+        if self.seek.len == 0 || self.seek.probe_id != probe_id {
+            return None;
+        }
+        Some(self.unseek(gap))
+    }
+
+    /// Apply at `now` the answer, `acked` bytes long, to a search probe of
+    /// `sent` bytes: the smaller of the two is proven when it is larger
+    /// than the size proven and than the smallest size. An answer shorter
+    /// than the probe caps the search below the probe. Returns whether the
+    /// proven MTU changed.
+    pub(super) fn seek_proved(&mut self, sent: usize, acked: usize, now: I) -> bool {
+        let size = sent.min(acked);
+        let raised = size > PATH_PROBE_MIN_SIZE && self.mtu.is_none_or(|m| size > m);
+        if raised {
+            self.mtu = Some(size);
+        }
+        if acked < sent {
+            self.lose(sent, now);
+        } else {
+            self.end(now);
+        }
+        raised
+    }
+
+    /// Judge the outstanding search probe at `now`, `timeout` being the
+    /// probe timeout: once the timeout has passed since it was sent and a
+    /// probe sent after it has been answered in time, it is lost and the
+    /// search goes on below its size, the next search probe free to go
+    /// `gap` after it was sent. Until then it waits: a loss with no later
+    /// answer says nothing about its size.
+    pub(super) fn seek_judge(&mut self, now: I, timeout: Duration, gap: Duration) {
+        let Some(at) = self.seek.at.filter(|_| self.seek.len != 0) else {
+            return;
+        };
+        let id = self.seek.probe_id;
+        if now < deadline(at, timeout) || self.answered.is_none_or(|a| !after(a, id)) {
+            return;
+        }
+        let len = self.unseek(gap);
+        self.lose(len, now);
+    }
+
+    /// Take the outstanding search probe, returning its length; the next
+    /// may go `gap` after it was sent.
+    fn unseek(&mut self, gap: Duration) -> usize {
+        let len = usize::from(core::mem::take(&mut self.seek.len));
+        self.seek.at = self.seek.at.map(|at| deadline(at, gap));
+        len
+    }
+
+    /// Record `len` bytes lost by the search at `now`.
+    fn lose(&mut self, len: usize, now: I) {
+        let len = short(len);
+        self.seek.lost = match self.seek.lost {
+            0 => len,
+            lost => lost.min(len),
+        };
+        self.end(now);
+    }
+
+    /// End the search at `now` once the size proven and the smallest lost
+    /// lie within `SEEK_STEP`: it starts again from the size proven after
+    /// `SEEK_RAISE`.
+    fn end(&mut self, now: I) {
+        let proven = self.mtu.unwrap_or(PATH_PROBE_MIN_SIZE);
+        let lost = usize::from(self.seek.lost);
+        if lost != 0 && lost <= proven.saturating_add(SEEK_STEP) {
+            self.seek.lost = 0;
+            self.seek.at = Some(deadline(now, SEEK_RAISE));
+        }
     }
 
     /// Count one authentic frame of `len` bytes received at `now`. The

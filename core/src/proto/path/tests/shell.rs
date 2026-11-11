@@ -829,6 +829,7 @@ pub(crate) fn keep(out: Outputs<Slot>, kept: &mut Vec<Slot>) -> Vec<Out> {
             Output::Switched { from, to, why } => Output::Switched { from, to, why },
             Output::Orphaned => Output::Orphaned,
             Output::Connect { to } => Output::Connect { to },
+            Output::Proven { to, mtu } => Output::Proven { to, mtu },
         })
         .collect()
 }
@@ -925,7 +926,8 @@ pub(super) fn quiet(out: &[Out], calm: &Calm<'_>, asked: &mut Asked) -> Result<(
             | Output::State { .. }
             | Output::Refused { .. }
             | Output::Switched { .. }
-            | Output::Orphaned => {}
+            | Output::Orphaned
+            | Output::Proven { .. } => {}
         }
     }
     if calm.capable {
@@ -1251,7 +1253,8 @@ pub(super) fn slots(
             | Output::Refused { .. }
             | Output::Switched { .. }
             | Output::Orphaned
-            | Output::Connect { .. } => {
+            | Output::Connect { .. }
+            | Output::Proven { .. } => {
                 continue;
             }
         };
@@ -1287,7 +1290,8 @@ pub(super) fn active_kept(
             | Output::NotCapable
             | Output::Refused { .. }
             | Output::Orphaned
-            | Output::Connect { .. } => {}
+            | Output::Connect { .. }
+            | Output::Proven { .. } => {}
         }
     }
     Ok(())

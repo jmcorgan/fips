@@ -338,6 +338,13 @@ fn every_bundle_output() -> Vec<(path::Output<()>, Option<In>)> {
         ),
         (path::Output::Orphaned, Some(In::Orphaned { peer: peer() })),
         (path::Output::Connect { to: path(1) }, None),
+        (
+            path::Output::Proven {
+                to: path(1),
+                mtu: 1280,
+            },
+            None,
+        ),
     ]
 }
 

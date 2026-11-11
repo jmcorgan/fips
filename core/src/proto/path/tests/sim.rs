@@ -1140,7 +1140,7 @@ impl World {
                         }
                     }
                 }
-                Output::Released { .. } | Output::Connect { .. } => {}
+                Output::Released { .. } | Output::Connect { .. } | Output::Proven { .. } => {}
             }
         }
     }
@@ -1547,7 +1547,8 @@ fn line(o: &Out, base: u64) -> String {
         | Output::Refused { .. }
         | Output::Switched { .. }
         | Output::Orphaned
-        | Output::Connect { .. } => format!("{o:?}"),
+        | Output::Connect { .. }
+        | Output::Proven { .. } => format!("{o:?}"),
     }
 }
 

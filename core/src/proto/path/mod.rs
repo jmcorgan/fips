@@ -479,6 +479,18 @@ pub enum Output<D> {
         /// The path.
         to: PathRef,
     },
+    /// The size path `to` is proven to carry changed, up or down: the
+    /// largest frame, `mtu` bytes in the unit of [`Facts::mtu`], is the
+    /// largest path message proven ([`Liveness::mtu`]) plus the frame
+    /// overhead. The ladder of a Probing or Dead path's probes and the
+    /// upward search on a Live one prove sizes; a path proven only at the
+    /// smallest size proves none and reports nothing.
+    Proven {
+        /// The path.
+        to: PathRef,
+        /// The largest frame it is proven to carry, in bytes.
+        mtu: usize,
+    },
 }
 
 /// The outputs of one call, executed by the shell front to back.

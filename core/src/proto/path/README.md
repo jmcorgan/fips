@@ -91,11 +91,23 @@ its node code steps it and acts on what it decides.
   the size of a Probing or Dead path's probes it keeps the first
   `probe_id` of the path's current state, whether a padded probe sent in
   that state has timed out, and the length of the latest probe sent in
-  it, all started again by `fresh` at each change of state; `small`
-  says the next probe goes at the smallest size, which it does once a
-  padded probe of the state has timed out and the probe before was
-  padded. A probe still outstanding from the state before does not
-  count toward that. It also keeps the first `probe_id` sent since the
+  it, all started again by `fresh` at each change of state; `size`
+  gives the next probe's length: padded to the link MTU until a padded
+  probe of the state has timed out, and from then on the next step of
+  a ladder after the probe before (the link MTU, three quarters of it,
+  half of it, the smallest size, and the link MTU again). A probe still
+  outstanding from the state before does not count toward that. It
+  keeps the upward search for the size a Live path carries, in a small
+  record of `u16` sizes: the outstanding search probe, held outside the
+  ring, the smallest size lost and the instant the next may go
+  (`seek_size`, `seek_send`, `seek_answer`, `seek_proved`,
+  `seek_judge`). The search tries the link MTU first, then halfway
+  between the size proven and the smallest lost, ends within
+  `SEEK_STEP` (32 bytes) and starts again `SEEK_RAISE` (ten minutes)
+  later; a search probe is lost only once its timeout has passed and a
+  probe sent after it has been answered in time, and it is no miss and
+  no ETX sample. `fresh` starts the search afresh. `prove` says whether
+  the proven MTU changed. It also keeps the first `probe_id` sent since the
   path last left Dead (`thaw`): an earlier probe still outstanding then
   times out counting toward no unanswered count, and the mark is
   dropped once no such probe is outstanding. Fixed arrays only, so
@@ -128,12 +140,20 @@ its node code steps it and acts on what it decides.
   exchange: a candidate admitted becomes a Probing path, probed at once
   and padded to the link MTU. A Probing or Dead path's probes are padded
   until a padded one of its current state goes unanswered, and from then
-  on alternate, the smallest after a padded one, until its state changes
-  (padding is local, draft Section 5.1): a receiver whose buffer is
-  smaller than our link MTU drops every padded probe, and a smallest one
-  answered proves the path though no MTU, which nothing in the node
-  reads, so such a path is no worse off than a link of one path between
-  two nodes of different MTUs. A received probe of at least 27 bytes
+  on step down the ladder, until its state changes (padding is local,
+  draft Section 5.1): a hop narrower than our link MTU, or a receiver
+  whose buffer is smaller, drops every probe over its size, and the
+  first rung answered proves that size; a smallest one answered proves
+  the path though no MTU, so such a path is no worse off than a link of
+  one path between two nodes of different MTUs. On a Live path on a
+  connectionless transport whose proven size lies above the smallest and
+  below the link MTU, a padded search probe goes just ahead of a probe
+  at its cadence, at most once per standby interval and only while no
+  probe of the path is unanswered, and an answer to it raises the size
+  proven; no search runs on a connection-oriented transport, where an
+  oversized probe closes the connection. Each change of the size
+  proven, up or down, is reported in an `Output::Proven`, as the largest
+  frame in bytes, for the shell to apply. A received probe of at least 27 bytes
   finds its path by the peer's `path_id` on its transport, then by its
   pair, and otherwise creates a Probing path within the limits, and is
   answered on its pair with an ack padded to the smaller of the probe and
@@ -497,7 +517,8 @@ its node code steps it and acts on what it decides.
   carrier, an unreachable send, an interface leaving or returning, a
   removed transport, a connection settling, an operator's pin and its
   lifting, and a receiver report),
-  `Output` (with `Output::NotCapable`), `Outputs`, `Env` (the facts and
+  `Output` (with `Output::NotCapable`, and `Output::Proven`, a change of
+  the size a path is proven to carry), `Outputs`, `Env` (the facts and
   the link's cost the host measures), the `Facts`
   trait the host answers (link MTU, medium, whether it is
   connection-oriented, anonymity class, fixed kind if any, role, and

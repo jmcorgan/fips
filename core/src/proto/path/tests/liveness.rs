@@ -32,18 +32,12 @@ fn answer(probe: &PathProbe, to: &PathRef, active: bool) -> PathAck {
 
 /// The lengths a Probing or Dead path whose probes all go unanswered sends
 /// in one state, `n` of them: padded to `padded` first, and once that one
-/// has timed out alternating, the smallest after a padded one (Section
+/// has timed out stepping down the ladder, three quarters and half of
+/// `padded`, then the smallest, and starting again from `padded` (Section
 /// 5.1, padding being local).
-fn alternating(n: usize, padded: usize) -> Vec<usize> {
-    (0..n)
-        .map(|k| {
-            if k % 2 == 0 {
-                padded
-            } else {
-                PATH_PROBE_MIN_SIZE
-            }
-        })
-        .collect()
+fn ladder(n: usize, padded: usize) -> Vec<usize> {
+    let cycle = [padded, padded * 3 / 4, padded / 2, PATH_PROBE_MIN_SIZE];
+    cycle.iter().copied().cycle().take(n).collect()
 }
 
 /// The successive differences of `v`.
@@ -227,7 +221,7 @@ fn ten_unanswered_probes_in_suspect_retire_a_path_then_it_is_probed_at_the_dead_
         .filter(|(at, to, _)| *at > 13_600 && *to == q())
         .map(|(_, _, probe)| probe.len)
         .collect();
-    assert_eq!(lens, alternating(7, PADDED));
+    assert_eq!(lens, ladder(7, PADDED));
 }
 
 #[test]
@@ -304,7 +298,17 @@ fn a_path_answered_back_to_live_is_probed_at_its_live_cadence_from_then_on() {
     assert_eq!(state(&n, &q()), PathState::Dead);
     run(&mut n, &mut log, 50_000, &mut all);
     assert_eq!(state(&n, &q()), PathState::Live);
-    let after: Vec<u64> = log.on(&q()).into_iter().filter(|at| *at > 45_000).collect();
+    // The Dead probe answered at 45.6 s, a rung of the ladder, proves a
+    // size below the link MTU, so a padded search probe goes beside the
+    // next cadence probe; it is no cadence probe and is not counted.
+    let after: Vec<u64> = log
+        .probes
+        .iter()
+        .filter(|(at, to, probe)| {
+            *to == q() && (*at == 45_600 || (*at > 45_600 && probe.len == PATH_PROBE_MIN_SIZE))
+        })
+        .map(|(at, _, _)| *at)
+        .collect();
     assert_eq!(after, [45_600, 46_600, 47_600, 48_600, 49_600]);
 }
 
@@ -337,7 +341,7 @@ fn a_path_never_answered_is_given_up_after_eight_probes_doubling_up_to_the_heart
         .filter(|(_, to, _)| *to == q())
         .map(|(_, _, probe)| probe.len)
         .collect();
-    assert_eq!(probed, alternating(8, PADDED));
+    assert_eq!(probed, ladder(8, PADDED));
 }
 
 #[test]
@@ -991,11 +995,12 @@ fn the_next_wake_is_the_earliest_deadline_or_due_probe() {
     assert_eq!(n.b.next_wake(), Some(TestInstant(800)));
     // At 800 ms the next is due at 1.6 s and unanswered at 1.2 s; the
     // original's next Dead probe, due at 1 s, comes first. Its probe at 0,
-    // padded, has gone unanswered, so this one is of the smallest size.
+    // padded, has gone unanswered, so this one steps down the ladder, to
+    // three quarters of the padded size.
     n.tick(TestInstant(800)).expect("a wake at 800 ms");
     assert_eq!(n.b.next_wake(), Some(TestInstant(1_000)));
     let out = n.tick(TestInstant(1_000)).expect("a wake at 1 s");
-    assert_eq!(probe_on(&out, &p()).len, PATH_PROBE_MIN_SIZE);
+    assert_eq!(probe_on(&out, &p()).len, PADDED * 3 / 4);
 }
 
 #[test]
@@ -1030,11 +1035,11 @@ fn no_probe_exceeds_the_paths_link_mtu() {
     };
     for to in [q(), pair(t(2), addr(5))] {
         let lens = on(&to);
-        assert_eq!(lens, alternating(8, 1000 - FRAME_OVERHEAD));
+        assert_eq!(lens, ladder(8, 1000 - FRAME_OVERHEAD));
     }
     let dead = on(&r);
     assert!(dead.len() >= 6);
-    assert_eq!(dead, alternating(dead.len(), PADDED));
+    assert_eq!(dead, ladder(dead.len(), PADDED));
 }
 
 /// Drive the candidate q of a capable node `seed` while its probes go

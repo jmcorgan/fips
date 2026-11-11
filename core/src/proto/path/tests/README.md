@@ -5,8 +5,8 @@ tests module, `proto::path::tests`, declared from the module root, and
 declares `shell.rs`, `exchange.rs`, `account.rs`, `liveness.rs`,
 `active.rs`, `admit.rs`, `capability.rs`, `close.rs`, `charge.rs`,
 `choice.rs`, `connect.rs`, `disabled.rs`, `floor.rs`, `hold.rs`,
-`intake.rs`, `pin.rs`, `renew.rs`, `sim.rs`, `stub.rs`, `verdict.rs`
-and `view.rs`,
+`intake.rs`, `mtu.rs`, `pin.rs`, `renew.rs`, `sim.rs`, `stub.rs`,
+`verdict.rs` and `view.rs`,
 which drive
 the machine, `Bundle`,
 through its public interface only. Every other file is attached from
@@ -297,8 +297,9 @@ module of that file, sees its private items and keeps its test names.
   capability probe sent before the peer is capable and that any path
   message makes it capable,
   candidates admitted and probed padded to the link MTU, then, toward a
-  receiver that drops every padded probe, the smallest size after the
-  first padded one times out, proving the path with no MTU, while a
+  receiver that drops every frame over 1000 bytes, three quarters of the
+  padded size after the first padded one times out, proving that size,
+  which the search may then raise within the receiver's, while a
   padded probe sent before a change of state and timing out after it
   leaves the next probe padded, the receiver's
   lookup order (the peer's identifier, then the pair, then a new path,
@@ -337,8 +338,10 @@ module of that file, sees its private items and keeps its test names.
   capable; the early probe on
   the peer's `ACTIVE` turning off, and dropped when the ring is full;
   the ETX in Suspect; `next_wake`; no probe over the link MTU; the
-  sizes of unanswered Probing and Dead probes alternating, padded first
-  and the smallest after each padded one; and a
+  sizes of unanswered Probing and Dead probes stepping down the ladder,
+  padded first, then three quarters and half of it, then the smallest,
+  and padded again; the cadence probes of a path answered back to Live,
+  counted apart from the padded search probe beside one of them; and a
   Probing path held to eight probes while the peer's `ACTIVE` on it is
   set and cleared every 150 ms or every 40 ms, sending all eight when
   the flag never changes, and dropping a probe asked for at once after
@@ -363,8 +366,8 @@ module of that file, sees its private items and keeps its test names.
   is dropped once no probe before it is outstanding.
 - `mod.rs`: declares `shell`, `exchange`, `account`, `liveness`,
   `active`, `admit`, `capability`, `close`, `charge`, `choice`, `connect`,
-  `disabled`, `floor`, `hold`, `intake`, `pin`, `renew`, `sim`, `stub`,
-  `verdict` and `view`, and
+  `disabled`, `floor`, `hold`, `intake`, `mtu`, `pin`, `renew`, `sim`,
+  `stub`, `verdict` and `view`, and
   checks the module's source (`proto::path::tests::...`): the module
   root still denies
   wildcard match arms; no source file defines a `set_` setter, with a
@@ -374,6 +377,19 @@ module of that file, sees its private items and keeps its test names.
   `learn_peer`, `activate`, `readdress`, `discard`), with a planted call
   found and a count of the test files on disk. The names are built with
   `concat!` there, since that file is one of those scanned.
+- `mtu.rs`: the size a path proves (`proto::path::tests::mtu::...`),
+  driven through `Bundle`'s inputs in the shell, behind a stand-in hop
+  that answers at once each probe up to a given size: a Probing path
+  across a hop narrower than its link MTU proving three quarters of the
+  padded size; a path whose probes all go unanswered stepping down the
+  ladder and starting again; one that carries only the smallest size
+  proven with no MTU; after loss stepped the ladder down, the search
+  proving the link MTU again, with each change reported once in
+  `Output::Proven` in frame bytes; the search climbing to within 32
+  bytes of the hop's size, stopping, and starting again ten minutes
+  after it ended; a lost search probe neither a miss nor an ETX sample,
+  the path staying Live; and no search on a connection-oriented
+  transport.
 - `params.rs`: tests for `params.rs` (`proto::path::params::tests::...`):
   the draft's values field by field, the refusal of a zero in each
   interval and count with the name it carries, of a switch margin below

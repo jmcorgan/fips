@@ -710,6 +710,14 @@ impl Node {
                     why = ?why,
                     "Path input refused"
                 ),
+                // Logged only: nothing in the node uses the size yet.
+                Output::Proven { to, mtu } => debug!(
+                    peer = %self.peer_display_name(node_addr),
+                    transport_id = %to.transport,
+                    remote_addr = %to.addr,
+                    mtu,
+                    "Path proven size changed"
+                ),
                 Output::Orphaned => {
                     debug!(
                         peer = %self.peer_display_name(node_addr),

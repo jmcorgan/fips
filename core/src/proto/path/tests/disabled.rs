@@ -184,7 +184,8 @@ fn bare(out: Vec<Out>) -> Vec<Out> {
             | Output::Refused { .. }
             | Output::Switched { .. }
             | Output::Orphaned
-            | Output::Connect { .. }) => o,
+            | Output::Connect { .. }
+            | Output::Proven { .. }) => o,
         })
         .collect()
 }

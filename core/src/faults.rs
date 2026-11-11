@@ -313,6 +313,17 @@ faults! {
     /// and other link control too, so on an idle link the peer's heartbeats
     /// delay finding a failure of this node's own direction.
     VerdictCountsControl,
+    /// A Probing or Dead path whose padded probe went unanswered alternates
+    /// the padded and the smallest size, as before the size ladder, so a
+    /// path across a hop narrower than its link MTU proves no size.
+    DiscoveryAlternates,
+    /// The upward size search runs on a connection-oriented transport too,
+    /// where an oversized probe closes the connection.
+    SeekOnStreams,
+    /// A size search probe goes in the path's ring as an ordinary probe,
+    /// after the probe at its cadence, so its loss is a miss and an ETX loss
+    /// sample.
+    SeekCountsLoss,
 }
 
 impl Fault {

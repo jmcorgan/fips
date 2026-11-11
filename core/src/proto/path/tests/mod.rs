@@ -19,6 +19,7 @@ mod floor;
 mod hold;
 mod intake;
 mod liveness;
+mod mtu;
 mod pin;
 mod renew;
 pub(crate) mod shell;
@@ -102,6 +103,7 @@ const TESTS: &[(&str, &str)] = &[
     ("live.rs", include_str!("live.rs")),
     ("liveness.rs", include_str!("liveness.rs")),
     ("mod.rs", include_str!("mod.rs")),
+    ("mtu.rs", include_str!("mtu.rs")),
     ("params.rs", include_str!("params.rs")),
     ("pin.rs", include_str!("pin.rs")),
     ("renew.rs", include_str!("renew.rs")),

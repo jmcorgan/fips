@@ -299,3 +299,11 @@ VerdictUncapped	red	fips-core	proto::path::tests::sim::a_run_replays_byte_for_by
 VerdictCountsControl	red	fips-mesh	node::tests::path_accept::a_path_that_stops_carrying_our_frames_but_still_brings_the_peers_is_left_after_k_unanswered_probes	A left p within 3 s of the cut
 VerdictCountsControl	red	fips-core	proto::path::tests::liveness::three_unanswered_probes_make_a_live_path_suspect_while_frames_still_arrive_on_it	assertion `left == right` failed
 VerdictCountsControl	red	fips-core	proto::path::tests::verdict::heartbeats_reports_and_the_peers_probes_arriving_after_a_probe_do_not_hold_its_verdict
+DiscoveryAlternates	red	fips-core	proto::path::tests::mtu::a_probing_path_across_a_hop_narrower_than_its_link_mtu_proves_the_largest_rung_it_carries
+DiscoveryAlternates	red	fips-core	proto::path::tests::mtu::a_probing_path_whose_probes_all_go_unanswered_steps_down_the_ladder_and_starts_again
+DiscoveryAlternates	pass	fips-core	proto::path::tests::mtu::a_hop_that_carries_only_the_smallest_size_proves_the_path_with_no_mtu
+SeekOnStreams	red	fips-core	proto::path::tests::mtu::no_size_search_runs_on_a_connection_oriented_transport
+SeekOnStreams	pass	fips-core	proto::path::tests::mtu::the_search_stops_at_its_resolution_and_starts_again_after_its_raise_interval
+SeekCountsLoss	red	fips-core	proto::path::tests::mtu::a_lost_search_probe_is_no_miss_and_no_loss_sample
+SeekCountsLoss	red	fips-core	proto::path::tests::mtu::the_search_stops_at_its_resolution_and_starts_again_after_its_raise_interval
+SeekCountsLoss	pass	fips-core	proto::path::tests::mtu::after_loss_steps_the_ladder_down_the_search_proves_the_link_mtu_again

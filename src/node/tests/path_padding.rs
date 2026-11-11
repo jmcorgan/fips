@@ -144,7 +144,8 @@ async fn prove(b_mtu: u16) -> (Vec<PathState>, Option<usize>, u64) {
 /// with the MTU of A's padded probe, which shows the run can prove a path,
 /// and also when B's is smaller, so A's padded probe, 1472 bytes, is cut
 /// at B's 1380-byte buffer: the path still reaches Live within its
-/// discovery probes, by a probe of the smallest size, which proves no MTU.
+/// discovery probes, by the next step of the size ladder, three quarters
+/// of the padded probe, which fits B's buffer and proves that size.
 #[tokio::test]
 async fn a_path_to_a_receiver_with_a_smaller_udp_mtu_is_proven() {
     let padded = 1472 - crate::proto::fmp::wire::FRAME_OVERHEAD;
@@ -159,5 +160,9 @@ async fn a_path_to_a_receiver_with_a_smaller_udp_mtu_is_proven() {
         !smaller.contains(&PathState::Dead) && smaller.last() == Some(&PathState::Live),
         "proven toward the smaller MTU: {smaller:?}, {sent} datagrams sent on A's UDP transport"
     );
-    assert_eq!(mtu, None, "a probe of the smallest size proves no MTU");
+    assert_eq!(
+        mtu,
+        Some(padded * 3 / 4),
+        "the ladder's next step fits B's buffer and is proven"
+    );
 }

@@ -64,6 +64,13 @@
 //! earliest instant a poll has work, which after every step lies ahead of
 //! the step's instant.
 //!
+//! A Probing or Dead path's probes step down a ladder of sizes once a
+//! padded one goes unanswered, so the first size a narrow hop carries is
+//! proven; a Live path on a connectionless transport proven below its
+//! link MTU searches upward with padded probes held outside its ring,
+//! whose loss counts toward nothing. Each change of the size proven is an
+//! [`Output::Proven`].
+//!
 //! A path that has stopped answering is held to a floor (Section 5.6). A
 //! path that is not Probing stops answering when it becomes Dead, or once
 //! `PATH_SILENCE_MAX` has passed since the earliest probe no matching
@@ -1328,6 +1335,22 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             });
             return;
         };
+        let gap = self.params.cfg.standby_interval;
+        let seek = self
+            .set
+            .path_mut(i)
+            .and_then(|p| p.live_mut().seek_answer(msg.probe_id, gap));
+        if let Some(len) = seek {
+            self.attribute(i, frame, now);
+            let raised = self
+                .set
+                .path_mut(i)
+                .is_some_and(|p| p.live_mut().seek_proved(len, msg.len, now));
+            if raised {
+                self.proven(i, out);
+            }
+            return;
+        }
         let ring = self
             .set
             .path_mut(i)
@@ -1371,12 +1394,16 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         live.sample(now, now.saturating_duration_since(sent.at), window);
         // A capability probe is held outside the ring: its answer is no
         // loss sample, and at the smallest size it proves no MTU.
+        let mut proved = false;
         if ring.is_some() {
             live.fold(true);
             // Only a probe padded past the smallest size proves an MTU.
             if sent.len > PATH_PROBE_MIN_SIZE {
-                live.prove(sent.len.min(msg.len));
+                proved = live.prove(sent.len.min(msg.len));
             }
+        }
+        if proved {
+            self.proven(i, out);
         }
         self.set.mark_acked(i);
         self.flag(i, msg.flags.active());
@@ -2016,7 +2043,14 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                     live.owe();
                 }
             } else {
+                let seeks = !urgent && held.is_none();
+                if seeks && !node_fault!(SeekCountsLoss) {
+                    self.seek(i, now, env, out);
+                }
                 self.send(i, now, env, out);
+                if seeks && node_fault!(SeekCountsLoss) {
+                    self.seek(i, now, env, out);
+                }
                 if held.is_some()
                     && let Some(p) = self.set.path_mut(i)
                 {
@@ -2339,13 +2373,16 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// Send a probe on path `i`, and schedule the next. While the path is
     /// unproven, Probing or Dead it is padded to the link MTU (draft
     /// Section 5.1, step 1, where padding is local), except that once a
-    /// padded probe of its current state has gone unanswered the sizes
-    /// alternate, the smallest first (`Liveness::small`): a receiver
-    /// whose buffer is smaller than our link MTU drops a padded probe, and
-    /// a smallest one answered proves the path, though no MTU. Nothing in
-    /// the node reads the proven MTU, so a path proven so is no worse off
-    /// than a link of one path between two nodes whose MTUs differ.
-    /// Otherwise the probe is of the smallest size. It goes unanswered
+    /// padded probe of its current state has gone unanswered its sizes
+    /// step down a ladder, the smallest last (`Liveness::size`): a hop
+    /// narrower than our link MTU, or a receiver whose buffer is smaller,
+    /// drops a padded probe, and the first size answered is proven; a
+    /// smallest one answered proves the path, though no MTU, so a path
+    /// proven so is no worse off than a link of one path between two nodes
+    /// whose MTUs differ. Each change of the size proven goes to the shell
+    /// in an `Output::Proven`, and a Live path proven below its link MTU
+    /// searches upward beside these probes ([`Self::seek`]). Otherwise the
+    /// probe is of the smallest size. It goes unanswered
     /// after the probe timeout. Nothing goes when the path's ring is full.
     fn send(&mut self, i: usize, now: C::Instant, env: &Env<'_>, out: &mut Outputs<D>) {
         let flags = self.flags(i);
@@ -2357,12 +2394,12 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         };
         let to = pair(path);
         let len = match path.state() {
-            PathState::Probing | PathState::Dead if path.live().small() => PATH_PROBE_MIN_SIZE,
-            PathState::Probing | PathState::Dead => env
-                .facts
-                .mtu(to.transport, &to.addr)
-                .saturating_sub(FRAME_OVERHEAD)
-                .max(PATH_PROBE_MIN_SIZE),
+            PathState::Probing | PathState::Dead => path.live().size(
+                env.facts
+                    .mtu(to.transport, &to.addr)
+                    .saturating_sub(FRAME_OVERHEAD)
+                    .max(PATH_PROBE_MIN_SIZE),
+            ),
             PathState::Live | PathState::Suspect => PATH_PROBE_MIN_SIZE,
         };
         let path_id = path.path_id();
@@ -2377,6 +2414,73 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             to,
             bytes: msg.encode(),
         });
+    }
+
+    /// Send a search probe on path `i` just ahead of its probe at its
+    /// cadence, where one may go (`Liveness::seek_size`): the path is Live,
+    /// on a connectionless transport, since on a stream binding an oversized
+    /// probe closes the connection (draft Section 5.1), with no probe
+    /// unanswered in its current run, so the search never rides a run that
+    /// could reach `PATH_TIMEOUT_K`. A search probe outstanding is judged
+    /// first (`Liveness::seek_judge`). Search probes go at most once per
+    /// standby interval, are held outside the ring, and are judged lost
+    /// after the probe timeout; their loss is neither a miss nor an ETX
+    /// sample.
+    fn seek(&mut self, i: usize, now: C::Instant, env: &Env<'_>, out: &mut Outputs<D>) {
+        let flags = self.flags(i);
+        let gap = self.params.cfg.standby_interval;
+        let floor = self.params.cfg.timeout;
+        let cap = self.params.cfg.verdict_cap;
+        let Some(path) = self.set.path_mut(i) else {
+            return;
+        };
+        let to = pair(path);
+        if path.state() != PathState::Live
+            || (env.facts.oriented(to.transport) && !node_fault!(SeekOnStreams))
+        {
+            return;
+        }
+        let full = env
+            .facts
+            .mtu(to.transport, &to.addr)
+            .saturating_sub(FRAME_OVERHEAD)
+            .max(PATH_PROBE_MIN_SIZE);
+        let path_id = path.path_id();
+        let live = path.live_mut();
+        let timeout = live.timeout(floor, cap);
+        live.seek_judge(now, timeout, gap);
+        if live.misses() > 0 {
+            return;
+        }
+        let Some(len) = live.seek_size(full, now) else {
+            return;
+        };
+        let probe_id = if node_fault!(SeekCountsLoss) {
+            live.seek_ring(now, deadline(now, timeout), gap, len, draw::<E>)
+        } else {
+            Some(live.seek_send(now, len, draw::<E>))
+        };
+        let Some(probe_id) = probe_id else {
+            return;
+        };
+        let msg = PathProbe::new(probe_id, path_id, flags, caps()).with_len(len);
+        out.push(Output::Send {
+            to,
+            bytes: msg.encode(),
+        });
+    }
+
+    /// Report path `i`'s proven MTU, which has just changed, in frame bytes.
+    fn proven(&self, i: usize, out: &mut Outputs<D>) {
+        let Some(path) = self.set.get(i) else {
+            return;
+        };
+        if let Some(mtu) = path.live().mtu() {
+            out.push(Output::Proven {
+                to: pair(path),
+                mtu: mtu.saturating_add(FRAME_OVERHEAD),
+            });
+        }
     }
 
     /// The flags of a path message on path `i`: `ACTIVE` exactly when it is
