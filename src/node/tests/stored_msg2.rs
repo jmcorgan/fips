@@ -175,7 +175,7 @@ async fn a_peer_that_drops_its_link_silently_and_redials_16_s_after_its_last_fra
     one_exchange(&mut nodes, a, b).await;
 
     assert_replaced(&mut nodes, a, b, old_link).await;
-    assert_coherent(&mut nodes, &[], "the end of the test").await;
+    assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -203,7 +203,7 @@ async fn a_peer_we_dialled_that_drops_its_link_silently_and_redials_16_s_after_i
     one_exchange(&mut nodes, a, b).await;
 
     assert_replaced(&mut nodes, a, b, old_link).await;
-    assert_coherent(&mut nodes, &[], "the end of the test").await;
+    assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -263,7 +263,7 @@ async fn after_our_rekey_cutover_a_peer_silent_for_16_s_that_redials_completes_i
     one_exchange(&mut nodes, a, b).await;
 
     assert_replaced(&mut nodes, a, b, old_link).await;
-    assert_coherent(&mut nodes, &[], "the end of the test").await;
+    assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -405,7 +405,7 @@ async fn a_copy_of_an_adopted_rekey_msg1_on_a_young_session_is_refused_even_from
         refused_before + 1,
         "the refused copy must be counted as answered before"
     );
-    assert_coherent(&mut nodes, &[], "the end of the test").await;
+    assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -542,7 +542,7 @@ async fn an_exact_resend_of_the_link_setup_msg1_draws_the_stored_msg2_whether_th
         }
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
-    assert_coherent(&mut nodes, &[], "the end of the test").await;
+    assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -637,7 +637,7 @@ async fn after_our_initiator_cutover_an_off_path_msg1_and_an_earlier_link_msg1_3
     }
     deliver(&mut nodes[b]).await;
     heartbeat_decrypts(&mut nodes, a, b, "A to B after the cutover").await;
-    assert_coherent(&mut nodes, &[], "the end of the test").await;
+    assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -686,7 +686,7 @@ async fn a_sibling_dial_arriving_3_s_after_promotion_on_a_slow_first_path_leaves
     pump(&mut nodes).await;
     heartbeat_decrypts(&mut nodes, l, s, "L to S").await;
     heartbeat_decrypts(&mut nodes, s, l, "S to L").await;
-    assert_coherent(&mut nodes, &[], "the end of the test").await;
+    assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -932,7 +932,7 @@ async fn a_peers_rekey_msg1_12_s_after_our_last_cutover_on_a_link_older_than_30_
         let refused_before = refused(&c.nodes[c.b]);
         c.nodes[c.b].node.handle_msg1(msg1).await;
         found.extend(answered_and_adopted(&mut c, refused_before).await);
-        assert_coherent(&mut c.nodes, &[], "the end of the test").await;
+        assert_coherent(&mut c.nodes, "the end of the test").await;
         cleanup_nodes(&mut c.nodes).await;
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
@@ -974,7 +974,7 @@ async fn a_peers_rekey_msg1_inside_10_s_of_our_last_cutover_is_dropped_and_leave
         let refused_before = refused(&c.nodes[c.b]);
         c.nodes[c.b].node.handle_msg1(msg1).await;
         found.extend(dropped_inside_the_drain(&c, refused_before));
-        assert_coherent(&mut c.nodes, &[], "the end of the test").await;
+        assert_coherent(&mut c.nodes, "the end of the test").await;
         cleanup_nodes(&mut c.nodes).await;
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
@@ -998,7 +998,7 @@ async fn a_peers_rekey_msg1_dropped_inside_10_s_of_our_cutover_is_refused_again_
         let dropped = dropped_inside_the_drain(&c, refused_before);
         if !dropped.is_empty() {
             found.extend(dropped);
-            assert_coherent(&mut c.nodes, &[], "the end of the test").await;
+            assert_coherent(&mut c.nodes, "the end of the test").await;
             cleanup_nodes(&mut c.nodes).await;
             continue;
         }
@@ -1028,7 +1028,7 @@ async fn a_peers_rekey_msg1_dropped_inside_10_s_of_our_cutover_is_refused_again_
                 "{label}: B did not refuse the resend as answered before"
             ));
         }
-        assert_coherent(&mut c.nodes, &[], "the end of the test").await;
+        assert_coherent(&mut c.nodes, "the end of the test").await;
         cleanup_nodes(&mut c.nodes).await;
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
@@ -1091,7 +1091,7 @@ async fn an_off_link_msg1_from_a_peer_silent_for_16_s_12_s_after_our_cutover_on_
             if found.len() == before {
                 heartbeat_decrypts(&mut c.nodes, b, a, &label).await;
             }
-            assert_coherent(&mut c.nodes, &[], "the end of the test").await;
+            assert_coherent(&mut c.nodes, "the end of the test").await;
             cleanup_nodes(&mut c.nodes).await;
         }
     }

@@ -154,16 +154,19 @@ pub(super) fn expect(cell: Cell) -> Expect {
         | Cell::Dropped
         | Cell::Closed
         | Cell::Removed
-        | Cell::Cleared => Expect::Changed,
+        | Cell::Cleared
+        // The reading names the link it is kept under.
+        | Cell::Rekeyed => Expect::Changed,
         Cell::New
         | Cell::HandshakeLink
         | Cell::OldClosedNewAdopted
         | Cell::DialClosed
+        | Cell::DialHeldLeftClosed
         | Cell::FromDial
         | Cell::OpenedAtSource
         | Cell::OldDroppedFromDial
         | Cell::OldDroppedOpenedAtSource
-        | Cell::ReleasedUnclaimedDialDropped
+        | Cell::LeftDroppedDialNamed
         | Cell::DialDropped
         | Cell::Followed
         | Cell::SetupKeptRoamedAdded
@@ -199,11 +202,12 @@ pub(super) fn expect(cell: Cell) -> Expect {
         | Cell::LegSurvives
         | Cell::OldRemovedLegSurvives
         | Cell::DialRemovedPeerStepped
+        | Cell::DialRemovedPeerRekeyed
         | Cell::SteppedThenRemoved
         | Cell::UnkeptQueued
         | Cell::UnkeptQueuedCurrentClosed
         | Cell::DialClosedUnlessProven
-        | Cell::DialClosedReleasedQueued
+        | Cell::LeftClosedReleasedQueued
         | Cell::QueuedDrained
         | Cell::Marked
         | Cell::MarkedAtFirstFrame
@@ -843,6 +847,30 @@ fn spare(node: &Node, peer: &NodeAddr) -> PathRef {
     }
 }
 
+/// The key of the pending dial [`dirty`] plants.
+fn planted_dial(spare: &PathRef) -> (TransportId, u32) {
+    (spare.transport, 0x0dd_d1a1)
+}
+
+/// Move the pending dial [`dirty`] planted, which names the peer's link,
+/// onto a link of its own, opened beside it at a pair no row reads. A move
+/// closes the link the peer leaves, so a dial naming it would then name a
+/// link gone, which the live audit's `dial-link` clause rejects before any
+/// cell is read. For a move's tests, after [`dirty`] and before the first
+/// reading.
+pub(super) fn dial_aside(node: &mut Node, peer: &NodeAddr) {
+    let spare = spare(node, peer);
+    let id = node.allocate_link_id();
+    node.links.open(Link::connectionless(
+        id,
+        spare.transport,
+        TransportAddr::from_string("spare:3"),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    ));
+    node.pending_outbound.note(planted_dial(&spare), id);
+}
+
 /// The milliseconds the record's own writers take.
 fn now_ms() -> u64 {
     crate::time::mono_ms()
@@ -968,8 +996,7 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
         }
         Row::Dials => {
             if let Some(id) = node.get_peer(peer).map(ActivePeer::link_id) {
-                node.pending_outbound
-                    .note((spare.transport, 0x0dd_d1a1), id);
+                node.pending_outbound.note(planted_dial(&spare), id);
             }
         }
         Row::PathMtu => {

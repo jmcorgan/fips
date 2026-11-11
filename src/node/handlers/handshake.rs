@@ -2327,11 +2327,15 @@ impl Node {
                     // its outputs.
                     let built = peer.our_index() == Some(outbound_our_index);
                     let first_heard = unheard && peer.is_heard();
+                    // A rebuilt move holds the peer on the dial's link, and
+                    // the link it left is the one torn down.
+                    let left =
+                        held_now.filter(|held| *held != link_id && peer.link_id() == link_id);
 
                     // The rest of the move, in its order: the machines'
-                    // outputs, the path feeds, what follows a move to
-                    // another pair, the pin, the notes, the control
-                    // machine, and the dial's leg.
+                    // outputs, the path feeds, the peer held on the dial's
+                    // link, what follows a move to another pair, the pin,
+                    // the notes, the control machine, and the losing link.
                     let mut run = crate::node::settle::exec::Run::new(
                         peer_node_addr,
                         crate::node::settle::table::Transition::Move {
@@ -2349,6 +2353,7 @@ impl Node {
                     facts.theirs = Some(header.sender_idx);
                     facts.to = Some((packet.transport_id, packet.remote_addr.clone()));
                     facts.own_dial = own_dial;
+                    facts.loser = Some(left.unwrap_or(link_id));
                     facts.key = Some(crate::ipv6tun::link::PeerKey::from_xonly(
                         &peer_identity.pubkey(),
                     ));
@@ -2381,6 +2386,7 @@ impl Node {
                 let facts = run.crossing();
                 facts.to = Some((packet.transport_id, packet.remote_addr.clone()));
                 facts.lease = carrier_our_index;
+                facts.loser = Some(link_id);
                 facts.outcome = Some(CrossConnOutcome::Keep);
                 self.run(&mut run).await;
                 return;

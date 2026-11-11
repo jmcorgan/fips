@@ -500,7 +500,7 @@ impl Node {
         };
         let out = bundle.step(peer_now(), input, &mut env);
         self.paths.fold(bundle.next_wake());
-        let Some(steps) = pathed(*node_addr, out, Some(bundle), link) else {
+        let Some(steps) = pathed(*node_addr, out, Some(bundle), link, None) else {
             return Ran::default();
         };
         self.run_outputs(node_addr, steps, why).await
@@ -752,13 +752,22 @@ impl Node {
     /// each path's change of state is logged, and each path released is
     /// disposed of while the link lives. Each comes through the settlement
     /// core's join with the core input it stands for after it, which goes to
-    /// the core's record of the link. The connections left to close are
-    /// closed at the next tick.
-    pub(in crate::node) fn run_renewed(&mut self, node_addr: &NodeAddr, out: Outputs<UdpSlot>) {
-        let link = self.peers.get(node_addr).map(|p| p.link_id());
-        let no = link.and_then(|link| self.links.no(&link));
+    /// the core's record of the link. A move onto the dial's link renews the
+    /// bundle on that link and releases the paths of the link it left,
+    /// `left`, which the record and the release are then for. The
+    /// connections left to close are closed at the next tick.
+    pub(in crate::node) fn run_renewed(
+        &mut self,
+        node_addr: &NodeAddr,
+        left: Option<LinkId>,
+        out: Outputs<UdpSlot>,
+    ) {
+        let held = self.peers.get(node_addr).map(|p| p.link_id());
+        let no = held.and_then(|link| self.links.no(&link));
+        let gone = left.and_then(|link| self.links.no(&link));
+        let link = left.or(held);
         let bundle = self.peers.get(node_addr).and_then(|p| p.bundle());
-        let steps = pathed(*node_addr, out, bundle, no);
+        let steps = pathed(*node_addr, out, bundle, no, gone);
         for step in steps.into_iter().flatten() {
             let output = match step {
                 Step::Path(output) => output,
@@ -1007,6 +1016,23 @@ impl Node {
                 addr: addr.clone(),
             };
             self.send_unreachable(&node_addr, to).await;
+        }
+    }
+
+    /// The peer on the link `from` moved onto the link `to`: its carrier
+    /// readings are kept, under `to`.
+    pub(in crate::node) fn rekey_carrier(&mut self, from: LinkId, to: LinkId) {
+        let keys: Vec<(LinkId, TransportId)> = self
+            .paths
+            .carrier
+            .keys()
+            .filter(|(link, _)| *link == from)
+            .copied()
+            .collect();
+        for key in keys {
+            if let Some(reading) = self.paths.carrier.remove(&key) {
+                self.paths.carrier.insert((to, key.1), reading);
+            }
         }
     }
 

@@ -184,7 +184,7 @@ async fn restart_seen_in_a_rekey_msg2(a_larger: bool) {
         "A holds the restarted B's filter (A larger: {a_larger})"
     );
 
-    assert_coherent(&mut r.nodes, &[], "the end of the test").await;
+    assert_coherent(&mut r.nodes, "the end of the test").await;
     cleanup_nodes(&mut r.nodes).await;
 }
 
@@ -237,7 +237,7 @@ async fn a_restart_seen_in_a_rekey_msg2_keeps_the_tun_packets_held_behind_the_se
         "the packet held behind the ended session must stay held for the next session"
     );
 
-    assert_coherent(&mut r.nodes, &[], "the end of the test").await;
+    assert_coherent(&mut r.nodes, "the end of the test").await;
     cleanup_nodes(&mut r.nodes).await;
 }
 
@@ -321,7 +321,7 @@ async fn outbound_completion_with_a_changed_epoch_replaces_the_machine() {
             "the dialer decrypts the restarted node's frames (dialer smaller: {dialer_smaller})"
         );
 
-        assert_coherent(&mut nodes, &[], "the end of the test").await;
+        assert_coherent(&mut nodes, "the end of the test").await;
         cleanup_nodes(&mut nodes).await;
     }
 }
@@ -380,6 +380,6 @@ async fn a_pin_ends_when_a_rekey_msg2_reveals_the_peer_restarted() {
         peer.bundle().unwrap().pin().is_none(),
         "the pin ends when the peer restarted"
     );
-    assert_coherent(&mut r.nodes, &[], "the end of the test").await;
+    assert_coherent(&mut r.nodes, "the end of the test").await;
     cleanup_nodes(&mut r.nodes).await;
 }

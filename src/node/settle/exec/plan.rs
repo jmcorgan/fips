@@ -65,6 +65,9 @@ listed! {
         RunLinkOutputs,
         /// Run the path machine's outputs from its renewal.
         RunRenewed,
+        /// Hold the peer's link record, its control machine and its carrier
+        /// readings on the dial's link, if the move left another.
+        HoldDial,
         /// Read the pair the peer is on after the move.
         MovedRead,
         /// Seed the path MTU from the pair the peer moved to, if it moved.
@@ -76,10 +79,11 @@ listed! {
         MoveNote,
         /// Tell the peer's control machine how the crossing resolved.
         MachineCrossed,
-        /// Close the dial's connection unless the peer runs on it.
-        DialClose,
-        /// Remove the dial's link.
-        DialLinkRemoved,
+        /// Close the losing link's connection unless a live link uses it:
+        /// the link a move left, or the dial's.
+        LoserClose,
+        /// Remove the losing link.
+        LoserRemoved,
         /// Log the crossing kept on the peer's inbound session.
         KeepNote,
         /// Free the session index of the dial a kept crossing closes.
@@ -197,11 +201,12 @@ pub(in crate::node) fn plan(t: &Transition) -> &'static [Effect] {
             }
         }
         // The rekey machine moved onto the dial's session and the path
-        // machine renewed, then what follows a move to another pair, then the
-        // dial's leg ends.
+        // machine renewed, the peer held on the dial's link, then what follows
+        // a move to another pair, then the link the move left ends.
         Transition::Move { .. } => &[
             Effect::RunLinkOutputs,
             Effect::RunRenewed,
+            Effect::HoldDial,
             Effect::PathsRenewed,
             Effect::MovedRead,
             Effect::ClearUdpIfMoved,
@@ -211,8 +216,8 @@ pub(in crate::node) fn plan(t: &Transition) -> &'static [Effect] {
             Effect::MoveNote,
             Effect::MachineCrossed,
             Effect::DialForget,
-            Effect::DialClose,
-            Effect::DialLinkRemoved,
+            Effect::LoserClose,
+            Effect::LoserRemoved,
             Effect::TreeAnnounce,
             Effect::BloomMark,
             Effect::BackoffReset,
@@ -223,8 +228,8 @@ pub(in crate::node) fn plan(t: &Transition) -> &'static [Effect] {
             Effect::LeaseFreed,
             Effect::MachineCrossed,
             Effect::DialForget,
-            Effect::DialClose,
-            Effect::DialLinkRemoved,
+            Effect::LoserClose,
+            Effect::LoserRemoved,
             Effect::TreeAnnounce,
             Effect::BloomMark,
             Effect::BackoffReset,

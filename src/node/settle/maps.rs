@@ -42,6 +42,18 @@ impl MachineMap {
         self.machines.entry(link).or_insert_with(make)
     }
 
+    /// The machine of the link `from` now controls the link `to`, onto which
+    /// its peer moved: the machine and its timers are keyed under `to`.
+    pub(in crate::node) fn rekey(&mut self, from: LinkId, to: LinkId) {
+        if let Some(mut machine) = self.machines.remove(&from) {
+            machine.relink(to);
+            self.machines.insert(to, machine);
+        }
+        if let Some(timers) = self.timers.remove(&from) {
+            self.timers.insert(to, timers);
+        }
+    }
+
     /// Drop the link's machine and its timers.
     pub(in crate::node) fn drop(&mut self, link: LinkId) {
         self.machines.remove(&link);

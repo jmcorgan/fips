@@ -13,13 +13,17 @@
 //!   session that the other end has no handshake able to adopt. Tests call
 //!   the audit once both ends are quiet, so a rekey in flight is not caught
 //!   halfway.
-//! - `RightLink` ([`Breach::RightLink`]): the peer's link record exists and
-//!   is the link the session sits on, at the peer's transport and current
-//!   address. A node does not record which side of its current session's
-//!   handshake it was, so the record's direction is not checked on its own:
-//!   after a crossing on master the stale record is the inbound link at
-//!   another pair, which this sees. A stale inbound record at the same pair
-//!   is the case it cannot see.
+//! - `RightLink` ([`Breach::RightLink`]): the peer's link record exists, and
+//!   is at the peer's transport and current address or is a link this node
+//!   dialed. A move holds the dialed link, whose address is the one dialed,
+//!   and a peer that answered from another form of it or from another pair
+//!   is held at the msg2's pair (FRC-1201, Section 5.6), so an outbound
+//!   record off the peer's pair is right. A node does not record which side
+//!   of its current session's handshake it was, so an outbound record kept
+//!   across a move is not seen here; the crossing tests assert the link id
+//!   and address for that. An inbound record off the pair, the state a
+//!   crossing left before the move held the dialed link, is seen. A stale
+//!   inbound record at the same pair is the case it cannot see.
 //! - `MapsAgree` ([`Breach::MapsAgree`]): the link map against peers and
 //!   handshake legs, and the `(transport, address)` index against the link
 //!   map. The session-index map, the allocator and the decrypt workers are
@@ -39,9 +43,17 @@
 //!   one. It is read before the audit's own heartbeats, which could dial the
 //!   path again.
 //!
-//! Exemptions are listed in [`Exempt`], each with a plain reason and the
-//! change that removes it. One applies only when the test passes it; the
-//! audit never infers one from state.
+//! The audit takes no exemption: a test that holds a state the audit reds
+//! has found something to report. The last two exemptions waived the
+//! inbound link record a crossing or a node's own later dial left the mover
+//! on, and a move now holds the link it dialed. One healthy state it cannot
+//! tell from a leak is kept out by the tests instead: an accepted TCP
+//! connection awaiting its msg1, inside the handshake timeout, which the
+//! TCP pool cannot name or age from outside the transport. Every audited
+//! test delivers until the nodes are idle first, so none holds one. A
+//! candidate path of a bundle, whose connection is open before the path is
+//! in use, needs nothing: `ConnectionsInUse` counts every path of a held
+//! peer's bundle.
 //!
 //! The audit's own tests run with multipath off under their plain names and
 //! on as their `_with_multipath_on` siblings; each case's body is a helper
@@ -59,34 +71,6 @@ use crate::transport::{TransportHandle, TransportId};
 use fips_core::proto::rekey::Role;
 use std::collections::HashSet;
 use std::fmt;
-
-/// A waiver of one property for one node, passed by the test that makes the
-/// state it waives.
-///
-/// Listed, not coded: an accepted TCP connection awaiting its msg1, inside
-/// the handshake timeout. A healthy state, but the TCP pool cannot name or
-/// age a connection from outside the transport, so it is not coded until
-/// the audit can tell it from a leaked one. Every audited test delivers
-/// until the nodes are idle first, so none holds one. A candidate path of
-/// a bundle, whose connection is open before the path is in use, needs no
-/// waiver: `ConnectionsInUse` counts every path of a held peer's bundle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::node::tests) enum Exempt {
-    /// After crossed dials the smaller node, `node`, moves to its own
-    /// outbound session but keeps the inbound link it promoted `peer` on as
-    /// the peer's link record. Waives `RightLink` for `node`'s record of
-    /// `peer`. Removed when a crossing moves the smaller node onto the link
-    /// it dialed.
-    CrossedInbound { node: usize, peer: usize },
-    /// A node, `node`, whose own later dial to `peer` completed while it
-    /// held the peer moves the session, its indices and its address onto
-    /// that dial, but keeps the link the peer was promoted on as the peer's
-    /// link record. On another transport or address the record is then at
-    /// another pair. Waives `RightLink` for `node`'s record of `peer`.
-    /// Removed when that move re-keys the peer's link record to the dial's
-    /// link.
-    MovedOwnDial { node: usize, peer: usize },
-}
 
 /// One breach of a property, naming the node (by index in the test's
 /// slice) whose maps show it.
@@ -116,8 +100,8 @@ pub(super) enum Breach {
         /// The pending session's (local, remote) index.
         pending: (Option<SessionIndex>, Option<SessionIndex>),
     },
-    /// `RightLink`: `node`'s link record for `peer` is missing, or is not at
-    /// the peer's transport and current address.
+    /// `RightLink`: `node`'s link record for `peer` is missing, or is an
+    /// inbound link not at the peer's transport and current address.
     RightLink {
         node: usize,
         peer: usize,
@@ -254,7 +238,7 @@ impl fmt::Debug for Breach {
 /// `link_index_audit::audit` on each node (which panics on its own). Sends
 /// one heartbeat each way between every pair that holds each other, and
 /// delivers until idle, so it changes link counters but no settlement.
-pub(super) async fn audit(nodes: &mut [TestNode], exempt: &[Exempt]) -> Vec<Breach> {
+pub(super) async fn audit(nodes: &mut [TestNode]) -> Vec<Breach> {
     for (i, tn) in nodes.iter().enumerate() {
         link_index_audit::audit(&tn.node, &format!("node {i}"));
     }
@@ -264,7 +248,7 @@ pub(super) async fn audit(nodes: &mut [TestNode], exempt: &[Exempt]) -> Vec<Brea
     }
     one_session(nodes, &mut breaches).await;
     for i in 0..nodes.len() {
-        right_link(nodes, i, exempt, &mut breaches);
+        right_link(nodes, i, &mut breaches);
         maps_agree(nodes, i, &mut breaches);
         connections_in_use(nodes, i, &mut breaches).await;
     }
@@ -273,12 +257,8 @@ pub(super) async fn audit(nodes: &mut [TestNode], exempt: &[Exempt]) -> Vec<Brea
 
 /// Fail the test, marked as the defect, if [`audit`] reports any breach at
 /// `step`.
-pub(in crate::node::tests) async fn assert_coherent(
-    nodes: &mut [TestNode],
-    exempt: &[Exempt],
-    step: &str,
-) {
-    let breaches = audit(nodes, exempt).await;
+pub(in crate::node::tests) async fn assert_coherent(nodes: &mut [TestNode], step: &str) {
+    let breaches = audit(nodes).await;
     assert!(
         breaches.is_empty(),
         "defect: incoherent at {step}: {breaches:#?}"
@@ -385,17 +365,12 @@ fn unadoptable(nodes: &[TestNode], at: usize, peer: usize, breaches: &mut Vec<Br
 }
 
 /// `RightLink` for every peer `nodes[i]` holds among the test's nodes.
-fn right_link(nodes: &[TestNode], i: usize, exempt: &[Exempt], breaches: &mut Vec<Breach>) {
+fn right_link(nodes: &[TestNode], i: usize, breaches: &mut Vec<Breach>) {
     let node = &nodes[i].node;
     for (addr, peer) in node.peers.iter() {
         let Some(p) = index_of(nodes, addr) else {
             continue;
         };
-        if exempt.contains(&Exempt::CrossedInbound { node: i, peer: p })
-            || exempt.contains(&Exempt::MovedOwnDial { node: i, peer: p })
-        {
-            continue;
-        }
         let record = node
             .links
             .get(&peer.link_id())
@@ -405,7 +380,8 @@ fn right_link(nodes: &[TestNode], i: usize, exempt: &[Exempt], breaches: &mut Ve
             (&record, &pair),
             (Some((_, tid, remote)), (Some(t), Some(a))) if tid == t && remote == a
         );
-        if !at_pair {
+        let dialed = matches!(&record, Some((LinkDirection::Outbound, _, _)));
+        if !at_pair && !dialed {
             breaches.push(Breach::RightLink {
                 node: i,
                 peer: p,
@@ -551,7 +527,7 @@ async fn loopback_passes(on: bool) {
         nodes[0].node.get_peer(&a1).is_some(),
         "precondition: the dial promoted the peer"
     );
-    assert_coherent(&mut nodes, &[], "a single loopback dial").await;
+    assert_coherent(&mut nodes, "a single loopback dial").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -584,7 +560,7 @@ async fn single_tcp_dial(on: bool, zero_smaller: bool, d: usize) -> Vec<TestNode
 /// A single TCP dial from the larger node is coherent.
 async fn larger_passes(on: bool) {
     let mut nodes = single_tcp_dial(on, true, 1).await;
-    assert_coherent(&mut nodes, &[], "a TCP dial from the larger node").await;
+    assert_coherent(&mut nodes, "a TCP dial from the larger node").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -603,7 +579,7 @@ async fn the_audit_passes_a_single_tcp_dial_from_the_larger_node_with_multipath_
 /// A single TCP dial from the smaller node is coherent.
 async fn smaller_passes(on: bool) {
     let mut nodes = single_tcp_dial(on, true, 0).await;
-    assert_coherent(&mut nodes, &[], "a TCP dial from the smaller node").await;
+    assert_coherent(&mut nodes, "a TCP dial from the smaller node").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -624,67 +600,33 @@ fn at_node(breaches: &[Breach], node: usize) -> Vec<&Breach> {
     breaches.iter().filter(|b| b.node() == node).collect()
 }
 
-/// After crossed TCP dials, with no exemption passed, the audit flags the
-/// smaller node's link record for the larger node: the inbound link it was
-/// promoted on, at another pair than the one it holds the peer at. Its
-/// connection to the peer is the peer's active path, which the audit
-/// counts.
-async fn exemption_needed(on: bool) {
-    let (mut nodes, s, l) = crossed_tcp(on, true).await;
-    let breaches = audit(&mut nodes, &[]).await;
+/// After crossed TCP dials, the audit finds no breach at the smaller
+/// node: it holds the larger node on the link it
+/// dialed, an outbound record, and its connection to the peer is the
+/// peer's active path, which the audit counts. Before a move held the
+/// dialed link, the record was the inbound link it was promoted on, at
+/// another pair, which the audit flags.
+async fn crossing_clean(on: bool) {
+    let (mut nodes, s, _) = crossed_tcp(on, true).await;
+    let breaches = audit(&mut nodes).await;
     let at_s = at_node(&breaches, s);
     assert!(
-        at_s.iter().any(|b| matches!(
-            b,
-            Breach::RightLink { peer, record: Some((LinkDirection::Inbound, _, _)), .. } if *peer == l
-        )),
-        "defect: the smaller node's inbound record for the larger is not flagged: {breaches:#?}"
+        at_s.is_empty(),
+        "defect: the audit flags the smaller node after crossed dials: {breaches:#?}"
     );
     cleanup_nodes(&mut nodes).await;
 }
 
-/// [`exemption_needed`] with multipath off.
+/// [`crossing_clean`] with multipath off.
 #[tokio::test]
-async fn the_audit_without_its_crossing_exemption_flags_the_smaller_nodes_inbound_link_record() {
-    exemption_needed(false).await;
+async fn the_audit_finds_no_breach_at_the_smaller_node_after_crossed_tcp_dials() {
+    crossing_clean(false).await;
 }
 
-/// [`exemption_needed`] with multipath on.
+/// [`crossing_clean`] with multipath on.
 #[tokio::test]
-async fn the_audit_without_its_crossing_exemption_flags_the_smaller_nodes_inbound_link_record_with_multipath_on()
- {
-    exemption_needed(true).await;
-}
-
-/// The crossing exemption waives the named node's record only: naming the
-/// smaller node clears its breaches, naming the larger node leaves them.
-async fn exemption_scoped(on: bool) {
-    let (mut nodes, s, l) = crossed_tcp(on, true).await;
-    let named = audit(&mut nodes, &[Exempt::CrossedInbound { node: s, peer: l }]).await;
-    assert!(
-        named.is_empty(),
-        "defect: with the smaller node named the crossing is still flagged: {named:#?}"
-    );
-    let other = audit(&mut nodes, &[Exempt::CrossedInbound { node: l, peer: s }]).await;
-    assert!(
-        other
-            .iter()
-            .any(|b| matches!(b, Breach::RightLink { node, peer, .. } if *node == s && *peer == l)),
-        "defect: naming the larger node waived the smaller node's record: {other:#?}"
-    );
-    cleanup_nodes(&mut nodes).await;
-}
-
-/// [`exemption_scoped`] with multipath off.
-#[tokio::test]
-async fn the_crossing_exemption_waives_only_the_named_nodes_record() {
-    exemption_scoped(false).await;
-}
-
-/// [`exemption_scoped`] with multipath on.
-#[tokio::test]
-async fn the_crossing_exemption_waives_only_the_named_nodes_record_with_multipath_on() {
-    exemption_scoped(true).await;
+async fn the_audit_finds_no_breach_at_the_smaller_node_after_crossed_tcp_dials_with_multipath_on() {
+    crossing_clean(true).await;
 }
 
 /// A link left in the link map with no peer or handshake leg naming it, the
@@ -708,7 +650,7 @@ async fn stale_flagged(on: bool) {
             Duration::from_millis(100),
         ),
     );
-    let breaches = audit(&mut nodes, &[]).await;
+    let breaches = audit(&mut nodes).await;
     assert!(
         breaches.iter().any(|b| matches!(
             b,
@@ -740,7 +682,7 @@ async fn unbound_panics(on: bool) {
     let peer = *nodes[1].node.node_addr();
     let tid = nodes[0].transport_id;
     bind_index(&mut nodes[0].node, tid, 0x7fff_fff0, peer);
-    let _ = audit(&mut nodes, &[]).await;
+    let _ = audit(&mut nodes).await;
 }
 
 /// [`unbound_panics`] with multipath off.
@@ -783,7 +725,7 @@ async fn open_flagged(on: bool) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(connected, "precondition: the connection opened within 2 s");
-    let breaches = audit(&mut nodes, &[]).await;
+    let breaches = audit(&mut nodes).await;
     assert!(
         breaches.iter().any(|b| matches!(
             b,
@@ -830,7 +772,7 @@ async fn path_unconnected(on: bool) {
         !tcp.has_connection(&at).await,
         "precondition: the connection is closed"
     );
-    let breaches = audit(&mut nodes, &[]).await;
+    let breaches = audit(&mut nodes).await;
     assert!(
         breaches.iter().any(|x| matches!(
             x,
@@ -870,7 +812,7 @@ async fn pending_passes(on: bool) {
         Some(Role::Initiator),
         "precondition: node 0 holds an initiator pending"
     );
-    let breaches = audit(&mut nodes, &[]).await;
+    let breaches = audit(&mut nodes).await;
     let unadoptable: Vec<_> = breaches
         .iter()
         .filter(|b| matches!(b, Breach::Unadoptable { .. }))

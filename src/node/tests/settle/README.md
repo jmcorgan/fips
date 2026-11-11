@@ -32,7 +32,7 @@ files run off, which is what they test.
   (`bind_index`, `alias`, `tap`): the session-index map keyed by the bare
   index, and loopback addresses registered under their transport. A
   wrapper's body is the one place such a change is made.
-- `audit.rs`: the shell audit. `audit(nodes, exempt)` reports every breach
+- `audit.rs`: the shell audit. `audit(nodes)` reports every breach
   of four properties over real nodes, after running
   `link_index_audit::audit` on each node (which panics on its own);
   `assert_coherent` fails the test, marked `defect:`, on any breach. The
@@ -40,7 +40,7 @@ files run off, which is what they test.
   show the audit passes coherent states and fires on a planted breach of
   each property it reports. Where a property is also a clause of the node's
   live audit (`src/node/settle/audit.rs`), it calls that clause.
-  `assert_coherent` and `Exempt` are visible to the rest of `node::tests`:
+  `assert_coherent` is visible to the rest of `node::tests`:
   the crossing, restart, rekey-move, stored-msg2 and BLE crossing tests
   call it at their end, where both nodes hold each other and are quiet.
 - `bounds.rs`: a pending dial sprayed with 1000 forged msg2s, garbage or
@@ -77,23 +77,32 @@ files run off, which is what they test.
   `crate::time::advance`, so they run safely beside other tests. It holds
   copies of three private items of `handshake_lines.rs` and two private
   helpers of `handshake.rs`, each naming its original.
-- `crossing.rs`: crossed dials and a dialer's second dial. Crossed TCP
-  dials (one working session; the smaller node's link record and its redial
-  after a drop, known defects, with a single-dial control and a run that
-  rewrites the record); crossed loopback dials won on another transport or
-  address (the pair the winning msg2 came from, then the audit); a second
-  msg1 more than 1 s after the first (in order, on another transport, and
-  with the second msg2 first, a known defect checked by heartbeat and by the
-  audit); a larger node's dial on a quiet peer's aged link (two known
+- `crossing.rs`: crossed dials and a dialer's second dial. Crossed TCP dials
+  (one working session; the smaller node on the link it dialed and its redial
+  after a drop, with a single-dial control and a run that rewrites the
+  record); crossed loopback dials won on another transport or address (the
+  pair the winning msg2 came from, then the audit); a second msg1 more than 1
+  s after the first (in order, on another transport, the dialer left on its
+  second dial's link, and with the second msg2 first, a known defect checked
+  by heartbeat and by the audit); a move's link: the address dialed with the
+  msg2's pair a path of it, the control machine moved with the peer, and the
+  pin a second dial ends after a crossing; a TCP crossing whose one msg1
+  arrives inside the other's connect window, keeping the handshake that
+  completed first; a larger node's dial on a quiet peer's aged link (two known
   defects); a crossed msg1 the smaller node reads after installing from its
   own dial and hearing nothing for longer than the heard floor, from another
   transport and on the same one (known defects, with a control inside the
-  floor); a larger node's dial on the aged link after the smaller node's
-  own rekey, past the heard floor (a known defect, with the same control);
-  and two dials to one address with no peer held, the first reaped,
-  leaving open the connection the second runs on, on loopback and on the
-  BLE mock. Each two-order case is one test per order. It holds copies of
-  private helpers of `crossed_dial.rs` and `control.rs`, each naming its
+  floor); a larger node's dial on the aged link after the smaller node's own
+  rekey, past the heard floor (a known defect, with the same control); and two
+  dials to one address with no peer held, the first reaped, leaving open the
+  connection the second runs on, on loopback and on the BLE mock; and the
+  close rule where another link's second path holds the pair, at the link a
+  crossing retires and at a path released while its link lives, and where a
+  link's one path roamed to the pair of a dial the crossing tears down; and
+  what a move closes of the link it left: on TCP, the left link's connection,
+  after the msg2 queued on it is read, and on loopback, nothing a dial still
+  in flight uses. Each two-order case is one test per order. It holds copies
+  of private helpers of `crossed_dial.rs` and `control.rs`, each naming its
   original.
 - `explore/`: the real-node explorer and its world: two or three real nodes
   on the loopback, TCP or the BLE mock, driven by a schedule written as data,
@@ -184,15 +193,12 @@ the lane reds on it, as it does on `precondition`. That is the point: a pin
 that breaks in its setup has stopped showing its defect, and a fix landing
 elsewhere would go unseen.
 
-## The audit's exemptions
+## No exemptions
 
-An exemption waives one property for one node, and applies only when the
-test passes it; the audit never infers one from state. Each is listed in
-`audit.rs`'s `Exempt` with its reason and the change that removes it. A new
-one needs a test that constructs it in the same change (an enum variant no
-code constructs fails clippy), and a test showing it waives only what it
-names. A green test that the audit reds is a finding to report, not a
-reason to add an exemption.
+The audit takes none. The last two waived the inbound link record a
+crossing or a node's own later dial left the mover on, and went when a
+move came to hold the link it dialed. A green test that the audit reds is
+a finding to report, not a reason to bring an exemption back.
 
 ## Rules for changing it
 

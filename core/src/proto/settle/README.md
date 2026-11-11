@@ -91,7 +91,8 @@ release build.
 - `parity.txt`: the trace both sides compare with, `include_str!`d by
   `parity.rs`: one block per script, a line per step and end saying what
   the node holds, and `core` lines where the settlement core differs, each
-  naming its cause. Its head states where its lines came from.
+  naming its cause; it holds none since a crossing's mover holds the link
+  it dialed, as the core does. Its head states where its lines came from.
 - `faults.rs`: the test-only switches that turn each guard of the core
   and of its tests off (`FIPS_SETTLE_FAULTS`), read through the `fault!` macro in
   `mod.rs`, and the choice of a candidate rule for the two settlement

@@ -42,12 +42,16 @@ struct MoveScript {
     /// closes, the one the test planted with it.
     own: bool,
     /// A connection at a pair the readings cover was asked to close: the
-    /// dial's, where no other peer proves its pair, or a released path's.
+    /// link the peer left, where no live link uses its pair, or a released
+    /// path's.
     closed: bool,
     /// The peering was unheard before the move, promoted on the peer's
     /// msg1: the move makes it heard and forgets the msg1s remembered
     /// against replay, the one `dirty` planted among them.
     unheard: bool,
+    /// A released path's connection was queued to close, which the link
+    /// left's close is not.
+    queued: bool,
 }
 
 /// `Changed` if `changed`, else `Kept`.
@@ -62,9 +66,9 @@ fn by(changed: bool) -> Outcome {
 /// The outcome of each cell of `Move` that turns on the script.
 fn move_outcomes(s: MoveScript) -> Vec<(Row, Outcome)> {
     let mut rows = vec![
-        // The dial's link record goes; the peer keeps its own.
+        // The peer holds the dial's link record; the one it left goes.
         (Row::Link, Outcome::Changed),
-        // The released pairs are unclaimed and the dial's entry dropped.
+        // The link left is named nowhere, the dial's link where the peer is.
         (Row::Index, Outcome::Changed),
         // A renewal starts the link's paths again, with a new path id even
         // where `to` was held.
@@ -92,7 +96,7 @@ fn move_outcomes(s: MoveScript) -> Vec<(Row, Outcome)> {
         (Row::Tree, Outcome::Kept),
         // The test planted a failure.
         (Row::LookupBackoff, Outcome::Changed),
-        (Row::PathCloses, by(s.own || s.closed)),
+        (Row::PathCloses, by(s.own || s.queued)),
         (Row::PathListings, by(s.on)),
         (Row::Data(DataRow::Heard), by(s.unheard)),
         (Row::Replayed, by(s.unheard)),
@@ -292,6 +296,9 @@ async fn run_site(
     let to = at(msg2.transport_id, &msg2.remote_addr);
     let pairs = covering(node, peer, also);
     dirty(node, peer).await;
+    if matches!(t, Transition::Move { built: true, .. }) {
+        dial_aside(node, peer);
+    }
     if let Some(addr) = marked {
         assert_eq!(
             mark(node, peer, addr).await,
@@ -393,11 +400,10 @@ async fn tcp_crossed(on: bool, zero_smaller: bool) -> TcpCrossed {
 }
 
 /// The smaller node of crossed TCP dials takes the msg2 that answers its
-/// own dial and moves onto that session. No link is capable before the
-/// msg2, so the released inbound pair keeps its connection, and the dial's
-/// is the one the peer moves onto: nothing is closed, at either setting.
-/// That is the connection cell as the code has it today, and it is
-/// expected to change.
+/// own dial and moves onto that session and that link. No link is capable
+/// before the msg2, so the released inbound pair is kept by the renewal,
+/// and the link the move left, the inbound one, is closed once it goes, as
+/// no live link uses its connection: closed at either setting.
 async fn tcp_crossing_won(on: bool, zero_smaller: bool) {
     let mut x = tcp_crossed(on, zero_smaller).await;
     let (s, l) = (x.s, x.l);
@@ -414,8 +420,9 @@ async fn tcp_crossing_won(on: bool, zero_smaller: bool) {
         moved: true,
         reseeded: false,
         own: false,
-        closed: false,
+        closed: true,
         unheard: true,
+        queued: false,
     };
     let also = [x.from[s].clone(), at(msg2.transport_id, &msg2.remote_addr)];
     run_move(&mut x.nodes[s].node, &l_addr, msg2, &also, None, t, script).await;
@@ -452,7 +459,8 @@ async fn a_crossing_won_over_tcp_does_what_the_move_cells_say_larger_first_with_
 
 /// The smaller node of crossed loopback dials, whose own dial went out on a
 /// second transport, takes the msg2 that answers it and moves onto that
-/// transport.
+/// transport and the dial's link, and asks to close the connection of the
+/// link it left, on the first transport, which no live link uses.
 async fn loopback_crossing_won(on: bool) {
     let crossed = cross_dials_from(Dial::OtherTransport, with_path(Config::new(), on)).await;
     let (s, l) = (crossed.s, crossed.l);
@@ -469,8 +477,9 @@ async fn loopback_crossing_won(on: bool) {
         moved: true,
         reseeded: true,
         own: false,
-        closed: false,
+        closed: true,
         unheard: true,
+        queued: false,
     };
     let also = [
         at(nodes[s].transport_id, &nodes[l].addr),
@@ -595,6 +604,7 @@ async fn second_dial_answered(on: bool, dialer_larger: bool) {
         own: true,
         closed: false,
         unheard: false,
+        queued: false,
     };
     let also = [at(x.msg2.transport_id, &x.msg2.remote_addr)];
     run_move(
@@ -646,8 +656,9 @@ async fn a_second_dial_answered_does_what_the_move_cells_say_larger_dialer_with_
 /// quiet past link-dead, since until then a capable peer's link is live and
 /// is not dialled; the renewal releases that path, which is queued to close
 /// and closed by the unpin step's drain. With it off no link is capable,
-/// and only the dial's connection closes. That is the connection cell as
-/// the code has it today, and it is expected to change.
+/// and nothing closes: the peer holds the dial's link, whose connection is
+/// the one it was dialed on, and the link it left is at the msg2's pair,
+/// which the peer's renewed path uses.
 async fn own_dial_on_an_aged_link(on: bool) {
     use super::super::super::control::quieten;
     use super::super::super::paths::{beacon, capable_at, quiet_for, state_at};
@@ -708,28 +719,28 @@ async fn own_dial_on_an_aged_link(on: bool) {
         own: true,
         built: true,
     };
-    // The dial's connection, at the second address no path names, is
-    // closed at both settings.
+    // Only the released paths close, where the link is capable.
     let script = MoveScript {
         on,
         moved: false,
         reseeded: false,
         own: true,
-        closed: true,
+        closed: on,
         unheard: false,
+        queued: on,
     };
     let spare = spare(&nodes[s].node, &l_addr);
     run_move(&mut nodes[s].node, &l_addr, msg2, &also, None, t, script).await;
-    // Which closes the connection cell's one reading is made of: the dial's
-    // at both settings, and the released paths' only where the link is
-    // capable, the spare pair `dirty` admitted and, with multipath on, the
-    // beaconed one.
+    // Which closes the connection cell's one reading is made of: the
+    // released paths' only where the link is capable, the spare pair
+    // `dirty` admitted and, with multipath on, the beaconed one. The dial's
+    // connection is the link the peer now holds, and none is asked to close.
     let closes: Vec<usize> = also[1..]
         .iter()
         .chain([&spare])
         .map(|to| closes_at(&nodes[s].node, to))
         .collect();
-    let want = if on { vec![1, 1, 1] } else { vec![1, 0] };
+    let want = if on { vec![1, 0, 1] } else { vec![0, 0] };
     cleanup_nodes(&mut nodes).await;
     assert_eq!(
         closes,
@@ -868,7 +879,8 @@ async fn a_crossing_lost_at_a_proven_pair_does_what_the_keep_cells_say_with_mult
 /// drives them: node 0, the smaller, dials over L2 and node 1 over L1, and
 /// each promotes the other on its msg1. Node 0 holds node 1 on L1 and its
 /// mark there, as a frame of node 1's would leave it, and moves onto L2 at
-/// the msg2: the mark is relinked from L1 to L2. Node 1 holds node 0 on L2
+/// the msg2: the mark is relinked from L1 to L2, and L1, the link it left,
+/// is closed, as no live link uses it. Node 1 holds node 0 on L2
 /// and its mark there, and keeps that link at the msg2: the mark stays.
 /// Node 1's reading covers L2 alone: its dial's link, L1, is closed at the
 /// msg2, which unpools it and takes its reading of the mark with it; the
@@ -933,8 +945,9 @@ async fn ble_crossing(on: bool) {
         moved: true,
         reseeded: false,
         own: false,
-        closed: false,
+        closed: true,
         unheard: true,
+        queued: false,
     };
     run_move(&mut nodes[0].node, &n1, msg2, &also, Some(&a1), won, script).await;
 

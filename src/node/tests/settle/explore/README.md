@@ -87,7 +87,7 @@ helper that seeds a handshake machine by hand.
 - `oracle.rs`: what is checked at each leaf (`judge`), and the explorer's
   tests over the starts: every path of every start keeps its properties, per
   transport and setting; each pinned defect the map gives a start is found
-  there, with every waiver lifted; and each peer change of every start's
+  there; and each peer change of every start's
   scripted path, healed, does what the reference model's transition says,
   per setting, every transport in one test (below). And the crossing with a
   decrypt-worker pool (`pooled`): every path heals to one session per pair
@@ -199,8 +199,7 @@ connection opens after the timeout.
 Then, at the leaf:
 
 - `settle::settled` for every pair the start dials;
-- the shell audit, `settle::audit::audit`, with the start's waivers
-  passed;
+- the shell audit, `settle::audit::audit`;
 - the node's live audit, inherited: in a debug build it runs at every packet
   a node is handed and panics on a breach. A walk runs on a thread of its
   own, so the property test reports such a panic, with the path it was
@@ -209,7 +208,7 @@ Then, at the leaf:
 A start names the clauses a pinned defect breaks on its scripted path
 (`pinned`): start 6's split, which the leaf's heal does not mend. They are
 not asserted on any of that start's paths; the map names the pin, and the
-finder asserts it on the scripted path with every waiver lifted.
+finder asserts it on the scripted path.
 
 Each msg1's class against the model's is not checked here.
 

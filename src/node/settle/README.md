@@ -45,7 +45,8 @@ field, at once.
   the table, to its lookup and to a core record, that do not mark it, for
   the tests that the audit catches each.
 - `maps.rs`: `MachineMap`, the per-peer control machines with their timer
-  store (`add`, `ensure`, `drop`, `get_mut`; `timers`, `arm`, `cancel`);
+  store (`add`, `ensure`, `rekey`, `drop`, `get_mut`; `timers`, `arm`,
+  `cancel`), `rekey` keying a moved peer's machine under the dial's link;
   `DialMap`, the dials waiting for their msg2 (`note`, `forget`); `PeerMap`,
   the authenticated peers (`install`, `take`, and `get_mut`, `values_mut`
   and `iter_mut` for a change to a peer that leaves the map as it is); and

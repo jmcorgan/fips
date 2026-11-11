@@ -69,11 +69,22 @@ faults! {
     PlantedGreen,
     /// A crossed dial's move builds the new link machine on the link's old
     /// transport and leaves the path bundle as it was, instead of taking
-    /// the winning msg2's transport and address.
+    /// the winning msg2's transport and address, and leaves the peer on the
+    /// link it was held on, the old pair's.
     MoveKeepsOldPair,
     /// A crossed dial's move sends the peer a tree announce on the session
     /// it is about to leave, before the move, as well as after it.
     MoveAnnouncesFirst,
+    /// A crossed dial's move leaves the peer on the link it was held on and
+    /// tears down the dial's link, instead of holding the link it dialed
+    /// and tearing down the one it left.
+    MoveKeepsInboundLink,
+    /// A move onto the dial's link leaves the peer's control machine and
+    /// its timers under the link the peer left.
+    MachineLeftBehind,
+    /// A move onto the dial's link leaves the peer's carrier readings under
+    /// the link the peer left.
+    CarrierLeftBehind,
     /// The FMP decision for an outbound handshake completing beside an
     /// existing peer ignores that the dial was this node's own, so only
     /// the tie-break decides between swapping and keeping.

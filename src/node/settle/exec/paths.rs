@@ -140,13 +140,14 @@ impl Node {
                 | Effect::UnheardNote
                 | Effect::RunLinkOutputs
                 | Effect::RunRenewed
+                | Effect::HoldDial
                 | Effect::MovedRead
                 | Effect::SeedMtuIfMoved
                 | Effect::UnpinIfOwn
                 | Effect::MoveNote
                 | Effect::MachineCrossed
-                | Effect::DialClose
-                | Effect::DialLinkRemoved
+                | Effect::LoserClose
+                | Effect::LoserRemoved
                 | Effect::KeepNote
                 | Effect::LeaseFreed
                 | Effect::ReplayForget

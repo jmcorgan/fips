@@ -1134,12 +1134,10 @@ impl Fields {
 }
 
 /// A defect of the node that makes the settlement core differ from it,
-/// the closed list a `core` line may name: the three the model of the
-/// node shows (`legacy/findings.rs` in the settlement tests).
+/// the closed list a `core` line may name: the two the model of the node
+/// shows (`legacy/findings.rs` in the settlement tests).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cause {
-    /// Crossed dials leave the smaller node on the link the larger dialed.
-    CrossingWrongLink,
     /// A late second dial answered in the other order splits the session.
     LateDialSplit,
     /// A dial on the peer's aged link leaves a pending the peer cannot
@@ -1149,16 +1147,11 @@ pub enum Cause {
 
 impl Cause {
     /// Every cause.
-    pub const ALL: [Self; 3] = [
-        Self::CrossingWrongLink,
-        Self::LateDialSplit,
-        Self::AgedPending,
-    ];
+    pub const ALL: [Self; 2] = [Self::LateDialSplit, Self::AgedPending];
 
     /// Its name in a `core` line.
     pub fn name(self) -> &'static str {
         match self {
-            Self::CrossingWrongLink => "crossing-wrong-link",
             Self::LateDialSplit => "late-dial-split",
             Self::AgedPending => "aged-link-pending",
         }

@@ -1,12 +1,14 @@
-//! The three defects of the current node the settlement properties must
-//! find in the model of `master`, each on its named start and at each
-//! multipath setting: crossed dials leave the smaller node on the wrong
-//! link, a late second dial answered in the other order splits the session,
-//! and a dial on the peer's aged link leaves a pending the peer cannot
-//! adopt. If one of them is not found at its property, the world is weaker
-//! than the reproductions it stands for. A fourth, a forward wall step
-//! letting a msg1 replace a peering heard just now, is gone from the node
-//! since its gates read the peer clock, and its test says so.
+//! The two defects of the current node the settlement properties must find
+//! in the model of `master`, each on its named start and at each multipath
+//! setting: a late second dial answered in the other order splits the
+//! session, and a dial on the peer's aged link leaves a pending the peer
+//! cannot adopt. If one of them is not found at its property, the world is
+//! weaker than the reproductions it stands for. Two that were defects are
+//! gone from the node, and their tests say so: crossed dials no longer
+//! leave the smaller node on the wrong link, since a move holds the link
+//! the node dialed (FRC-1201 Section 5.6), and a forward wall step no
+//! longer lets a msg1 replace a peering heard just now, since the gates
+//! read the peer clock.
 
 use alloc::format;
 use alloc::string::String;
@@ -20,6 +22,7 @@ use super::super::joint::explore::CAPABLE;
 use super::super::oracle::{Breach, Oracle, every_step, follow, scripted};
 use super::super::shadow::{Entry, Rec, Refusal};
 use super::super::starts::{Do, Maker, Start, Want, starts};
+use super::super::world::Dir;
 use super::master::{master, master_on};
 
 /// The model of `master` at each multipath setting, by name.
@@ -98,40 +101,57 @@ const STREAM_LARGER_FIRST: &[Do] = &[
     Do::Get(0, Want::Msg2, None),
 ];
 
-/// A crossing's `RightLink` breach at the smaller node.
-fn wrong_link(number: u8, name: &str, steps: &[Do]) {
+/// A crossing leaves the smaller node on the link its own dial set up:
+/// after `steps` and a heal it holds the peer on an outbound link whose
+/// handshake is the one its session came from, and no step shows a
+/// `RightLink` breach at either node.
+fn dialed_link(number: u8, name: &str, steps: &[Do]) {
     for (setting, mk) in SETTINGS {
-        let found = found(mk, number, name, Some(steps));
+        let st = start(mk, number, name);
+        let mut w = (st.build)(st.maker);
+        let found = follow(&mut w, steps);
         assert!(
-            has(&found, Oracle::RightLink, 0, ""),
-            "multipath {setting}: the smaller node is on the wrong link:\n{}",
+            !found.iter().any(|b| b.oracle == Oracle::RightLink),
+            "multipath {setting}: no node is on the wrong link:\n{}",
             listed(&found)
+        );
+        let v = w.parties[0].view();
+        let held: Vec<(Dir, bool)> = v
+            .peers
+            .iter()
+            .map(|p| (p.dir, p.link == p.origin))
+            .collect();
+        assert_eq!(
+            held,
+            [(Dir::Outbound, true)],
+            "multipath {setting}: the smaller node holds the link it dialed: {:?}",
+            v.peers
         );
     }
 }
 
 #[test]
-fn against_a_model_of_master_crossed_dials_on_one_connectionless_transport_leave_the_smaller_node_on_the_wrong_link_smaller_first()
+fn against_a_model_of_the_node_crossed_dials_on_one_connectionless_transport_leave_the_smaller_node_on_the_link_it_dialed_smaller_first()
  {
-    wrong_link(1, "connectionless", SMALLER_FIRST);
+    dialed_link(1, "connectionless", SMALLER_FIRST);
 }
 
 #[test]
-fn against_a_model_of_master_crossed_dials_on_one_connectionless_transport_leave_the_smaller_node_on_the_wrong_link_larger_first()
+fn against_a_model_of_the_node_crossed_dials_on_one_connectionless_transport_leave_the_smaller_node_on_the_link_it_dialed_larger_first()
  {
-    wrong_link(1, "connectionless", LARGER_FIRST);
+    dialed_link(1, "connectionless", LARGER_FIRST);
 }
 
 #[test]
-fn against_a_model_of_master_crossed_dials_on_a_connection_oriented_transport_leave_the_smaller_node_on_the_wrong_link_smaller_first()
+fn against_a_model_of_the_node_crossed_dials_on_a_connection_oriented_transport_leave_the_smaller_node_on_the_link_it_dialed_smaller_first()
  {
-    wrong_link(3, "connection-oriented", STREAM_SMALLER_FIRST);
+    dialed_link(3, "connection-oriented", STREAM_SMALLER_FIRST);
 }
 
 #[test]
-fn against_a_model_of_master_crossed_dials_on_a_connection_oriented_transport_leave_the_smaller_node_on_the_wrong_link_larger_first()
+fn against_a_model_of_the_node_crossed_dials_on_a_connection_oriented_transport_leave_the_smaller_node_on_the_link_it_dialed_larger_first()
  {
-    wrong_link(3, "connection-oriented", STREAM_LARGER_FIRST);
+    dialed_link(3, "connection-oriented", STREAM_LARGER_FIRST);
 }
 
 /// Start 6's split, with the dialer named by `name`.
@@ -215,10 +235,11 @@ fn against_a_model_of_master_a_forward_wall_step_does_not_let_a_msg1_replace_a_p
 /// with no paths and the joint world rebuilds on real bundles, explored to
 /// their depths with the model
 /// of `master` made by `mk` at both ends and no exemption. Every breach is
-/// printed with its path; a breach other than the three defects and the
+/// printed with its path; a breach other than the two defects and the
 /// named differences is a lead, to be reproduced on real nodes before it is
-/// a finding. Returns the starts carrying one of the three defects that do
-/// not show it.
+/// a finding. Returns the starts carrying one of the two defects that do
+/// not show it, and the two crossings, starts 1 and 3, where a node is on
+/// the wrong link.
 #[cfg(feature = "slow-tests")]
 fn against_itself(setting: &str, mk: Maker, chosen: impl Fn(&Start) -> bool) -> Vec<String> {
     use super::super::oracle::sweep;
@@ -259,8 +280,18 @@ fn against_itself(setting: &str, mk: Maker, chosen: impl Fn(&Start) -> bool) -> 
                 b.what
             );
         }
+        if matches!(st.number, 1 | 3)
+            && let Some((b, _)) = swept
+                .found
+                .iter()
+                .find(|(b, _)| b.oracle == Oracle::RightLink)
+        {
+            missing.push(format!(
+                "{setting}, {}: RightLink at n{}: {}",
+                st.name, b.node, b.what
+            ));
+        }
         let want = match st.number {
-            1 | 3 => Some((Oracle::RightLink, "")),
             6 => Some((Oracle::OneSession, "")),
             7 => Some((Oracle::OneSession, "pending:")),
             _ => None,
@@ -279,7 +310,7 @@ fn against_itself(setting: &str, mk: Maker, chosen: impl Fn(&Start) -> bool) -> 
 
 #[cfg(feature = "slow-tests")]
 #[test]
-fn the_model_of_master_against_itself_on_every_start_shows_the_three_defects() {
+fn the_model_of_master_against_itself_on_every_start_shows_the_two_defects_and_no_wrong_link() {
     // At multipath on, the starts whose links turn capable step a minute of
     // probes at each healed leaf and run in the test below.
     let mut missing = against_itself("off", master, |_| true);
@@ -305,7 +336,7 @@ fn the_model_of_master_with_multipath_on_against_itself_on_a_crossing_of_two_tra
 
 #[cfg(feature = "slow-explorers")]
 #[test]
-fn the_model_of_master_with_multipath_on_shows_the_wrong_link_on_a_connection_oriented_crossing() {
+fn the_model_of_master_with_multipath_on_holds_the_dialed_link_on_a_connection_oriented_crossing() {
     capable(1);
 }
 

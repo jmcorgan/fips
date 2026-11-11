@@ -7,12 +7,14 @@
 //! same-epoch msg1 to the peer's link rekey machine, the restart and
 //! replacement gates with the replay memory, the inbound promotion,
 //! `establish_outbound`'s promote, restart, swap and keep, the close of a
-//! losing leg by `addr_carries_other_peer`, the release of a path, the link
-//! timers and the feeds of the bundles. Its gates read the clock the node
-//! reads, the peer clock, which a step of the wall clock does not move. A
-//! swap moves the session and keeps the peer's link record, as
-//! `move_session` does, counts the peering heard (FRC-1201 Section 5.5),
-//! and starts the bundle again at the msg2's pair.
+//! losing link by the close rule, the release of a path, the link timers
+//! and the feeds of the bundles. Its gates read the clock the node reads,
+//! the peer clock, which a step of the wall clock does not move. A swap
+//! moves the session onto the dial, holds the link the dial set up and
+//! retires the one it leaves (FRC-1201 Section 5.6), counts the peering
+//! heard (Section 5.5), and starts the bundle again at the msg2's pair. Its
+//! transport-address index is derived from the link records and the
+//! bundles, never written.
 //!
 //! Its rekey and its paths are the machines': a peer's [`Machines`]
 //! (`../joint/machines.rs`) take each same-epoch msg1, each own rekey's
@@ -73,6 +75,9 @@ struct Link {
     /// A released path at `remote` queued its connection's close, so no
     /// connection there is this link's any more.
     closing: bool,
+    /// A path at `remote` was released, so the index no longer names the
+    /// link there.
+    released: bool,
 }
 
 /// An own dial in flight (`pending_outbound` and its `PeerMachine`).
@@ -152,7 +157,6 @@ struct State {
     configured: Vec<Configured>,
     retry: BTreeMap<u8, Ms>,
     links: BTreeMap<u32, Link>,
-    index: BTreeMap<(u8, u16), u32>,
     peers: BTreeMap<u8, Peer>,
     dials: BTreeMap<u32, Dial>,
     legs: BTreeMap<u32, Leg>,
@@ -236,7 +240,6 @@ impl MasterParty {
                 configured,
                 retry: BTreeMap::new(),
                 links: BTreeMap::new(),
-                index: BTreeMap::new(),
                 peers: BTreeMap::new(),
                 dials: BTreeMap::new(),
                 legs: BTreeMap::new(),
@@ -283,16 +286,30 @@ impl MasterParty {
                 remote,
                 hs,
                 closing: false,
+                released: false,
             },
         );
-        self.s.index.insert(key(remote), id);
         id
     }
 
-    /// `remove_link`: the record and every index entry naming it.
+    /// `remove_link`: the record, and with it every index entry naming it.
     fn unlink(&mut self, id: u32) {
         self.s.links.remove(&id);
-        self.s.index.retain(|_, l| *l != id);
+    }
+
+    /// The link the transport-address index names at `at`, derived from the
+    /// records: each live link's setup address, unless a release there took
+    /// it out, and each held peer's proven paths. Where several links use
+    /// the pair, the newest is named.
+    fn indexed(&self, at: Addr) -> Option<u32> {
+        self.s.links.iter().rev().find_map(|(&id, l)| {
+            let setup = l.remote == at && !l.released;
+            let path =
+                self.s.peers.values().any(|p| {
+                    p.link == id && matches!(p.machines.matched(at), Match::Proven { .. })
+                });
+            (setup || path).then_some(id)
+        })
     }
 
     /// Every address whose connection a live link of this node uses: a
@@ -320,13 +337,21 @@ impl MasterParty {
         self.needs().contains(&at)
     }
 
-    /// `addr_carries_other_peer`: whether a peer on a link other than `link`
-    /// sends or is proven at `at`.
+    /// The close rule: whether a live link other than `link` uses the
+    /// connection at `at`. A link a peer holds uses each pair its bundle
+    /// holds proven; a link no peer holds, a handshake's, uses the address
+    /// it was set up at.
     fn carried(&self, at: Addr, link: u32) -> bool {
         self.s
-            .peers
-            .values()
-            .any(|p| p.link != link && matches!(p.machines.matched(at), Match::Proven { .. }))
+            .links
+            .iter()
+            .filter(|(id, _)| **id != link)
+            .any(
+                |(id, l)| match self.s.peers.values().find(|p| p.link == *id) {
+                    Some(p) => matches!(p.machines.matched(at), Match::Proven { .. }),
+                    None => l.remote == at,
+                },
+            )
     }
 
     /// Note the inbound connection a msg1 arrived on at `src` when it left
@@ -407,6 +432,12 @@ impl MasterParty {
 
     /// Route `events` of `peer`'s machines.
     fn route(&mut self, peer: Node, events: Vec<Ev>) -> Routed {
+        self.routed(peer, None, events)
+    }
+
+    /// Route `events` of `peer`'s machines, a released path's going to the
+    /// link `released` where given: at a move, the link moved off.
+    fn routed(&mut self, peer: Node, released: Option<LinkNo>, events: Vec<Ev>) -> Routed {
         let State {
             peers,
             bound,
@@ -422,7 +453,7 @@ impl MasterParty {
                 peer,
                 key: names::addr(peer),
                 link: Some(LinkNo(u64::from(p.link))),
-                released: None,
+                released,
                 machines: &p.machines,
                 bound,
             },
@@ -452,25 +483,10 @@ impl MasterParty {
                 // (`reset_restarted`).
                 In::Restarted { .. } => change = Some(Transition::Restarted),
                 In::Ended { .. } | In::Orphaned { .. } => self.lost(net, peer),
-                // A path that moved takes the link's index entry with it.
-                In::Moved { link, from, to } => {
-                    let (from, to) = (addr(&from), addr(&to));
-                    if self.s.index.get(&key(from)).copied() == no(link) {
-                        self.s.index.remove(&key(from));
-                        if let Some(l) = no(link) {
-                            self.s.index.entry(key(to)).or_insert(l);
-                        }
-                    }
-                }
-                // The link's address lookup gains the pair switched to.
-                In::Switched { link, to, .. } => {
-                    if let Some(l) = no(link) {
-                        self.s.index.entry(key(addr(&to))).or_insert(l);
-                    }
-                }
                 In::Released { link, pair, keep } => self.release(no(link), addr(&pair), keep),
-                // The node logs a path's state and does nothing else with it.
-                In::State { .. } => {}
+                // The index reads a moved, switched or changed path from the
+                // bundle, so the node does nothing else with it.
+                In::Moved { .. } | In::Switched { .. } | In::State { .. } => {}
                 i @ (In::Dial(_)
                 | In::Punched(_)
                 | In::ConnectFailed { .. }
@@ -503,15 +519,16 @@ impl MasterParty {
     }
 
     /// `release_path`: the path at `to` of the link `link` is handed back.
-    /// The link's address lookup loses the pair, and unless `keep` says the
-    /// peer may still send there, or another peer's link uses it, its
-    /// connection is queued to close.
+    /// The bundle no longer holds it, and a released setup address leaves
+    /// the index too. Unless `keep` says the peer may still send there, or
+    /// the close rule finds another link using it, its connection is queued
+    /// to close.
     fn release(&mut self, link: Option<u32>, to: Addr, keep: bool) {
         let Some(link) = link else {
             return;
         };
-        if self.s.index.get(&key(to)) == Some(&link) {
-            self.s.index.remove(&key(to));
+        if let Some(l) = self.s.links.get_mut(&link).filter(|l| l.remote == to) {
+            l.released = true;
         }
         if keep || self.carried(to, link) {
             return;
@@ -744,9 +761,9 @@ impl MasterParty {
         }
     }
 
-    /// `close_handshake_link_connection`: close a leg's connection unless
-    /// `addr_carries_other_peer` (a peer on another link sends or is proven
-    /// there).
+    /// `close_handshake_link_connection`: close a link's connection at the
+    /// address it was set up at unless the close rule ([`Self::carried`])
+    /// finds another link using it.
     fn close_leg(&mut self, net: &mut Net, id: u32) {
         let Some(l) = self.s.links.get(&id).copied() else {
             return;
@@ -976,7 +993,7 @@ impl MasterParty {
         let reachable = self.reachable(net, id);
         let pending = self.pending(id);
         let floors = self.s.floors;
-        let indexed = self.s.index.get(&key(src)).copied();
+        let indexed = self.indexed(src);
         let Some(p) = self.s.peers.get_mut(&id.0) else {
             return false;
         };
@@ -1052,7 +1069,7 @@ impl MasterParty {
         };
         // The pre-crypto duplicate short circuit: an inbound link from this
         // address with no peer on it resends its stored msg2.
-        if let Some(&l) = self.s.index.get(&key(src))
+        if let Some(l) = self.indexed(src)
             && self.s.links.get(&l).is_some_and(|k| k.dir == Dir::Inbound)
             && !self.s.peers.values().any(|p| p.link == l)
         {
@@ -1364,10 +1381,19 @@ impl MasterParty {
                     .is_some_and(|l| l.dir == Dir::Outbound)
             });
             let wins = self.s.me < id;
+            // The link that loses: the dial's at a keep; at a move, the link
+            // moved off, unless the switch keeps the peer on it.
+            let mut loser = link;
             let change = if own || wins {
                 // The swap: `move_session` onto this dial's session at the
-                // msg2's pair; the link record is kept.
+                // msg2's pair, holding the link the dial set up.
                 let old = self.s.peers.remove(&id.0).expect("held above");
+                let held = if fault!(MoveKeepsInboundLink) {
+                    old.link
+                } else {
+                    loser = old.link;
+                    link
+                };
                 let setup = Setup {
                     done,
                     lease,
@@ -1385,7 +1411,7 @@ impl MasterParty {
                 self.s.peers.insert(
                     id.0,
                     Peer {
-                        link: old.link,
+                        link: held,
                         origin: hs,
                         heard,
                         promoted: old.promoted,
@@ -1398,8 +1424,10 @@ impl MasterParty {
                     },
                 );
                 self.named(id, Some(hs));
-                // A renewal's closes wait for the next wake (`run_renewed`).
-                let r = self.route(id, events);
+                // A renewal's closes wait for the next wake (`run_renewed`);
+                // its released paths are the link's moved off.
+                let off = (loser != link).then_some(LinkNo(u64::from(loser)));
+                let r = self.routed(id, off, events);
                 self.carry(net, id, r);
                 self.renewed(net, id);
                 net.mark(self.s.ix, src, true);
@@ -1411,8 +1439,8 @@ impl MasterParty {
                 }
                 Transition::Keep
             };
-            self.close_leg(net, link);
-            self.unlink(link);
+            self.close_leg(net, loser);
+            self.unlink(loser);
             change
         } else {
             let restart = self.s.peers.contains_key(&id.0);
@@ -1837,7 +1865,6 @@ impl MasterParty {
         s.count = 0;
         s.retry.clear();
         s.links.clear();
-        s.index.clear();
         s.dampener.clear();
         s.replayed.clear();
         s.idle.clear();
@@ -1869,7 +1896,6 @@ impl MasterParty {
             configured,
             retry,
             links,
-            index,
             peers,
             dials,
             legs,
@@ -1888,7 +1914,7 @@ impl MasterParty {
             expired: _,
         } = &self.s;
         let mut out = format!(
-            "{ix} {now} {me:?} {mode:?} {life} {count} {nlinks} {configured:?} {retry:?} {links:?} {index:?} {dials:?} {legs:?} {dampener:?} {replayed:?} {idle:?} "
+            "{ix} {now} {me:?} {mode:?} {life} {count} {nlinks} {configured:?} {retry:?} {links:?} {dials:?} {legs:?} {dampener:?} {replayed:?} {idle:?} "
         );
         for (k, p) in peers {
             let Peer {
@@ -2157,11 +2183,6 @@ impl Party for MasterParty {
                     .map(|(h, _)| Hs(*h))
                     .collect(),
             });
-        }
-        for (a, l) in &s.index {
-            if !s.links.contains_key(l) {
-                v.audit.push(format!("index {a:?}: link {l} has no record"));
-            }
         }
         for (h, d) in &s.dials {
             if !s.links.contains_key(&d.link) {

@@ -1,5 +1,6 @@
-//! A crossing resolved on the peer held: moved onto this node's dial, or
-//! kept on the peer's inbound session with the dial closed.
+//! A crossing resolved on the peer held: moved onto this node's dial, and
+//! held on the dial's link with the link it left closed, or kept on the
+//! peer's inbound session with the dial closed.
 //!
 //! The site, `handle_msg2`'s crossing arm, makes a move itself with
 //! `move_session`, which also settles the peer's record, then fills the
@@ -53,6 +54,9 @@ pub(in crate::node) struct Facts {
     /// The move made the peering heard: it was unheard before the move and
     /// is heard after it.
     pub(in crate::node) first_heard: bool,
+    /// The link the crossing tears down: at a move that holds the peer on
+    /// the dial's link, the link it left; otherwise the dial's.
+    pub(in crate::node) loser: Option<LinkId>,
 }
 
 impl Run {
@@ -105,10 +109,45 @@ pub(super) async fn link_outputs(node: &mut Node, r: &mut Run) {
     node.run_link_outputs(&r.peer, out);
 }
 
-/// Run the path machine's outputs from its renewal.
+/// The link a move left for the dial's, if it held the peer on the dial's
+/// link; `None` at a keep and at a move refused or kept on its link.
+fn left(r: &mut Run) -> Option<LinkId> {
+    let dial = dial(&r.t).map(|(link, _)| link);
+    r.crossing().loser.filter(|loser| Some(*loser) != dial)
+}
+
+/// The link the crossing tears down: the one the move left, or the dial's.
+fn loser(r: &mut Run) -> Option<LinkId> {
+    let dial = dial(&r.t).map(|(link, _)| link);
+    r.crossing().loser.or(dial)
+}
+
+/// Run the path machine's outputs from its renewal: the bundle renewed on
+/// the peer's link, and what it released belonging to the link the move
+/// left.
 pub(super) async fn renewed(node: &mut Node, r: &mut Run) {
+    let left = left(r);
     let paths = std::mem::take(&mut r.crossing().paths);
-    node.run_renewed(&r.peer, paths);
+    node.run_renewed(&r.peer, left, paths);
+}
+
+/// Hold the peer on the dial's link, if the move left another: the core's
+/// record of the dial's link is the peer's, and the control machine, its
+/// timers and the carrier readings are keyed under the dial's link, which
+/// every later read of the peer's link names.
+pub(super) async fn hold_dial(node: &mut Node, r: &mut Run) {
+    let (Some(left), Some((dial, _))) = (left(r), dial(&r.t)) else {
+        return;
+    };
+    node.links.hold(&dial, r.peer);
+    // The mutation lane's break: the machine stays under the link left.
+    if !node_fault!(MachineLeftBehind) {
+        node.peer_machines.rekey(left, dial);
+    }
+    // The mutation lane's break: the readings stay under the link left.
+    if !node_fault!(CarrierLeftBehind) {
+        node.rekey_carrier(left, dial);
+    }
 }
 
 /// Read the pair the peer is on after the move into `r.moved`.
@@ -181,18 +220,19 @@ pub(super) async fn machine_crossed(node: &mut Node, r: &mut Run) {
     }
 }
 
-/// Close the dial's connection: a separate socket on TCP, a no-op when
-/// connectionless, and left open when it is the very connection the peer
-/// runs on (BLE).
-pub(super) async fn dial_close(node: &mut Node, r: &mut Run) {
-    if let Some((link, _)) = dial(&r.t) {
+/// Close the losing link's connection, the link a move left or the dial's:
+/// a separate socket on TCP, a no-op when connectionless, and left open
+/// while a live link uses it, such as the very connection the peer runs on
+/// (BLE).
+pub(super) async fn loser_close(node: &mut Node, r: &mut Run) {
+    if let Some(link) = loser(r) {
         node.close_unused(link).await;
     }
 }
 
-/// Remove the dial's link.
-pub(super) async fn dial_removed(node: &mut Node, r: &mut Run) {
-    if let Some((link, _)) = dial(&r.t) {
+/// Remove the losing link, the link a move left or the dial's.
+pub(super) async fn loser_removed(node: &mut Node, r: &mut Run) {
+    if let Some(link) = loser(r) {
         node.remove_link(&link);
     }
 }

@@ -121,7 +121,11 @@ const MOVE: &[(Effect, &str)] = &[
     ),
     (
         Effect::RunRenewed,
-        "self.run_renewed(&peer_node_addr, paths)",
+        "self.run_renewed(&peer_node_addr, left, paths)",
+    ),
+    (
+        Effect::HoldDial,
+        "if left: self.links.hold(&link_id, peer_node_addr); self.peer_machines.rekey(left, link_id); self.rekey_carrier(left, link_id)",
     ),
     (
         Effect::PathsRenewed,
@@ -157,10 +161,10 @@ const MOVE: &[(Effect, &str)] = &[
     ),
     (Effect::DialForget, "self.pending_outbound.forget(&key)"),
     (
-        Effect::DialClose,
-        "self.close_handshake_link_connection(link_id).await",
+        Effect::LoserClose,
+        "self.close_handshake_link_connection(loser).await",
     ),
-    (Effect::DialLinkRemoved, "self.remove_link(&link_id)"),
+    (Effect::LoserRemoved, "self.remove_link(&loser)"),
     (
         Effect::TreeAnnounce,
         "self.send_tree_announce_to_peer(&peer_node_addr).await",
@@ -193,10 +197,10 @@ const KEEP: &[(Effect, &str)] = &[
     ),
     (Effect::DialForget, "self.pending_outbound.forget(&key)"),
     (
-        Effect::DialClose,
+        Effect::LoserClose,
         "self.close_handshake_link_connection(link_id).await",
     ),
-    (Effect::DialLinkRemoved, "self.remove_link(&link_id)"),
+    (Effect::LoserRemoved, "self.remove_link(&link_id)"),
     (
         Effect::TreeAnnounce,
         "self.send_tree_announce_to_peer(&peer_node_addr).await",

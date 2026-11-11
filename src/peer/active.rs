@@ -743,7 +743,9 @@ impl ActivePeer {
     ///
     /// `dial` is the link of the dial whose session the peer moves onto, and
     /// `own` says the dial answered was this node's own or a later one
-    /// rather than a crossing won on the tie-break.
+    /// rather than a crossing won on the tie-break. A move that rebuilt the
+    /// machine holds the peer on `dial`, the link it dialed (FRC-1201,
+    /// Section 5.6), and the caller tears down the link it left.
     ///
     /// Returns the outputs that unbind, revoke and release what the closed
     /// machine held and bind (and offer) the new session, and the outputs of
@@ -774,6 +776,14 @@ impl ActivePeer {
         caps: &mut LinkCaps<'_>,
     ) -> (LinkOutputs, Outputs<UdpSlot>) {
         let (out, paths, built) = self.rebuild(session, ours, theirs, to, caps);
+        // The mutation lane's break: the peer stays on the link it was held
+        // on, and the dial's link is the one torn down.
+        let inbound = node_fault!(MoveKeepsInboundLink);
+        // The mutation lane's break of the pair keeps that link with it.
+        let old = node_fault!(MoveKeepsOldPair);
+        if built && !inbound && !old {
+            self.set_link_id(dial);
+        }
         self.settle(&Transition::Move { dial, own, built });
         (out, paths)
     }

@@ -100,14 +100,6 @@ helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_its_def
 helper        fips-mesh  node::tests::settle::lane::a_planted_test_that_passes  src/node/tests/settle/lane.rs
 helper        fips-mesh  node::tests::settle::lane::a_planted_switch_reds_at_its_defect_assertion  src/node/tests/settle/lane.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
-known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_smaller_dialer  src/node/tests/settle/crossing.rs

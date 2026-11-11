@@ -131,7 +131,7 @@ async fn one_dial_after_a_peer_restart_leaves_both_ends_on_one_session_with_end_
                 "D smaller {d_smaller}, D dialled the original link {d_dialled}: {f}"
             ));
         }
-        assert_coherent(&mut nodes, &[], "the end of the test").await;
+        assert_coherent(&mut nodes, "the end of the test").await;
         cleanup_nodes(&mut nodes).await;
     }
     assert!(failures.is_empty(), "{failures:#?}");

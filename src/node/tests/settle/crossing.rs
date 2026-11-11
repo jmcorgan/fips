@@ -2,22 +2,39 @@
 //! each end is left on.
 //!
 //! - Crossed TCP dials between two real TCP nodes on 127.0.0.1: one working
-//!   session on one connection (green); the smaller node's link record and
-//!   its redial after a drop (known defects), with a control that redials
-//!   after a single dial and a run that rewrites the record and redials.
+//!   session on one connection; the smaller node held on the link it
+//!   dialed, and its redial after a drop, with a control that redials after
+//!   a single dial and a run that rewrites the record and redials.
 //! - Crossed loopback dials won on another transport or from another
 //!   address: the smaller node holds the peer at the pair the winning msg2
 //!   came from, and the result is coherent by the audit.
 //! - A dialer's second msg1 reaching the responder more than 1 s after its
-//!   first: in order, on another transport, and with the second msg2 reaching
-//!   the dialer first (known defect, for both address orders, by the
-//!   heartbeat check and by the audit).
+//!   first: in order, on another transport, with the dialer left on its
+//!   second dial's link, and with the second msg2 reaching the dialer first
+//!   (known defect, for both address orders, by the heartbeat check and by
+//!   the audit).
+//! - A move holds the link it dialed: at the address dialed, with the msg2's
+//!   pair a path of it; the control machine moves with the peer; and a
+//!   second dial answered after a crossing ends the pin.
+//! - A TCP crossing whose one msg1 reaches the other node inside its connect
+//!   window: no move runs, and both ends keep the handshake that completed
+//!   first.
 //! - A larger node's dial on a quiet peer's aged link, which the peer set
 //!   up: its next rekey is answered, and no pending is left that it cannot
 //!   adopt (known defects).
 //! - Two dials to one address with no peer held, the first reaped: the
 //!   connection the second runs on stays open, on loopback by its record of
 //!   closes and on the BLE mock by its pool.
+//! - The close rule where a second path of another link holds the pair, with
+//!   multipath on: the link a crossing retires, and a path released while its
+//!   link lives, each leave the connection open.
+//! - The close rule on a roamed link: a larger node's dial at the pair its
+//!   peer's one path roamed to, torn down when the peer's own dial wins,
+//!   leaves the connection the peer runs on open.
+//! - What a move closes of the link it left: on TCP, crossed dials leave the
+//!   smaller node holding its dial's connection alone, and the larger reads
+//!   the msg2 queued on the closed connection before it ends; on loopback, a
+//!   dial still in flight at the left link's pair keeps that connection open.
 //!
 //! Each test is run once per address order, so each order has its own
 //! verdict, and once per setting of `node.path.enabled`: a test's plain name
@@ -32,11 +49,12 @@ use super::super::rekey_parity::{
     age_link, cutover, deliver, heartbeat, rekey_config, rekey_to_pending, trigger_age,
 };
 use super::super::spanning_tree::{
-    LOOPBACK_REGISTRY, TestNode, cleanup_nodes, drain_all_packets, initiate_handshake,
+    LOOPBACK_REGISTRY, TestNode, cleanup_nodes, dial_at, drain_all_packets, initiate_handshake,
     make_test_node_with_config, process_available_packets,
 };
 use super::super::*;
-use super::audit::{Breach, Exempt, assert_coherent, audit};
+use super::audit::{Breach, assert_coherent, audit};
+use super::readings::own_dial;
 use super::{
     alias, crossed_tcp, heartbeat_reaches, loopback_node, pool, pump, received, resolve_connect,
     settled, with_path,
@@ -115,12 +133,7 @@ async fn working_session(on: bool, zero_smaller: bool) {
         bad.is_empty(),
         "defect: crossed TCP dials lost the peering: {bad:#?}"
     );
-    assert_coherent(
-        &mut nodes,
-        &[Exempt::CrossedInbound { node: s, peer: l }],
-        "the end of crossed TCP dials",
-    )
-    .await;
+    assert_coherent(&mut nodes, "the end of crossed TCP dials").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -191,28 +204,24 @@ async fn smaller_on_its_dialed_link(on: bool, zero_smaller: bool) {
 }
 
 #[tokio::test]
-#[ignore = "known defect: after crossed dials the smaller node keeps the inbound link it was promoted on as the peer's link record"]
 async fn crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first() {
     smaller_on_its_dialed_link(false, true).await;
 }
 
 /// [`crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: after crossed dials the smaller node keeps the inbound link it was promoted on as the peer's link record"]
 async fn crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first_with_multipath_on()
  {
     smaller_on_its_dialed_link(true, true).await;
 }
 
 #[tokio::test]
-#[ignore = "known defect: after crossed dials the smaller node keeps the inbound link it was promoted on as the peer's link record"]
 async fn crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first() {
     smaller_on_its_dialed_link(false, false).await;
 }
 
 /// [`crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: after crossed dials the smaller node keeps the inbound link it was promoted on as the peer's link record"]
 async fn crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first_with_multipath_on()
  {
     smaller_on_its_dialed_link(true, false).await;
@@ -291,7 +300,6 @@ async fn crossed_then_redial(on: bool, zero_smaller: bool) {
 }
 
 #[tokio::test]
-#[ignore = "known defect: after crossed dials the smaller node cannot redial a dropped connection, because its link record is the inbound link"]
 async fn after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first()
  {
     crossed_then_redial(false, true).await;
@@ -299,14 +307,12 @@ async fn after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_
 
 /// [`after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: after crossed dials the smaller node cannot redial a dropped connection, because its link record is the inbound link"]
 async fn after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first_with_multipath_on()
  {
     crossed_then_redial(true, true).await;
 }
 
 #[tokio::test]
-#[ignore = "known defect: after crossed dials the smaller node cannot redial a dropped connection, because its link record is the inbound link"]
 async fn after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first()
  {
     crossed_then_redial(false, false).await;
@@ -314,7 +320,6 @@ async fn after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_
 
 /// [`after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: after crossed dials the smaller node cannot redial a dropped connection, because its link record is the inbound link"]
 async fn after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first_with_multipath_on()
  {
     crossed_then_redial(true, false).await;
@@ -441,8 +446,7 @@ fn route(at: &TransportAddr, to: &TestNode) {
 
 /// Cross the dials as `dial` says, hand the smaller node the winning msg2,
 /// and check it holds the peer at the msg2's transport and source address;
-/// then deliver everything and check the audit finds the pair coherent,
-/// with the crossing's exemption for the smaller node.
+/// then deliver everything and check the audit finds the pair coherent.
 async fn coherent_pair(on: bool, dial: Dial) {
     let crossed = cross_dials_from(dial, with_path(Config::new(), on)).await;
     let (s, l, to) = (crossed.s, crossed.l, crossed.to.clone());
@@ -473,12 +477,7 @@ async fn coherent_pair(on: bool, dial: Dial) {
     }
     route(&dialled, &nodes[l]);
     pump(&mut nodes).await;
-    assert_coherent(
-        &mut nodes,
-        &[Exempt::CrossedInbound { node: s, peer: l }],
-        "the end of a crossed dial won on another pair",
-    )
-    .await;
+    assert_coherent(&mut nodes, "the end of a crossed dial won on another pair").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -542,6 +541,11 @@ pub(super) struct LateDial {
     /// Frames the dialer had received from the responder before the second
     /// msg1 was handled.
     before: u64,
+    /// The link the dialer held the responder on after its first msg2, when
+    /// that msg2 was read first.
+    first: Option<LinkId>,
+    /// The transport and address the second dial was made to.
+    dialed: (TransportId, TransportAddr),
 }
 
 /// The dialer sends two msg1s; the first reaches the responder stamped
@@ -555,6 +559,7 @@ pub(super) async fn second_msg1_late(on: bool, dialer_larger: bool, second: Seco
     let d_addr = *nodes[d].node.node_addr();
     let r_addr = *nodes[r].node.node_addr();
     initiate_handshake(&mut nodes, d, r).await;
+    let mut dialed = (nodes[d].transport_id, nodes[r].addr.clone());
     if let Second::OtherTransport = second {
         let t2 = TransportId::new(2);
         let d2 = alias(&nodes[d].addr, t2);
@@ -571,6 +576,7 @@ pub(super) async fn second_msg1_late(on: bool, dialer_larger: bool, second: Seco
                 .insert(t2, TransportHandle::Loopback(lo));
         }
         let (t1, r1) = (nodes[d].transport_id, nodes[r].addr.clone());
+        dialed = (t2, r2.clone());
         nodes[d].transport_id = t2;
         nodes[r].addr = r2;
         initiate_handshake(&mut nodes, d, r).await;
@@ -604,9 +610,11 @@ pub(super) async fn second_msg1_late(on: bool, dialer_larger: bool, second: Seco
         .expect("precondition: the first msg1 promoted the dialer");
 
     let before;
+    let mut held = None;
     match second {
         Second::InOrder | Second::OtherTransport => {
             process_available_packets(std::slice::from_mut(&mut nodes[d])).await;
+            held = nodes[d].node.get_peer(&r_addr).map(|p| p.link_id());
             before = nodes[d]
                 .node
                 .get_peer(&r_addr)
@@ -666,6 +674,8 @@ pub(super) async fn second_msg1_late(on: bool, dialer_larger: bool, second: Seco
         d,
         r,
         before,
+        first: held,
+        dialed,
     }
 }
 
@@ -710,98 +720,157 @@ async fn working_peering(late: &mut LateDial) -> Result<(), String> {
     }
 }
 
-/// The breaches the dialer's own move leaves at the dialer after its
-/// second dial.
-#[derive(Clone, Copy)]
-enum Kept {
-    /// None: the held link keeps its index entry, since the retired dial's
-    /// link no longer takes it.
-    Entry,
-    /// The peer's link record stays on the first transport. The move's
-    /// renewal of the link's paths on the dial's pair releases the record's
-    /// setup pair, which then leaves the index, as a released setup pair
-    /// does.
-    Record,
-}
-
 /// The dialer's second msg1 leaves a working peering, checked by heartbeat
-/// and then by the audit. Without an exemption the audit finds exactly the
-/// breaches `kept` names at the dialer, which are the documented move;
-/// with it, none.
-async fn late_dial_works(on: bool, dialer_larger: bool, second: Second, kept: Kept) {
+/// and then by the audit, which finds no breach:
+/// the held link keeps its index entry, since the retired link no longer
+/// takes it, and the dialer holds the peer on the link of its second dial,
+/// whichever transport that dial took.
+async fn late_dial_works(on: bool, dialer_larger: bool, second: Second) {
     let mut late = second_msg1_late(on, dialer_larger, second).await;
     let works = working_peering(&mut late).await;
     assert!(works.is_ok(), "defect: {works:?}");
-    let (d, r) = (late.d, late.r);
-    let unexempt = audit(&mut late.nodes, &[]).await;
-    let (expected, exempt) = match kept {
-        Kept::Entry => (unexempt.is_empty(), None),
-        Kept::Record => (
-            unexempt.len() == 1
-                && matches!(
-                    &unexempt[0],
-                    Breach::RightLink { node, peer, .. } if *node == d && *peer == r
-                ),
-            Some(Exempt::MovedOwnDial { node: d, peer: r }),
-        ),
-    };
+    let found = audit(&mut late.nodes).await;
     assert!(
-        expected,
-        "defect: the audit finds only the dialer's documented breach: {unexempt:#?}"
+        found.is_empty(),
+        "defect: the audit finds a breach after a late second dial: {found:#?}"
     );
-    let exempt: Vec<Exempt> = exempt.into_iter().collect();
-    assert_coherent(&mut late.nodes, &exempt, "the end of a late second dial").await;
+    assert_coherent(&mut late.nodes, "the end of a late second dial").await;
     cleanup_nodes(&mut late.nodes).await;
 }
 
 #[tokio::test]
 async fn a_second_msg1_more_than_1s_later_leaves_a_working_peering_larger_dialer() {
-    late_dial_works(false, true, Second::InOrder, Kept::Entry).await;
+    late_dial_works(false, true, Second::InOrder).await;
 }
 
 /// [`a_second_msg1_more_than_1s_later_leaves_a_working_peering_larger_dialer`] with multipath on.
 #[tokio::test]
 async fn a_second_msg1_more_than_1s_later_leaves_a_working_peering_larger_dialer_with_multipath_on()
 {
-    late_dial_works(true, true, Second::InOrder, Kept::Entry).await;
+    late_dial_works(true, true, Second::InOrder).await;
 }
 
 #[tokio::test]
 async fn a_second_msg1_more_than_1s_later_leaves_a_working_peering_smaller_dialer() {
-    late_dial_works(false, false, Second::InOrder, Kept::Entry).await;
+    late_dial_works(false, false, Second::InOrder).await;
 }
 
 /// [`a_second_msg1_more_than_1s_later_leaves_a_working_peering_smaller_dialer`] with multipath on.
 #[tokio::test]
 async fn a_second_msg1_more_than_1s_later_leaves_a_working_peering_smaller_dialer_with_multipath_on()
  {
-    late_dial_works(true, false, Second::InOrder, Kept::Entry).await;
+    late_dial_works(true, false, Second::InOrder).await;
 }
 
 #[tokio::test]
 async fn a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer()
  {
-    late_dial_works(false, true, Second::OtherTransport, Kept::Record).await;
+    late_dial_works(false, true, Second::OtherTransport).await;
 }
 
 /// [`a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer`] with multipath on.
 #[tokio::test]
 async fn a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer_with_multipath_on()
  {
-    late_dial_works(true, true, Second::OtherTransport, Kept::Record).await;
+    late_dial_works(true, true, Second::OtherTransport).await;
 }
 
 #[tokio::test]
 async fn a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_smaller_dialer()
  {
-    late_dial_works(false, false, Second::OtherTransport, Kept::Record).await;
+    late_dial_works(false, false, Second::OtherTransport).await;
 }
 
 /// [`a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_smaller_dialer`] with multipath on.
 #[tokio::test]
 async fn a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_smaller_dialer_with_multipath_on()
  {
-    late_dial_works(true, false, Second::OtherTransport, Kept::Record).await;
+    late_dial_works(true, false, Second::OtherTransport).await;
+}
+
+/// After its second dial is answered, the dialer holds the responder on
+/// that dial's link: the link it dialed, `Outbound`, set up at the address
+/// it dialed, on the second transport where the dial took it; and the link
+/// it held the peer on before is gone (FRC-1201, Section 5.6).
+async fn own_dial_holds(on: bool, dialer_larger: bool, second: Second) {
+    let mut late = second_msg1_late(on, dialer_larger, second).await;
+    let (d, r) = (late.d, late.r);
+    let first = late
+        .first
+        .expect("precondition: the dialer held the responder after its first msg2");
+    let dialed = late.dialed.clone();
+    let r_addr = *late.nodes[r].node.node_addr();
+    let node = &late.nodes[d].node;
+    let held = node
+        .get_peer(&r_addr)
+        .map(|p| p.link_id())
+        .expect("precondition: the dialer holds the responder");
+    let record = node
+        .links
+        .get(&held)
+        .map(|k| (k.direction(), k.transport_id(), k.remote_addr().clone()));
+    let left = node.links.contains_key(&first);
+    cleanup_nodes(&mut late.nodes).await;
+    assert_ne!(
+        held, first,
+        "defect: the dialer still holds the responder on the link it held before its second dial"
+    );
+    assert_eq!(
+        record,
+        Some((LinkDirection::Outbound, dialed.0, dialed.1)),
+        "defect: the dialer's link record is not the second dial's"
+    );
+    assert!(!left, "defect: the link the dialer left is still open");
+}
+
+#[tokio::test]
+async fn a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_larger_dialer() {
+    own_dial_holds(false, true, Second::InOrder).await;
+}
+
+/// [`a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_larger_dialer`] with multipath on.
+#[tokio::test]
+async fn a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_larger_dialer_with_multipath_on()
+{
+    own_dial_holds(true, true, Second::InOrder).await;
+}
+
+#[tokio::test]
+async fn a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer() {
+    own_dial_holds(false, false, Second::InOrder).await;
+}
+
+/// [`a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer`] with multipath on.
+#[tokio::test]
+async fn a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer_with_multipath_on()
+ {
+    own_dial_holds(true, false, Second::InOrder).await;
+}
+
+#[tokio::test]
+async fn a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_larger_dialer()
+ {
+    own_dial_holds(false, true, Second::OtherTransport).await;
+}
+
+/// [`a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_larger_dialer`] with multipath on.
+#[tokio::test]
+async fn a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_larger_dialer_with_multipath_on()
+ {
+    own_dial_holds(true, true, Second::OtherTransport).await;
+}
+
+#[tokio::test]
+async fn a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer()
+ {
+    own_dial_holds(false, false, Second::OtherTransport).await;
+}
+
+/// [`a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer`] with multipath on.
+#[tokio::test]
+async fn a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer_with_multipath_on()
+ {
+    own_dial_holds(true, false, Second::OtherTransport).await;
 }
 
 /// The reordered case, checked by heartbeat: both ends on one session.
@@ -846,7 +915,7 @@ async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_p
 /// first clause. Other breaches are not this pin's reason and are ignored.
 async fn reordered_one_session(on: bool, dialer_larger: bool) {
     let mut late = second_msg1_late(on, dialer_larger, Second::Reordered).await;
-    let breaches = audit(&mut late.nodes, &[]).await;
+    let breaches = audit(&mut late.nodes).await;
     cleanup_nodes(&mut late.nodes).await;
     let split: Vec<&Breach> = breaches
         .iter()
@@ -1024,7 +1093,7 @@ async fn a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answere
 /// reason and are ignored.
 async fn none_unadoptable(on: bool) {
     let AgedDial { mut nodes, .. } = aged_link_dial(on).await;
-    let breaches = audit(&mut nodes, &[]).await;
+    let breaches = audit(&mut nodes).await;
     cleanup_nodes(&mut nodes).await;
     let unadoptable: Vec<&Breach> = breaches
         .iter()
@@ -1419,4 +1488,912 @@ async fn a_reaped_ble_dial_leaves_the_channel_another_dial_in_flight_uses() {
 #[tokio::test]
 async fn a_reaped_ble_dial_leaves_the_channel_another_dial_in_flight_uses_with_multipath_on() {
     ble_reaped(true).await;
+}
+
+// ---------------------------------------------------------------------------
+// The move holds the dialed link
+// ---------------------------------------------------------------------------
+
+/// Two loopback nodes peered by node 0's dial, delivered until idle.
+async fn dialed_pair(on: bool) -> Vec<TestNode> {
+    let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    pump(&mut nodes).await;
+    let b = *nodes[1].node.node_addr();
+    assert!(
+        nodes[0].node.get_peer(&b).is_some(),
+        "precondition: node 0 holds node 1"
+    );
+    nodes
+}
+
+/// Node 0's later dial to node 1 at `dialed`, which node 1 answers as on
+/// an aged link, its msg2 reaching node 0 from `answered`.
+async fn answered_from(nodes: &mut [TestNode], dialed: TransportAddr, answered: &TransportAddr) {
+    dial_at(nodes, 0, 1, dialed).await;
+    let a = *nodes[0].node.node_addr();
+    let held = nodes[1]
+        .node
+        .get_peer_mut(&a)
+        .expect("precondition: node 1 holds node 0");
+    held.test_backdate_heard(Duration::from_secs(60));
+    held.test_backdate_session_established(Duration::from_secs(600));
+    let msg1 = nodes[1]
+        .packet_rx
+        .try_recv()
+        .expect("precondition: the dial's msg1 is queued at node 1");
+    nodes[1].node.handle_msg1(msg1).await;
+    let mut msg2 = nodes[0]
+        .packet_rx
+        .try_recv()
+        .expect("precondition: node 1's msg2 is queued at node 0");
+    msg2.remote_addr = answered.clone();
+    nodes[0].node.handle_msg2(msg2).await;
+}
+
+/// A dial answered from another address than the one dialed: the dialer
+/// holds the dial's link, `Outbound` and set up at the address it dialed,
+/// which a redial needs (FRC-1201, Section 5.7, rule 4.1), and the peer at
+/// the msg2's pair, a path of the link's bundle (Section 5.6). The index
+/// names the link at both, and the pair of the link it left at neither.
+async fn adopted_address(on: bool) {
+    let mut nodes = dialed_pair(on).await;
+    let b = *nodes[1].node.node_addr();
+    let t1 = nodes[0].transport_id;
+    let home = nodes[1].addr.clone();
+    let dialed = alias(&home, t1);
+    let answered = alias(&home, t1);
+    let left = nodes[0]
+        .node
+        .get_peer(&b)
+        .map(|p| p.link_id())
+        .expect("precondition: node 0 holds node 1");
+    answered_from(&mut nodes, dialed.clone(), &answered).await;
+    let node = &nodes[0].node;
+    let peer = node
+        .get_peer(&b)
+        .expect("precondition: the move keeps the peer");
+    let held = peer.link_id();
+    let record = node
+        .links
+        .get(&held)
+        .map(|k| (k.direction(), k.transport_id(), k.remote_addr().clone()));
+    let at = (peer.transport_id(), peer.current_addr().cloned());
+    let named = |addr: &TransportAddr| node.links.index().get(&(t1, addr.clone())).copied();
+    let index = (named(&dialed), named(&answered), named(&home));
+    cleanup_nodes(&mut nodes).await;
+    assert_ne!(
+        held, left,
+        "defect: node 0 holds node 1 on the link it left, not the dial's"
+    );
+    assert_eq!(
+        record,
+        Some((LinkDirection::Outbound, t1, dialed)),
+        "defect: the moved link's record is not the dial's, at the address dialed"
+    );
+    assert_eq!(
+        at,
+        (Some(t1), Some(answered)),
+        "defect: the peer is not held at the msg2's pair"
+    );
+    assert_eq!(
+        index,
+        (Some(held), Some(held), None),
+        "defect: the index does not name the dial's link at the address dialed and at the msg2's pair alone"
+    );
+}
+
+#[tokio::test]
+async fn a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path() {
+    adopted_address(false).await;
+}
+
+/// [`a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path`] with multipath on.
+#[tokio::test]
+async fn a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path_with_multipath_on()
+{
+    adopted_address(true).await;
+}
+
+/// The peer's control machine and its timers move with the peer onto the
+/// dial's link, so the machine controls the link the peer is on, and a
+/// link-dead, which finds the machine by the peer's link, reaches it and
+/// removes the peer with its machine.
+async fn machine_moves(on: bool) {
+    use crate::peer::machine::TimerKind;
+    use crate::proto::settle::output::Why;
+
+    let mut nodes = dialed_pair(on).await;
+    let b = *nodes[1].node.node_addr();
+    let left = nodes[0]
+        .node
+        .get_peer(&b)
+        .map(|p| p.link_id())
+        .expect("precondition: node 0 holds node 1");
+    nodes[0]
+        .node
+        .peer_machines
+        .arm(left, TimerKind::Liveness, u64::MAX / 2);
+    own_dial(&mut nodes).await;
+    let node = &nodes[0].node;
+    let held = node
+        .get_peer(&b)
+        .map(|p| p.link_id())
+        .expect("precondition: the move keeps the peer");
+    let machine = node.peer_machines.get(&held).map(|m| m.link_id());
+    let timer = node
+        .peer_machines
+        .timers()
+        .get(&held)
+        .is_some_and(|t| t.contains_key(&TimerKind::Liveness));
+    let behind =
+        node.peer_machines.contains_key(&left) || node.peer_machines.timers().contains_key(&left);
+    nodes[0]
+        .node
+        .route_link_dead(b, Node::now_ms(), Why::Dead)
+        .await;
+    let node = &nodes[0].node;
+    let after = (
+        node.get_peer(&b).is_some(),
+        node.peer_machines.contains_key(&held),
+    );
+    cleanup_nodes(&mut nodes).await;
+    assert_ne!(
+        held, left,
+        "precondition: node 0 moved onto the dial's link"
+    );
+    assert_eq!(
+        machine,
+        Some(held),
+        "defect: no machine controls the link the peer is on"
+    );
+    assert!(timer, "defect: the machine's timers did not move with it");
+    assert!(
+        !behind,
+        "defect: a machine or its timers stay under the link left"
+    );
+    assert_eq!(
+        after,
+        (false, false),
+        "defect: a link-dead did not reach the moved peer's machine"
+    );
+}
+
+#[tokio::test]
+async fn a_moved_peers_control_machine_moves_with_it() {
+    machine_moves(false).await;
+}
+
+/// [`a_moved_peers_control_machine_moves_with_it`] with multipath on.
+#[tokio::test]
+async fn a_moved_peers_control_machine_moves_with_it_with_multipath_on() {
+    machine_moves(true).await;
+}
+
+/// Two dials from the smaller node, both made before it holds the peer: a
+/// crossing moves it onto the first, and then the second is answered. The
+/// held link is then the first dial's, a link it dialed, so the second is
+/// this node's own dial to a peer it holds on a link it dialed, and its
+/// move ends the pin, as the peer's answer to it is the replacement or the
+/// rekey that ends one (FRC-1201, Section 5.6).
+async fn second_ends_pin(on: bool) {
+    use fips_core::proto::path::{Input, Pin};
+
+    let (mut nodes, s, l) = ordered_pair(on, false).await;
+    let s_addr = *nodes[s].node.node_addr();
+    let l_addr = *nodes[l].node.node_addr();
+    initiate_handshake(&mut nodes, s, l).await;
+    initiate_handshake(&mut nodes, s, l).await;
+    let mut dials: Vec<(LinkId, u32)> = nodes[s]
+        .node
+        .pending_outbound
+        .iter()
+        .map(|((_, index), id)| (*id, *index))
+        .collect();
+    dials.sort_by_key(|(id, _)| id.as_u64());
+    assert_eq!(dials.len(), 2, "precondition: two dials in flight");
+    initiate_handshake(&mut nodes, l, s).await;
+    let crossing = nodes[s]
+        .packet_rx
+        .try_recv()
+        .expect("precondition: the larger node's msg1 is queued");
+    nodes[s].node.handle_msg1(crossing).await;
+    assert!(
+        nodes[s].node.get_peer(&l_addr).is_some(),
+        "precondition: the smaller node holds the larger on its msg1"
+    );
+
+    // The smaller node pins its active path.
+    let (transport, addr) = nodes[s]
+        .node
+        .get_peer(&l_addr)
+        .and_then(|p| p.active_path())
+        .map(|a| (a.transport_id(), a.addr().clone()))
+        .expect("precondition: an active path");
+    nodes[s]
+        .node
+        .step_path(
+            &l_addr,
+            Input::Pin {
+                transport,
+                addr: Some(addr.clone()),
+            },
+        )
+        .await;
+    let pin = Pin {
+        transport,
+        addr: Some(addr),
+    };
+    let pinned = |tn: &TestNode| {
+        tn.node
+            .get_peer(&l_addr)
+            .and_then(|p| p.bundle())
+            .and_then(|b| b.pin().cloned())
+    };
+    assert_eq!(
+        pinned(&nodes[s]),
+        Some(pin.clone()),
+        "precondition: the smaller node pinned its path"
+    );
+
+    // The larger node answers both dials, the second as on an aged link;
+    // the smaller node's answer to the larger's dial is not delivered.
+    let msg1s: Vec<ReceivedPacket> = std::iter::from_fn(|| nodes[l].packet_rx.try_recv().ok())
+        .filter(|p| phase(p) == Some(PHASE_MSG1))
+        .collect();
+    assert_eq!(
+        msg1s.len(),
+        2,
+        "precondition: both msg1s reach the larger node"
+    );
+    let mut msg1s = msg1s.into_iter();
+    let first = msg1s.next().expect("precondition: the first msg1");
+    nodes[l].node.handle_msg1(first).await;
+    let held = nodes[l]
+        .node
+        .get_peer_mut(&s_addr)
+        .expect("precondition: the larger node holds the smaller");
+    held.test_backdate_heard(Duration::from_secs(60));
+    held.test_backdate_session_established(Duration::from_secs(600));
+    let second = msg1s.next().expect("precondition: the second msg1");
+    nodes[l].node.handle_msg1(second).await;
+    let msg2s: Vec<ReceivedPacket> = std::iter::from_fn(|| nodes[s].packet_rx.try_recv().ok())
+        .filter(|p| phase(p) == Some(PHASE_MSG2))
+        .collect();
+    assert_eq!(msg2s.len(), 2, "precondition: both dials are answered");
+
+    let mut msg2s = msg2s.into_iter();
+    let index = |tn: &TestNode| tn.node.get_peer(&l_addr).and_then(|p| p.our_index());
+    hand(
+        &mut nodes[s].node,
+        msg2s.next().expect("precondition: the first msg2"),
+    )
+    .await;
+    assert_eq!(
+        index(&nodes[s]),
+        Some(SessionIndex::new(dials[0].1)),
+        "precondition: the crossing moved the smaller node onto its first dial"
+    );
+    assert_eq!(
+        pinned(&nodes[s]),
+        Some(pin),
+        "precondition: a crossing won on the tie-break keeps the pin"
+    );
+    hand(
+        &mut nodes[s].node,
+        msg2s.next().expect("precondition: the second msg2"),
+    )
+    .await;
+    let moved = index(&nodes[s]);
+    let after = pinned(&nodes[s]);
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        moved,
+        Some(SessionIndex::new(dials[1].1)),
+        "precondition: the second dial's answer moved the smaller node onto it"
+    );
+    assert_eq!(
+        after, None,
+        "defect: the second dial answered after a crossing kept the pin"
+    );
+}
+
+#[tokio::test]
+async fn a_second_dial_answered_after_a_crossing_ends_the_pin() {
+    second_ends_pin(false).await;
+}
+
+/// [`a_second_dial_answered_after_a_crossing_ends_the_pin`] with multipath on.
+#[tokio::test]
+async fn a_second_dial_answered_after_a_crossing_ends_the_pin_with_multipath_on() {
+    second_ends_pin(true).await;
+}
+
+/// Deliver what `tn` has received, polling nothing, until `done` holds of
+/// it, for up to 2 s.
+async fn until_at(tn: &mut TestNode, done: impl Fn(&TestNode) -> bool) {
+    for _ in 0..200 {
+        process_available_packets(std::slice::from_mut(tn)).await;
+        if done(tn) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("precondition: the node reached the state within 2 s");
+}
+
+/// Crossed TCP dials where the larger node's handshake completes before the
+/// smaller node's msg1 reaches it: the smaller node's connect is still in
+/// flight when the larger node's msg1 arrives, so the smaller node installs
+/// the peer as responder and the larger as initiator. The smaller node's
+/// msg1 then meets a peer the larger holds on a young, heard link, which
+/// the restart gates refuse, so no move runs at either end: both hold the
+/// one link whose handshake completed first, the larger node's dial
+/// (FRC-1201, Section 5.6, its last paragraph). Reaped, the smaller node's
+/// dial closes its connection, which no live link uses.
+async fn connect_window(on: bool) {
+    let mut nodes = tcp_pair(on, false).await;
+    let (s, l) = (1, 0);
+    let s_addr = *nodes[s].node.node_addr();
+    let l_addr = *nodes[l].node.node_addr();
+    tcp_dial(&mut nodes, l, s).await;
+    resolve_connect(&mut nodes[l]).await;
+    tcp_dial(&mut nodes, s, l).await;
+    let dial = nodes[s]
+        .node
+        .peering
+        .pending_connects
+        .first()
+        .map(|c| c.link_id)
+        .expect("precondition: the smaller node's connect is in flight");
+    until_at(&mut nodes[s], |tn| tn.node.get_peer(&l_addr).is_some()).await;
+    until_at(&mut nodes[l], |tn| tn.node.get_peer(&s_addr).is_some()).await;
+    let held = (
+        nodes[s].node.get_peer(&l_addr).and_then(|p| p.our_index()),
+        nodes[l].node.get_peer(&s_addr).and_then(|p| p.our_index()),
+    );
+    resolve_connect(&mut nodes[s]).await;
+    pump(&mut nodes).await;
+    assert_eq!(
+        (
+            nodes[s].node.get_peer(&l_addr).and_then(|p| p.our_index()),
+            nodes[l].node.get_peer(&s_addr).and_then(|p| p.our_index()),
+        ),
+        held,
+        "precondition: the smaller node's msg1 moved neither end"
+    );
+    assert!(
+        nodes[s].node.links.contains_key(&dial),
+        "precondition: the smaller node's dial is still in flight"
+    );
+    let direction = |tn: &TestNode, peer: &NodeAddr| {
+        tn.node
+            .get_peer(peer)
+            .and_then(|p| tn.node.links.get(&p.link_id()))
+            .map(|k| k.direction())
+    };
+    let directions = (direction(&nodes[s], &l_addr), direction(&nodes[l], &s_addr));
+    let session = settled(&mut nodes, s, l).await;
+    nodes[s].node.cleanup_stale_connection(dial, 0).await;
+    assert!(
+        !nodes[s].node.links.contains_key(&dial),
+        "precondition: the smaller node's dial is reaped"
+    );
+    for _ in 0..100 {
+        if pool(&nodes[s]).1 == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let pools = pool(&nodes[s]);
+    let after = settled(&mut nodes, s, l).await;
+    cleanup_nodes(&mut nodes).await;
+    assert!(
+        session.is_ok(),
+        "defect: the two ends are not on one session: {session:?}"
+    );
+    assert_eq!(
+        directions,
+        (Some(LinkDirection::Inbound), Some(LinkDirection::Outbound)),
+        "defect: the ends do not hold the larger node's dial, the handshake that completed first"
+    );
+    assert_eq!(
+        pools,
+        (1, 0),
+        "defect: the reaped dial's connection is left open, or the peer's is closed"
+    );
+    assert!(
+        after.is_ok(),
+        "defect: the reap broke the session: {after:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_keeps_the_handshake_that_completed_first()
+ {
+    connect_window(false).await;
+}
+
+/// [`a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_keeps_the_handshake_that_completed_first`] with multipath on.
+#[tokio::test]
+async fn a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_keeps_the_handshake_that_completed_first_with_multipath_on()
+ {
+    connect_window(true).await;
+}
+
+// ---------------------------------------------------------------------------
+// The close rule on a link of two paths
+// ---------------------------------------------------------------------------
+
+/// The closes `tn` asked of its loopback transport `id`, in order.
+fn closes(tn: &TestNode, id: TransportId) -> Vec<TransportAddr> {
+    match tn.node.transports.get(&id) {
+        Some(TransportHandle::Loopback(t)) => t.closed(),
+        _ => panic!("precondition: transport {id} is a loopback transport"),
+    }
+}
+
+/// Link `nodes[0]` to a third loopback node, pushed onto `nodes`, by its
+/// own dial, and give that node's link at `nodes[0]` a second path at
+/// (`tid`, `at`), proven by the third node's frames: a link of two paths,
+/// the second at a pair another node answers at. The offer finds the third
+/// node not yet known capable, so node 0 asks it first, and probes `at` on
+/// its answer. Loopback delivers what is sent to `at` to the node that owns
+/// it, `nodes[1]`, so the test hands the probe from there to the third node
+/// and its answer to node 0 as though it came from `at`, as a host behind
+/// one shared address would see them.
+async fn second_path(nodes: &mut Vec<TestNode>, tid: TransportId, at: &TransportAddr) {
+    use super::super::paths::deliver_from;
+
+    nodes.push(loopback_node(true).await);
+    let c = nodes.len() - 1;
+    initiate_handshake(nodes, 0, c).await;
+    pump(nodes).await;
+    let c_addr = *nodes[c].node.node_addr();
+    nodes[0].node.offer_path(&c_addr, tid, at.clone()).await;
+    deliver(&mut nodes[c]).await;
+    deliver(&mut nodes[0]).await;
+    let mut probes = 0;
+    while let Ok(probe) = nodes[1].packet_rx.try_recv() {
+        probes += 1;
+        nodes[c].node.handle_encrypted_frame(probe).await;
+    }
+    deliver_from(&mut nodes[0], at).await;
+    let peer = nodes[0]
+        .node
+        .get_peer(&c_addr)
+        .expect("precondition: node 0 holds the third node");
+    assert!(probes > 0, "precondition: node 0 probed {at}");
+    assert!(
+        !peer.past_feed(),
+        "precondition: no test mutator touched the third node's bundle"
+    );
+    assert!(
+        matches!(peer.path_match(tid, at), crate::peer::Match::Proven { .. }),
+        "precondition: the third node's link holds a proven second path at {at}"
+    );
+}
+
+/// A crossing that moves node 0 off the link it held node 1 on retires that
+/// link, and the close rule decides the connection at the link's setup pair.
+/// Node 0's dial is answered from a third address of node 1's, so the moved
+/// link holds no path at the pair it left; a second path of a third node's
+/// link holds it, so the connection stays open.
+#[tokio::test]
+async fn a_crossing_retires_a_link_at_a_pair_another_links_second_path_holds_with_multipath_on() {
+    let mut nodes = dialed_pair(true).await;
+    let b = *nodes[1].node.node_addr();
+    let t1 = nodes[0].transport_id;
+    let home = nodes[1].addr.clone();
+    second_path(&mut nodes, t1, &home).await;
+    let left = nodes[0]
+        .node
+        .get_peer(&b)
+        .map(|p| p.link_id())
+        .expect("precondition: node 0 holds node 1");
+    let dialed = alias(&home, t1);
+    let answered = alias(&home, t1);
+    answered_from(&mut nodes, dialed, &answered).await;
+    let node = &nodes[0].node;
+    let held = node
+        .get_peer(&b)
+        .map(|p| p.link_id())
+        .expect("precondition: the move keeps the peer");
+    let retired = !node.links.contains_key(&left);
+    let at_home = node.get_peer(&b).map(|p| p.path_match(t1, &home));
+    let closed = closes(&nodes[0], t1);
+    cleanup_nodes(&mut nodes).await;
+    assert_ne!(
+        held, left,
+        "precondition: node 0 moved onto the dial's link"
+    );
+    assert!(retired, "precondition: the link node 0 left is retired");
+    assert_eq!(
+        at_home,
+        Some(crate::peer::Match::None),
+        "precondition: the moved link holds no path at the pair it left"
+    );
+    assert!(
+        !closed.contains(&home),
+        "defect: retiring the link closed the connection another link's second path holds: {closed:?}"
+    );
+}
+
+/// A capable link of two paths, p on t1 and q on t2, with the peer active on
+/// q: p is killed, left unanswered and discarded past its grace, so the
+/// bundle releases it
+/// while the link lives, and the close rule decides p's connection. A second
+/// path of a third node's link holds p's pair, so the connection stays open,
+/// where with nothing else on it it closes
+/// (`paths::a_capable_links_original_connection_closes_when_its_path_is_discarded`).
+#[tokio::test]
+async fn a_released_path_at_a_pair_another_links_path_holds_stays_open_with_multipath_on() {
+    use super::super::paths::{beat, loopback_mut, state_at, t2, two_transports};
+    use fips_core::proto::path::{Input, PathRef};
+
+    let (mut nodes, b, a2, _b2) = two_transports(1280).await;
+    let t1 = TransportId::new(1);
+    let p = nodes[1].addr.clone();
+    second_path(&mut nodes, t1, &p).await;
+    loopback_mut(&mut nodes[0], t1).typed(crate::transport::TransportType::TCP);
+    let on_q = PathRef {
+        transport: t2(),
+        addr: a2,
+    };
+    beat(&mut nodes, Some(&on_q)).await;
+    nodes[0]
+        .node
+        .get_peer_mut(&b)
+        .expect("precondition: node 0 holds node 1")
+        .kill_path(t1, &p);
+    nodes[0].node.step_path(&b, Input::Poll).await;
+    // Nothing node 0 sends towards node 1 now is answered, so p stays dead
+    // through its grace, as a path whose pair has gone does.
+    while nodes[1].packet_rx.try_recv().is_ok() {}
+    crate::time::advance(Duration::from_secs(601));
+    nodes[0].node.step_path(&b, Input::Poll).await;
+    let released = state_at(&nodes[0], &b, t1, &p).is_none();
+    let kept = nodes[0].node.get_peer(&b).is_some();
+    let closed = closes(&nodes[0], t1);
+    cleanup_nodes(&mut nodes).await;
+    assert!(released, "precondition: p is discarded");
+    assert!(kept, "precondition: the link lives on q");
+    assert!(
+        !closed.contains(&p),
+        "defect: releasing p closed the connection another link's path holds: {closed:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The close rule on a roamed link
+// ---------------------------------------------------------------------------
+
+/// Two loopback nodes, the smaller dialing the larger, so the larger holds
+/// the smaller on an inbound link; the larger's transport is then typed TCP,
+/// to stand in for one whose connections a close takes. A frame of the
+/// smaller node's reaches the larger from a second address of the
+/// smaller's: the link's one path roams there, a roam at multipath off and
+/// a path `Moved` on. The larger then dials the smaller at that address, and
+/// the smaller answers as on an aged link. The larger, whose peer's own dial
+/// wins the tie-break, keeps its session and tears its dial down, and the
+/// close rule finds the roamed path at the dial's pair, so the connection
+/// the peer now runs on stays open.
+async fn roamed_through(on: bool) {
+    let (mut nodes, s, l) = ordered_pair(on, false).await;
+    let s_addr = *nodes[s].node.node_addr();
+    let l_addr = *nodes[l].node.node_addr();
+    initiate_handshake(&mut nodes, s, l).await;
+    pump(&mut nodes).await;
+    let link = nodes[l]
+        .node
+        .get_peer(&s_addr)
+        .map(|p| p.link_id())
+        .expect("precondition: the larger node holds the smaller");
+    assert_eq!(
+        nodes[l].node.links.get(&link).map(|k| k.direction()),
+        Some(LinkDirection::Inbound),
+        "precondition: the larger node holds the smaller on the link the smaller dialed"
+    );
+    let session = nodes[l].node.get_peer(&s_addr).and_then(|p| p.our_index());
+    let tid = nodes[l].transport_id;
+    match nodes[l].node.transports.get_mut(&tid) {
+        Some(TransportHandle::Loopback(t)) => t.typed(crate::transport::TransportType::TCP),
+        _ => panic!("precondition: the larger node's transport is loopback"),
+    }
+
+    let roamed = alias(&nodes[s].addr, tid);
+    heartbeat(&mut nodes[s], &l_addr).await;
+    super::super::paths::deliver_from(&mut nodes[l], &roamed).await;
+    let active = nodes[l]
+        .node
+        .get_peer(&s_addr)
+        .and_then(|p| p.active_path())
+        .map(|p| (p.transport_id(), p.addr().clone()));
+    assert_eq!(
+        active,
+        Some((tid, roamed.clone())),
+        "precondition: the frame roamed the link's one path"
+    );
+
+    dial_at(&mut nodes, l, s, roamed.clone()).await;
+    let held = nodes[s]
+        .node
+        .get_peer_mut(&l_addr)
+        .expect("precondition: the smaller node holds the larger");
+    held.test_backdate_heard(Duration::from_secs(60));
+    held.test_backdate_session_established(Duration::from_secs(600));
+    assert_eq!(
+        deliver(&mut nodes[s]).await,
+        1,
+        "precondition: the larger node's msg1 reaches the smaller"
+    );
+    assert_eq!(
+        deliver(&mut nodes[l]).await,
+        1,
+        "precondition: the smaller node's msg2 reaches the larger"
+    );
+    let kept = nodes[l].node.get_peer(&s_addr).and_then(|p| p.our_index());
+    let dials = nodes[l].node.pending_outbound.len();
+    let closed = closes(&nodes[l], tid);
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        (kept, dials),
+        (session, 0),
+        "precondition: the larger node kept its session and its dial is answered"
+    );
+    assert!(
+        !closed.contains(&roamed),
+        "defect: tearing the dial down closed the connection the roamed peer's path runs on: {closed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_tcp_peer_that_roamed_keeps_its_connection_through_a_crossing() {
+    roamed_through(false).await;
+}
+
+/// [`a_tcp_peer_that_roamed_keeps_its_connection_through_a_crossing`] with multipath on.
+#[tokio::test]
+async fn a_tcp_peer_that_roamed_keeps_its_connection_through_a_crossing_with_multipath_on() {
+    roamed_through(true).await;
+}
+
+// ---------------------------------------------------------------------------
+// What a move closes of the link it left
+// ---------------------------------------------------------------------------
+
+/// Packets reaching `tn` over TCP, taken as they arrive until `enough` holds
+/// of those taken. The limit counts polls 10 ms apart, so a loaded host only
+/// makes the wait longer, and it fails as a precondition.
+async fn arrived(
+    tn: &mut TestNode,
+    enough: impl Fn(&[ReceivedPacket]) -> bool,
+) -> Vec<ReceivedPacket> {
+    let mut got = Vec::new();
+    for _ in 0..1000 {
+        while let Ok(packet) = tn.packet_rx.try_recv() {
+            got.push(packet);
+        }
+        if enough(&got) {
+            return got;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let phases: Vec<Option<u8>> = got.iter().map(phase).collect();
+    panic!("precondition: the packets reached the node within 1000 polls: {phases:?}");
+}
+
+/// Whether `packets` hold one of handshake phase `want`.
+fn holds(packets: &[ReceivedPacket], want: u8) -> bool {
+    packets.iter().any(|p| phase(p) == Some(want))
+}
+
+/// The first packet of handshake phase `want` in `packets`, taken out.
+fn take_phase(packets: &mut Vec<ReceivedPacket>, want: u8) -> ReceivedPacket {
+    let at = packets
+        .iter()
+        .position(|p| phase(p) == Some(want))
+        .expect("precondition: a packet of the phase arrived");
+    packets.remove(at)
+}
+
+/// Crossed TCP dials, each node's msg1 sent before either is read. The
+/// larger node reads the smaller's and answers it. The smaller reads the
+/// larger's msg1, promoting the larger on an inbound link and queueing its
+/// msg2 on that link's connection, and at once the msg2 answering its own
+/// dial, which moves it onto that dial's link and retires the inbound one.
+/// No dial is on the inbound link's connection, so the move closes it: the
+/// smaller node holds its dial's connection alone. The close lets the
+/// connection's writer finish what was queued (FRC-1301), so the larger node
+/// reads the msg2 its dial was answered with, and then the connection ends.
+async fn left_closed(on: bool, zero_smaller: bool) {
+    let mut nodes = tcp_pair(on, zero_smaller).await;
+    let (s, l) = if zero_smaller { (0, 1) } else { (1, 0) };
+    let s_addr = *nodes[s].node.node_addr();
+    let l_addr = *nodes[l].node.node_addr();
+    tcp_dial(&mut nodes, 0, 1).await;
+    tcp_dial(&mut nodes, 1, 0).await;
+    resolve_connect(&mut nodes[0]).await;
+    resolve_connect(&mut nodes[1]).await;
+    let s_dial: Vec<u32> = nodes[s].node.pending_outbound.keys().map(|k| k.1).collect();
+    assert_eq!(
+        s_dial.len(),
+        1,
+        "precondition: the smaller node's dial is pending"
+    );
+    assert_eq!(
+        nodes[l].node.pending_outbound.len(),
+        1,
+        "precondition: the larger node's dial is pending"
+    );
+
+    let mut at_l = arrived(&mut nodes[l], |got| holds(got, PHASE_MSG1)).await;
+    let msg1 = take_phase(&mut at_l, PHASE_MSG1);
+    hand(&mut nodes[l].node, msg1).await;
+    assert!(
+        nodes[l].node.get_peer(&s_addr).is_some(),
+        "precondition: the larger node holds the smaller on its msg1"
+    );
+
+    let mut at_s = arrived(&mut nodes[s], |got| {
+        holds(got, PHASE_MSG1) && holds(got, PHASE_MSG2)
+    })
+    .await;
+    let msg1 = take_phase(&mut at_s, PHASE_MSG1);
+    let msg2 = take_phase(&mut at_s, PHASE_MSG2);
+    hand(&mut nodes[s].node, msg1).await;
+    assert!(
+        nodes[s].node.get_peer(&l_addr).is_some(),
+        "precondition: the smaller node holds the larger on its msg1"
+    );
+    hand(&mut nodes[s].node, msg2).await;
+    assert_eq!(
+        nodes[s].node.get_peer(&l_addr).and_then(|p| p.our_index()),
+        Some(SessionIndex::new(s_dial[0])),
+        "precondition: the smaller node moved onto its own dial's session"
+    );
+    for packet in at_s {
+        hand(&mut nodes[s].node, packet).await;
+    }
+    for _ in 0..100 {
+        if pool(&nodes[s]) == (0, 1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let s_pool = pool(&nodes[s]);
+
+    let mut answered = false;
+    for _ in 0..500 {
+        process_available_packets(std::slice::from_mut(&mut nodes[l])).await;
+        if nodes[l].node.pending_outbound.is_empty() {
+            answered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    for _ in 0..500 {
+        if pool(&nodes[l]).1 == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let l_pool = pool(&nodes[l]);
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        s_pool,
+        (0, 1),
+        "defect: the smaller node holds a connection besides its dial's, or lost that one"
+    );
+    assert!(
+        answered,
+        "defect: the larger node never read the msg2 queued on the connection the move closed"
+    );
+    assert_eq!(
+        l_pool.1, 0,
+        "defect: the connection the move closed is still open at the larger node: {l_pool:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_move_closes_the_left_links_connection_with_no_dial_on_it_smaller_first() {
+    left_closed(false, true).await;
+}
+
+/// [`a_move_closes_the_left_links_connection_with_no_dial_on_it_smaller_first`] with multipath on.
+#[tokio::test]
+async fn a_move_closes_the_left_links_connection_with_no_dial_on_it_smaller_first_with_multipath_on()
+ {
+    left_closed(true, true).await;
+}
+
+#[tokio::test]
+async fn a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first() {
+    left_closed(false, false).await;
+}
+
+/// [`a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first`] with multipath on.
+#[tokio::test]
+async fn a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first_with_multipath_on()
+{
+    left_closed(true, false).await;
+}
+
+/// Node 0, holding node 1 on the link it dialed, dials node 1 again at a
+/// second address and once more at the held link's own pair, and neither
+/// msg1 is read yet. Node 1 answers the first as on an aged link, its msg2
+/// reaching node 0 from a third address, and node 0 moves onto that dial and
+/// retires the link it left. The second dial is still in flight on the left
+/// link's pair, so the close rule leaves that connection open.
+async fn flying_dial(on: bool) {
+    let mut nodes = dialed_pair(on).await;
+    let b = *nodes[1].node.node_addr();
+    let a = *nodes[0].node.node_addr();
+    let t1 = nodes[0].transport_id;
+    let home = nodes[1].addr.clone();
+    let dialed = alias(&home, t1);
+    let answered = alias(&home, t1);
+    let left = nodes[0]
+        .node
+        .get_peer(&b)
+        .map(|p| p.link_id())
+        .expect("precondition: node 0 holds node 1");
+    dial_at(&mut nodes, 0, 1, dialed).await;
+    let msg1 = nodes[1]
+        .packet_rx
+        .try_recv()
+        .expect("precondition: the first dial's msg1 is queued at node 1");
+    let before: Vec<LinkId> = nodes[0].node.links.keys().copied().collect();
+    initiate_handshake(&mut nodes, 0, 1).await;
+    let second = nodes[0]
+        .node
+        .links
+        .keys()
+        .copied()
+        .find(|id| !before.contains(id))
+        .expect("precondition: the second dial has a link");
+    while nodes[1].packet_rx.try_recv().is_ok() {}
+    let held = nodes[1]
+        .node
+        .get_peer_mut(&a)
+        .expect("precondition: node 1 holds node 0");
+    held.test_backdate_heard(Duration::from_secs(60));
+    held.test_backdate_session_established(Duration::from_secs(600));
+    nodes[1].node.handle_msg1(msg1).await;
+    let mut msg2 = nodes[0]
+        .packet_rx
+        .try_recv()
+        .expect("precondition: node 1's msg2 is queued at node 0");
+    msg2.remote_addr = answered;
+    nodes[0].node.handle_msg2(msg2).await;
+    let node = &nodes[0].node;
+    let moved = node.get_peer(&b).map(|p| p.link_id());
+    let retired = !node.links.contains_key(&left);
+    let flying = node.links.get(&second).map(|k| k.remote_addr().clone());
+    let closed = closes(&nodes[0], t1);
+    cleanup_nodes(&mut nodes).await;
+    assert!(
+        moved.is_some_and(|id| id != left) && retired,
+        "precondition: node 0 moved off the link it held and retired it"
+    );
+    assert_eq!(
+        flying,
+        Some(home.clone()),
+        "precondition: the second dial is in flight at the left link's pair"
+    );
+    assert!(
+        !closed.contains(&home),
+        "defect: the move closed the connection a dial in flight uses: {closed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_move_leaves_a_connection_a_dial_in_flight_uses() {
+    flying_dial(false).await;
+}
+
+/// [`a_move_leaves_a_connection_a_dial_in_flight_uses`] with multipath on.
+#[tokio::test]
+async fn a_move_leaves_a_connection_a_dial_in_flight_uses_with_multipath_on() {
+    flying_dial(true).await;
 }

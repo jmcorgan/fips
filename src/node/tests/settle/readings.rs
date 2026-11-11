@@ -438,8 +438,9 @@ async fn with_multipath_off_a_restart_teardown_queues_no_close() {
 }
 
 /// A reading of no carrier is kept by link and transport, so a move, which
-/// keeps the link id, keeps it; the peer's removal ends it at the next read.
-/// The link here holds two paths, since a link of one keeps no reading.
+/// holds the peer on the dial's link, keeps it under that link; the peer's
+/// removal ends it at the next read. The link here holds two paths, since a
+/// link of one keeps no reading.
 #[tokio::test]
 async fn a_no_carrier_reading_stays_across_a_move_and_goes_with_the_peer() {
     let t1 = TransportId::new(1);
@@ -466,7 +467,11 @@ async fn a_no_carrier_reading_stays_across_a_move_and_goes_with_the_peer() {
         index,
         "precondition: the peer moved onto the dial's session"
     );
-    assert_eq!(moved.link_id(), link, "precondition: the link id stays");
+    assert_ne!(
+        moved.link_id(),
+        link,
+        "precondition: the peer moved onto the dial's link"
+    );
     let after = nodes[0].node.paths.readings();
     crate::time::advance(Duration::from_millis(50));
     nodes[0].node.path_tick().await;

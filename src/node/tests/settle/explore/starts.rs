@@ -77,17 +77,6 @@ impl Order {
     }
 }
 
-/// A waiver of the shell audit a start may need, by the script's nodes: the
-/// node that holds the breach and its peer. It is passed at every leaf of
-/// the start's paths.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Waive {
-    /// `Exempt::CrossedInbound`.
-    CrossedInbound(usize, usize),
-    /// `Exempt::MovedOwnDial`.
-    MovedOwnDial(usize, usize),
-}
-
 /// What an oracle reads at a leaf: whether each pair settled, a breach of
 /// the shell audit's, or the leaf's heal itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,8 +125,6 @@ pub(super) struct Start {
     /// The schedule from the start to its target. The explorer varies each
     /// of its handshake packets.
     pub(super) script: &'static [Step],
-    /// The waivers a leaf passes.
-    pub(super) waivers: &'static [Waive],
     /// How many paths the explorer walks: the scripted path and each
     /// variation that applies, in either order and at either setting, as
     /// first measured. A swap applies only where a second packet of its
@@ -292,16 +279,9 @@ const THREE: &[Step] = &[dial(0, 1, 0), dial(1, 0, 0), dial(2, 0, 0)];
 /// node 1's and then node 2's, then node 0 reads node 1's answer.
 const THREE_SCRIPT: &[Step] = &[msg1(1, 0), msg1(0, 0), msg1(0, 0), msg2(0, 0)];
 
-/// A crossing's waiver at its smaller node, whichever of the script's two
-/// nodes that is in the order run.
-const CROSSING_WAIVERS: &[Waive] = &[Waive::CrossedInbound(0, 1), Waive::CrossedInbound(1, 0)];
-
-/// A dialer's later dial moving its held peer: node 0 dials.
-const LATE_WAIVERS: &[Waive] = &[Waive::MovedOwnDial(0, 1)];
-
 /// Every named start a real pair runs on this build.
 pub(super) fn starts() -> Vec<Start> {
-    let s = |number, name, medium, build, script, waivers, reach| Start {
+    let s = |number, name, medium, build, script, reach| Start {
         number,
         name,
         medium,
@@ -311,7 +291,6 @@ pub(super) fn starts() -> Vec<Start> {
         workers: false,
         build,
         script,
-        waivers,
         reach,
         pinned: &[],
     };
@@ -323,7 +302,6 @@ pub(super) fn starts() -> Vec<Start> {
             Medium::Loopback,
             CROSSED,
             CROSSING,
-            CROSSING_WAIVERS,
             9,
         ),
         Start {
@@ -334,7 +312,6 @@ pub(super) fn starts() -> Vec<Start> {
                 Medium::Loopback,
                 CROSSED_TWICE,
                 CROSSING_TWICE,
-                CROSSING_WAIVERS,
                 9,
             )
         },
@@ -344,7 +321,6 @@ pub(super) fn starts() -> Vec<Start> {
             Medium::Tcp,
             CROSSED_ORIENTED,
             CROSSING,
-            CROSSING_WAIVERS,
             9,
         ),
         s(
@@ -353,7 +329,6 @@ pub(super) fn starts() -> Vec<Start> {
             Medium::Loopback,
             DIALED_TWICE,
             IN_ORDER,
-            LATE_WAIVERS,
             11,
         ),
         // The scripted path leaves the two ends on different sessions,
@@ -367,7 +342,6 @@ pub(super) fn starts() -> Vec<Start> {
                 Medium::Loopback,
                 DIALED_TWICE,
                 LATE_REORDERED,
-                LATE_WAIVERS,
                 11,
             )
         },
@@ -377,7 +351,6 @@ pub(super) fn starts() -> Vec<Start> {
             Medium::Loopback,
             DIALED,
             RESTARTED,
-            &[],
             5,
         ),
         Start {
@@ -388,21 +361,12 @@ pub(super) fn starts() -> Vec<Start> {
                 Medium::Loopback,
                 REKEYING,
                 CROSSING_REKEY,
-                CROSSING_WAIVERS,
                 10,
             )
         },
         Start {
             nodes: 3,
-            ..s(
-                11,
-                "three nodes",
-                Medium::Loopback,
-                THREE,
-                THREE_SCRIPT,
-                CROSSING_WAIVERS,
-                10,
-            )
+            ..s(11, "three nodes", Medium::Loopback, THREE, THREE_SCRIPT, 10)
         },
     ];
     #[cfg(ble_available)]
@@ -412,7 +376,6 @@ pub(super) fn starts() -> Vec<Start> {
         Medium::Ble,
         CROSSED_ORIENTED,
         CROSSING,
-        CROSSING_WAIVERS,
         9,
     ));
     v
@@ -433,7 +396,6 @@ pub(super) fn pooled() -> Start {
         workers: true,
         build: CROSSED,
         script: CROSSING,
-        waivers: CROSSING_WAIVERS,
         reach: 9,
         pinned: &[],
     }
@@ -467,9 +429,9 @@ pub(super) const NOT_RUN: &[(u8, &str)] = &[
 /// Where the explorer finds a pinned defect of the node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Reach {
-    /// On the scripted path of the start named, in the order given, with
-    /// every waiver lifted: the clause given breaks, at the node given (in
-    /// the world's indices) or at any node.
+    /// On the scripted path of the start named, in the order given: the
+    /// clause given breaks, at the node given (in the world's indices) or at
+    /// any node.
     Start {
         name: &'static str,
         order: Order,
@@ -479,9 +441,6 @@ pub(super) enum Reach {
     /// No start reaches it, for the reason given.
     None(&'static str),
 }
-
-/// The reason the crossed TCP redial pins reach no start.
-const REDIAL: &str = "the world has no step that closes an established connection, so no redial is driven; its cause, the smaller node's inbound link record, is what the four crossed TCP record pins map to, and is found there";
 
 /// The reason the aged-link pins reach no start.
 const AGED: &str = "the dial is to a second address of the peer on the link's own transport, after both ends aged past the rekey trigger with no rekey started; the world dials a second address only as a second transport, and ages a session only by starting a rekey (start 7 is not run)";
@@ -503,66 +462,6 @@ pub(super) const PINS: &[(&str, bool, Reach)] = &[
         Reach::None(
             "a defect of the Ethernet transport's blocking send, not of settlement: no start runs that transport",
         ),
-    ),
-    (
-        "node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first",
-        false,
-        Reach::Start {
-            name: "crossing, connection-oriented",
-            order: Order::Smaller,
-            clause: Clause::RightLink,
-            node: Some(0),
-        },
-    ),
-    (
-        "node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first_with_multipath_on",
-        true,
-        Reach::Start {
-            name: "crossing, connection-oriented",
-            order: Order::Smaller,
-            clause: Clause::RightLink,
-            node: Some(0),
-        },
-    ),
-    (
-        "node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first",
-        false,
-        Reach::Start {
-            name: "crossing, connection-oriented",
-            order: Order::Larger,
-            clause: Clause::RightLink,
-            node: Some(0),
-        },
-    ),
-    (
-        "node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first_with_multipath_on",
-        true,
-        Reach::Start {
-            name: "crossing, connection-oriented",
-            order: Order::Larger,
-            clause: Clause::RightLink,
-            node: Some(0),
-        },
-    ),
-    (
-        "node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first",
-        false,
-        Reach::None(REDIAL),
-    ),
-    (
-        "node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first_with_multipath_on",
-        true,
-        Reach::None(REDIAL),
-    ),
-    (
-        "node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first",
-        false,
-        Reach::None(REDIAL),
-    ),
-    (
-        "node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first_with_multipath_on",
-        true,
-        Reach::None(REDIAL),
     ),
     (
         "node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer",

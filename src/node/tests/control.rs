@@ -303,21 +303,19 @@ async fn alternate_path_for_quiet_peer(dialer_smaller: bool, dialer_set_up: bool
         }
     }
 
-    // The link stays on its path at both ends.
+    // The link stays on its path at both ends. A dialer that moves to the
+    // dial's session holds the dial's link, the link it dialed, at the
+    // msg2's pair, which is the peer's primary address.
     let dialer_after = link_view(&nodes[d], &peer_addr);
     let peer_after = link_view(&nodes[p], &dialer_addr);
     assert_eq!(
         (
-            dialer_after.link_id,
+            dialer_after.link_id == dialer_before.link_id,
             dialer_after.transport_id,
             dialer_after.current_addr.as_ref()
         ),
-        (
-            dialer_before.link_id,
-            dialer_before.transport_id,
-            Some(&nodes[p].addr)
-        ),
-        "the dialer's link must stay on the peer's primary address (dialer smaller: {dialer_smaller})"
+        (!swaps, dialer_before.transport_id, Some(&nodes[p].addr)),
+        "the dialer's link must stay on the peer's primary address, on the dial's link where it moves (dialer smaller: {dialer_smaller})"
     );
     assert_eq!(
         (
@@ -547,14 +545,27 @@ async fn pin_across_our_later_dial_to_a_peering_the_peer_dialled(
         "precondition: the dial was answered and its leg resolved ({case})"
     );
     let dialer_after = link_view(&nodes[d], &peer_addr);
-    assert_eq!(
-        dialer_after.link_id, dialer_before.link_id,
-        "precondition: the dialer kept its link ({case})"
-    );
     let moved = dialer_after.our_index != dialer_before.our_index;
     assert_eq!(
         moved, dialer_smaller,
         "precondition: the dialer moved to the dial's session only when smaller ({case})"
+    );
+    let held = nodes[d]
+        .node
+        .links
+        .get(&dialer_after.link_id)
+        .map(|l| l.direction());
+    assert_eq!(
+        (dialer_after.link_id == dialer_before.link_id, held),
+        (
+            !moved,
+            Some(if moved {
+                LinkDirection::Outbound
+            } else {
+                LinkDirection::Inbound
+            })
+        ),
+        "precondition: the dialer holds the dial's link where it moved, and its own link otherwise ({case})"
     );
     assert_eq!(
         held_pin(&nodes[d]),

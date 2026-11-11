@@ -928,6 +928,13 @@ impl PeerMachine {
         self.link
     }
 
+    /// The peer this machine controls moved onto `link`. The connection the
+    /// machine carries keeps the handshake's link id: no reader looks at it
+    /// once the leg is promoted.
+    pub(crate) fn relink(&mut self, link: LinkId) {
+        self.link = link;
+    }
+
     /// Which side opened this connection, read from the surviving carrier.
     /// Seeded at construction: an outbound machine carries an outbound
     /// connection state and an inbound machine an inbound one.

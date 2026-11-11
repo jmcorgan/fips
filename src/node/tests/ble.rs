@@ -4,7 +4,7 @@
 //! handshake, spanning tree convergence, mixed-transport routing.
 //! All tests use MockBleIo (in-memory channels, no hardware needed).
 
-use super::settle::audit::{Exempt, assert_coherent};
+use super::settle::audit::assert_coherent;
 use super::*;
 use crate::config::BleConfig;
 use crate::proto::fmp::wire::{PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2};
@@ -707,7 +707,7 @@ async fn crossed_handshakes_on_one_of_two_links_keep_the_pair_peered() {
         verified_at(&nodes[1], &a0x.to_transport_addr()).await,
         Some(false)
     );
-    assert_coherent(&mut nodes, &[], "the end of the test").await;
+    assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -935,8 +935,9 @@ async fn next_packet(tn: &mut TestNode) -> ReceivedPacket {
 
 /// Crossed dials on two links between one pair: node 0, the smaller, dials
 /// over L2 and node 1 over L1. Node 0 keeps its outbound handshake, whose
-/// msg2 comes over L2, so it holds node 1 on L2, keeps L2 pooled, and moves
-/// node 1's verification there from L1.
+/// msg2 comes over L2, so it holds node 1 on L2, the link it dialed, keeps
+/// L2 pooled, moves node 1's verification there, and closes L1, which no
+/// link uses once the move has left it.
 #[tokio::test(start_paused = true)]
 async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link() {
     let mut nodes = vec![
@@ -1033,16 +1034,11 @@ async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification
     );
     assert_eq!(
         verified_at(&nodes[0], &a1).await,
-        Some(false),
-        "node 0's L1 is no longer node 1's link"
+        None,
+        "node 0 closed L1, the link it left for the one it dialed"
     );
     drop(held);
-    assert_coherent(
-        &mut nodes,
-        &[Exempt::CrossedInbound { node: 0, peer: 1 }],
-        "the end of the test",
-    )
-    .await;
+    assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 

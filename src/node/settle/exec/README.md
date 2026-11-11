@@ -41,7 +41,14 @@ statements at its site.
   `handle_msg2` fills through `Run::crossing`, since this file's module is
   private to `exec/`. The move itself, `move_session`, stays at the site,
   and so does the decision between a move and a keep, which passes through
-  `Run::swaps` for the mutation lane's break of it.
+  `Run::swaps` for the mutation lane's break of it. A move that rebuilt the
+  machine holds the peer on the dial's link: `move_session` sets the
+  peer's link id, and `HoldDial` holds the core's record of that link and
+  keys the control machine, its timers and the carrier readings under it.
+  `Facts.loser` names the link torn down, the one the move left or, at a
+  refused move and a keep, the dial's, which `LoserClose` and
+  `LoserRemoved` close by the close rule (`Node::close_unused`) and
+  remove; the renewal's released paths go to the link left.
 - `paths.rs`: a followed, switched or released path's effects, which are
   plain functions because a removal reaches a release where it cannot
   await, with `Node::run_now`, which walks such a plan without awaiting;
