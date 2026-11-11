@@ -1542,6 +1542,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and counted every new frame as reordered, and the peer's receiver reports
   on the new session were dropped as stale, so the link's round-trip, loss
   and ETX estimates stopped updating.
+- When two nodes dial each other at once, the node with the smaller address
+  now holds the peer on the link it dialed and closes the inbound one. Before,
+  it ran on its own dial's session and connection but kept the inbound link's
+  record and left that link's connection open, and since the record said
+  inbound it would not redial the peer when the connection dropped. A
+  crossing now leaves one link and one connection, which `fipsctl show links`
+  lists as outbound at the smaller node, and that node redials its peer if
+  the connection drops. Which session each end runs on is unchanged, and
+  nothing on the wire changes.
 - A node whose first msg2 could not be sent, as when its interface was
   between rebinds, now installs the peer when it answers the dialer's
   resent msg1 with the stored msg2. Before, the dialer completed the link
