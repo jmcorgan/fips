@@ -26,6 +26,10 @@ moves in from the root crate one module at a time. So far it holds:
 - `SessionIndex`, its random allocator `IndexAllocator` and
   `IndexError`, re-exported under `fips::utils::index`, where
   `IndexAllocator` is an alias over `OsEntropy`;
+- `utils::onlink::OnLinkPrefixes`, the set of this node's interface
+  prefixes, and `read_suspect`, re-exported under `fips::utils::onlink`.
+  Reading the set from the system stays in the root crate, as
+  `fips::utils::onlink::read_system`;
 - the rate limiters (`node::rate_limit`) and the stats history
   (`node::stats_history`), generic over `time::Clock` and re-exported
   under the root crate's `node::rate_limit` and `node::stats_history`

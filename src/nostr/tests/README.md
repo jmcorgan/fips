@@ -1,17 +1,21 @@
 # Nostr rendezvous tests in their own files
 
-This directory holds two kinds of test file.
+This directory holds the unit tests of `src/nostr/`: the `nostr::tests`
+module itself and two kinds of test file beside it.
 
-- Child modules of `src/nostr/tests.rs`, which declares each as
-  `mod <name>;`. Each is a child of `nostr::tests` and reaches the
-  `pub(super)` items of the files in `src/nostr/` and the private helpers of
-  `tests.rs` (such as `send_probe`). Most of the directory's unit tests are
-  still in `tests.rs` itself; the files here each hold one behaviour's tests.
+- `mod.rs` is `nostr::tests`, declared from `src/nostr/mod.rs` as
+  `#[cfg(test)] mod tests;`. It holds the tests that span several files of
+  `src/nostr/` (the runtime, signalling, traversal and advert paths
+  together), and the helpers its child modules share.
+- Child modules of `mod.rs`, which declares each as `mod <name>;`. Each is a
+  child of `nostr::tests` and reaches the `pub(super)` items of the files in
+  `src/nostr/` and the private helpers of `mod.rs` (such as `send_probe`).
+  Each holds one behaviour's tests.
 - The tests of one file in `src/nostr/`, declared from that file as
   `#[cfg(test)] #[path = "tests/<file>.rs"] mod tests;`, so they are its
   child module and reach its private items.
 
-Child modules of `tests.rs`:
+Child modules of `mod.rs`:
 
 - `notify_channels.rs`: the notify loop in `runtime.rs` logs a lag on
   either of its two channels and reads on, and ends only when a channel
@@ -43,8 +47,25 @@ Child modules of `tests.rs`:
   reaches the traversal waiting for it, through the relay client's
   admission policy and the notify loop in `runtime.rs`.
 
-Tests of one file:
+Tests of one file, each named `nostr::<file>::tests::...`:
 
+- `advert.rs`, of `advert.rs`: `AdvertMachine`'s advert cache (admission,
+  replacement, pruning, the size cap and the protection of configured and
+  linked authors against a flood of new keys, the open-discovery candidates
+  and the cache-full warning) and its publish planning.
+- `failure_state.rs`, of `failure_state.rs`: the per-npub traversal failure
+  streaks, the warning window, cooldowns, protocol-mismatch cooldowns,
+  observed skew and the size cap.
+- `offer_admission.rs`, of `offer_admission.rs`: the per-npub allowance of
+  concurrent inbound offers, and that idle senders are reclaimed.
+- `signal_gate.rs`, of `signal_gate.rs`: the inbound signal rate limit, its
+  refill, and the reserve kept for answers to this node's own traversals.
 - `signal_route.rs`, of `signal_route.rs`: the admission policy takes a
   traversal signal off the pool's channel and queues it on its own, once
   however many relays deliver it, and leaves every other event to the pool.
+- `stun.rs`, of `stun.rs`: the STUN binding-success parser against malformed
+  responses, and the private overlay candidate filter.
+- `traversal.rs`, of `traversal.rs`: punch packet classification by session
+  hash, and the once-a-minute warning for a stranger's refused offers.
+- `traversal_machine.rs`, of `traversal_machine.rs`: initiator election,
+  outbound initiator dedup, and the replay cache's expiry and cap.

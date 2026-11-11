@@ -216,8 +216,8 @@ and from `fips-core`:
   Packet Too Big bucket of each source.
 - **DNS**: `dnsmsg` (message parsing and screening, and `clamp_ttl` in
   `config.rs`), `hosts` (`HostMap`, `HostMapReloader`,
-  `DEFAULT_HOSTS_PATH`) and `utils::onlink::OnLinkPrefixes`, in `dns.rs`
-  and `lifecycle.rs`.
+  `DEFAULT_HOSTS_PATH`) and `utils::onlink::OnLinkPrefixes` with
+  `utils::onlink::read_system`, in `dns.rs` and `lifecycle.rs`.
 - **The status socket**: `config::ipv6tun_socket` for its path,
   `control::protocol::{Request, Response}` and `control::serve` for the
   control socket's framing, and `utils::sockbind` to bind and remove it, in

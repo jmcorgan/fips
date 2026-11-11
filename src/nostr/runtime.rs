@@ -48,7 +48,6 @@ use super::types::{
 };
 use crate::PeerIdentity;
 use crate::config::{NostrRendezvousConfig, PeerConfig};
-use crate::utils::onlink::OnLinkPrefixes;
 
 const ADVERT_CACHE_STALE_GRACE_MULTIPLIER: u64 = 2;
 
@@ -1497,7 +1496,7 @@ impl NostrRendezvous {
             offer.reflexive_address.as_ref(),
             &answer.payload.local_addresses,
             answer.payload.reflexive_address.as_ref(),
-            &OnLinkPrefixes::read_system(),
+            &crate::utils::onlink::read_system(),
         )?;
         self.log_punch_refusals(&tally, &peer_short, &short_id(&session_id));
 
@@ -1744,7 +1743,7 @@ impl NostrRendezvous {
             answer.reflexive_address.as_ref(),
             &offer.local_addresses,
             offer.reflexive_address.as_ref(),
-            &OnLinkPrefixes::read_system(),
+            &crate::utils::onlink::read_system(),
         )?;
         self.log_punch_refusals(&tally, &peer_short, &short_id(&offer.session_id));
 

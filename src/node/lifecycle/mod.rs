@@ -1386,7 +1386,7 @@ impl Node {
         if events.is_empty() && self.peering.lan.is_empty() {
             return;
         }
-        let on_link = OnLinkPrefixes::read_system();
+        let on_link = crate::utils::onlink::read_system();
         if events.is_empty() {
             self.dial_pending_lan(&on_link).await;
         } else {

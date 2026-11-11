@@ -792,6 +792,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields, or `with_ack()` and `bidirectional()`. FRC-1501 reserves the
   SessionSetup flags byte with no named bits, and nothing used them. The type
   now carries the byte as it arrived.
+- **Source-breaking for consumers of the library crate**:
+  `fips::utils::onlink::OnLinkPrefixes::read_system()` is now the free
+  function `fips::utils::onlink::read_system()`. The prefix set moved to
+  `fips-core` (`fips_core::utils::onlink`), where nothing may read the
+  system, and is re-exported at its old path with `read_suspect`; the read
+  stays in `fips`, and Rust allows no inherent method on another crate's
+  type. The read, its result and its log lines are unchanged.
 
 #### Packaging
 

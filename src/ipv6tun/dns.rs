@@ -501,7 +501,7 @@ fn check_returning(
     mesh_addr: Option<Ipv6Addr>,
 ) -> Result<(), &'static str> {
     let source = probe_source(dst).map_err(|_| "reply-route-probe-failed")?;
-    let prefixes = OnLinkPrefixes::read_system();
+    let prefixes = crate::utils::onlink::read_system();
     if prefixes.read_failed() {
         return Err("interface-read-failed");
     }

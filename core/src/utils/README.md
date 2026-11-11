@@ -30,6 +30,16 @@ the same way in both crates.
   per node, so an index is unique across the node, not per transport.
   The root crate re-exports all three under `utils::index`, with
   `IndexAllocator` an alias over its `OsEntropy`.
+- `onlink.rs`: `OnLinkPrefixes`, the address prefixes of this node's
+  own interfaces (address, prefix length and, when known, interface
+  index), and the questions asked of them: whether an address is on one
+  of this node's links, whether it is on a given interface, and whether
+  two addresses share a link. IPv4-mapped IPv6 addresses are judged as
+  IPv4, and a zero prefix length is discarded and counted. Beside it,
+  `read_suspect`, which says whether a read produced a set that cannot
+  be trusted. Reading the set from the system needs `getifaddrs`, so
+  that stays in the root crate as `utils::onlink::read_system`, which
+  re-exports both items at their old path.
 - `tests/`: the unit tests for the files here; its README describes it.
 
 ## Invariants
@@ -45,3 +55,7 @@ the same way in both crates.
   change on the deployed lines.
 - **The field is private.** Code builds and reads an index through `new`
   and `as_u32`.
+- **An empty prefix set holds nothing.** A caller that gates candidate
+  addresses with an `OnLinkPrefixes` refuses every one when the set is
+  empty, including the set a failed read yields (`failed()`, told apart
+  from a read that found nothing by `read_failed()`).
