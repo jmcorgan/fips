@@ -969,14 +969,19 @@ async fn handle_one_on(tn: &mut TestNode, transport: TransportId) {
 /// timestamp and the dwell runs from the heartbeat's arrival, 70 + 400 +
 /// 10 = 480 ms, so B's sample is now - echo - dwell = 510 - 480 = 30 ms.
 /// Echoing the probe would give a dwell of 10 ms and a sample of 510 -
-/// 100 - 10 = 400 ms. Each figure carries the real time the test takes
-/// besides the mocked advances, a few milliseconds. The sample is a
-/// difference of four clock readings, each truncated to the millisecond,
-/// so it can read up to 2 ms under 30. Mutation: pass `sample: true` for
-/// every frame in `account_authentic`.
+/// 100 - 10 = 400 ms. The clock is frozen, so no figure carries the real
+/// time the test takes. The sample is a difference of four clock readings,
+/// each truncated to the millisecond, so it can read up to 2 ms under 30.
+/// Mutation: pass `sample: true` for every frame in `account_authentic`.
 #[tokio::test]
 async fn a_standby_probe_does_not_move_the_round_trip_the_peer_derives_from_our_report() {
+    // With the clock running, time the test spends descheduled adds to the
+    // dwell and the sample, and can carry them past their bounds.
+    crate::time::freeze();
     let (mut nodes, b, a2, b2) = two_transports(1280).await;
+    // The clock has not moved since the session began, and a timestamp of
+    // 0 reads as no echo, so B's heartbeat goes out 10 ms in.
+    crate::time::advance(Duration::from_millis(10));
     let a = *nodes[0].node.node_addr();
     let t1 = nodes[0].transport_id;
     let on_q = PathRef {
@@ -1420,6 +1425,9 @@ fn advance_to(at: crate::peer::PeerInstant, before: Duration) {
 /// machine; a machine of two paths arms it and is stepped only at its wake.
 #[tokio::test]
 async fn the_path_tick_is_disarmed_and_steps_nothing_without_work() {
+    // The tick is run 20 ms before the wake. With the clock running, time
+    // the test spends descheduled can bring the wake due in that tick.
+    crate::time::freeze();
     let mut nodes = linked_pair(disabled(), disabled()).await;
     let b = *nodes[1].node.node_addr();
     // A step of a disabled machine, as a path message or a tick makes.
@@ -1475,14 +1483,17 @@ pub(super) async fn exchange(nodes: &mut [TestNode]) -> usize {
     on_t2
 }
 
-/// Run `ticks` path ticks at A 50 ms apart, each followed by an exchange,
-/// and return how many frames reached B on `t2()` in each.
+/// Run `ticks` path ticks at A 50 ms apart and return how many frames
+/// reached B on `t2()` in each. The frames are taken from B's queue, not
+/// handed to B, so B's machine is not stepped and does not send: what is
+/// counted is what A sent. Handed over, they could step B when its own
+/// probe on q is due, and A's answer to that probe would be counted too.
 async fn t2_ticks(nodes: &mut [TestNode], ticks: usize) -> Vec<usize> {
     let mut seen = Vec::new();
     for _ in 0..ticks {
         crate::time::advance(Duration::from_millis(50));
         nodes[0].node.path_tick().await;
-        seen.push(exchange(nodes).await);
+        seen.push(t2_taken(nodes));
     }
     seen
 }
@@ -1491,6 +1502,10 @@ async fn t2_ticks(nodes: &mut [TestNode], ticks: usize) -> Vec<usize> {
 /// before.
 #[tokio::test]
 async fn a_probe_goes_out_when_its_path_is_due() {
+    // The ticks run 100 ms before the probe is due and 50 ms apart after.
+    // With the clock running, time the test spends descheduled brings
+    // probes due a tick sooner than the ticks say.
+    crate::time::freeze();
     let (mut nodes, b, _, b2) = two_transports(1280).await;
     exchange(&mut nodes).await;
     let due = {
@@ -2169,6 +2184,9 @@ async fn two_carrier_losses_in_one_read_step_each_link_in_its_path_order() {
 /// for the floor's first instant, 1 s after the path became Dead.
 #[tokio::test]
 async fn a_returning_interface_probes_at_once_and_a_returning_carrier_at_the_floor() {
+    // The floor is checked 50 ms either side. With the clock running, time
+    // the test spends descheduled can bring q's probe due before it.
+    crate::time::freeze();
     // (a) The interface of q's transport goes and comes back.
     let (mut nodes, b, _, b2) = two_transports(1280).await;
     exchange(&mut nodes).await;
