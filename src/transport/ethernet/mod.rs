@@ -346,14 +346,14 @@ impl EthernetTransport {
 
     /// Query transport-local congestion indicators.
     ///
-    /// On Linux this is the one reader of the socket's kernel drop count,
-    /// which resets when read: each call takes the drops since the last one
-    /// into the stats total and reports the total. The node's congestion
-    /// sample calls it once a second. Drops on a socket torn down between
-    /// two calls are not counted. Elsewhere the transport cannot see the
-    /// kernel's drops and reports none.
+    /// On Linux and macOS this is the one reader of the socket's kernel drop
+    /// count (`PACKET_STATISTICS`, `BIOCGSTATS`): each call takes the drops
+    /// since the last one into the stats total and reports the total. The
+    /// node's congestion sample calls it once a second. Drops on a socket
+    /// torn down between two calls are not counted. Elsewhere the transport
+    /// cannot see the kernel's drops and reports none.
     pub fn congestion(&self) -> super::TransportCongestion {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             if let Some(socket) = self.binding.socket() {
                 match socket.get_ref().take_drops() {
@@ -369,7 +369,7 @@ impl EthernetTransport {
                 recv_drops: Some(self.stats.kernel_drops.load(Ordering::Relaxed)),
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             super::TransportCongestion::default()
         }

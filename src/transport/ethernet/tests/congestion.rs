@@ -25,7 +25,7 @@ fn unbound_transport() -> (EthernetTransport, super::super::PacketRx) {
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn the_congestion_sample_reports_the_kernel_drop_total() {
     // Before this transport reported a count the node's sampler saw `None`
@@ -41,7 +41,7 @@ fn the_congestion_sample_reports_the_kernel_drop_total() {
     );
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn the_congestion_sample_reports_nothing_where_drops_are_not_read() {
     let (eth, _rx) = unbound_transport();
