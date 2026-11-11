@@ -16,7 +16,8 @@ plain name runs multipath off, and its `_with_multipath_on` sibling runs it
 on. They are two tests and not one loop, since a pin that fails in a loop's
 first pass would never reach the second, and each pin has a line of its own
 in `testing/ignored-tests.txt`. `readings.rs` runs on, but for its one test
-named for off. The other files run off, which is what they test.
+named for off, and `cells.rs`'s heard crossing runs both ways. The other
+files run off, which is what they test.
 
 ## Files
 
@@ -52,11 +53,16 @@ named for off. The other files run off, which is what they test.
   msg1 releases the clamp entry of the session it clears, and, over the BLE
   mock, the initiator's link is verified when it promotes on its msg2.
 - `cells.rs`: five per-peer cells a settlement change has to decide:
-  characterisation tests (`chartest_`) of four, each asserting what master
-  does today, and the test that replaced the fifth's when the index moved,
-  with a coverage map in its module doc. They are evidence, not coverage: a
-  red one means the reading of master was wrong, and a change that moves a
-  cell replaces its test with a reproduction.
+  characterisation tests (`chartest_`) of three, each asserting what master
+  does today, and the tests that replaced the other two's when those cells
+  moved, with a coverage map in its module doc. The characterisation tests
+  are evidence, not coverage: a red one means the reading of master was
+  wrong, and a change that moves a cell replaces its test with a
+  reproduction. Two cells have moved: the index, so that the held link is
+  still named at its pair after a second own dial to its address; and a
+  crossing's move counts the peering heard, which its tests assert at both
+  settings, with the replay memory the move forgets and the restart floor
+  it keeps.
 - `clock.rs`: settlement intervals against steps of the wall clock:
   handshake timers against forward and backward steps, an inbound leg
   holding its msg2 reaped at its timeout, the shown start and idle times of

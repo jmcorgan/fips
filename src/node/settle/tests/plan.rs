@@ -170,6 +170,10 @@ const MOVE: &[(Effect, &str)] = &[
         "self.bloom_state.mark_update_needed(peer_node_addr)",
     ),
     (Effect::BackoffReset, "self.reset_lookup_backoff()"),
+    (
+        Effect::ReplayForget,
+        "if first_heard: self.replayed_msg1s.forget(&peer_node_addr)",
+    ),
 ];
 
 /// The tail of `handle_msg2`'s crossing arm when the peer keeps its inbound

@@ -84,6 +84,9 @@ listed! {
         KeepNote,
         /// Free the session index of the dial a kept crossing closes.
         LeaseFreed,
+        /// Forget the msg1s remembered against replay for a peering the
+        /// move made heard.
+        ReplayForget,
 
         /// Move the link's lookup entry from the path's old pair to its new.
         LinkFollow,
@@ -213,6 +216,7 @@ pub(in crate::node) fn plan(t: &Transition) -> &'static [Effect] {
             Effect::TreeAnnounce,
             Effect::BloomMark,
             Effect::BackoffReset,
+            Effect::ReplayForget,
         ],
         Transition::Keep { .. } => &[
             Effect::KeepNote,

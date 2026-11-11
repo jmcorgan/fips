@@ -184,7 +184,7 @@ impl PeerData {
             last_heartbeat_attempt: _,
             promoted_at: _,
             heard_at: _,
-            heard: _,
+            heard,
             frame_heard: _,
             handshake_msg2: _,
             setup_ephemeral: _,
@@ -214,6 +214,7 @@ impl PeerData {
                     | DataCell::Base
                     | DataCell::Clear
                     | DataCell::New
+                    | DataCell::Set
                     | DataCell::Drop => unsettled(row, t),
                 },
                 DataRow::Spin => match cell {
@@ -229,6 +230,7 @@ impl PeerData {
                     | DataCell::Base
                     | DataCell::Clear
                     | DataCell::New
+                    | DataCell::Set
                     | DataCell::Drop => unsettled(row, t),
                 },
                 DataRow::PeerFilter => match cell {
@@ -242,6 +244,7 @@ impl PeerData {
                     | DataCell::Roll
                     | DataCell::Base
                     | DataCell::New
+                    | DataCell::Set
                     | DataCell::Drop => unsettled(row, t),
                 },
                 DataRow::TreePosition => match cell {
@@ -254,6 +257,7 @@ impl PeerData {
                     | DataCell::Roll
                     | DataCell::Base
                     | DataCell::New
+                    | DataCell::Set
                     | DataCell::Drop => unsettled(row, t),
                 },
                 DataRow::PrevFrames => match cell {
@@ -263,6 +267,7 @@ impl PeerData {
                     | DataCell::Base
                     | DataCell::Clear
                     | DataCell::New
+                    | DataCell::Set
                     | DataCell::Drop => unsettled(row, t),
                 },
                 DataRow::HsLines => match cell {
@@ -272,6 +277,7 @@ impl PeerData {
                     | DataCell::Base
                     | DataCell::Clear
                     | DataCell::New
+                    | DataCell::Set
                     | DataCell::Drop => unsettled(row, t),
                 },
                 DataRow::ReplayBase => match cell {
@@ -283,6 +289,23 @@ impl PeerData {
                     | DataCell::Roll
                     | DataCell::Clear
                     | DataCell::New
+                    | DataCell::Set
+                    | DataCell::Drop => unsettled(row, t),
+                },
+                DataRow::Heard => match cell {
+                    DataCell::Keep => {}
+                    // The stamps stay: the gate measures a heard peering's
+                    // quiet time from the promotion until its first frame.
+                    DataCell::Set => {
+                        if !node_fault!(MoveLeavesUnheard) {
+                            *heard = true;
+                        }
+                    }
+                    DataCell::Reset
+                    | DataCell::Roll
+                    | DataCell::Base
+                    | DataCell::Clear
+                    | DataCell::New
                     | DataCell::Drop => unsettled(row, t),
                 },
                 // Rows only a new record or the record's end changes.
@@ -290,7 +313,6 @@ impl PeerData {
                 | DataRow::TreePending
                 | DataRow::TreeStamp
                 | DataRow::TreeInterval
-                | DataRow::Heard
                 | DataRow::StoredSetup
                 | DataRow::Stats
                 | DataRow::ReplayTotal => match cell {
@@ -300,6 +322,7 @@ impl PeerData {
                     | DataCell::Base
                     | DataCell::Clear
                     | DataCell::New
+                    | DataCell::Set
                     | DataCell::Drop => unsettled(row, t),
                 },
             }

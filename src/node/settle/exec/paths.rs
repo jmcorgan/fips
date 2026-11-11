@@ -149,6 +149,7 @@ impl Node {
                 | Effect::DialLinkRemoved
                 | Effect::KeepNote
                 | Effect::LeaseFreed
+                | Effect::ReplayForget
                 | Effect::UnmarkHeld
                 | Effect::CloseHeld
                 | Effect::Reconnect => {

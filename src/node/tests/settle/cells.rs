@@ -2,17 +2,18 @@
 //! settlement change has to decide, asserted as master does it, so a change
 //! to any of them shows up as a red test rather than passing unseen.
 //!
-//! None of these is coverage of a behaviour the code means to keep; each
-//! records a value that was read from the code and is checked here by a
-//! run. A change that means to move one replaces its test with one asserting
-//! the new value, with a reproduction of why: the index cell's test is one,
-//! and it has no `chartest_` prefix.
+//! None of the `chartest_` tests is coverage of a behaviour the code means
+//! to keep; each records a value that was read from the code and is checked
+//! here by a run. A change that means to move one replaces its test with one
+//! asserting the new value, with a reproduction of why, named without the
+//! prefix: that one is coverage. The index cell's test and the heard cell's
+//! tests are of that kind.
 //!
 //! Coverage map, by what each cell covers:
 //!
 //! | Cell | Test |
 //! | --- | --- |
-//! | heard-from after a crossing moves the smaller node | `chartest_a_crossing_leaves_the_smaller_node_unheard_until_the_peers_first_frame` |
+//! | heard-from after a crossing moves the smaller node, now set at the move | `a_crossing_leaves_the_smaller_node_heard`, both settings, with the replay memory it forgets and the restart floor it keeps |
 //! | the end-to-end session at a restart found in this node's own msg2 | `chartest_a_restart_seen_in_our_msg2_keeps_the_fsp_session_of_an_unheard_peering` |
 //! | the address index after a second own dial to the held link's address | `a_second_own_dial_to_the_held_links_address_leaves_a_link_named_there` |
 //! | the path MTU of a BLE peer that frames move to another link | `chartest_a_ble_peer_moved_by_its_frames_keeps_the_path_mtu_of_its_first_link` |
@@ -25,38 +26,123 @@ use super::super::*;
 use super::crossing::{Second, second_msg1_late};
 use super::{crossed_tcp, loopback_node, with_path};
 
-/// After crossed dials, right after the smaller node moves onto its own
-/// outbound handshake and before any frame of the peer's, the smaller node
-/// counts the peering as not heard from: the move does not set it.
-#[tokio::test]
-async fn chartest_a_crossing_leaves_the_smaller_node_unheard_until_the_peers_first_frame() {
-    let crossed = cross_dials_from(Dial::AnsweredFromFirst, with_path(Config::new(), false)).await;
+/// Cross the dials of two nodes built with multipath `on`, the larger
+/// answering the smaller's dial from the address its own msg1 came from,
+/// and hand the smaller node that msg2, so that it moves onto its own
+/// outbound handshake before any frame of the peer's. Returns the nodes, the
+/// smaller and the larger node's indices, and what the smaller node held of
+/// the larger before the msg2: whether it heard it, and how many msg1s it
+/// remembered against replay.
+async fn crossed_and_moved(on: bool) -> (Vec<TestNode>, usize, usize, (bool, usize)) {
+    let crossed = cross_dials_from(Dial::AnsweredFromFirst, with_path(Config::new(), on)).await;
     let (s, l) = (crossed.s, crossed.l);
     let mut nodes = crossed.nodes;
     let l_addr = *nodes[l].node.node_addr();
-    assert!(
-        !nodes[s]
+    let before = (
+        nodes[s]
             .node
             .get_peer(&l_addr)
             .expect("precondition: the smaller node holds the larger")
             .is_heard(),
-        "precondition: the smaller node, promoted on the peer's msg1, has not heard it"
+        nodes[s].node.replayed_msg1_count(&l_addr),
     );
     hand(&mut nodes[s].node, crossed.msg2).await;
-    let peer = nodes[s]
-        .node
-        .get_peer(&l_addr)
-        .expect("precondition: the smaller node keeps the larger");
     assert_eq!(
-        peer.our_index(),
+        nodes[s].node.get_peer(&l_addr).and_then(|p| p.our_index()),
         Some(crossed.outbound),
         "precondition: the smaller node moved to its outbound session"
     );
-    let heard = peer.is_heard();
-    cleanup_nodes(&mut nodes).await;
+    (nodes, s, l, before)
+}
+
+/// After crossed dials the smaller node, promoted on the peer's msg1 and so
+/// not yet hearing from it, moves onto its own outbound handshake. The
+/// peer's msg2 answered a dial of the node's own, so the peering is one it
+/// set up as initiator and counts as heard at once, before any frame of the
+/// peer's (FRC-1201, Section 5.5).
+async fn crossing_heard(on: bool) {
+    let (mut nodes, s, l, (heard, _)) = crossed_and_moved(on).await;
     assert!(
         !heard,
-        "defect: master no longer leaves the moved peering unheard until the peer's first frame"
+        "precondition: the smaller node, promoted on the peer's msg1, has not heard it"
+    );
+    let l_addr = *nodes[l].node.node_addr();
+    let heard = nodes[s].node.get_peer(&l_addr).map(ActivePeer::is_heard);
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        heard,
+        Some(true),
+        "defect: the smaller node does not count a peering it moved onto its own dial as heard"
+    );
+}
+
+/// [`crossing_heard`] with multipath off.
+#[tokio::test]
+async fn a_crossing_leaves_the_smaller_node_heard() {
+    crossing_heard(false).await;
+}
+
+/// [`crossing_heard`] with multipath on.
+#[tokio::test]
+async fn a_crossing_leaves_the_smaller_node_heard_with_multipath_on() {
+    crossing_heard(true).await;
+}
+
+/// The smaller node of a crossing was promoted on the peer's msg1 while it
+/// heard nothing, so it remembered that msg1 against replay. The move that
+/// makes the peering heard forgets it, as the peering's first authenticated
+/// frame would: the memory bounds the replacements of an unheard peering.
+#[tokio::test]
+async fn a_move_forgets_the_replayed_msg1s_it_was_promoted_by() {
+    let (mut nodes, s, l, (_, remembered)) = crossed_and_moved(false).await;
+    assert!(
+        remembered > 0,
+        "precondition: the smaller node remembered the msg1 it was promoted on"
+    );
+    let l_addr = *nodes[l].node.node_addr();
+    let left = nodes[s].node.replayed_msg1_count(&l_addr);
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        left, 0,
+        "defect: the move that made the peering heard kept the msg1s remembered against replay"
+    );
+}
+
+/// Two seconds after a crossing moved the smaller node onto its own dial,
+/// with no frame of the peer's yet, the larger node restarts and dials it.
+/// Two seconds is past an unheard peering's one-second floor and inside a
+/// heard one's fifteen, and the moved peering is heard, so the restart msg1
+/// is refused and the peering stays on the session it moved to.
+#[tokio::test]
+async fn a_move_heard_at_a_restart_gate_keeps_the_fifteen_second_floor() {
+    let (mut nodes, s, l, _) = crossed_and_moved(false).await;
+    let l_addr = *nodes[l].node.node_addr();
+    let moved = nodes[s]
+        .node
+        .get_peer(&l_addr)
+        .map(|p| (p.link_id(), p.our_index()));
+    crate::time::advance(Duration::from_secs(2));
+    let restarted = restarted_node(&nodes[l], with_path(Config::new(), false));
+    let mut old = std::mem::replace(&mut nodes[l], restarted);
+    cleanup_nodes(std::slice::from_mut(&mut old)).await;
+    while nodes[s].packet_rx.try_recv().is_ok() {}
+    initiate_handshake(&mut nodes, l, s).await;
+    let mut msg1 = std::iter::from_fn(|| nodes[s].packet_rx.try_recv().ok())
+        .find(|p| {
+            crate::proto::fmp::wire::CommonPrefix::parse(&p.data)
+                .is_some_and(|c| c.phase == crate::proto::fmp::wire::PHASE_MSG1)
+        })
+        .expect("precondition: the restarted node's msg1 is queued at the smaller node");
+    msg1.timestamp_ms = Node::now_ms();
+    nodes[s].node.handle_msg1(msg1).await;
+    let after = nodes[s]
+        .node
+        .get_peer(&l_addr)
+        .map(|p| (p.link_id(), p.our_index()));
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        after, moved,
+        "defect: a restart msg1 inside the heard floor replaced the peering a move made heard"
     );
 }
 

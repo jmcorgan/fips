@@ -181,6 +181,7 @@ impl Node {
             Effect::DialLinkRemoved => cross::dial_removed(self, r).await,
             Effect::KeepNote => cross::keep_note(self, r).await,
             Effect::LeaseFreed => cross::lease_freed(self, r).await,
+            Effect::ReplayForget => cross::replay_forget(self, r).await,
 
             Effect::LinkFollow => paths::link_follow(self, r),
             Effect::FollowNote => paths::follow_note(self, r),

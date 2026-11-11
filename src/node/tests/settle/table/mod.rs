@@ -138,6 +138,8 @@ pub(super) fn expect(cell: Cell) -> Expect {
         | Cell::NotRun
         | Cell::NotReseeded
         | Cell::NotStamped => Expect::Kept,
+        // Set on a peering that was unheard, kept on one heard already.
+        Cell::Data(DataCell::Set) => Expect::Stated,
         Cell::Data(
             DataCell::Reset
             | DataCell::Roll
@@ -227,6 +229,7 @@ pub(super) fn expect(cell: Cell) -> Expect {
         | Cell::StampedIfHeard
         | Cell::NotedIfNoFrame
         | Cell::NotedIfUnheard
+        | Cell::ForgottenIfUnheard
         | Cell::NotedDead
         | Cell::NotedDeadThenRemoved
         | Cell::Registered

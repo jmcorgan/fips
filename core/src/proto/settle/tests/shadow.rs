@@ -11,8 +11,6 @@
 //!
 //! Some differences are known and named, each with its resync:
 //!
-//! - **Heard after a move**: heard is not set by a move; the shadow takes
-//!   the party's heard after each move.
 //! - **The dampener's stamp**: only a msg1 restart or replacement stamps
 //!   the dampener. The model's dampener rule gives the same, so it needs no
 //!   resync.
@@ -127,8 +125,6 @@ pub enum Entry {
 /// A named difference from the model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Named {
-    /// Heard is not set by a move.
-    HeardAfterMove,
     /// The late second dial keeps no fallback.
     LateSecondDial,
     /// The replay memory refused a msg1 the model accepts.
@@ -349,14 +345,6 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
                 {
                     p.fallback = None;
                     found.named.push((peer, Named::LateSecondDial));
-                }
-                if rec.change == Some(Transition::Move)
-                    && s.change == rec.change
-                    && let Some(p) = j.peering.as_mut()
-                    && p.heard != rec.heard
-                {
-                    p.heard = rec.heard;
-                    found.named.push((peer, Named::HeardAfterMove));
                 }
                 let model_refused = s.refused.map(Refusal::Gate);
                 let named = match rec.refused {

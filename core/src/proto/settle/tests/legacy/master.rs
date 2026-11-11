@@ -11,7 +11,8 @@
 //! timers and the feeds of the bundles. Its gates read the clock the node
 //! reads, the peer clock, which a step of the wall clock does not move. A
 //! swap moves the session and keeps the peer's link record, as
-//! `move_session` does, and starts the bundle again at the msg2's pair.
+//! `move_session` does, counts the peering heard (FRC-1201 Section 5.5),
+//! and starts the bundle again at the msg2's pair.
 //!
 //! Its rekey and its paths are the machines': a peer's [`Machines`]
 //! (`../joint/machines.rs`) take each same-epoch msg1, each own rekey's
@@ -1374,12 +1375,19 @@ impl MasterParty {
                 };
                 let (machines, events) =
                     old.machines.moved(&mut self.s.kit, now, setup, src, local);
+                // The move holds this node's own dial, so the peering is
+                // heard (FRC-1201 Section 5.5), and the memory of the msg1s
+                // that promoted it unheard goes, as its first frame's would.
+                let heard = old.heard || !fault!(MoveLeavesUnheard);
+                if heard && !old.heard {
+                    self.s.replayed.remove(&id.0);
+                }
                 self.s.peers.insert(
                     id.0,
                     Peer {
                         link: old.link,
                         origin: hs,
-                        heard: old.heard,
+                        heard,
                         promoted: old.promoted,
                         last: old.last,
                         answered: true,

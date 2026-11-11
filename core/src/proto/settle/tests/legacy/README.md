@@ -90,6 +90,15 @@ dial rule (`feeds.rs`). The link-dead timer was left out of this model at
 `2ba790b2`, since the world then had none; a joint node runs it since the
 world grew one, so this model does too.
 
+### The crossed-dial fix
+
+The node changes these rules in the same work, and this model with them, so
+they are not `db946033`'s:
+
+| Rule | At `db946033` | Here |
+| --- | --- | --- |
+| A move's heard (FRC-1201 Section 5.5) | the peering keeps the heard it had, so one promoted on the peer's msg1 is unheard until the peer's first frame | the move counts the peering heard, and forgets the msg1s remembered against replay for it if it was unheard, as that first frame would. `MoveLeavesUnheard` puts back the old heard, and with it the memory |
+
 ## What `maint.rs` transcribes
 
 The deployed node, at the tag `v0.5.3` (`f4a5b4a8`), with the line ranges

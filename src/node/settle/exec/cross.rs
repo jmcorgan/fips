@@ -50,6 +50,9 @@ pub(in crate::node) struct Facts {
     /// The session index of the dial a kept crossing closes, freed when
     /// run.
     pub(in crate::node) lease: Option<IndexLease>,
+    /// The move made the peering heard: it was unheard before the move and
+    /// is heard after it.
+    pub(in crate::node) first_heard: bool,
 }
 
 impl Run {
@@ -217,5 +220,15 @@ pub(super) async fn lease_freed(node: &mut Node, r: &mut Run) {
         let _ = node
             .index_allocator
             .free(SessionIndex::new(lease.release()));
+    }
+}
+
+/// Forget the msg1s remembered against replay for a peering the move made
+/// heard, as its first authenticated frame would: the memory bounds the
+/// replacements of an unheard peering, and this one is heard.
+pub(super) async fn replay_forget(node: &mut Node, r: &mut Run) {
+    // The mutation lane's break: the memory stays until the peer's removal.
+    if r.crossing().first_heard && !node_fault!(MoveKeepsReplayMemory) {
+        node.replayed_msg1s.forget(&r.peer);
     }
 }

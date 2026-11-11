@@ -85,8 +85,8 @@ pub(crate) enum Fault {
     MoveKeepsInboundLink,
     /// A move hands the per-peer data no reset.
     MoveNoReset,
-    /// A move sets the peering heard, as the model does.
-    MoveSetsHeard,
+    /// A move leaves the peering unheard until the peer's first frame.
+    MoveLeavesUnheard,
     /// An own dial completing on a held link this node dialed is judged by
     /// the tie-break alone.
     IgnoreOwnDial,
@@ -284,7 +284,7 @@ impl Fault {
         Self::MoveKeepsOldPair,
         Self::MoveKeepsInboundLink,
         Self::MoveNoReset,
-        Self::MoveSetsHeard,
+        Self::MoveLeavesUnheard,
         Self::IgnoreOwnDial,
         Self::ModelFallbackInCore,
         Self::ReplacementUngated,

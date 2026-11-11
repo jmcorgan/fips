@@ -498,7 +498,10 @@ pub const ROWS: &[Row] = &[
             SCRIPTED_ON,
         ],
     ),
-    (Fault::MoveSetsHeard, &[NAMED]),
+    (
+        Fault::MoveLeavesUnheard,
+        &[SIM_REACHED, PARITY_MODEL, PARITY_JOINT],
+    ),
     (
         Fault::IgnoreOwnDial,
         &[

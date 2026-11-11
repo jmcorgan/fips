@@ -124,6 +124,11 @@ MemoryOnWall	red	fips-mesh	node::tests::settle::clock::a_replay_memory_entry_age
 MemoryVerdictOnPacketStamp	red	fips-mesh	node::tests::settle::clock::a_forward_wall_step_does_not_empty_the_replay_memory
 MemoryVerdictOnPacketStamp	red	fips-mesh	node::tests::handshake::nine_distinct_captures_in_fifteen_seconds_promote_at_most_eight	every promotion of an unheard peering is remembered
 MemoryNeverExpires	red	fips-mesh	node::tests::settle::clock::a_replay_memory_entry_ages_out_after_the_interval_across_a_backward_wall_step
+MoveKeepsReplayMemory	red	fips-mesh	node::tests::settle::cells::a_move_forgets_the_replayed_msg1s_it_was_promoted_by
+MoveLeavesUnheard	red	fips-mesh	node::tests::settle::cells::a_crossing_leaves_the_smaller_node_heard
+MoveLeavesUnheard	red	fips-mesh	node::tests::settle::cells::a_crossing_leaves_the_smaller_node_heard_with_multipath_on
+MoveLeavesUnheard	red	fips-mesh	node::tests::settle::cells::a_move_heard_at_a_restart_gate_keeps_the_fifteen_second_floor
+MoveLeavesUnheard	red	fips-mesh	peer::data::tests::a_move_resets_what_its_cells_say_and_carries_the_rest
 # Transport lifecycle rules (src/transport/tests/conformance and the BLE node tests).
 DrainAbortsAtOnce	red	fips-mesh	transport::conformance::tcp::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
 DrainAbortsAtOnce	red	fips-mesh	transport::conformance::tor::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer

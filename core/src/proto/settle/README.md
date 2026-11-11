@@ -127,7 +127,8 @@ to the model, and nothing in `model/` refers to a core item; the scans in
   node does; only an operator disconnect, an orphaned bundle and `close`
   apply the close rule to a held peer's link. A crossing's losing link and
   the link a late second dial moves off are retired by the close rule.
-- A move does not set the peering heard, as the current node does not.
+- A move sets the peering heard, as FRC-1201 Section 5.5 counts a
+  peering this node set up as initiator, and as the node does.
 - Every deadline comes from `params::deadline`, which saturates at the
   end of the instant type's range rather than overflowing.
 - Only an accepted restart or replacement that tears down a heard

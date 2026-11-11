@@ -233,6 +233,8 @@ pub(crate) enum DataCell {
     Keep,
     /// Starts again, keeping what the row's own reset says it carries.
     Reset,
+    /// The flag set, the rest of the row kept.
+    Set,
     /// Rolled over to a new period.
     Roll,
     /// The base moves up to the total, which stays.
@@ -447,6 +449,8 @@ pub(crate) enum Cell {
     NotedIfNoFrame,
     /// The msg1's ephemeral noted if the peering is unheard.
     NotedIfUnheard,
+    /// The peer's entries forgotten if the peering was unheard.
+    ForgottenIfUnheard,
 
     /// Noted as a dead link.
     NotedDead,
@@ -584,6 +588,10 @@ pub(crate) fn data_cell(row: DataRow, t: &Transition) -> DataCell {
         | Transition::Release { .. } => DataCell::Keep,
         Transition::Move { built, .. } => match row {
             DataRow::Mmp | DataRow::Spin if *built => DataCell::Reset,
+            // The peer answered this node's dial, so the peering is one it
+            // set up as initiator, heard once that handshake completed
+            // (FRC-1201, Section 5.5).
+            DataRow::Heard if *built => DataCell::Set,
             DataRow::HsLines => DataCell::Roll,
             DataRow::ReplayBase => DataCell::Base,
             DataRow::Mmp
@@ -981,7 +989,8 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
                     Cell::NotedIfUnheard
                 }
             }
-            T::Move { .. }
+            T::Move { built: true, .. } => Cell::ForgottenIfUnheard,
+            T::Move { built: false, .. }
             | T::Keep { .. }
             | T::Cutover { .. }
             | T::Restarted

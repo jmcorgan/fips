@@ -2284,6 +2284,8 @@ impl Node {
 
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     let suppressed = peer.replay_suppressed_count();
+                    // Read before the move, which may make the peering heard.
+                    let unheard = !peer.is_heard();
                     let epoch = diag::epoch_tag(&outbound_session);
                     // The peer's link machine is closed and rebuilt on the
                     // outbound session: what it held is unbound and freed.
@@ -2324,6 +2326,7 @@ impl Node {
                     // the old machine, or none, and hands the index back in
                     // its outputs.
                     let built = peer.our_index() == Some(outbound_our_index);
+                    let first_heard = unheard && peer.is_heard();
 
                     // The rest of the move, in its order: the machines'
                     // outputs, the path feeds, what follows a move to
@@ -2356,6 +2359,7 @@ impl Node {
                         our_index: outbound_our_index,
                         their_index: header.sender_idx,
                     });
+                    facts.first_heard = first_heard;
                     self.run(&mut run).await;
                     return;
                 }

@@ -12,8 +12,8 @@
 //!
 //! The site's follow-up tree announce is held behind the rate limit: a send
 //! writes the record's announce stamp, as any send does, and that is not
-//! the transition's cell (the record's cells are "keep" at a move and at a
-//! kept link). The test still requires the site to have tried to announce,
+//! the transition's cell (the record's announce cells are "keep" at a move
+//! and at a kept link). The test still requires the site to have tried to announce,
 //! by the node's count of rate-limited announces.
 
 use super::super::super::crossed_dial::{Dial, cross_dials_from, hand, phase};
@@ -44,6 +44,10 @@ struct MoveScript {
     /// A connection at a pair the readings cover was asked to close: the
     /// dial's, where no other peer proves its pair, or a released path's.
     closed: bool,
+    /// The peering was unheard before the move, promoted on the peer's
+    /// msg1: the move makes it heard and forgets the msg1s remembered
+    /// against replay, the one `dirty` planted among them.
+    unheard: bool,
 }
 
 /// `Changed` if `changed`, else `Kept`.
@@ -90,6 +94,8 @@ fn move_outcomes(s: MoveScript) -> Vec<(Row, Outcome)> {
         (Row::LookupBackoff, Outcome::Changed),
         (Row::PathCloses, by(s.own || s.closed)),
         (Row::PathListings, by(s.on)),
+        (Row::Data(DataRow::Heard), by(s.unheard)),
+        (Row::Replayed, by(s.unheard)),
     ];
     if s.own {
         rows.push((Row::Pin, Outcome::Changed));
@@ -409,6 +415,7 @@ async fn tcp_crossing_won(on: bool, zero_smaller: bool) {
         reseeded: false,
         own: false,
         closed: false,
+        unheard: true,
     };
     let also = [x.from[s].clone(), at(msg2.transport_id, &msg2.remote_addr)];
     run_move(&mut x.nodes[s].node, &l_addr, msg2, &also, None, t, script).await;
@@ -463,6 +470,7 @@ async fn loopback_crossing_won(on: bool) {
         reseeded: true,
         own: false,
         closed: false,
+        unheard: true,
     };
     let also = [
         at(nodes[s].transport_id, &nodes[l].addr),
@@ -586,6 +594,7 @@ async fn second_dial_answered(on: bool, dialer_larger: bool) {
         reseeded: false,
         own: true,
         closed: false,
+        unheard: false,
     };
     let also = [at(x.msg2.transport_id, &x.msg2.remote_addr)];
     run_move(
@@ -707,6 +716,7 @@ async fn own_dial_on_an_aged_link(on: bool) {
         reseeded: false,
         own: true,
         closed: true,
+        unheard: false,
     };
     let spare = spare(&nodes[s].node, &l_addr);
     run_move(&mut nodes[s].node, &l_addr, msg2, &also, None, t, script).await;
@@ -924,6 +934,7 @@ async fn ble_crossing(on: bool) {
         reseeded: false,
         own: false,
         closed: false,
+        unheard: true,
     };
     run_move(&mut nodes[0].node, &n1, msg2, &also, Some(&a1), won, script).await;
 

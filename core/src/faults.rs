@@ -110,11 +110,17 @@ faults! {
     MemoryVerdictOnPacketStamp,
     /// The replay memory never ages an entry out.
     MemoryNeverExpires,
+    /// A move that makes a peering heard keeps the replay memory of the
+    /// msg1s that promoted it unheard.
+    MoveKeepsReplayMemory,
     /// The node's interval clock reads the wall clock.
     IntervalOnWall,
     /// An authenticated frame marks the peer heard without moving the
     /// instant it was last heard.
     TouchKeepsHeardInstant,
+    /// A move onto this node's own dial leaves the peering unheard until
+    /// the peer's first frame.
+    MoveLeavesUnheard,
     /// A peer never sent a tree announce counts as sent one at instant 0.
     TreeNoneAsZero,
     /// The tree announce rate limit reads the wall clock.

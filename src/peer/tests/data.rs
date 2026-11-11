@@ -469,6 +469,7 @@ fn expected(mut data: PeerData, t: &Transition) -> PeerData {
             // The spin bit restarts in MMP's reset.
             (DataRow::Spin, DataCell::Reset) => {}
             (DataRow::PrevFrames, DataCell::Reset) => data.prev_frames = 0,
+            (DataRow::Heard, DataCell::Set) => data.heard = true,
             (DataRow::HsLines, DataCell::Roll) => data.hs_lines.roll(),
             (DataRow::ReplayBase, DataCell::Base) => {
                 data.replay_base = data.replay_total.load(Ordering::Relaxed);
@@ -637,6 +638,11 @@ fn a_move_resets_what_its_cells_say_and_carries_the_rest() {
             assert_eq!(
                 after.prev_frames, 5,
                 "defect: {t:?} reset the previous session's frames"
+            );
+            assert_eq!(
+                (before.heard, after.heard),
+                (false, built),
+                "defect: {t:?} did not set an unheard peering heard exactly when it moved"
             );
             let highest = after.mmp.as_ref().unwrap().receiver.highest_counter();
             if built {
