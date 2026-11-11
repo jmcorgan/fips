@@ -121,6 +121,13 @@ const AGED: Test = (
     "against_a_model_of_master_a_dial_on_the_peers_aged_link_leaves_a_pending_the_peer_cannot_adopt",
 );
 
+/// The right-link property on a crossing both ends settled on the larger
+/// node's dial, which leaves the smaller node inbound.
+const RIGHT_LINK: Test = (
+    ORACLE,
+    "right_link_fires_when_both_ends_of_a_crossing_settle_on_the_larger_nodes_dial",
+);
+
 /// The table and a shell's record reading the bundle's reports one way.
 const MIRROR: Test = (
     TABLE,
@@ -262,6 +269,13 @@ pub const ROWS: &[Row] = &[
     (
         Fault::KeepIgnored,
         &[(LINKS, "a_released_path_marked_keep_closes_nothing")],
+    ),
+    (
+        Fault::ReleasedSetupIndexed,
+        &[(
+            LINKS,
+            "a_released_setup_address_leaves_the_index_and_a_roamed_one_stays",
+        )],
     ),
     (
         Fault::UnheardInclusive,
@@ -447,6 +461,14 @@ pub const ROWS: &[Row] = &[
                 JOINT_PARTY,
                 "a_crossing_on_a_connection_oriented_transport_leaves_the_smaller_node_at_its_dials_pair_on_real_machines",
             ),
+            (
+                REGRESS,
+                "a_crossing_over_two_transports_settles_on_one_session",
+            ),
+            (
+                SIM,
+                "seeded_clean_runs_on_every_transport_model_keep_the_properties_and_heal",
+            ),
             SCRIPTED_OFF,
             SCRIPTED_ON,
         ],
@@ -463,18 +485,41 @@ pub const ROWS: &[Row] = &[
                 "a_late_second_dial_in_order_retires_the_link_moved_off",
             ),
             AGREES,
-            (
-                REGRESS,
-                "a_crossing_over_two_transports_settles_on_one_session",
-            ),
-            SIM_STREAM,
-            SIM_MIXED,
-            (
-                SIM,
-                "seeded_clean_runs_on_every_transport_model_keep_the_properties_and_heal",
-            ),
+            // Not here: the crossing over two transports, the seeded clean
+            // runs, and the connection-oriented and two-transport seeded
+            // sets. Under this switch the kept inbound link's setup path is
+            // released at the renewal, so its address leaves the derived
+            // index and `ConnectionsInUse` no longer finds it in use on the
+            // closed connection. Each still reds with `ReleasedSetupIndexed`
+            // on as well, and a row holds one switch; the first two are on
+            // `MoveKeepsOldPair`'s row, the seeded sets on others.
             SCRIPTED_OFF,
             SCRIPTED_ON,
+            (
+                FINDINGS,
+                "against_a_model_of_the_node_crossed_dials_on_one_connectionless_transport_leave_the_smaller_node_on_the_link_it_dialed_smaller_first",
+            ),
+            (
+                FINDINGS,
+                "against_a_model_of_the_node_crossed_dials_on_one_connectionless_transport_leave_the_smaller_node_on_the_link_it_dialed_larger_first",
+            ),
+            (
+                FINDINGS,
+                "against_a_model_of_the_node_crossed_dials_on_a_connection_oriented_transport_leave_the_smaller_node_on_the_link_it_dialed_smaller_first",
+            ),
+            (
+                FINDINGS,
+                "against_a_model_of_the_node_crossed_dials_on_a_connection_oriented_transport_leave_the_smaller_node_on_the_link_it_dialed_larger_first",
+            ),
+            PARITY_MODEL,
+            (
+                LEGACY,
+                "a_model_of_the_node_off_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
+            ),
+            (
+                LEGACY,
+                "a_model_of_the_node_on_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
+            ),
         ],
     ),
     (
@@ -491,7 +536,10 @@ pub const ROWS: &[Row] = &[
             SCRIPTED_ON,
         ],
     ),
-    (Fault::MoveSetsHeard, &[NAMED]),
+    (
+        Fault::MoveLeavesUnheard,
+        &[SIM_REACHED, PARITY_MODEL, PARITY_JOINT],
+    ),
     (
         Fault::IgnoreOwnDial,
         &[
@@ -753,47 +801,9 @@ pub const ROWS: &[Row] = &[
             "a_split_of_another_cause_on_a_shaped_path_is_not_exempt",
         )],
     ),
-    (
-        Fault::RightLinkOff,
-        &[
-            (
-                FINDINGS,
-                "against_a_model_of_master_crossed_dials_on_one_connectionless_transport_leave_the_smaller_node_on_the_wrong_link_smaller_first",
-            ),
-            (
-                FINDINGS,
-                "against_a_model_of_master_crossed_dials_on_one_connectionless_transport_leave_the_smaller_node_on_the_wrong_link_larger_first",
-            ),
-            (
-                FINDINGS,
-                "against_a_model_of_master_crossed_dials_on_a_connection_oriented_transport_leave_the_smaller_node_on_the_wrong_link_smaller_first",
-            ),
-            (
-                FINDINGS,
-                "against_a_model_of_master_crossed_dials_on_a_connection_oriented_transport_leave_the_smaller_node_on_the_wrong_link_larger_first",
-            ),
-        ],
-    ),
-    (
-        Fault::RightLinkPairOnly,
-        &[
-            (
-                FINDINGS,
-                "against_a_model_of_master_crossed_dials_on_one_connectionless_transport_leave_the_smaller_node_on_the_wrong_link_smaller_first",
-            ),
-            (
-                FINDINGS,
-                "against_a_model_of_master_crossed_dials_on_one_connectionless_transport_leave_the_smaller_node_on_the_wrong_link_larger_first",
-            ),
-        ],
-    ),
-    (
-        Fault::RightLinkNoDirection,
-        &[(
-            ORACLE,
-            "right_link_fires_when_both_ends_of_a_crossing_settle_on_the_larger_nodes_dial",
-        )],
-    ),
+    (Fault::RightLinkOff, &[RIGHT_LINK]),
+    (Fault::RightLinkPairOnly, &[RIGHT_LINK]),
+    (Fault::RightLinkNoDirection, &[RIGHT_LINK]),
     (
         Fault::OneSessionNoSplit,
         &[
@@ -1090,20 +1100,20 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
         "a measurement run by hand and ignored, which asserts nothing: it prints how deep the cold start is explored within a time limit, and the depth it gives is asserted by the cold start's reach tests",
     ),
     (
-        "the_model_of_master_against_itself_on_every_start_shows_the_three_defects",
-        "a whole sweep of the model on machines at each setting, past a row's cost; the crossing tests carry `RightLinkOff`",
+        "the_model_of_master_against_itself_on_every_start_shows_the_two_defects_and_no_wrong_link",
+        "a whole sweep of the model on machines at each setting, past a row's cost; the crossing tests carry `MoveKeepsInboundLink`, and the late-dial and aged-link tests `OneSessionNoSplit` and `OneSessionNoPending`",
     ),
     (
         "the_model_of_master_with_multipath_on_against_itself_on_a_crossing_of_two_transports",
-        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `RightLinkOff`",
+        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `MoveKeepsInboundLink`",
     ),
     (
-        "the_model_of_master_with_multipath_on_shows_the_wrong_link_on_a_connection_oriented_crossing",
-        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `RightLinkOff`",
+        "the_model_of_master_with_multipath_on_holds_the_dialed_link_on_a_connection_oriented_crossing",
+        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `MoveKeepsInboundLink`",
     ),
     (
         "the_model_of_master_with_multipath_on_against_itself_on_a_crossing_during_a_rekey",
-        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `RightLinkOff`",
+        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `MoveKeepsInboundLink`",
     ),
     (
         "an_abstract_far_ends_frame_opens_at_the_machine_holding_its_session",

@@ -107,15 +107,15 @@ can rebuild any state by replaying the path that reached it.
   but 7 and 12.
 - `shadow.rs`: a party's log replayed through one model `Judge` per peer,
   the first difference per peer reported as `Classified` or `Fresh`, with
-  the named differences and their resyncs (heard after a move, the late
-  second dial's fallback, the replay memory, the silent-session
-  back-off, an ephemeral the rekey machine recorded when it refused it
-  (switch `RecordedCompared`), the rekey machine's cutover at the peer's
-  frame (`FrameCutoverMissed`), the larger node's
-  yielded rekey, an own rekey ended with its peering, a frame under a
-  drained session counted as heard, and a msg1 from a pair the party's
-  bundle holds proven, which the model reads as off the link and is
-  compared as arriving at the setup pair (`ProvenCompared`)).
+  the named differences and their resyncs (the late second dial's
+  fallback, the replay memory, the silent-session back-off, an ephemeral
+  the rekey machine recorded when it refused it (switch
+  `RecordedCompared`), the rekey machine's cutover at the peer's frame
+  (`FrameCutoverMissed`), the larger node's yielded rekey, an own rekey
+  ended with its peering, a frame under a drained session counted as
+  heard, and a msg1 from a pair the party's bundle holds proven, which the
+  model reads as off the link and is compared as arriving at the setup
+  pair (`ProvenCompared`)).
   `resync_close` gives the close a node with no fallback makes at a late
   second dial's move. Its tests show the late dial's close and the
   proven-path comparison on planted logs.

@@ -6,8 +6,7 @@
 //!   dials hold each other on one session that carries a heartbeat each way;
 //! - through the shell audit (`settle::audit::audit`): one
 //!   session and nothing left unadoptable, the right link record, the maps
-//!   agreeing, every open connection in use, with the start's waivers
-//!   passed where the node recorded them;
+//!   agreeing, every open connection in use;
 //! - the node's live audit, inherited: in a debug build every packet a node
 //!   is handed runs it, and a breach panics there, naming its clause.
 //!
@@ -18,15 +17,14 @@
 #[cfg(unix)]
 use super::super::super::link_index_audit;
 use super::super::super::spanning_tree::cleanup_nodes;
-use super::super::audit::{Breach, Exempt, audit};
+use super::super::audit::{Breach, audit};
 use super::super::settled;
 use super::explore::{Job, build, heal, jobs, named, parallel, paths, walk, walk_from};
 use super::model::Tap;
 #[cfg(unix)]
 use super::starts::pooled;
-use super::starts::{Clause, Order, PINS, Reach, Start, Waive, starts};
+use super::starts::{Clause, Order, PINS, Reach, Start, starts};
 use super::world::{Medium, World};
-use crate::node::settle::Waiver;
 use std::sync::{Arc, Mutex};
 
 /// What an oracle found at a leaf.
@@ -48,64 +46,14 @@ fn clause(breach: &Breach) -> Clause {
         Breach::Unadoptable { .. } => Clause::Unadoptable,
         Breach::RightLink { .. } => Clause::RightLink,
         Breach::MapsAgree { .. } => Clause::MapsAgree,
-        Breach::ConnectionsInUse { .. } => Clause::ConnectionsInUse,
+        Breach::ConnectionsInUse { .. } | Breach::Unconnected { .. } => Clause::ConnectionsInUse,
     }
-}
-
-/// The waivers of `start` that the node they name recorded in `world`, in
-/// the world's indices for `order`.
-fn recorded(world: &World, start: &Start, order: Order) -> Vec<Exempt> {
-    let mut out = Vec::new();
-    for waive in start.waivers {
-        let (exempt, at, peer, waiver) = match *waive {
-            Waive::CrossedInbound(a, b) => {
-                let (node, peer) = (order.node(a), order.node(b));
-                (
-                    Exempt::CrossedInbound { node, peer },
-                    node,
-                    peer,
-                    Waiver::CrossedInbound,
-                )
-            }
-            Waive::MovedOwnDial(a, b) => {
-                let (node, peer) = (order.node(a), order.node(b));
-                (
-                    Exempt::MovedOwnDial { node, peer },
-                    node,
-                    peer,
-                    Waiver::MovedOwnDial,
-                )
-            }
-            Waive::HeldLinkEntry(a, b) => {
-                let (node, peer) = (order.node(a), order.node(b));
-                (
-                    Exempt::HeldLinkEntry { node, peer },
-                    node,
-                    peer,
-                    Waiver::HeldLinkEntry,
-                )
-            }
-        };
-        let node = &world.nodes[at].node;
-        if node
-            .get_peer(world.nodes[peer].node.node_addr())
-            .is_some_and(|p| node.links.carries(&p.link_id(), waiver))
-        {
-            out.push(exempt);
-        }
-    }
-    out
 }
 
 /// Heal `world`, a leaf of `start` in `order`, and check it: every pair the
-/// start dials is settled, then the shell audit, with the start's recorded
-/// waivers passed unless `lifted`. Every finding, in that order.
-pub(super) async fn judge(
-    world: &mut World,
-    start: &Start,
-    order: Order,
-    lifted: bool,
-) -> Vec<Finding> {
+/// start dials is settled, then the shell audit. Every finding, in that
+/// order.
+pub(super) async fn judge(world: &mut World, start: &Start, order: Order) -> Vec<Finding> {
     let mut out = Vec::new();
     if !heal(world, start, order).await {
         out.push(Finding {
@@ -124,12 +72,7 @@ pub(super) async fn judge(
             });
         }
     }
-    let exempt = if lifted {
-        Vec::new()
-    } else {
-        recorded(world, start, order)
-    };
-    for breach in audit(&mut world.nodes, &exempt).await {
+    for breach in audit(&mut world.nodes).await {
         out.push(Finding {
             clause: clause(&breach),
             node: Some(breach.node()),
@@ -150,7 +93,7 @@ async fn walked((start, order, on): Job, at: Arc<Mutex<String>>) -> Vec<String> 
         let Some(mut world) = walk(&start, order, on, path).await else {
             continue;
         };
-        let found = judge(&mut world, &start, order, false).await;
+        let found = judge(&mut world, &start, order).await;
         cleanup_nodes(&mut world.nodes).await;
         for f in found {
             if !start.pinned.contains(&f.clause) {
@@ -287,8 +230,8 @@ fn a_crossing_with_the_worker_pool_started_offers_the_moved_session_with_multipa
 }
 
 /// Each pinned defect the map gives a start is found there: the start's
-/// scripted path, in the pin's order and at its setting, healed and checked
-/// with every waiver lifted, breaks the pin's clause at the pin's node.
+/// scripted path, in the pin's order and at its setting, healed and checked,
+/// breaks the pin's clause at the pin's node.
 /// Each start, order and setting runs once for all the pins it holds.
 #[tokio::test]
 async fn the_explorer_finds_each_pinned_defect_at_its_oracle() {
@@ -311,7 +254,7 @@ async fn the_explorer_finds_each_pinned_defect_at_its_oracle() {
         let mut world = walk(start, order, on, None)
             .await
             .expect("precondition: the scripted path is a path");
-        let found = judge(&mut world, start, order, true).await;
+        let found = judge(&mut world, start, order).await;
         cleanup_nodes(&mut world.nodes).await;
         for (pin, pinned_on, reach) in PINS {
             let Reach::Start {

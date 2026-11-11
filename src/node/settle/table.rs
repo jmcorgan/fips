@@ -172,7 +172,9 @@ macro_rules! rows {
 rows! {
     /// The link record and the peer's `link_id`.
     Link,
-    /// The reverse lookup's entries for the peer's link.
+    /// The reverse lookup's entries for the peer's link, derived from the
+    /// link records: each live link's setup pair, kept while the link lives,
+    /// and its proven paths.
     Index,
     /// The bundle's paths and which is active.
     Paths,
@@ -281,6 +283,9 @@ pub(crate) enum Cell {
     OldClosedNewAdopted,
     /// The dial's link closed, the peer's kept.
     DialClosed,
+    /// The dial's link held as the peer's, as the link it dialed, and the
+    /// link the peer left closed.
+    DialHeldLeftClosed,
 
     /// The dial's entry, carried from the dial.
     FromDial,
@@ -290,20 +295,23 @@ pub(crate) enum Cell {
     OldDroppedFromDial,
     /// The old entry dropped, then as [`Cell::FromLeg`].
     OldDroppedFromLeg,
-    /// Each released pair's entry unclaimed, the new pair not claimed and the
-    /// dial's dropped.
-    ReleasedUnclaimedDialDropped,
-    /// Each released pair's entry unclaimed, the new pair not claimed and the
-    /// leg's dropped, its key handed back to a live link it displaced.
-    ReleasedUnclaimedLegDropped,
+    /// The link the peer left named nowhere, and the dial's link, which
+    /// the peer now holds, named at its setup pair and its proven paths.
+    LeftDroppedDialNamed,
+    /// The leg named nowhere, and the link the peer holds named at its
+    /// setup pair and its proven paths, the pair it moved to among them.
+    LegDroppedHeldNamed,
     /// The dial's entry dropped.
     DialDropped,
-    /// The leg's entry dropped, its key handed back to a live link it
-    /// displaced.
+    /// The leg named nowhere, so its pair names the live link it named
+    /// before the leg, if that link still uses it.
     LegDropped,
-    /// The entry moved, if it names the link.
+    /// The moved path's new pair named, and the pair it left unnamed but
+    /// where the link was set up.
     Followed,
-    /// The new pair claimed, if free.
+    /// The setup pair's entry kept, and the roamed pair's added.
+    SetupKeptRoamedAdded,
+    /// The new pair named, which a proven path already is.
     Claimed,
     /// The entry unclaimed, only if it names the link and is not the pair of
     /// the link's own record, which keeps naming it while it lives.
@@ -378,6 +386,9 @@ pub(crate) enum Cell {
     DialRemovedPeerStepped,
     /// The leg's machine removed; the peer's is not told.
     LegRemoved,
+    /// The dial's removed, the peer's keyed under the dial's link with its
+    /// timers and then told how the crossing resolved.
+    DialRemovedPeerRekeyed,
     /// Stepped first and then removed.
     SteppedThenRemoved,
 
@@ -386,11 +397,13 @@ pub(crate) enum Cell {
     UnkeptQueued,
     /// As [`Cell::UnkeptQueued`], and the current pair closed, unguarded.
     UnkeptQueuedCurrentClosed,
-    /// The dial's connection closed unless another peer proves its pair.
+    /// The dial's connection closed unless a live link uses its pair: a
+    /// held link at a pair its bundle proves, any other at its setup pair.
     DialClosedUnlessProven,
-    /// As [`Cell::DialClosedUnlessProven`], with released paths as
-    /// [`Cell::UnkeptQueued`].
-    DialClosedReleasedQueued,
+    /// The connection of the link the peer left closed unless a live link
+    /// uses its pair, as at [`Cell::DialClosedUnlessProven`], with released
+    /// paths as [`Cell::UnkeptQueued`].
+    LeftClosedReleasedQueued,
     /// Released paths as [`Cell::UnkeptQueued`]; the leg's connection is the
     /// one the peer moves onto, and stays.
     ReleasedQueued,
@@ -478,6 +491,8 @@ pub(crate) enum Cell {
     GoneAtDiscovery,
     /// Goes at the next read.
     GoneAtNextRead,
+    /// Kept, keyed under the dial's link, which the peer now holds.
+    Rekeyed,
 }
 
 listed! {
@@ -649,6 +664,13 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
         Row::Link => match t {
             T::Promote { .. } => Cell::HandshakeLink,
             T::Replace { .. } => Cell::OldClosedNewAdopted,
+            // The peer holds the link it dialed (FRC-1201, Section 5.6): the
+            // dial's, at its msg2; at the peer's msg3, the one it holds.
+            T::Move {
+                built: true,
+                inbound: false,
+                ..
+            } => Cell::DialHeldLeftClosed,
             T::Move { .. } | T::Keep { .. } => Cell::DialClosed,
             T::Cutover { .. }
             | T::Restarted
@@ -679,9 +701,9 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
                 ..
             } => {
                 if *inbound {
-                    Cell::ReleasedUnclaimedLegDropped
+                    Cell::LegDroppedHeldNamed
                 } else {
-                    Cell::ReleasedUnclaimedDialDropped
+                    Cell::LeftDroppedDialNamed
                 }
             }
             T::Move {
@@ -696,7 +718,8 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
                     Cell::DialDropped
                 }
             }
-            T::Cutover { .. } | T::Restarted | T::Roam => Cell::Keep,
+            T::Cutover { .. } | T::Restarted => Cell::Keep,
+            T::Roam => Cell::SetupKeptRoamedAdded,
             T::Follow => Cell::Followed,
             T::Switch => Cell::Claimed,
             T::Release { .. } => Cell::UnclaimedOffRecord,
@@ -817,13 +840,9 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
         Row::ControlMachine => match t {
             T::Promote { .. } => Cell::LegSurvives,
             T::Replace { .. } => Cell::OldRemovedLegSurvives,
-            T::Move { inbound, .. } | T::Keep { inbound, .. } => {
-                if *inbound {
-                    Cell::LegRemoved
-                } else {
-                    Cell::DialRemovedPeerStepped
-                }
-            }
+            T::Move { inbound: true, .. } | T::Keep { inbound: true, .. } => Cell::LegRemoved,
+            T::Move { built: true, .. } => Cell::DialRemovedPeerRekeyed,
+            T::Move { built: false, .. } | T::Keep { .. } => Cell::DialRemovedPeerStepped,
             T::Cutover { .. }
             | T::Restarted
             | T::Roam
@@ -852,7 +871,7 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
                 if *inbound {
                     Cell::ReleasedQueued
                 } else {
-                    Cell::DialClosedReleasedQueued
+                    Cell::LeftClosedReleasedQueued
                 }
             }
             // A crossing settled at the msg3 leaves the leg's connection open.
@@ -1137,6 +1156,11 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
         },
         Row::PathCarrier => match t {
             T::Replace { .. } | T::Remove { .. } => Cell::GoneAtNextRead,
+            T::Move {
+                built: true,
+                inbound: false,
+                ..
+            } => Cell::Rekeyed,
             T::Promote { .. }
             | T::Move { .. }
             | T::Keep { .. }

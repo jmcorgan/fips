@@ -1,9 +1,11 @@
 //! What a move or a restart does with multipath on to state outside the
-//! peer's record, on real nodes: a close queued at a restart's teardown that
-//! reaches the wrong connection, a known defect, with the control that with
-//! multipath off a restart's teardown queues none; a connect still out when a
-//! move releases its path, which is closed once it settles; a no-carrier reading across a move and
-//! a removal; and what a restart found at a rekey keeps of the bundle.
+//! peer's record, on real nodes: a connect still out when a move releases its
+//! path, closed as it opens unless another link uses the pair, with the
+//! healthy path of a connect the bundle still waits for; a close queued at a
+//! restart's teardown, which the drain spares where the new link runs and
+//! still makes where nothing does, with the control that with multipath off
+//! the teardown queues none; a no-carrier reading across a move and a
+//! removal; and what a restart found at a rekey keeps of the bundle.
 //!
 //! The file's helpers, a second dial of a node's own and a restart's msg1,
 //! also serve the replay tests of `decrypt_replay.rs`.
@@ -14,7 +16,10 @@ use super::super::paths::{
     two_transports,
 };
 use super::super::rekey_parity::{deliver, linked_pair, rekey_config, trigger_age};
-use super::super::spanning_tree::{TestNode, cleanup_nodes, initiate_handshake, restarted_node};
+use super::super::spanning_tree::{
+    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, make_test_node_with_config,
+    restarted_node,
+};
 use super::super::*;
 use super::{TcpConfig, TcpTransport, TransportHandle, TransportId, with_path};
 use crate::peer::PathState;
@@ -129,14 +134,10 @@ async fn connect_settled(tn: &TestNode, id: TransportId, addr: &TransportAddr) -
     panic!("precondition: the connect to {addr} finished within 3000 polls");
 }
 
-/// A capable link holds a path being opened on TCP when a second dial of the
-/// node's own moves the peer. The renewed bundle does not hold the path, and
-/// its close finds nothing in the pool, since the connect is still out. Once
-/// the connect finishes and the tick settles it, nothing should be left open
-/// that no path names, and nothing is: the connection is gone from the pool
-/// once the tick has settled it.
-#[tokio::test]
-async fn a_connect_in_flight_across_a_move_leaves_no_connection_with_no_path() {
+/// [`same_transport_with`] at multipath on, with node 0 mixing kinds of
+/// path and holding a third, TCP transport. Returns the nodes, B's address
+/// and the TCP transport's id.
+async fn with_tcp() -> (Vec<TestNode>, NodeAddr, TransportId) {
     let mut config = enabled();
     config.node.path.mix_kinds = true;
     let (mut nodes, b, _b2) = same_transport_with(config).await;
@@ -159,6 +160,12 @@ async fn a_connect_in_flight_across_a_move_leaves_no_connection_with_no_path() {
         .node
         .transports
         .insert(t3, TransportHandle::Tcp(tcp));
+    (nodes, b, t3)
+}
+
+/// A listener on 127.0.0.1 that a connect can finish at, and its address.
+/// Nothing accepts or reads; the listener closes when dropped.
+fn listener() -> (std::net::TcpListener, TransportAddr) {
     let sink = std::net::TcpListener::bind("127.0.0.1:0")
         .expect("precondition: the connect's target listens");
     let target = TransportAddr::from_string(
@@ -167,38 +174,91 @@ async fn a_connect_in_flight_across_a_move_leaves_no_connection_with_no_path() {
             .expect("precondition: the target is bound")
             .to_string(),
     );
-    nodes[0].node.offer_path(&b, t3, target.clone()).await;
+    (sink, target)
+}
+
+/// `nodes[0]` offers its peer `b` a path on `t3` at `target`, which the
+/// bundle holds Probing while its connect is out.
+async fn connect_out(
+    nodes: &mut [TestNode],
+    b: &NodeAddr,
+    t3: TransportId,
+    target: &TransportAddr,
+) {
+    nodes[0].node.offer_path(b, t3, target.clone()).await;
     assert_eq!(
-        state_at(&nodes[0], &b, t3, &target),
+        state_at(&nodes[0], b, t3, target),
         Some(PathState::Probing),
         "precondition: the path is held and being opened"
     );
-    assert_eq!(
-        outbound(&nodes[0], t3),
-        0,
-        "precondition: the connect is not in the pool yet"
-    );
+}
 
+/// A second dial of `nodes[0]`'s own moves its peer `b` onto the dial's
+/// session, and the renewed bundle holds none of `targets` on `t3`.
+async fn move_off(
+    nodes: &mut [TestNode],
+    b: &NodeAddr,
+    t3: TransportId,
+    targets: &[TransportAddr],
+) {
     let before = nodes[0]
         .node
-        .get_peer(&b)
+        .get_peer(b)
         .expect("precondition: the peer is held")
         .our_index();
-    own_dial(&mut nodes).await;
+    own_dial(nodes).await;
     let peer = nodes[0]
         .node
-        .get_peer(&b)
+        .get_peer(b)
         .expect("precondition: the move keeps the peer");
     assert_ne!(
         peer.our_index(),
         before,
         "precondition: the peer moved onto the dial's session"
     );
+    for target in targets {
+        assert_eq!(
+            state_at(&nodes[0], b, t3, target),
+            None,
+            "precondition: the renewed bundle does not hold the pair"
+        );
+    }
+}
+
+/// Unanswered probes on the path `nodes[0]`'s peer `b` holds at
+/// (`transport`, `addr`); `None` when it holds no such path.
+fn probes(
+    tn: &TestNode,
+    b: &NodeAddr,
+    transport: TransportId,
+    addr: &TransportAddr,
+) -> Option<usize> {
+    tn.node
+        .get_peer(b)?
+        .paths()
+        .iter()
+        .find(|path| path.transport_id() == transport && path.addr() == addr)
+        .map(|path| path.live().outstanding())
+}
+
+/// A capable link holds a path being opened on TCP when a second dial of the
+/// node's own moves the peer. The renewed bundle does not hold the path, and
+/// its close finds nothing in the pool, since the connect is still out. Once
+/// the connect finishes and the tick settles it, nothing is left open that
+/// no path names: the connection is closed as it opens, since no link uses
+/// it.
+#[tokio::test]
+async fn a_connect_in_flight_across_a_move_leaves_no_connection_with_no_path() {
+    let (mut nodes, b, t3) = with_tcp().await;
+    let (sink, target) = listener();
+    connect_out(&mut nodes, &b, t3, &target).await;
     assert_eq!(
-        state_at(&nodes[0], &b, t3, &target),
-        None,
-        "precondition: the renewed bundle does not hold the pair"
+        outbound(&nodes[0], t3),
+        0,
+        "precondition: the connect is not in the pool yet"
     );
+
+    move_off(&mut nodes, &b, t3, std::slice::from_ref(&target)).await;
     assert_eq!(
         outbound(&nodes[0], t3),
         0,
@@ -217,12 +277,115 @@ async fn a_connect_in_flight_across_a_move_leaves_no_connection_with_no_path() {
     assert_eq!(open, 0, "defect: a connection is left open with no path");
 }
 
+/// The healthy path beside it: a connect for a path the bundle still holds
+/// is stepped into the bundle as it always was. The connection stays open,
+/// and the path's probe, which waited for it, goes out.
+#[tokio::test]
+async fn a_connect_for_a_path_still_held_steps_the_bundle() {
+    let (mut nodes, b, t3) = with_tcp().await;
+    let (sink, target) = listener();
+    connect_out(&mut nodes, &b, t3, &target).await;
+    assert_eq!(
+        probes(&nodes[0], &b, t3, &target),
+        Some(0),
+        "precondition: no probe goes out before the connection opens"
+    );
+
+    let state = connect_settled(&nodes[0], t3, &target).await;
+    assert_eq!(
+        state,
+        ConnectionState::Connected,
+        "precondition: the connect finished"
+    );
+    nodes[0].node.path_tick().await;
+    let open = outbound(&nodes[0], t3);
+    let sent = probes(&nodes[0], &b, t3, &target);
+    drop(sink);
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        open, 1,
+        "defect: the connection a held path waited for is left open"
+    );
+    assert!(
+        sent.is_some_and(|n| n > 0),
+        "defect: the bundle was told the connection opened and probed the path: {sent:?}"
+    );
+}
+
+/// Two connects out when a move releases their paths, each at a pair
+/// another live link uses: a handshake leg set up at the first, and the
+/// acked path of a second peer's link at the second. The bundle that asked
+/// for them holds neither, but the close rule finds each in use, so neither
+/// connection is closed as it opens.
+#[tokio::test]
+async fn a_connect_at_a_pair_another_link_uses_stays_open() {
+    let (mut nodes, b, t3) = with_tcp().await;
+    nodes.push(make_test_node_with_config(enabled(), 1280).await);
+    initiate_handshake(&mut nodes, 0, 2).await;
+    drain_all_packets(&mut nodes, false).await;
+    let c = *nodes[2].node.node_addr();
+    assert!(
+        nodes[0].node.get_peer(&c).is_some(),
+        "precondition: node 0 holds a second peer"
+    );
+    let (leg_sink, at_leg) = listener();
+    let (path_sink, at_path) = listener();
+    connect_out(&mut nodes, &b, t3, &at_leg).await;
+    connect_out(&mut nodes, &b, t3, &at_path).await;
+    move_off(&mut nodes, &b, t3, &[at_leg.clone(), at_path.clone()]).await;
+
+    let a = &mut nodes[0].node;
+    let id = a.allocate_link_id();
+    let leg = Link::new(
+        id,
+        t3,
+        at_leg.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    );
+    a.links.raw().insert(id, leg);
+    let peer = a
+        .get_peer_mut(&c)
+        .expect("precondition: node 0 holds its second peer");
+    peer.admit_path(t3, at_path.clone());
+    peer.ack_path(t3, &at_path);
+    for target in [&at_leg, &at_path] {
+        let state = connect_settled(&nodes[0], t3, target).await;
+        assert_eq!(
+            state,
+            ConnectionState::Connected,
+            "precondition: the connect to {target} finished"
+        );
+    }
+    nodes[0].node.path_tick().await;
+    let transport = nodes[0]
+        .node
+        .transports
+        .get(&t3)
+        .expect("precondition: the transport is held");
+    let (leg_open, path_open) = (
+        transport.connection_state(&at_leg),
+        transport.connection_state(&at_path),
+    );
+    drop((leg_sink, path_sink));
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        leg_open,
+        ConnectionState::Connected,
+        "defect: the connection a handshake leg uses was closed as it opened"
+    );
+    assert_eq!(
+        path_open,
+        ConnectionState::Connected,
+        "defect: the connection another peer's acked path uses was closed as it opened"
+    );
+}
+
 /// A capable link with the peer active on q leaves p unkept. A restart's msg1
 /// arrives from p's pair, and the teardown queues p's close before the new
-/// link exists there. The drain should spare the pair the new link was just
-/// promoted at; it does not ask again, and calls for its close.
+/// link exists there. The drain asks the close rule again, so it spares the
+/// pair the new link was just promoted at.
 #[tokio::test]
-#[ignore = "known defect: a close queued at a restart's teardown is drained at the pair the new link runs on"]
 async fn a_close_queued_at_a_restart_teardown_spares_the_new_link_at_that_pair() {
     let t1 = TransportId::new(1);
     let (mut nodes, _b, a2, _b2) = two_transports(1280).await;
@@ -246,6 +409,32 @@ async fn a_close_queued_at_a_restart_teardown_spares_the_new_link_at_that_pair()
     );
 }
 
+/// The same restart with the peer active on p leaves q unkept, and the
+/// teardown queues q's close. The new link runs at p and nothing else uses q,
+/// so the drain, asking the close rule again, still closes q, and only q.
+#[tokio::test]
+async fn a_close_queued_with_nothing_on_its_pair_still_closes() {
+    let t1 = TransportId::new(1);
+    let (mut nodes, _b, _a2, b2) = two_transports(1280).await;
+    beat(&mut nodes, None).await;
+    restart_dial(&mut nodes, enabled()).await;
+    assert!(
+        loopback(&nodes[0], t2()).closed().is_empty(),
+        "precondition: the close waits for the drain"
+    );
+    nodes[0].node.drain_closes().await;
+    let closed = (
+        loopback(&nodes[0], t1).closed(),
+        loopback(&nodes[0], t2()).closed(),
+    );
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        closed,
+        (vec![], vec![b2]),
+        "defect: the drain closes the connection of the unkept path q, and only that one"
+    );
+}
+
 /// With multipath off no link is capable, so every path keeps its connection:
 /// the same restart's teardown queues no close, and the drain closes nothing.
 #[tokio::test]
@@ -263,12 +452,22 @@ async fn with_multipath_off_a_restart_teardown_queues_no_close() {
 }
 
 /// A reading of no carrier is kept by link and transport, so a move, which
-/// keeps the link id, keeps it; the peer's removal ends it at the next read.
-/// The link here holds two paths, since a link of one keeps no reading.
+/// holds the peer on the dial's link, keeps it under that link; the peer's
+/// removal ends it at the next read. The link here holds two paths, since a
+/// link of one keeps no reading.
 #[tokio::test]
 async fn a_no_carrier_reading_stays_across_a_move_and_goes_with_the_peer() {
     let t1 = TransportId::new(1);
-    let (mut nodes, b, _a2, _b2) = two_transports(1280).await;
+    // Node 0 is the smaller, so `own_dial` moves it at its msg2 onto the
+    // dial's link: on this line a larger node moves at the peer's msg3 and
+    // stays held on the link it was held on.
+    let (mut nodes, b) = loop {
+        let (mut nodes, b, _a2, _b2) = two_transports(1280).await;
+        if nodes[0].node.node_addr() < nodes[1].node.node_addr() {
+            break (nodes, b);
+        }
+        cleanup_nodes(&mut nodes).await;
+    };
     loopback(&nodes[0], t1).set_carrier(Some(false));
     loopback(&nodes[0], t2()).set_carrier(Some(false));
     crate::time::advance(Duration::from_millis(50));
@@ -291,7 +490,11 @@ async fn a_no_carrier_reading_stays_across_a_move_and_goes_with_the_peer() {
         index,
         "precondition: the peer moved onto the dial's session"
     );
-    assert_eq!(moved.link_id(), link, "precondition: the link id stays");
+    assert_ne!(
+        moved.link_id(),
+        link,
+        "precondition: the peer moved onto the dial's link"
+    );
     let after = nodes[0].node.paths.readings();
     crate::time::advance(Duration::from_millis(50));
     nodes[0].node.path_tick().await;

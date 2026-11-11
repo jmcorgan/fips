@@ -1,8 +1,7 @@
 //! The live audit on real nodes: every node entry that can change a
 //! per-peer map audits the maps on its way out in a debug build
 //! (`node::settle::audit`), on every node a test did not write past the map
-//! writers, and the waivers it honours are recorded at the event that makes
-//! their state, on that link only.
+//! writers.
 //!
 //! The audit is absent from a release build, so every test here that needs
 //! it to run carries `#[cfg(debug_assertions)]`.
@@ -10,11 +9,10 @@
 // Those tests' helpers and imports are unused in a release test build.
 #![cfg_attr(not(debug_assertions), allow(dead_code, unused_imports))]
 
-use super::super::crossed_dial::{Dial, cross_dials_from, hand};
+use super::super::crossed_dial::hand;
 use super::super::spanning_tree::{TestNode, cleanup_nodes, initiate_handshake};
 use super::super::*;
-use super::{loopback_node, pump, resolve_connect, tcp_dial, tcp_pair, with_path};
-use crate::node::settle::Waiver;
+use super::{loopback_node, pump, resolve_connect, tcp_dial, tcp_pair};
 use crate::peer::machine::DialOrigin;
 
 /// How many times the live audit has checked `tn`'s node.
@@ -164,87 +162,6 @@ async fn an_index_entry_written_past_the_table_fails_the_live_audit_at_the_next_
         .try_recv()
         .expect("precondition: the heartbeat is queued at node 0");
     hand(&mut nodes[0].node, frame).await;
-}
-
-/// A crossed dial won from a second address of the larger node's: the
-/// smaller node's move releases the only index entry of the inbound link it
-/// keeps the peer on, and it records the crossing's waiver on that link and
-/// on no other, neither a second link it holds nor any link of the larger
-/// node. The second link is written in by hand, so the live audit is off for
-/// the smaller node here; the waivers are recorded all the same.
-#[tokio::test]
-async fn the_waiver_is_recorded_at_the_crossing_and_scoped_to_that_link() {
-    let crossed = cross_dials_from(Dial::OtherAddress, with_path(Config::new(), false)).await;
-    let (s, l) = (crossed.s, crossed.l);
-    let mut nodes = crossed.nodes;
-    let spare = nodes[s].node.allocate_link_id();
-    let link = Link::connectionless(
-        spare,
-        nodes[s].transport_id,
-        TransportAddr::from_string("127.0.0.1:9"),
-        LinkDirection::Outbound,
-        Duration::from_millis(100),
-    );
-    nodes[s].node.links.raw().insert(spare, link);
-    hand(&mut nodes[s].node, crossed.msg2).await;
-    assert!(
-        nodes[s].node.links.contains_key(&spare),
-        "precondition: the smaller node still holds its second link"
-    );
-    let link = held(&nodes, s, l);
-    let carried = nodes[s].node.links.carries(&link, Waiver::CrossedInbound);
-    let others: Vec<(usize, LinkId)> = nodes
-        .iter()
-        .enumerate()
-        .flat_map(|(i, tn)| {
-            tn.node
-                .links
-                .keys()
-                .filter(|k| {
-                    !(i == s && **k == link) && tn.node.links.carries(k, Waiver::CrossedInbound)
-                })
-                .map(move |k| (i, *k))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    cleanup_nodes(&mut nodes).await;
-    assert!(
-        carried,
-        "defect: the smaller node recorded no crossing waiver on the link it holds the peer on"
-    );
-    assert!(
-        others.is_empty(),
-        "defect: other links carry a waiver: {others:?}"
-    );
-}
-
-/// A crossed dial won on the tie-break, answered from the address the
-/// smaller node already holds the larger on: the move keeps the link at its
-/// pair with its index entry, so the swap records no waiver.
-#[tokio::test]
-async fn a_crossing_that_keeps_the_links_entry_records_no_waiver() {
-    let crossed = cross_dials_from(Dial::AnsweredFromFirst, with_path(Config::new(), false)).await;
-    let (s, l) = (crossed.s, crossed.l);
-    let mut nodes = crossed.nodes;
-    hand(&mut nodes[s].node, crossed.msg2).await;
-    let link = held(&nodes, s, l);
-    let entry = nodes[s]
-        .node
-        .links
-        .index()
-        .values()
-        .any(|named| *named == link);
-    let waived = nodes[s].node.links.carries(&link, Waiver::CrossedInbound)
-        || nodes[s].node.links.carries(&link, Waiver::MovedOwnDial);
-    cleanup_nodes(&mut nodes).await;
-    assert!(
-        entry,
-        "precondition: the move kept an index entry for the held link"
-    );
-    assert!(
-        !waived,
-        "defect: a swap that kept the link's index entry recorded a waiver"
-    );
 }
 
 /// A node whose decrypt-worker pool lost one of its two workers at start:

@@ -7,7 +7,9 @@
 //! holds with each path's proven state. The index from transport and
 //! address to link is never written directly: every method that changes a
 //! record recomputes it, from each live link's setup address and its
-//! proven paths, so it cannot drift from the records.
+//! proven paths, so it cannot drift from the records. A setup address
+//! whose path the bundle released leaves the index; one the path roamed
+//! away from stays, since the link was set up there.
 //!
 //! The close rule (FRC-1201 Section 5.6, and the multipath draft's release
 //! rule): a connection at a transport and address is in use while some
@@ -102,6 +104,9 @@ pub struct LinkRec {
     pub holder: Holder,
     /// The paths its bundle holds, with their states.
     pub paths: Vec<(Pair, Proven)>,
+    /// Whether the bundle released its path at the setup address, which
+    /// then leaves the index.
+    pub released: bool,
 }
 
 impl LinkRec {
@@ -139,6 +144,7 @@ impl Links {
                 dir,
                 holder,
                 paths: Vec::new(),
+                released: false,
             },
         );
         self.reindex();
@@ -227,11 +233,16 @@ impl Links {
             .map(|(_, l)| *l)
     }
 
-    /// The index recomputed from the records now.
+    /// The index recomputed from the records now: each live link's setup
+    /// address, unless its bundle released the path there, and its proven
+    /// paths.
     pub fn derived(&self) -> BTreeSet<(Pair, LinkNo)> {
+        let keep = fault!(ReleasedSetupIndexed) || node_fault!(ReleasedSetupIndexed);
         let mut out = BTreeSet::new();
         for (l, r) in &self.recs {
-            out.insert((r.setup.clone(), *l));
+            if !r.released || keep {
+                out.insert((r.setup.clone(), *l));
+            }
             for (p, s) in &r.paths {
                 if s.counts() {
                     out.insert((p.clone(), *l));
@@ -275,12 +286,16 @@ impl Links {
     }
 
     /// `link`'s bundle released its path at `pair`; `keep` says the peer
-    /// may still send there. Returns the address to close, if any.
+    /// may still send there. A released setup address leaves the index.
+    /// Returns the address to close, if any.
     pub fn release(&mut self, link: LinkNo, pair: &Pair, keep: bool) -> Vec<Pair> {
         let Some(r) = self.recs.get_mut(&link) else {
             return Vec::new();
         };
         r.paths.retain(|(p, _)| p != pair);
+        if r.setup == *pair {
+            r.released = true;
+        }
         let own = r.uses(pair);
         self.reindex();
         if (keep && !fault!(KeepIgnored)) || own || self.in_use(pair, link) {

@@ -368,7 +368,7 @@ async fn a_peer_restart_revealed_by_our_rekey_leaves_the_peers_next_rekey_adopte
         }
     }
 
-    assert_coherent(&mut r.nodes, &[], "the end of the test").await;
+    assert_coherent(&mut r.nodes, "the end of the test").await;
     cleanup_nodes(&mut r.nodes).await;
 }
 
@@ -416,7 +416,7 @@ async fn a_restart_our_rekey_msg2_reveals_cuts_over_at_once_and_the_restarted_pe
     );
     assert!(!peer.current_k_bit(), "A's K-bit stays 0");
 
-    assert_coherent(&mut r.nodes, &[], "the end of the test").await;
+    assert_coherent(&mut r.nodes, "the end of the test").await;
     cleanup_nodes(&mut r.nodes).await;
 }
 
@@ -468,7 +468,7 @@ async fn a_peer_rekey_frame_on_our_pending_index_promotes_it_even_when_the_k_bit
         }
     }
 
-    assert_coherent(&mut nodes, &[], "the end of the test").await;
+    assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -556,7 +556,7 @@ async fn our_cutover_at_a_restart_revealing_msg2_takes_k_bit_zero_and_our_next_r
         "A's K-bit equals B's after B adopts A's rekey"
     );
 
-    assert_coherent(&mut r.nodes, &[], "the end of the test").await;
+    assert_coherent(&mut r.nodes, "the end of the test").await;
     cleanup_nodes(&mut r.nodes).await;
 }
 
@@ -623,7 +623,7 @@ async fn a_frame_on_the_pending_index_that_does_not_authenticate_neither_promote
         "A counts both frames as decryption failures"
     );
 
-    assert_coherent(&mut nodes, &[], "the end of the test").await;
+    assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -672,7 +672,7 @@ async fn a_k_flipped_frame_on_the_current_index_that_fails_the_trial_still_decry
         "A receives B's frame on its current session"
     );
 
-    assert_coherent(&mut nodes, &[], "the end of the test").await;
+    assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -740,7 +740,7 @@ async fn a_cross_connection_move_on_an_aged_session_keeps_the_link_alive_until_t
     // The test ends before the larger node has read the smaller node's first
     // frame on the moved session; delivered until idle, the two settle.
     super::settle::pump(&mut nodes).await;
-    assert_coherent(&mut nodes, &[], "the end of the test, delivered until idle").await;
+    assert_coherent(&mut nodes, "the end of the test, delivered until idle").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -935,6 +935,6 @@ async fn our_link_rekey_takes_the_inverse_of_the_k_bit_the_peer_was_last_seen_se
     // The test ends at node 0's cutover, before node 1 adopts; delivered
     // until idle, the two settle.
     super::settle::pump(&mut nodes).await;
-    assert_coherent(&mut nodes, &[], "the end of the test, delivered until idle").await;
+    assert_coherent(&mut nodes, "the end of the test, delivered until idle").await;
     cleanup_nodes(&mut nodes).await;
 }

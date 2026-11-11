@@ -65,9 +65,6 @@ mod tests;
 pub(in crate::node) use links::LinkTable;
 pub(in crate::node) use maps::{BindMap, DialMap, LegMap, MachineMap, PeerMap};
 
-#[cfg(any(test, debug_assertions))]
-pub(in crate::node) use links::Waiver;
-
 impl crate::node::Node {
     /// Audit the per-peer maps as the node entry `site` returns, panicking
     /// on a breach, in a debug build; nothing in a release build. Every

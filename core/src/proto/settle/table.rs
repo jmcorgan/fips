@@ -34,8 +34,9 @@
 //!   frame authenticated is a silent session to the gates.
 //! - **Heard**: a frame sets the peering heard and its last frame, makes
 //!   the gates forget its replay memory and silent sessions, and moves the
-//!   peer's current address if it came from elsewhere. A move does not set
-//!   heard.
+//!   peer's current address if it came from elsewhere. A move onto this
+//!   node's own dial sets heard too (FRC-1201 Section 5.5); the gates
+//!   forget at the peer's next frame.
 //!
 //! The gate both decides and stamps, so each input's method decides first
 //! and changes state only after, rather than through a separate plan.
@@ -642,7 +643,10 @@ impl<I: Instant> Table<I> {
         if !fault!(MoveKeepsOldPair) {
             h.current = from;
         }
-        if fault!(MoveSetsHeard) {
+        // FRC-1201 Section 5.5: a peering this node set up as initiator is
+        // heard once that handshake completed, and the move holds this
+        // node's own dial.
+        if !fault!(MoveLeavesUnheard) {
             h.heard = true;
         }
         let pair = h.current.clone();

@@ -6,9 +6,11 @@
 //! the peer machine still carries those results. A third keeps the per-peer
 //! map wrappers of `node/settle/` closed: what the compiler cannot refuse
 //! there is a `DerefMut` on a wrapper, or a way past the writers outside
-//! `#[cfg(test)]`. The settlement scans of `node/settle/tests/` walk the
-//! source with this file's `sources` too, and name each file with its
-//! `label`.
+//! `#[cfg(test)]`. A fourth keeps out what a crossed dial's fix replaced:
+//! the two close helpers the close rule took over, the excuses for a link
+//! with no index entry, and the dial's close and removal. The settlement
+//! scans of `node/settle/tests/` walk the source with this file's `sources`
+//! too, and name each file with its `label`.
 
 use std::path::{Path, PathBuf};
 
@@ -238,6 +240,29 @@ const LINK: &[&str] = &[
 /// node's statistics history also uses.
 const SHELLS: &[&str] = &["Policy", "policy", "DEPLOYED", "PeerSnapshot"];
 
+/// Names of the code a crossed dial's fix replaced: the two helpers whose
+/// work is now `close_unused` and the close rule `in_use`; the waiver that
+/// excused a link with no index entry, the effect that recorded it and the
+/// table's lookup of it, once the index was derived from the link records;
+/// and the effects and bodies that closed and removed the dial's link at a
+/// crossing, which now close and remove the losing link.
+const CROSSING: &[&str] = &[
+    "close_handshake_link_connection",
+    "addr_carries_other_peer",
+    "Waiver",
+    "WaiverIfNoEntry",
+    "shadowed",
+    "DialClose",
+    "DialLinkRemoved",
+    "dial_close",
+    "dial_removed",
+];
+
+/// Banned in `node/settle/` only: the effect body that recorded a waiver,
+/// whose name the handshake handlers still give the established-address
+/// waiver of a msg1.
+const SETTLE: &[&str] = &["waiver"];
+
 /// Each use of a name in `banned` in the code of `source` (comments and
 /// literals left out, so prose may still say what the deployed code did),
 /// as `file:line: name`.
@@ -377,6 +402,69 @@ fn no_deployed_rekey_rule_of_either_layer_survives_in_the_shells_and_the_scan_fi
         "node/dataplane/encrypted.rs",
         "peer/active.rs",
         "peer/machine.rs",
+    ] {
+        assert!(files.iter().any(|p| p.ends_with(want)), "{want} is scanned");
+    }
+}
+
+/// Nothing a crossed dial's fix replaced is back in the root crate's code,
+/// and no waiver body is back in the settlement code. The planted lines show
+/// the scan finds each name in code, and not one named in a comment.
+#[test]
+fn no_name_the_crossed_dial_fix_replaced_survives_and_the_scan_finds_a_planted_one() {
+    let planted = "    // close_handshake_link_connection once closed a leg.\n\
+                   \x20   node.close_handshake_link_connection(id).await;\n\
+                   \x20   if node.addr_carries_other_peer(t, &a, id) {}\n\
+                   \x20   let w: Option<Waiver> = links.shadowed(&key);\n\
+                   \x20   Effect::WaiverIfNoEntry => cross::waiver(node, r),\n\
+                   \x20   Effect::DialClose => cross::dial_close(node, r).await,\n\
+                   \x20   Effect::DialLinkRemoved => cross::dial_removed(node, r).await,\n";
+    assert_eq!(
+        uses("planted.rs", planted, CROSSING),
+        [
+            "planted.rs:2: close_handshake_link_connection",
+            "planted.rs:3: addr_carries_other_peer",
+            "planted.rs:4: Waiver",
+            "planted.rs:4: shadowed",
+            "planted.rs:5: WaiverIfNoEntry",
+            "planted.rs:6: DialClose",
+            "planted.rs:6: dial_close",
+            "planted.rs:7: DialLinkRemoved",
+            "planted.rs:7: dial_removed"
+        ],
+        "the scan finds each replaced name in code, and not one named in a comment"
+    );
+    assert_eq!(
+        uses("planted.rs", planted, SETTLE),
+        ["planted.rs:5: waiver"],
+        "the scan finds a planted waiver body"
+    );
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let settle = root.join("node").join("settle");
+    let mut files = Vec::new();
+    sources(&root, &mut files);
+    let mut found = Vec::new();
+    for path in &files {
+        let source = std::fs::read_to_string(path).expect("the source file reads");
+        let file = label(&root, path);
+        found.extend(uses(&file, &source, CROSSING));
+        if path.starts_with(&settle) {
+            found.extend(uses(&file, &source, SETTLE));
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "code a crossed dial's fix replaced is back: {found:?}"
+    );
+    // The scan reaches the close rule's home, the crossing's executor, the
+    // link table and the reaped leg's close.
+    for want in [
+        "node/mod.rs",
+        "node/settle/exec/cross.rs",
+        "node/settle/exec/plan.rs",
+        "node/settle/links.rs",
+        "node/handlers/timeout.rs",
     ] {
         assert!(files.iter().any(|p| p.ends_with(want)), "{want} is scanned");
     }

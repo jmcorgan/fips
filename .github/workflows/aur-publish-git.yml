@@ -43,7 +43,9 @@ jobs:
       - name: Install lint tooling
         run: |
           set -euo pipefail
-          pacman -Sy --noconfirm --needed namcap
+          # -Syu, not -Sy: Arch supports no partial upgrade (see the same
+          # step in aur-publish.yml).
+          pacman -Syu --noconfirm --needed namcap
 
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 

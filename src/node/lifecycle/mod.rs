@@ -16,6 +16,7 @@ use super::peering::reconcile::{
 use super::peering::retry::MAX_RETRY_CONNECTIONS_PER_TICK;
 
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
+use crate::node::AddrKey;
 use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::settle::exec::Removed;
@@ -25,6 +26,7 @@ use crate::peer::machine::{DialOrigin, HandshakeCrypto, PeerEvent, PeerMachine};
 use crate::peer::{Match, PathState};
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
+use crate::proto::settle::links::Holder;
 use crate::proto::settle::output::Why;
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
 use crate::utils::onlink::OnLinkPrefixes;
@@ -1146,7 +1148,8 @@ impl Node {
         // key admission or the per-path dedupe, and — matching next's
         // poll_transport_discovery — bypass the discovery connect budget in the
         // core. The driver-only gates below are theirs: the link index
-        // dedup, and with multipath enabled the dial gate of a capable linked
+        // dedup (a handshake in flight or a live held peer's link), and with
+        // multipath enabled the dial gate of a capable linked
         // peer that holds the beacon's pair as a proven path or as a path
         // still Probing.
         let mut transport_neighbors: Vec<Candidate> = Vec::new();
@@ -1181,7 +1184,9 @@ impl Node {
                     // pair, so the beacon is not listed as the peer's. Any
                     // other anonymous beacon is no path candidate, and a
                     // transport read only for candidates drops it. Dedup by
-                    // transport address — skip if a link already exists.
+                    // transport address: skip it where the link index names
+                    // a handshake in flight or the link of a held peer that
+                    // is live (`beacon_link_busy`).
                     if intake
                         && let Some((node_addr, held)) = self.beacon_peer(*transport_id, &peer.addr)
                     {
@@ -1198,11 +1203,7 @@ impl Node {
                     if !auto {
                         continue;
                     }
-                    if self
-                        .links
-                        .index()
-                        .contains_key(&(*transport_id, peer.addr.clone()))
-                    {
+                    if self.beacon_link_busy(&(*transport_id, peer.addr.clone())) {
                         continue;
                     }
                     transport_neighbors.push(Candidate {
@@ -3746,6 +3747,26 @@ impl Node {
             return peer.idle_time(now_ms) <= node.link_dead_timeout_secs.saturating_mul(1000);
         }
         !self.peer_link_is_stale(peer, now_ms)
+    }
+
+    /// Whether the link the index names at `key` keeps an anonymous beacon
+    /// there from being dialled: a handshake in flight, or a held peer
+    /// whose link is live ([`Self::active_peer_link_is_live`]). The index
+    /// names a held link at each of its proven paths as well as at its
+    /// setup pair, so a beacon at a proven path of a peer silent past its
+    /// liveness is dialled, as failover needs; a pair no link uses is
+    /// dialled too.
+    pub(in crate::node) fn beacon_link_busy(&self, key: &AddrKey) -> bool {
+        let Some(id) = self.links.index().get(key) else {
+            return false;
+        };
+        if node_fault!(BeaconSkipsAnyIndexed) {
+            return true;
+        }
+        match self.links.holder(id) {
+            Some(Holder::Peer(peer)) => self.active_peer_link_is_live(&peer),
+            _ => true,
+        }
     }
 
     /// The linked peer whose dial gate an anonymous beacon from

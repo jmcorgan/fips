@@ -18,6 +18,23 @@ CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_w
 CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_over_tcp_does_what_the_move_cells_say_larger_first_with_multipath_on
 CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::an_own_dial_answered_on_an_aged_link_does_what_the_move_cells_say
 CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::an_own_dial_answered_on_an_aged_link_does_what_the_move_cells_say_with_multipath_on
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_from_another_address_keeps_an_index_entry_for_its_link
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_from_another_address_keeps_an_index_entry_for_its_link_with_multipath_on
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_another_transport_keeps_an_index_entry_for_its_link
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_another_transport_keeps_an_index_entry_for_its_link_with_multipath_on
+# Crossed TCP dials here settle at each end's msg3, which this break does not
+# reach, so the tests of the smaller node's link record after them are not
+# under it on this line; they pass with it on and with it off.
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path_with_multipath_on
+MoveKeepsInboundLink	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	node 0 closed L1, the link it left for the one it dialed
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_smaller_first	defect: the smaller node holds a connection besides its dial's
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_smaller_first_with_multipath_on	defect: the smaller node holds a connection besides its dial's
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first	defect: the smaller node holds a connection besides its dial's
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first_with_multipath_on	defect: the smaller node holds a connection besides its dial's
+MachineLeftBehind	red	fips-mesh	node::tests::settle::crossing::a_moved_peers_control_machine_moves_with_it	peer machine present for the promoted cross-connection peer
+MachineLeftBehind	red	fips-mesh	node::tests::settle::crossing::a_moved_peers_control_machine_moves_with_it_with_multipath_on	peer machine present for the promoted cross-connection peer
+CarrierLeftBehind	red	fips-mesh	node::tests::settle::readings::a_no_carrier_reading_stays_across_a_move_and_goes_with_the_peer
 ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_garbage_msg2s
 ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_replayed_msg2s
 OutputsBeforeInstall	red	fips-mesh	node::tests::decrypt_replay::a_promoted_session_reaches_the_decrypt_workers_with_the_peers_total
@@ -98,13 +115,24 @@ ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::nym::a_frame_above
 ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::nym::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
 BleWriterRemovesByAddress	red	fips-mesh	transport::ble::close_tests::a_writer_whose_write_fails_leaves_the_other_channel_at_its_address_pooled
 MovedLeavesEntry	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	entry-pair
-MovedLeavesEntry	red	fips-mesh	node::tests::settle::table::paths::a_probe_from_a_new_address_moves_a_path_of_a_two_path_link_with_multipath_on
-SwitchSkipsClaim	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	the new active pair maps to the link
-SwitchSkipsClaim	red	fips-mesh	node::tests::settle::table::paths::the_active_path_closed_by_the_peer_switches_the_link_as_the_table_says_with_multipath_on
 ReleaseKeepsPairOpen	red	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_another_closes_its_connection_as_the_table_says_with_multipath_on
 ReleaseKeepsPairOpen	pass	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_it_keeps_its_connection_as_the_table_says_with_multipath_on
+ReleaseKeepsPairOpen	red	fips-mesh	node::tests::settle::readings::a_close_queued_with_nothing_on_its_pair_still_closes
+# On this line a restart replaces the peer at the msg3, so its teardown
+# queues the close after the new link is there, and the close rule at the
+# queue spares it too: the teardown test reds only with CloseByPeerAddress
+# as well. The drain's own reading is shown at a leg's connection.
+DrainReadsNothing	red	fips-mesh	node::tests::settle::readings::a_connect_at_a_pair_another_link_uses_stays_open	defect: the connection a handshake leg uses
+DrainReadsNothing	pass	fips-mesh	node::tests::settle::readings::a_close_queued_with_nothing_on_its_pair_still_closes
 RenewedStateDropped	red	fips-mesh	node::tests::crossed_dial::a_crossed_dials_renewal_writes_the_old_paths_ending_and_the_new_originals_beginning	the old path's ending is written at the pair the link left
 RenewedStateDropped	pass	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_over_tcp_does_what_the_move_cells_say_smaller_first
+# On this line a move's renewal queues the released path's close and nothing
+# at the move drains it, so the next tick's drain closes the connection once
+# it has opened, whether or not the connect asks the close rule: the test
+# reds only with ReleaseKeepsPairOpen as well. The break is held as a pass.
+ConnectLeftOpen	pass	fips-mesh	node::tests::settle::readings::a_connect_in_flight_across_a_move_leaves_no_connection_with_no_path
+ConnectClosesHeld	red	fips-mesh	node::tests::settle::readings::a_connect_for_a_path_still_held_steps_the_bundle
+ConnectClosesHeld	pass	fips-mesh	node::tests::settle::readings::a_connect_at_a_pair_another_link_uses_stays_open
 RemoveKeepsLink	red	fips-mesh	node::tests::disconnect::test_disconnect_clears_session	link-named
 RemoveKeepsLink	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_is_reaped	link-named
 RemoveKeepsLink	red	fips-mesh	node::tests::settle::table::remove::a_peer_that_disconnects_is_removed_as_its_cells_say
@@ -119,6 +147,21 @@ UnbindKept	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_m
 AdminKeepsConnection	red	fips-mesh	node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say
 AdminKeepsConnection	red	fips-mesh	node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say_with_multipath_on
 AdminKeepsConnection	red	fips-mesh	node::tests::tcp::test_api_disconnect_closes_the_tcp_connection	the pooled TCP connection must not outlive the peer
+CloseByPeerAddress	red	fips-mesh	node::tests::settle::crossing::a_reaped_dial_leaves_a_connection_another_dial_in_flight_uses
+CloseByPeerAddress	red	fips-mesh	node::tests::settle::crossing::a_reaped_dial_leaves_a_connection_another_dial_in_flight_uses_with_multipath_on
+CloseByPeerAddress	red	fips-mesh	node::tests::settle::crossing::a_reaped_ble_dial_leaves_the_channel_another_dial_in_flight_uses
+CloseByPeerAddress	red	fips-mesh	node::tests::settle::crossing::a_reaped_ble_dial_leaves_the_channel_another_dial_in_flight_uses_with_multipath_on
+CloseByPeerAddress	pass	fips-mesh	node::tests::ble::reaping_a_handshake_leg_keeps_the_peer_link_it_shares
+CloseByPeerAddress	red	fips-mesh	node::tests::settle::readings::a_connect_at_a_pair_another_link_uses_stays_open	defect: the connection a handshake leg uses
+CloseByPeerAddress	red	fips-mesh	node::tests::settle::crossing::a_move_leaves_a_connection_a_dial_in_flight_uses
+CloseByPeerAddress	red	fips-mesh	node::tests::settle::crossing::a_move_leaves_a_connection_a_dial_in_flight_uses_with_multipath_on
+CloseBySetupAddress	red	fips-mesh	node::tests::paths::an_acked_standby_of_another_peer_keeps_a_handshake_links_connection_open	the peer's acked standby keeps the connection open
+CloseBySetupAddress	pass	fips-mesh	node::tests::ble::reaping_a_handshake_leg_keeps_the_peer_link_it_shares
+CloseBySetupAddress	red	fips-mesh	node::tests::settle::readings::a_connect_at_a_pair_another_link_uses_stays_open	defect: the connection another peer's acked path uses
+CloseBySetupAddress	red	fips-mesh	node::tests::settle::crossing::a_crossing_retires_a_link_at_a_pair_another_links_second_path_holds_with_multipath_on
+CloseBySetupAddress	red	fips-mesh	node::tests::settle::crossing::a_released_path_at_a_pair_another_links_path_holds_stays_open_with_multipath_on
+CloseBySetupAddress	red	fips-mesh	node::tests::settle::crossing::a_tcp_peer_that_roamed_keeps_its_connection_through_a_crossing
+CloseBySetupAddress	red	fips-mesh	node::tests::settle::crossing::a_tcp_peer_that_roamed_keeps_its_connection_through_a_crossing_with_multipath_on
 DisconnectKeepsVerified	red	fips-mesh	node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says
 DisconnectKeepsVerified	red	fips-mesh	node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says_with_multipath_on
 DisconnectKeepsVerified	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_disconnects	the link is still pooled but no longer verified
@@ -130,3 +173,21 @@ LinksNotFed	red	fips-mesh	node::tests::settle::live::a_dialed_links_record_holds
 LinksNotFed	red	fips-mesh	node::tests::settle::live::a_healthy_dial_passes_the_live_audit_at_every_entry	links-mirror
 LinksNotFed	red	fips-mesh	node::tests::settle::live::a_healthy_dial_passes_the_live_audit_at_every_entry_with_multipath_on	links-mirror
 MirrorLetsAckedOff	red	fips-mesh	node::tests::settle::live::a_switch_to_an_acked_path_is_recorded_live_and_is_let_off_with_multipath_on	let off an acknowledged path that is not active
+# On this line the link record's own pair stays in the index after its path is
+# released (LinkTable::with_setups), which is what this break does in the core,
+# so it changes nothing at the node and is held as a pass.
+ReleasedSetupIndexed	pass	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it
+# A crossed dial from another address or transport retires a link that is
+# named at no pair by the time it closes, so this break has nothing to
+# take from the held link there. Those tests' check that the held link stays
+# named at the msg2's pair is under MoveKeepsOldPair.
+ShadowLosesEntry	red	fips-mesh	node::settle::tests::a_pair_two_links_are_set_up_at_names_the_newest_and_then_the_one_left	closing the second link leaves the pair naming the first
+ForgetTakesKey	red	fips-mesh	node::settle::tests::links::forgetting_a_dial_leaves_the_held_links_entry
+IndexOldestWins	red	fips-mesh	node::settle::tests::a_pair_two_links_are_set_up_at_names_the_newest_and_then_the_one_left	the pair names the link opened last
+IndexOldestWins	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_lost_at_a_proven_pair_does_what_the_keep_cells_say
+IndexOldestWins	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_lost_at_a_proven_pair_does_what_the_keep_cells_say_with_multipath_on
+IndexNotRebuilt	red	fips-mesh	node::tests::settle::links::a_second_path_proven_through_frames_is_named_in_the_link_index_with_multipath_on	index-cache
+IndexNotRebuilt	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays	index-cache
+RoamNotFed	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays	links-mirror
+RoamNotFed	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays_with_multipath_on	links-mirror
+BeaconSkipsAnyIndexed	red	fips-mesh	node::tests::anon_beacon::an_anonymous_beacon_at_a_proven_path_of_a_silent_peer_is_dialled

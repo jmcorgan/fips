@@ -69,6 +69,9 @@ listed! {
         /// Offer the pair the link left to the heard feed, if the move left
         /// one.
         HeardLeft,
+        /// Hold the peer's link record, its control machine and its carrier
+        /// readings on the dial's link, if the move left another.
+        HoldDial,
         /// Read the pair the peer is on after the move.
         MovedRead,
         /// Seed the path MTU from the pair the peer moved to, if it moved.
@@ -76,16 +79,15 @@ listed! {
         /// Log the move, and at a dial's msg2 the replays suppressed during
         /// it.
         MoveNote,
-        /// Record on the moved link the waiver for the state the move left
-        /// it in, naming the move; test and debug builds only.
-        Waiver,
         /// Tell the peer's control machine how the crossing resolved.
         MachineCrossed,
-        /// Close the dial's connection unless the peer runs on it.
-        DialClose,
-        /// Remove the link of the handshake the crossing ended: this node's
-        /// dial, or the inbound leg the peer's msg3 completed.
-        DialLinkRemoved,
+        /// Close the losing link's connection unless a live link uses it:
+        /// the link a move left, or the dial's.
+        LoserClose,
+        /// Remove the losing link: the link a move left, or the link of the
+        /// handshake the crossing ended, this node's dial or the inbound leg
+        /// the peer's msg3 completed.
+        LoserRemoved,
         /// Drop the control machine of the inbound leg the peer's msg3
         /// completed.
         LegMachineRemoved,
@@ -188,12 +190,13 @@ const REPLACE_IN: &[Effect] = &[
 ];
 
 /// A crossing won by this node's dial at its msg2: the rekey machine moved
-/// onto the dial's session and the path machine renewed, then what follows
-/// a move to another pair, the notes, the control machine, and the dial's
-/// leg ends.
+/// onto the dial's session and the path machine renewed, the peer held on
+/// the dial's link, then what follows a move to another pair, the note, the
+/// control machine, and the link the move left ends.
 const MOVE_DIAL: &[Effect] = &[
     Effect::RunLinkOutputs,
     Effect::RunRenewed,
+    Effect::HoldDial,
     Effect::PathsRenewed,
     Effect::HeardLeft,
     Effect::MovedRead,
@@ -201,23 +204,21 @@ const MOVE_DIAL: &[Effect] = &[
     Effect::SeedMtuIfMoved,
     Effect::RelinkIfMoved,
     Effect::MoveNote,
-    Effect::Waiver,
     Effect::MachineCrossed,
     Effect::DialForget,
-    Effect::DialClose,
-    Effect::DialLinkRemoved,
+    Effect::LoserClose,
+    Effect::LoserRemoved,
     Effect::TreeAnnounce,
     Effect::BloomMark,
     Effect::BackoffReset,
 ];
 
 /// A crossing settled at the peer's msg3 by moving onto the inbound leg it
-/// completed: the rekey machine moved onto the leg's session, the waiver,
-/// the path machine renewed, what follows a move to another pair, the note,
-/// and the leg ends.
+/// completed: the rekey machine moved onto the leg's session, the path
+/// machine renewed, what follows a move to another pair, the note, and the
+/// leg ends. The peer stays held on the link it dialed.
 const MOVE_LEG: &[Effect] = &[
     Effect::RunLinkOutputs,
-    Effect::Waiver,
     Effect::RunRenewed,
     Effect::PathsRenewed,
     Effect::MovedRead,
@@ -225,7 +226,7 @@ const MOVE_LEG: &[Effect] = &[
     Effect::SeedMtuIfMoved,
     Effect::RelinkIfMoved,
     Effect::MoveNote,
-    Effect::DialLinkRemoved,
+    Effect::LoserRemoved,
     Effect::LegMachineRemoved,
 ];
 
@@ -236,8 +237,8 @@ const KEEP_DIAL: &[Effect] = &[
     Effect::LeaseFreed,
     Effect::MachineCrossed,
     Effect::DialForget,
-    Effect::DialClose,
-    Effect::DialLinkRemoved,
+    Effect::LoserClose,
+    Effect::LoserRemoved,
     Effect::TreeAnnounce,
     Effect::BloomMark,
     Effect::BackoffReset,
@@ -248,7 +249,7 @@ const KEEP_DIAL: &[Effect] = &[
 const KEEP_LEG: &[Effect] = &[
     Effect::LeaseFreed,
     Effect::KeepNote,
-    Effect::DialLinkRemoved,
+    Effect::LoserRemoved,
     Effect::LegMachineRemoved,
 ];
 

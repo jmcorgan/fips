@@ -4771,9 +4771,9 @@ async fn a_transient_msg2_failure_from_an_established_peer_address_leaves_the_fr
     let leg = deferred_leg(&node, transport_id, &source_addr);
     assert_ne!(leg, peer_link, "the msg1 built a fresh leg");
     assert_eq!(
-        node.links.prior(&leg),
-        Some(peer_link),
-        "the fresh leg records the peer's link it displaced"
+        node.links.index().get(&(transport_id, source_addr.clone())),
+        Some(&leg),
+        "the fresh leg, the newest link at the peer's pair, names it"
     );
     let peer = node
         .get_peer(&peer_addr)

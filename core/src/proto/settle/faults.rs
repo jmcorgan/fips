@@ -38,6 +38,8 @@ pub(crate) enum Fault {
     ProbingCounts,
     /// A path released with keep is closed anyway.
     KeepIgnored,
+    /// A setup address whose path the bundle released stays in the index.
+    ReleasedSetupIndexed,
     /// The unheard floor refuses at exactly its age as well.
     UnheardInclusive,
     /// The heard floor counts from the peering's installation only.
@@ -83,8 +85,8 @@ pub(crate) enum Fault {
     MoveKeepsInboundLink,
     /// A move hands the per-peer data no reset.
     MoveNoReset,
-    /// A move sets the peering heard, as the model does.
-    MoveSetsHeard,
+    /// A move leaves the peering unheard until the peer's first frame.
+    MoveLeavesUnheard,
     /// An own dial completing on a held link this node dialed is judged by
     /// the tie-break alone.
     IgnoreOwnDial,
@@ -260,6 +262,7 @@ impl Fault {
         Self::CloseBySetupAddress,
         Self::ProbingCounts,
         Self::KeepIgnored,
+        Self::ReleasedSetupIndexed,
         Self::UnheardInclusive,
         Self::HeardFromInstall,
         Self::HeardNeedsFrame,
@@ -281,7 +284,7 @@ impl Fault {
         Self::MoveKeepsOldPair,
         Self::MoveKeepsInboundLink,
         Self::MoveNoReset,
-        Self::MoveSetsHeard,
+        Self::MoveLeavesUnheard,
         Self::IgnoreOwnDial,
         Self::ModelFallbackInCore,
         Self::ReplacementUngated,

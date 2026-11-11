@@ -256,10 +256,11 @@ with v0.5.x or earlier peers.
   the XX handshake that the design document lists. Aggregation is not
   implemented. The path messages are three new link message types, `0x52` to
   `0x54`, inside the existing encrypted link. A peer without multipath
-  discards them, and the pair behaves as before, but for one known defect:
-  after a crossed handshake moves a link, a peer not known to implement
-  multipath, which is every peer with multipath off, is dialled at each further
-  anonymous beacon at the pair the link left. `node.path.*` sets the
+  discards them, and the pair behaves as before. After a crossed handshake
+  moves a link, the address the link left names no link, so the first
+  anonymous beacon there from a peer not known to implement multipath, which
+  is every peer with multipath off, is dialled, and settles as another
+  crossing on the one peering. `node.path.*` sets the
   behaviour, each transport's `role` (`never`, `backup`, `normal`, `preferred`)
   ranks its paths, and UDP's and TCP's `kind` (`local`, `internet`) overrides
   the kind the peer's address implies, which a VPN on RFC 1918 space needs.
@@ -1660,6 +1661,16 @@ with v0.5.x or earlier peers.
 
 #### macOS
 
+- Upgrading with the macOS package no longer leaves the daemon without UDP.
+  The preinstall's `launchctl bootout` returns while the daemon is still
+  shutting down, so the package wrote the new binary over the running one and
+  bootstrapped the new daemon before the old process had gone. The new
+  daemon's UDP bind failed with "Address already in use", and the old socket
+  stayed bound after the old process was gone, so every later start failed too
+  until a reboot or a port change. Both package scripts now wait for the old
+  daemon's process to exit, and kill it after 30 s, before going on. The BLE
+  agent, which runs the same file, is waited for the same way.
+
 - The macOS daemon's log, `/usr/local/var/log/fips/fips.log`, no longer grows
   without bound (717 MB on a node at debug level). launchd appends stdout to a
   file forever and gives the daemon no way to reopen one rotated away, so the
@@ -1750,6 +1761,15 @@ with v0.5.x or earlier peers.
 
 #### Peer and link state
 
+- With multipath enabled, a dial to a peer that times out after the peer came
+  up on another link now leaves its address as a path candidate, where before
+  the address was dropped with the dial. A dial that loses that race was the
+  only thing holding the address, and a discovery feed that reports only
+  changes never offers it again, so the link never gained that path. Seen with
+  an Android node whose LAN dial to a desktop raced a USB and a BLE dial after
+  a restart: the LAN path stayed missing until the desktop left the LAN and
+  came back. A dial a transport neighbour's key claim started is left out.
+  Nothing on the wire changes.
 - When crossed dials move a link onto the other session, the link's MMP
   receive state starts again with the new session, as at a rekey. Before,
   until the new session's frame counter passed the old one, receiver
@@ -1757,6 +1777,24 @@ with v0.5.x or earlier peers.
   and counted every new frame as reordered, and the peer's receiver reports
   on the new session were dropped as stale, so the link's round-trip, loss
   and ETX estimates stopped updating.
+- When two nodes dial each other at once and the crossing settles where the
+  node with the smaller address reads the msg2 answering its own dial, that
+  node now holds the peer on the link it dialed and closes the inbound one.
+  Before, it ran on its own dial's session and connection but kept the
+  inbound link's record and left that link's connection open, and since the
+  record said inbound it would not redial the peer when the connection
+  dropped. Such a crossing now leaves the smaller node one link and one
+  connection, which `fipsctl show links` lists as outbound, and that node
+  redials its peer if the connection drops. Which session each end runs on is
+  unchanged, and nothing on the wire changes. A crossing the larger node
+  settles at the peer's msg3 is unchanged: it still holds the link it dialed
+  while running on the peer's dial, and two connections can stay open.
+- An anonymous shared-media beacon at the address of a peer's link, or of a
+  path the link has proven, is now dialled once that peer has gone quiet past
+  its liveness, as a beacon naming the peer is. Before, a beacon at any
+  address in the node's link index was skipped, so failover through it waited
+  for the quiet peer to be removed. A beacon is now skipped only at the
+  address of a handshake in progress or of a peer whose link is live.
 
 #### Sessions and rekey
 

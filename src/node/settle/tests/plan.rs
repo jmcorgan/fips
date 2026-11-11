@@ -125,7 +125,11 @@ const MOVE_DIAL: &[(Effect, &str)] = &[
     ),
     (
         Effect::RunRenewed,
-        "self.run_renewed(&peer_node_addr, paths)",
+        "self.run_renewed(&peer_node_addr, left, paths)",
+    ),
+    (
+        Effect::HoldDial,
+        "if left: self.links.hold(&link_id, peer_node_addr); self.peer_machines.rekey(left, link_id); self.rekey_carrier(left, link_id)",
     ),
     (
         Effect::PathsRenewed,
@@ -155,17 +159,16 @@ const MOVE_DIAL: &[(Effect, &str)] = &[
         Effect::MoveNote,
         "debug!(.., \"Suppressed replay detections during link transition\"); debug!(.., the swap line)",
     ),
-    (Effect::Waiver, "self.links.waive(held, waiver)"),
     (
         Effect::MachineCrossed,
         "self.observe_cross_conn_resolved(&peer_node_addr, outcome)",
     ),
     (Effect::DialForget, "self.pending_outbound.forget(&key)"),
     (
-        Effect::DialClose,
-        "self.close_handshake_link_connection(link_id).await",
+        Effect::LoserClose,
+        "self.close_handshake_link_connection(loser).await",
     ),
-    (Effect::DialLinkRemoved, "self.remove_link(&link_id)"),
+    (Effect::LoserRemoved, "self.remove_link(&loser)"),
     (
         Effect::TreeAnnounce,
         "self.send_tree_announce_to_peer(&peer_node_addr).await",
@@ -181,11 +184,7 @@ const MOVE_DIAL: &[(Effect, &str)] = &[
 /// leg's session, after `move_session`.
 const MOVE_LEG: &[(Effect, &str)] = &[
     (Effect::RunLinkOutputs, "self.run_link_outputs(&peer, out)"),
-    (
-        Effect::Waiver,
-        "self.links.waive(held, Waiver::SettledAtMsg3)",
-    ),
-    (Effect::RunRenewed, "self.run_renewed(&peer, paths)"),
+    (Effect::RunRenewed, "self.run_renewed(&peer, None, paths)"),
     (
         Effect::PathsRenewed,
         "Box::pin(self.paths_renewed(&peer)).await",
@@ -210,7 +209,7 @@ const MOVE_LEG: &[(Effect, &str)] = &[
         Effect::MoveNote,
         "debug!(.., \"Simultaneous-init (msg3): swapped to inbound session (our inbound wins)\")",
     ),
-    (Effect::DialLinkRemoved, "self.remove_link(&link)"),
+    (Effect::LoserRemoved, "self.remove_link(&link)"),
     (Effect::LegMachineRemoved, "self.remove_peer_machine(link)"),
 ];
 
@@ -231,10 +230,10 @@ const KEEP_DIAL: &[(Effect, &str)] = &[
     ),
     (Effect::DialForget, "self.pending_outbound.forget(&key)"),
     (
-        Effect::DialClose,
+        Effect::LoserClose,
         "self.close_handshake_link_connection(link_id).await",
     ),
-    (Effect::DialLinkRemoved, "self.remove_link(&link_id)"),
+    (Effect::LoserRemoved, "self.remove_link(&link_id)"),
     (
         Effect::TreeAnnounce,
         "self.send_tree_announce_to_peer(&peer_node_addr).await",
@@ -257,7 +256,7 @@ const KEEP_LEG: &[(Effect, &str)] = &[
         Effect::KeepNote,
         "debug!(.., \"Simultaneous-init (msg3): keeping outbound session (our outbound wins)\")",
     ),
-    (Effect::DialLinkRemoved, "self.remove_link(&link)"),
+    (Effect::LoserRemoved, "self.remove_link(&link)"),
     (Effect::LegMachineRemoved, "self.remove_peer_machine(link)"),
 ];
 

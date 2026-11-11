@@ -151,20 +151,24 @@ pub(super) fn expect(cell: Cell) -> Expect {
         | Cell::Dropped
         | Cell::Closed
         | Cell::Removed
-        | Cell::Cleared => Expect::Changed,
+        | Cell::Cleared
+        // The reading names the link it is kept under.
+        | Cell::Rekeyed => Expect::Changed,
         Cell::New
         | Cell::HandshakeLink
         | Cell::OldClosedNewAdopted
         | Cell::DialClosed
+        | Cell::DialHeldLeftClosed
         | Cell::FromDial
         | Cell::FromLeg
         | Cell::OldDroppedFromDial
         | Cell::OldDroppedFromLeg
-        | Cell::ReleasedUnclaimedDialDropped
-        | Cell::ReleasedUnclaimedLegDropped
+        | Cell::LeftDroppedDialNamed
+        | Cell::LegDroppedHeldNamed
         | Cell::DialDropped
         | Cell::LegDropped
         | Cell::Followed
+        | Cell::SetupKeptRoamedAdded
         | Cell::Claimed
         | Cell::UnclaimedOffRecord
         | Cell::NewAtSource
@@ -198,11 +202,12 @@ pub(super) fn expect(cell: Cell) -> Expect {
         | Cell::OldRemovedLegSurvives
         | Cell::DialRemovedPeerStepped
         | Cell::LegRemoved
+        | Cell::DialRemovedPeerRekeyed
         | Cell::SteppedThenRemoved
         | Cell::UnkeptQueued
         | Cell::UnkeptQueuedCurrentClosed
         | Cell::DialClosedUnlessProven
-        | Cell::DialClosedReleasedQueued
+        | Cell::LeftClosedReleasedQueued
         | Cell::ReleasedQueued
         | Cell::QueuedDrained
         | Cell::Marked
@@ -838,6 +843,30 @@ fn spare(node: &Node, peer: &NodeAddr) -> PathRef {
     }
 }
 
+/// The key of the pending dial [`dirty`] plants.
+fn planted_dial(spare: &PathRef) -> (TransportId, u32) {
+    (spare.transport, 0x0dd_d1a1)
+}
+
+/// Move the pending dial [`dirty`] planted, which names the peer's link,
+/// onto a link of its own, opened beside it at a pair no row reads. A move
+/// closes the link the peer leaves, so a dial naming it would then name a
+/// link gone, which the live audit's `dial-link` clause rejects before any
+/// cell is read. For a move's tests, after [`dirty`] and before the first
+/// reading.
+pub(super) fn dial_aside(node: &mut Node, peer: &NodeAddr) {
+    let spare = spare(node, peer);
+    let id = node.allocate_link_id();
+    node.links.open(Link::connectionless(
+        id,
+        spare.transport,
+        TransportAddr::from_string("spare:3"),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    ));
+    node.pending_outbound.note(planted_dial(&spare), id);
+}
+
 /// The milliseconds the record's own writers take.
 fn now_ms() -> u64 {
     crate::time::mono_ms()
@@ -971,8 +1000,7 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
         }
         Row::Dials => {
             if let Some(id) = node.get_peer(peer).map(ActivePeer::link_id) {
-                node.pending_outbound
-                    .note((spare.transport, 0x0dd_d1a1), id);
+                node.pending_outbound.note(planted_dial(&spare), id);
             }
         }
         Row::PathMtu => {
@@ -1319,7 +1347,27 @@ async fn reds_a_planted_change_of_each_row(on: bool) {
             .filter(|r| expect(cell(*r, &keeping)) == Expect::Stated)
             .map(|r| (r, Outcome::Kept))
             .collect();
-        assert_cells(&before, &before, &keeping, &others);
+        // The unchanged reading passes at the keeping transition. Where that
+        // transition changes another row whatever the script, as a cutover
+        // resets the record's counters, only the planted row is read: the
+        // index is derived from the link records, so a roam, once the quiet
+        // transition that kept it, now adds the roamed pair.
+        if Row::all()
+            .into_iter()
+            .any(|r| expect(cell(r, &keeping)) == Expect::Changed)
+        {
+            let quiet = check_cells(&before, &before, &keeping, &others);
+            assert!(
+                !quiet
+                    .breaches
+                    .iter()
+                    .any(|b| b.starts_with(&format!("{row:?} "))),
+                "precondition: the unchanged reading of {row:?} passes at {keeping:?}: {:?}",
+                quiet.breaches
+            );
+        } else {
+            assert_cells(&before, &before, &keeping, &others);
+        }
         let checked = check_cells(&before, &after, &keeping, &others);
         if !checked
             .breaches

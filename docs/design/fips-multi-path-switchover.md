@@ -96,7 +96,8 @@ does.
 
 A **candidate** is an address a node might probe. It comes from the
 configuration, the peer's Nostr advert, local discovery, an address the
-peer was heard from, or an operator's `connect`. A candidate proves nothing
+peer was heard from, an operator's `connect`, or a dial to the peer that
+timed out after the peer came up on another link. A candidate proves nothing
 and changes no existing path. An address learned from an unauthenticated
 source, such as an mDNS advert, stays a candidate until a probe
 exchange proves it.

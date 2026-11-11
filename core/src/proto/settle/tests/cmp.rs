@@ -10,7 +10,6 @@
 //! closes are compared, except on a step the model leaves open. The named
 //! differences of `shadow.rs` are applied the same way here:
 //!
-//! - after a move, the judge takes the core's heard;
 //! - at a late second dial's move, the core is expected to close what
 //!   [`resync_close`] computes, and the judge's fallback is cleared;
 //! - where the core's replay memory or silent-session back-off refuses a
@@ -597,14 +596,6 @@ fn run(mode: Mode, me: Node, peer: Node, history: &[Event]) -> Ran {
             }
             ran.named.push((i, Named::LateSecondDial));
         }
-        if s.change == Some(Transition::Move)
-            && did.change == s.change
-            && let Some(p) = j.peering.as_mut()
-            && p.heard != did.heard
-        {
-            p.heard = did.heard;
-            ran.named.push((i, Named::HeardAfterMove));
-        }
         if matches!(did.class, Some(Class::Copy | Class::Recorded))
             && did.refused.is_none()
             && did.change.is_none()
@@ -729,16 +720,6 @@ fn named() -> Vec<(History, usize, Named)> {
         silent.push(msg1(10 + n, (10 + n) * 10, E1, 1 + n, at(port), CL));
     }
     alloc::vec![
-        (
-            (
-                "heard after a move",
-                SMALL,
-                LARGE,
-                crossed(SMALL, LARGE, CL)
-            ),
-            2,
-            Named::HeardAfterMove,
-        ),
         (
             ("late second dial", LARGE, SMALL, late_dial()),
             4,

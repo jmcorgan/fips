@@ -26,14 +26,11 @@ AgedMove	crossing, connection-oriented: AgedMove at n0 against maint, flipped	Co
 AgedMove	crossing, connection-oriented: AgedMove at n0 against maint, flipped	OneSession	0	kept
 AgedMove	crossing, connection-oriented: AgedMove at n0 against master off, as written	ConnectionsInUse	0	kept
 AgedMove	crossing, connection-oriented: AgedMove at n0 against master off, flipped	ConnectionsInUse	0	kept
-AgedMove	crossing, connection-oriented: AgedMove at n0 against master off, flipped	OneSession	0	kept
-AgedMove	crossing, connection-oriented: AgedMove at n0 against master off, flipped	OneSession	1	kept
 AgedMove	crossing, connection-oriented: AgedMove at n1 against maint, as written	ConnectionsInUse	1	kept
 AgedMove	crossing, connection-oriented: AgedMove at n1 against maint, as written	OneSession	1	kept
 AgedMove	crossing, connection-oriented: AgedMove at n1 against maint, flipped	ConnectionsInUse	1	kept
 AgedMove	crossing, connection-oriented: AgedMove at n1 against maint, flipped	OneSession	1	kept
 AgedMove	crossing, connection-oriented: AgedMove at n1 against master off, as written	ConnectionsInUse	1	kept
-AgedMove	crossing, connection-oriented: AgedMove at n1 against master off, as written	OneSession	0	kept
 AgedMove	crossing, connection-oriented: AgedMove at n1 against master off, as written	OneSession	1	kept
 AgedMove	crossing, connection-oriented: AgedMove at n1 against master off, flipped	ConnectionsInUse	1	kept
 AgedMove	crossing, connectionless: AgedMove at n0 against maint, flipped	OneSession	0	kept
@@ -109,14 +106,11 @@ DialerSettle	crossing, connection-oriented: DialerSettle at n0 against maint, fl
 DialerSettle	crossing, connection-oriented: DialerSettle at n0 against maint, flipped	OneSession	0	kept
 DialerSettle	crossing, connection-oriented: DialerSettle at n0 against master off, as written	ConnectionsInUse	0	kept
 DialerSettle	crossing, connection-oriented: DialerSettle at n0 against master off, flipped	ConnectionsInUse	0	kept
-DialerSettle	crossing, connection-oriented: DialerSettle at n0 against master off, flipped	OneSession	0	kept
-DialerSettle	crossing, connection-oriented: DialerSettle at n0 against master off, flipped	OneSession	1	kept
 DialerSettle	crossing, connection-oriented: DialerSettle at n1 against maint, as written	ConnectionsInUse	1	kept
 DialerSettle	crossing, connection-oriented: DialerSettle at n1 against maint, as written	OneSession	1	kept
 DialerSettle	crossing, connection-oriented: DialerSettle at n1 against maint, flipped	ConnectionsInUse	1	kept
 DialerSettle	crossing, connection-oriented: DialerSettle at n1 against maint, flipped	OneSession	1	kept
 DialerSettle	crossing, connection-oriented: DialerSettle at n1 against master off, as written	ConnectionsInUse	1	kept
-DialerSettle	crossing, connection-oriented: DialerSettle at n1 against master off, as written	OneSession	0	kept
 DialerSettle	crossing, connection-oriented: DialerSettle at n1 against master off, as written	OneSession	1	kept
 DialerSettle	crossing, connection-oriented: DialerSettle at n1 against master off, flipped	ConnectionsInUse	1	kept
 DialerSettle	crossing, connectionless: DialerSettle at n0 against maint, flipped	OneSession	0	kept
@@ -195,14 +189,11 @@ ResponderHold	crossing, connection-oriented: ResponderHold at n0 against maint, 
 ResponderHold	crossing, connection-oriented: ResponderHold at n0 against maint, flipped	OneSession	0	kept
 ResponderHold	crossing, connection-oriented: ResponderHold at n0 against master off, as written	ConnectionsInUse	0	kept
 ResponderHold	crossing, connection-oriented: ResponderHold at n0 against master off, flipped	ConnectionsInUse	0	kept
-ResponderHold	crossing, connection-oriented: ResponderHold at n0 against master off, flipped	OneSession	0	kept
-ResponderHold	crossing, connection-oriented: ResponderHold at n0 against master off, flipped	OneSession	1	kept
 ResponderHold	crossing, connection-oriented: ResponderHold at n1 against maint, as written	ConnectionsInUse	1	kept
 ResponderHold	crossing, connection-oriented: ResponderHold at n1 against maint, as written	OneSession	1	kept
 ResponderHold	crossing, connection-oriented: ResponderHold at n1 against maint, flipped	ConnectionsInUse	1	kept
 ResponderHold	crossing, connection-oriented: ResponderHold at n1 against maint, flipped	OneSession	1	kept
 ResponderHold	crossing, connection-oriented: ResponderHold at n1 against master off, as written	ConnectionsInUse	1	kept
-ResponderHold	crossing, connection-oriented: ResponderHold at n1 against master off, as written	OneSession	0	kept
 ResponderHold	crossing, connection-oriented: ResponderHold at n1 against master off, as written	OneSession	1	kept
 ResponderHold	crossing, connection-oriented: ResponderHold at n1 against master off, flipped	ConnectionsInUse	1	kept
 ResponderHold	crossing, connectionless: ResponderHold at n0 against maint, flipped	OneSession	0	kept

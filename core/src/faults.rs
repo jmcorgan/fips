@@ -69,11 +69,22 @@ faults! {
     PlantedGreen,
     /// A crossed dial's move builds the new link machine on the link's old
     /// transport and leaves the path bundle as it was, instead of taking
-    /// the winning msg2's transport and address.
+    /// the winning msg2's transport and address, and leaves the peer on the
+    /// link it was held on, the old pair's.
     MoveKeepsOldPair,
     /// A crossed dial's move sends the peer a tree announce on the session
     /// it is about to leave, before the move, as well as after it.
     MoveAnnouncesFirst,
+    /// A crossed dial's move leaves the peer on the link it was held on and
+    /// tears down the dial's link, instead of holding the link it dialed
+    /// and tearing down the one it left.
+    MoveKeepsInboundLink,
+    /// A move onto the dial's link leaves the peer's control machine and
+    /// its timers under the link the peer left.
+    MachineLeftBehind,
+    /// A move onto the dial's link leaves the peer's carrier readings under
+    /// the link the peer left.
+    CarrierLeftBehind,
     /// The smaller node of a crossed dial keeps the peer on its inbound
     /// session and closes its own dial, as the larger node does, where the
     /// tie-break moves it onto its dial.
@@ -156,18 +167,26 @@ faults! {
     /// A BLE writer whose write fails removes every channel pooled at its
     /// address, not only its own.
     BleWriterRemovesByAddress,
-    /// Following a moved path keeps the link's index entry at the pair the
-    /// path left, beside the one at the pair it moved to.
+    /// A moved path's old pair stays in the link's record, so the index
+    /// derived from it keeps an entry there, beside the one at the pair it
+    /// moved to.
     MovedLeavesEntry,
-    /// A switch of the active path leaves the link's index without an entry
-    /// at the newly active pair.
-    SwitchSkipsClaim,
     /// A path released while the link lives leaves its connection open,
     /// though the peer has no further use for it and no other link uses it.
     ReleaseKeepsPairOpen,
+    /// A queued close is drained without asking the close rule again, so it
+    /// closes a connection a link took up after the close was queued.
+    DrainReadsNothing,
     /// A crossed dial's renewal of the path machine logs none of its paths'
     /// changes of state.
     RenewedStateDropped,
+    /// A connection that opens for a pair the link's bundle no longer
+    /// holds is stepped into the bundle and left open, though no link
+    /// uses it.
+    ConnectLeftOpen,
+    /// A connection that opens for a pair is closed when no other link
+    /// uses it, even when the link's own bundle still holds the pair.
+    ConnectClosesHeld,
     /// Removing an active peer leaves its link in the link table, with
     /// every index entry naming it.
     RemoveKeepsLink,
@@ -177,6 +196,12 @@ faults! {
     /// The operator's disconnect leaves the transport connection at the
     /// peer's pair open once the peer is removed.
     AdminKeepsConnection,
+    /// The node's close rule counts only the proven paths of peers on
+    /// other links, so a handshake leg in flight keeps no connection open.
+    CloseByPeerAddress,
+    /// The node's close rule answers a link a peer holds by the pair it was
+    /// set up at, whatever paths its bundle has proven.
+    CloseBySetupAddress,
     /// A peer that sent a Disconnect is removed with the transport's mark
     /// at its pair left in place.
     DisconnectKeepsVerified,
@@ -189,6 +214,28 @@ faults! {
     /// The live audit lets off any acknowledged path the core records Live,
     /// not only the active path a switch made Live.
     MirrorLetsAckedOff,
+    /// A link's setup address stays in the index derived from the link
+    /// records after its bundle released the path there.
+    ReleasedSetupIndexed,
+    /// Closing a link takes the index's entry at each pair it was named at
+    /// from any other link that uses the pair, as the written index did.
+    ShadowLosesEntry,
+    /// Abandoning a dial takes the index's entry at the dial's pair from
+    /// whichever link it named, as the written index did.
+    ForgetTakesKey,
+    /// A pair several links use names the link opened first, not the one
+    /// opened last.
+    IndexOldestWins,
+    /// Applying a bundle's report to a link's record leaves the index as it
+    /// was, so a path the record gains or loses is not reflected in it.
+    IndexNotRebuilt,
+    /// A one-path roam or a bind, which the bundle reports in no output, is
+    /// not told to the core, so the link's record keeps the old pair.
+    RoamNotFed,
+    /// An anonymous beacon at any pair the link index names is not dialled,
+    /// whatever holds the link there, so a beacon at a proven path of a
+    /// held peer silent past its liveness is skipped too.
+    BeaconSkipsAnyIndexed,
 }
 
 impl Fault {

@@ -419,13 +419,10 @@ impl Node {
                             if let Some(transport) = self.transports.get(&ambient.transport_id) {
                                 transport.close_connection(&ambient.remote_addr).await;
                             }
-                            // This connection lost — clean up its link
+                            // This connection lost — clean up its link. The
+                            // index, derived from the live links, names the
+                            // winner's link where it uses the pair.
                             self.remove_link(&promote_link);
-                            // Restore the link index entry for the winner's link
-                            self.links.award(
-                                (ambient.transport_id, ambient.remote_addr.clone()),
-                                winner_link_id,
-                            );
                             debug!(
                                 winner_link_id = %winner_link_id,
                                 "Inbound cross-connection lost, keeping existing"

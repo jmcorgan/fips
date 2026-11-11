@@ -29,13 +29,16 @@ pub(in crate::node) type PathSteps = Joined<LinkProfile, UdpSlot, PeerInstant>;
 /// What the step of `peer`'s bundle that returned `out` stands for, read from
 /// `bundle` after the step: each output, then the core input it stands for on
 /// `link`, the core's number for the peer's link, if the table holds one. A
-/// step with no bundle or no link to read tells the core nothing. `None` only
-/// if the join refused the step, which it never does.
+/// path the step released belongs to `released` where it is given, the link
+/// a move left, and to `link` otherwise. A step with no bundle or no link to
+/// read tells the core nothing. `None` only if the join refused the step,
+/// which it never does.
 pub(in crate::node) fn pathed(
     peer: NodeAddr,
     out: Outputs<UdpSlot>,
     bundle: Option<&PeerBundle>,
     link: Option<LinkNo>,
+    released: Option<LinkNo>,
 ) -> Option<PathSteps> {
     let read = |p: &PathRef| bundle.map_or(Proven::Probing, |b| join::proven(b, p));
     let link = link.filter(|_| bundle.is_some());
@@ -43,7 +46,7 @@ pub(in crate::node) fn pathed(
         out,
         read: &read,
         link,
-        released: None,
+        released,
     };
     let Ok(steps) = join::<LinkProfile, PeerClock, OsEntropy, UdpSlot>(peer, event) else {
         debug_assert!(false, "the join refused a bundle's step");
@@ -99,6 +102,10 @@ impl Node {
         let Some(link) = self.links.no(&link) else {
             return;
         };
+        // The mutation lane's break: the roam never reaches the record.
+        if node_fault!(RoamNotFed) {
+            return;
+        }
         let event = Event::Roam {
             link,
             from: from.as_ref().map(pair),

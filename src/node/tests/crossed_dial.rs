@@ -31,7 +31,7 @@
 
 use super::link_index_audit;
 use super::rekey_parity::heartbeat;
-use super::settle::audit::{Exempt, assert_coherent};
+use super::settle::audit::assert_coherent;
 use super::spanning_tree::{
     LOOPBACK_REGISTRY, TestNode, add_loopback_alias, cleanup_nodes, loopback_tap,
     make_test_node_with_config,
@@ -586,15 +586,8 @@ async fn check_move(crossed: Crossed) {
     // node sends on another transport land in `tap`, which the audit's
     // delivery does not read, so that move is not audited here.
     match dial {
-        Dial::OtherAddress => {
-            assert_coherent(
-                &mut nodes,
-                &[Exempt::CrossedInbound { node: s, peer: l }],
-                "the end of the move",
-            )
-            .await
-        }
-        Dial::AnsweredFromFirst => assert_coherent(&mut nodes, &[], "the end of the move").await,
+        Dial::OtherAddress => assert_coherent(&mut nodes, "the end of the move").await,
+        Dial::AnsweredFromFirst => assert_coherent(&mut nodes, "the end of the move").await,
         Dial::OtherTransport => {}
     }
     cleanup_nodes(&mut nodes).await;
@@ -983,7 +976,7 @@ async fn a_crossed_dial_won_on_the_tie_break_keeps_the_pin() {
     );
     // The smaller node's msg3 is still on its way to the larger node.
     super::settle::pump(&mut nodes).await;
-    assert_coherent(&mut nodes, &[], "the end of the test, delivered until idle").await;
+    assert_coherent(&mut nodes, "the end of the test, delivered until idle").await;
     cleanup_nodes(&mut nodes).await;
 }
 

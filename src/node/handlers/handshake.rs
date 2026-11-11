@@ -539,9 +539,10 @@ impl Node {
         );
 
         // The key may already name a live link: an established peer's (a rekey
-        // or restart msg1) or our own outbound dial (a crossing msg1). The table
-        // records it so `remove_link` hands the key back if this leg is disposed.
-        self.links.open_leg(link);
+        // or restart msg1) or our own outbound dial (a crossing msg1). The leg,
+        // the newest link there, names it while it lives, and the key names
+        // that link again once `remove_link` disposes of the leg.
+        self.links.open(link);
 
         // Build the msg2 response, storing it on the surviving carrier for
         // potential resend before the machine enters the registry below.
@@ -1330,6 +1331,8 @@ impl Node {
 
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     let suppressed = peer.replay_suppressed_count();
+                    // The link the peer is held on before the move.
+                    let held = peer.link_id();
                     let epoch = diag::epoch_tag(&outbound_session);
                     // The peer's link machine is closed and rebuilt on the
                     // outbound session: what it held is unbound and freed.
@@ -1374,11 +1377,14 @@ impl Node {
                     // the old machine, or none, and hands the index back in
                     // its outputs.
                     let built = peer.our_index() == Some(outbound_our_index);
+                    // A rebuilt move holds the peer on the dial's link, and
+                    // the link it left is the one torn down.
+                    let left = (held != link_id && peer.link_id() == link_id).then_some(held);
 
                     // The rest of the move, in its order: the machines'
-                    // outputs, the path feeds, what follows a move to
-                    // another pair, the note, the waiver, the control
-                    // machine, and the dial's leg.
+                    // outputs, the path feeds, the peer held on the dial's
+                    // link, what follows a move to another pair, the note,
+                    // the control machine, and the losing link.
                     let mut run = crate::node::settle::exec::Run::new(
                         peer_node_addr,
                         crate::node::settle::table::Transition::Move {
@@ -1396,6 +1402,7 @@ impl Node {
                     facts.ours = Some(outbound_our_index);
                     facts.theirs = Some(header.sender_idx);
                     facts.to = Some((packet.transport_id, packet.remote_addr.clone()));
+                    facts.loser = Some(left.unwrap_or(link_id));
                     facts.key = Some(crate::ipv6tun::link::PeerKey::from_xonly(
                         &peer_identity.pubkey(),
                     ));
@@ -1430,6 +1437,7 @@ impl Node {
                 let facts = run.crossing();
                 facts.to = Some((packet.transport_id, packet.remote_addr.clone()));
                 facts.lease = carrier_our_index;
+                facts.loser = Some(link_id);
                 facts.outcome = Some(CrossConnOutcome::Keep);
                 self.run(&mut run).await;
                 return;
@@ -1445,7 +1453,7 @@ impl Node {
             // no-op when connectionless, and left open when it is the very
             // connection the promoted peer runs on (BLE), where closing would
             // take the msg3 just queued, and the link, with it.
-            self.close_handshake_link_connection(link_id).await;
+            self.close_unused(link_id).await;
             self.remove_link(&link_id);
 
             // Send TreeAnnounce now that sessions are aligned

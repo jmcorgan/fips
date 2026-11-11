@@ -3206,28 +3206,28 @@ impl Node {
             .copied()
     }
 
-    /// Close the transport connection under handshake link `link_id`, unless
-    /// an active peer on another link sends or is proven over the same
-    /// connection ([`Self::addr_carries_other_peer`]).
+    /// Close the transport connection at the pair link `link_id` was set up
+    /// at, unless another live link uses it ([`Self::in_use`]).
     ///
     /// A transport that keys its connections by remote address alone — BLE,
-    /// whose pool holds one L2CAP link per peer address — carries both legs
-    /// of a crossed handshake on one connection, so a losing or stale leg can
-    /// share its address with a live peer. Closing that address would take
-    /// the live peer's link down with it. On TCP the two legs are separate
-    /// sockets at different addresses, and a connectionless transport's close
-    /// is a no-op, so both are unaffected.
-    pub(in crate::node) async fn close_handshake_link_connection(&self, link_id: LinkId) {
+    /// whose pool holds one L2CAP link per peer address — carries every leg
+    /// to one address on one connection, so a losing or stale leg can share
+    /// its address with a live peer or with another dial still in flight.
+    /// Closing that address would take the live peer's link, or the other
+    /// dial's channel, down with it. On TCP the two legs of a crossing are
+    /// separate sockets at different addresses, and a connectionless
+    /// transport's close is a no-op, so both are unaffected.
+    pub(in crate::node) async fn close_unused(&self, link_id: LinkId) {
         let Some(link) = self.links.get(&link_id) else {
             return;
         };
         let transport_id = link.transport_id();
         let addr = link.remote_addr();
-        if self.addr_carries_other_peer(transport_id, addr, link_id) {
+        if self.in_use(transport_id, addr, link_id) {
             tracing::debug!(
                 link_id = %link_id,
                 addr = %addr,
-                "Handshake link shares its connection with an active peer; leaving it open"
+                "Handshake link shares its connection with another live link; leaving it open"
             );
             return;
         }
@@ -3236,22 +3236,39 @@ impl Node {
         }
     }
 
-    /// Whether an active peer on a link other than `link_id` sends or is
-    /// proven over `(transport_id, addr)`: the pair is one of its paths
-    /// that is Live or acked in its link, the active one among them.
-    pub(in crate::node) fn addr_carries_other_peer(
+    /// The close rule: whether a live link other than `link_id` uses
+    /// `(transport_id, addr)`, so its connection stays open. A link a peer
+    /// holds uses each pair that is one of its paths, Live or acked in its
+    /// bundle, the active one among them; a link no peer holds, a handshake
+    /// leg, uses the pair it was set up at
+    /// ([`LinkTable::used`](settle::LinkTable::used)).
+    pub(in crate::node) fn in_use(
         &self,
         transport_id: TransportId,
         addr: &TransportAddr,
         link_id: LinkId,
     ) -> bool {
-        self.peers.values().any(|peer| {
-            peer.link_id() != link_id
-                && matches!(
-                    peer.path_match(transport_id, addr),
-                    crate::peer::Match::Proven { .. }
-                )
-        })
+        let proven = |peer: &ActivePeer| {
+            matches!(
+                peer.path_match(transport_id, addr),
+                crate::peer::Match::Proven { .. }
+            )
+        };
+        if node_fault!(CloseByPeerAddress) {
+            return self
+                .peers
+                .values()
+                .any(|peer| peer.link_id() != link_id && proven(peer));
+        }
+        let holders: HashMap<LinkId, &ActivePeer> = self
+            .peers
+            .values()
+            .map(|peer| (peer.link_id(), peer))
+            .collect();
+        self.links
+            .used(&(transport_id, addr.clone()), link_id, |id| {
+                holders.get(&id).map(|peer| proven(peer))
+            })
     }
 
     /// Remove a link.
@@ -3268,11 +3285,10 @@ impl Node {
     /// Entries a newer link has already claimed are left alone, since they no
     /// longer name this link.
     ///
-    /// An inbound handshake leg that overwrote a key at msg1 hands it back to
-    /// the link it displaced, if that link is still live and nothing has claimed
-    /// the key since. Restoring only to a live link is what keeps a stale record
-    /// harmless: `LinkId`s come from a monotonic counter, so a dead link's id
-    /// never names a new one.
+    /// An inbound handshake leg that takes a key at msg1 names it while it
+    /// lives, as the newest link there; once it closes, the index the link
+    /// records give names the link named there before, if that link is still
+    /// live.
     pub fn remove_link(&mut self, link_id: &LinkId) -> Option<Link> {
         self.links.close(link_id)
     }
@@ -3311,13 +3327,6 @@ impl Node {
             panic!(
                 "control machine for link {link} has no live carrier \
                  (no pending connection, active peer, or pending connect)"
-            );
-        }
-        for leg in self.links.displaced() {
-            assert!(
-                self.links.contains_key(leg),
-                "displaced-key record for link {leg} outlived its link \
-                 (a removal path bypassed `remove_link`)"
             );
         }
     }

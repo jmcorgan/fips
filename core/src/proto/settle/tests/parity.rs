@@ -157,6 +157,21 @@ fn without(drop: impl Fn(&str) -> bool) -> String {
         .join("\n")
 }
 
+/// The first script's line at step 5, node 0, the first line of the
+/// committed trace that holds the peer `out`.
+const FIFTH: &str = "5 n0 held own out udp-home udp-home heard";
+
+/// A `core` line of a listed cause stating a field the line [`FIFTH`]
+/// holds otherwise.
+const PLANTED: &str = "core 5 n0 dir=in cause=late-dial-split";
+
+/// The committed trace with `core` added to the first script's block
+/// beside [`FIFTH`]: the fixture the reader's plants go on, since the
+/// committed trace holds no `core` line.
+fn with_core(core: &str) -> String {
+    TRACE.replacen(FIFTH, &format!("{FIFTH}\n{core}"), 1)
+}
+
 #[test]
 fn every_script_has_its_lines_and_every_line_its_script() {
     let traces = read(TRACE).expect("the committed trace reads");
@@ -218,12 +233,13 @@ fn every_script_has_its_lines_and_every_line_its_script() {
             .any(|f| f.contains("header states")),
         "the scan finds a header whose settings are not its script's"
     );
-    let restated = read(&TRACE.replacen(
-        "core 5 n0 dir=out cause=crossing-wrong-link",
-        "core 5 n0 dir=in cause=crossing-wrong-link",
-        1,
-    ))
-    .expect("the trace reads");
+    let fixture = read(&with_core(PLANTED)).expect("the trace with a core line reads");
+    assert!(
+        unmatched(SCRIPTS, &fixture).is_empty(),
+        "precondition: a core line stating a difference is no mismatch"
+    );
+    let restated =
+        read(&with_core("core 5 n0 dir=out cause=late-dial-split")).expect("the trace reads");
     assert!(
         unmatched(SCRIPTS, &restated)
             .iter()
@@ -234,9 +250,9 @@ fn every_script_has_its_lines_and_every_line_its_script() {
 
 #[test]
 fn a_core_line_names_a_listed_cause() {
-    let traces = read(TRACE).expect("the committed trace reads");
+    let traces = read(&with_core(PLANTED)).expect("the trace with a core line reads");
     let core: usize = traces.iter().map(|t| t.core.len()).sum();
-    assert!(core > 0, "the committed trace holds core lines");
+    assert_eq!(core, 1, "precondition: the fixture holds its one core line");
     for t in &traces {
         for d in &t.core {
             assert!(
@@ -259,13 +275,13 @@ fn a_core_line_names_a_listed_cause() {
         "core 5 n0 dir=out cause=the-node-is-wrong",
         "core 5 n0 dir=out",
         "core 5 n0 dir=out cause=",
-        "core 5 n0 cause=crossing-wrong-link",
+        "core 5 n0 cause=late-dial-split",
     ] {
         assert!(
             differs(planted).is_err(),
             "a planted core line with no listed cause, or no field, does not read: {planted:?}"
         );
-        let text = TRACE.replacen("core 5 n0 dir=out cause=crossing-wrong-link", planted, 1);
+        let text = with_core(planted);
         assert!(
             read(&text).is_err(),
             "nor does the trace it is planted in: {planted:?}"

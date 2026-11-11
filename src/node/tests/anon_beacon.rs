@@ -14,9 +14,16 @@
 //! not hold, or gave up on unproven (Dead, never acked), is still dialled:
 //! the beacon is not authenticated, and names nobody.
 //!
-//! A crossed move that takes a link off the pair its record names leaves
-//! that pair keyed to the link, so a beacon there is not dialled with
-//! multipath off at either end, as with it on at both.
+//! A crossed move holds the smaller node on the link it dialed and tears
+//! down the link it left, so the pair it left names no link. With multipath
+//! off at either end the first beacon there is dialled, as a beacon naming
+//! no link is, and leaves one working peering; with it on at both the
+//! capable gate holds it.
+//!
+//! The link index dedup holds a beacon back only where the pair names a
+//! handshake in flight or a live held peer's link: the index names a held
+//! link at each of its proven paths, so a beacon at a proven path of a peer
+//! silent past its liveness is dialled, as failover needs.
 
 use super::paths::{
     active_of, capable_at, disabled, enabled, loopback, quiet_for, second_transport, state_at, t2,
@@ -299,25 +306,59 @@ async fn beacons_from_a_linked_peer_leave_its_standby_for_the_interface_loss_to_
 }
 
 /// Failover is unaffected: once a capable peer has been silent past the
-/// link-dead timeout, a beacon at its proven path is dialled again.
-/// Mutation: skip the beacon whatever the link's liveness.
+/// link-dead timeout, a beacon at its proven path is dialled again. The
+/// pair is the held link's setup pair, so the link index names it, and the
+/// index dedup holds a beacon there back only while the peer's link is
+/// live. Mutations: skip the beacon whatever the link's liveness; skip it
+/// at any pair the link index names (`BeaconSkipsAnyIndexed`).
 #[tokio::test]
 async fn an_anonymous_beacon_at_a_proven_path_of_a_silent_peer_is_dialled() {
     let (mut nodes, s) = moved_with_standby(enabled, enabled, |_| true).await;
     assert_two_paths(&nodes);
     let peer = other(&nodes, s);
+    let pair = (t2(), t2_addr(&nodes, 1 - s));
+    assert!(
+        nodes[s].node.links.index().contains_key(&pair),
+        "precondition: the link index names the beacon's pair"
+    );
     let dead = nodes[s].node.config().node.link_dead_timeout_secs + 1;
     quiet_for(&mut nodes[s], &peer, dead);
     assert!(
         hear(&mut nodes, s).await,
-        "a beacon of a peer silent past link-dead is dialled"
+        "defect: a beacon at a proven path of a peer silent past link-dead was not dialled"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The control of the test above: while the peer's link is live, a beacon
+/// at its proven path is held back by the index dedup alone, with the
+/// capable gate out of the way on a peer not known capable.
+#[tokio::test]
+async fn an_anonymous_beacon_at_the_link_of_a_live_peer_not_known_capable_is_not_dialled() {
+    let (mut nodes, s) = moved_with_standby(enabled, disabled, |s| s == 0).await;
+    assert_eq!(s, 0);
+    assert!(
+        !capable_at(&nodes[0], &other(&nodes, 0)),
+        "precondition: not capable"
+    );
+    let pair = (t2(), t2_addr(&nodes, 1));
+    assert!(
+        nodes[0].node.links.index().contains_key(&pair),
+        "precondition: the link index names the beacon's pair"
+    );
+    assert!(
+        !hear(&mut nodes, 0).await,
+        "a beacon at the link of a live peer was dialled"
     );
     cleanup_nodes(&mut nodes).await;
 }
 
 /// The rule covers a capable peer only: with the peer's multipath off, a
-/// beacon at the pair the link moved to is dialled as without multipath.
-/// Mutation: drop the capability check.
+/// beacon at a proven path of the link is dialled as without multipath. The
+/// smaller node holds the link it dialed at the beacon's pair, which the
+/// link index names; the test drops the entry to stand for a proven path
+/// at another pair, so that only the gate stands between the beacon and a
+/// dial. Mutation: drop the capability check.
 #[tokio::test]
 async fn an_anonymous_beacon_of_a_peer_not_known_capable_is_dialled_as_before() {
     // Node 0 has multipath on and is the smaller, so its won crossed
@@ -332,6 +373,10 @@ async fn an_anonymous_beacon_of_a_peer_not_known_capable_is_dialled_as_before() 
         matches!(held(&nodes, 0), Match::Proven { .. }),
         "precondition: the link is on the beacon's pair"
     );
+    // The link record's own pair stays keyed; dropping the entry stands for
+    // a proven path at a pair other than the link's own.
+    let pair = (t2(), t2_addr(&nodes, 1));
+    nodes[0].node.links.raw_index().remove(&pair);
     assert!(
         hear(&mut nodes, 0).await,
         "a peer not known to be capable is dialled as before"
@@ -530,13 +575,19 @@ async fn returned_and_probing() -> (Vec<TestNode>, usize, TransportAddr, Cut) {
     let mut taken = || cut.taken().len();
     let sent = until_window(&mut nodes, s, &a2, 3, &mut taken).await;
     assert!(sent >= 3, "precondition: {sent} probes went unanswered");
+    // The link record's own pair stays keyed; dropping the entry stands for
+    // a returned interface's pair other than the link's own.
+    nodes[s].node.links.raw_index().remove(&(t2(), a2.clone()));
     (nodes, s, a2, cut)
 }
 
 /// Assert what [`returned_and_probing`] promises before its beacon: the
 /// peer is capable and live, and the pair is held Probing, never acked, in
 /// a window, and is not keyed in `addr_to_link`, so only the gate stands
-/// between the beacon and a dial.
+/// between the beacon and a dial. The pair is the setup pair of the link
+/// the smaller node dialed and holds, and so keyed while the link lives;
+/// [`returned_and_probing`] drops the entry to stand for a returned
+/// interface's pair other than the link's own.
 fn assert_returned(nodes: &[TestNode], s: usize, a2: &TransportAddr) {
     let peer = other(nodes, s);
     assert!(capable_at(&nodes[s], &peer), "precondition: capable");
@@ -939,38 +990,6 @@ async fn late_with(cfg_s: fn() -> Config, cfg_l: fn() -> Config) -> (Vec<TestNod
     (nodes, s)
 }
 
-/// [`late_answer`]'s crossing settles at the larger node's msg3 holding an
-/// inbound link off the msg3's pair. `SettledAtMsg3` names the link a node
-/// dialed, so that link does not carry it.
-#[tokio::test]
-async fn a_crossing_settled_at_msg3_on_a_held_inbound_link_records_no_settled_at_msg3_waiver() {
-    let (mut nodes, s) = late_answer().await;
-    let l = 1 - s;
-    let link = nodes[l]
-        .node
-        .get_peer(&other(&nodes, l))
-        .expect("precondition: the larger node holds the peer")
-        .link_id();
-    let inbound = nodes[l]
-        .node
-        .links
-        .get(&link)
-        .is_some_and(|k| k.direction() == LinkDirection::Inbound);
-    let waived = nodes[l]
-        .node
-        .links
-        .carries(&link, crate::node::settle::Waiver::SettledAtMsg3);
-    cleanup_nodes(&mut nodes).await;
-    assert!(
-        inbound,
-        "precondition: the larger node holds an inbound link"
-    );
-    assert!(
-        !waived,
-        "defect: SettledAtMsg3 was recorded on a link the node did not dial"
-    );
-}
-
 /// After [`late_answer`]'s move, the pair the link left is offered to the
 /// new path machine as heard, so the peer is capable again at both ends with
 /// the beacon's pair proven, and the next beacon from it is not dialled.
@@ -1045,9 +1064,10 @@ async fn the_pair_a_late_answers_move_offers_is_unlisted_after_the_heard_silence
 }
 
 /// After [`late_with`]'s move, with the smaller node built from `cfg_s` and
-/// the larger from `cfg_l`, the link record's own pair, the one the move
-/// left, still names the link at the smaller node, five beacons there start
-/// no handshake, and the smaller node keeps its session for the peer.
+/// the larger from `cfg_l`: the smaller node holds the link it dialed, whose
+/// own pair is keyed to it, five beacons at the pair the move left start no
+/// handshake, and the smaller node keeps its session for the peer. Holds
+/// where the capable gate takes the beacon as the peer's.
 async fn left_quiet(name: &str, cfg_s: fn() -> Config, cfg_l: fn() -> Config) {
     let (mut nodes, s) = late_with(cfg_s, cfg_l).await;
     let peer = other(&nodes, s);
@@ -1085,28 +1105,76 @@ async fn left_quiet(name: &str, cfg_s: fn() -> Config, cfg_l: fn() -> Config) {
     cleanup_nodes(&mut nodes).await;
 }
 
-/// The pair a crossed move left stays the link's with multipath off at both
-/// ends. Mutation: drop the entry at the link record's own pair on release,
-/// which reds the entry assertion, and without it the dial count.
+/// After [`late_with`]'s move, with the smaller node built from `cfg_s` and
+/// the larger from `cfg_l`, where the capable gate does not take the beacon
+/// as the peer's. The move held the smaller node on the link it dialed and
+/// tore down the link it left, so the pair it left names no link, and the
+/// first of five beacons there is dialled, as a beacon naming no link is.
+/// That dial leaves one working peering: no other beacon is dialled once
+/// the pair names the held link again, each end holds the other once with
+/// one link and no handshake in flight, and the two ends are on one session
+/// on which a heartbeat authenticates each way.
+async fn left_dialled_once(name: &str, cfg_s: fn() -> Config, cfg_l: fn() -> Config) {
+    use super::settle::settled;
+    let (mut nodes, s) = late_with(cfg_s, cfg_l).await;
+    let l = 1 - s;
+    let peer = other(&nodes, s);
+    let left = (t2(), t2_addr(&nodes, l));
+    assert_eq!(
+        nodes[s].node.links.index().get(&left),
+        None,
+        "precondition: {name}: the pair the move left names no link"
+    );
+    let mut dials = 0;
+    for _ in 0..5 {
+        dials += u32::from(hear(&mut nodes, s).await);
+        pump(&mut nodes).await;
+    }
+    assert_eq!(
+        dials, 1,
+        "{name}: {dials} of 5 beacons at the pair the link left were dialled"
+    );
+    let me = *nodes[s].node.node_addr();
+    for (x, them) in [(s, peer), (l, me)] {
+        let tn = &nodes[x].node;
+        assert!(
+            tn.get_peer(&them).is_some(),
+            "{name}: node {x} holds its peer"
+        );
+        assert_eq!(tn.peers.len(), 1, "{name}: node {x} holds one peer");
+        assert_eq!(tn.links.len(), 1, "{name}: node {x} holds one link");
+        assert!(
+            !tn.peer_machines.values().any(|m| m.leg().is_some()),
+            "{name}: node {x} has a handshake in flight"
+        );
+    }
+    let one = settled(&mut nodes, s, l).await;
+    assert!(one.is_ok(), "{name}: one working session: {one:?}");
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The pair a crossed move left names no link with multipath off at both
+/// ends, so one beacon there is dialled and leaves one working peering.
 #[tokio::test]
-async fn a_beacon_at_the_pair_a_crossed_move_left_is_not_dialled_with_multipath_off_at_both_ends() {
-    left_quiet("off at both", Config::new, Config::new).await;
+async fn a_beacon_at_the_pair_a_crossed_move_left_is_dialled_once_and_leaves_one_peering_with_multipath_off_at_both_ends()
+ {
+    left_dialled_once("off at both", Config::new, Config::new).await;
 }
 
 /// As above, with multipath on at the smaller node and off at the larger,
 /// where the peer is not capable at the smaller node, so the capable gate
 /// does not hold the beacon.
 #[tokio::test]
-async fn a_beacon_at_the_pair_a_crossed_move_left_is_not_dialled_with_multipath_on_at_the_smaller_and_off_at_the_larger()
+async fn a_beacon_at_the_pair_a_crossed_move_left_is_dialled_once_and_leaves_one_peering_with_multipath_on_at_the_smaller_and_off_at_the_larger()
  {
-    left_quiet("on at the smaller, off at the larger", enabled, Config::new).await;
+    left_dialled_once("on at the smaller, off at the larger", enabled, Config::new).await;
 }
 
 /// As above, with multipath off at the smaller node and on at the larger.
 #[tokio::test]
-async fn a_beacon_at_the_pair_a_crossed_move_left_is_not_dialled_with_multipath_off_at_the_smaller_and_on_at_the_larger()
+async fn a_beacon_at_the_pair_a_crossed_move_left_is_dialled_once_and_leaves_one_peering_with_multipath_off_at_the_smaller_and_on_at_the_larger()
  {
-    left_quiet("off at the smaller, on at the larger", Config::new, enabled).await;
+    left_dialled_once("off at the smaller, on at the larger", Config::new, enabled).await;
 }
 
 /// The control, with multipath on at both ends. Its entry assertion covers

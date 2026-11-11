@@ -99,3 +99,36 @@ fn a_released_path_marked_keep_closes_nothing() {
     let left: Vec<Pair> = links.at(&pair(1, 2)).map(|_| pair(1, 2)).collect();
     assert!(left.is_empty(), "the released path leaves the index");
 }
+
+#[test]
+fn a_released_setup_address_leaves_the_index_and_a_roamed_one_stays() {
+    let mut links = Links::new();
+    let released = links.open(pair(1, 1), Dir::Outbound, peer(2));
+    links.path(released, pair(1, 1), Proven::Live);
+    links.path(released, pair(1, 2), Proven::Live);
+    let roamed = links.open(pair(1, 5), Dir::Inbound, peer(3));
+    links.path(roamed, pair(1, 5), Proven::Live);
+    links.moved(roamed, &pair(1, 5), pair(1, 6));
+    links.release(released, &pair(1, 1), true);
+    assert_eq!(
+        links.at(&pair(1, 2)).collect::<Vec<_>>(),
+        [released],
+        "precondition: the link's other path stays named"
+    );
+    assert_eq!(
+        links.at(&pair(1, 1)).count(),
+        0,
+        "a released setup address leaves the index"
+    );
+    assert_eq!(
+        links.at(&pair(1, 5)).collect::<Vec<_>>(),
+        [roamed],
+        "a setup address the path roamed away from stays named"
+    );
+    assert_eq!(
+        links.at(&pair(1, 6)).collect::<Vec<_>>(),
+        [roamed],
+        "the roamed pair is named"
+    );
+    assert_eq!(*links.index(), links.derived(), "the index is the records'");
+}

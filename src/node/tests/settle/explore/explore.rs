@@ -183,14 +183,24 @@ fn dialing(world: &World, at: usize) -> bool {
     !node.pending_outbound.is_empty() || !node.peering.pending_connects.is_empty()
 }
 
+/// Whether node `at` of `world` still waits for a connection a held peer's
+/// path machine asked for, which the path tick settles and then probes.
+fn opening(world: &World, at: usize) -> bool {
+    let node = &world.nodes[at].node;
+    node.peers
+        .keys()
+        .any(|p| !node.paths.connects(p).is_empty())
+}
+
 /// Heal a leaf. Everything sent is handed over; then, until every pair of
 /// the start holds each other on one session, each dialer of the start
 /// holding neither its peer nor a dial in progress dials again, as a
 /// configured peer is redialed, and time moves on a second, for at most
 /// [`LEAF_SECS`]. Once every pair agrees, time moves on a second at a time
-/// while any node still has a dial in progress, for at most [`DIAL_SECS`],
-/// every pair still agreeing after each delivery. Returns whether the
-/// nodes went quiet with every pair held on one session and no dial left.
+/// while any node still has a dial in progress, or a connection a path
+/// machine asked for still opening, for at most [`DIAL_SECS`], every pair
+/// still agreeing after each delivery. Returns whether the nodes went quiet
+/// with every pair held on one session and no dial or path connection left.
 pub(super) async fn heal(world: &mut World, start: &Start, order: Order) -> bool {
     let pairs = start.pairs(order);
     let dials = start.dials(order);
@@ -218,7 +228,7 @@ pub(super) async fn heal(world: &mut World, start: &Start, order: Order) -> bool
             (Some(_), true) => {}
         }
         if let Some(at) = agreed {
-            if !(0..world.nodes.len()).any(|i| dialing(world, i)) {
+            if !(0..world.nodes.len()).any(|i| dialing(world, i) || opening(world, i)) {
                 return true;
             }
             if round >= at + DIAL_SECS {
@@ -254,6 +264,9 @@ pub(super) fn jobs(medium: Medium, settings: &[bool]) -> Vec<Job> {
     out
 }
 
+/// The stack of a walk's thread.
+const WALK_STACK: usize = 8 * 1024 * 1024;
+
 /// Run `f` on each job, each on a thread of its own with its own runtime,
 /// and so its own test clock, side by side, and return what they found. A
 /// job names the path it is on in the string it is given; a panic in a
@@ -268,13 +281,19 @@ where
     for job in jobs {
         let at = Arc::new(Mutex::new(String::new()));
         let seen = Arc::clone(&at);
-        let run = std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("precondition: a runtime for the walk")
-                .block_on(f(job, seen))
-        });
+        // A walk runs a node's handlers to their full depth in a debug
+        // build, which on the loopback starts alone comes within a few per
+        // cent of the default 2 MiB thread stack, so each walk takes more.
+        let run = std::thread::Builder::new()
+            .stack_size(WALK_STACK)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("precondition: a runtime for the walk")
+                    .block_on(f(job, seen))
+            })
+            .expect("precondition: a thread for the walk");
         runs.push((run, at));
     }
     let mut found = Vec::new();

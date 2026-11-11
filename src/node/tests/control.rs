@@ -333,21 +333,23 @@ async fn alternate_path_for_quiet_peer(dialer_smaller: bool) {
         }
     }
 
-    // The link stays on its path at both ends.
+    // The link stays on its path at both ends. A dialer that moves to the
+    // dial's session holds the dial's link, the link it dialed, at the
+    // msg2's pair, which is the peer's primary address.
     let dialer_after = link_view(&nodes[d], &peer_addr);
     let peer_after = link_view(&nodes[p], &dialer_addr);
     assert_eq!(
         (
-            dialer_after.link_id,
+            dialer_after.link_id == dialer_before.link_id,
             dialer_after.transport_id,
             dialer_after.current_addr.as_ref()
         ),
         (
-            dialer_before.link_id,
+            !dialer_smaller,
             dialer_before.transport_id,
             Some(&nodes[p].addr)
         ),
-        "the dialer's link must stay on the peer's primary address (dialer smaller: {dialer_smaller})"
+        "the dialer's link must stay on the peer's primary address, on the dial's link where it moves (dialer smaller: {dialer_smaller})"
     );
     assert_eq!(
         (
@@ -1110,6 +1112,136 @@ async fn test_api_connect_to_a_live_capable_peer_holds_a_new_address_as_a_path_c
     );
 }
 
+/// Plant on `node` an outbound leg to `peer` at (`transport`, `addr`), started
+/// by a dial of `origin` at `dial_ms` and still unanswered, with its
+/// handshake timeout due 30 s later. Returns the leg's link.
+fn plant_lost_dial(
+    node: &mut Node,
+    peer: PeerIdentity,
+    transport: TransportId,
+    addr: &TransportAddr,
+    origin: crate::peer::machine::DialOrigin,
+    dial_ms: u64,
+) -> LinkId {
+    use crate::peer::machine::{PeerEvent, PeerMachine, TimerKind};
+    use crate::proto::fmp::LegStamp;
+
+    let link_id = node.allocate_link_id();
+    let mut conn = outbound_leg(link_id, peer, dial_ms);
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let _ = conn
+        .start_handshake(
+            node.identity().keypair(),
+            node.startup_epoch(),
+            LegStamp::at(dial_ms),
+        )
+        .unwrap();
+    let mut machine = PeerMachine::new_outbound(link_id, Some(peer), LegStamp::at(dial_ms));
+    machine.set_dial_origin(origin);
+    let _ = machine.step(
+        PeerEvent::Dial {
+            transport_id: transport,
+            remote_addr: addr.clone(),
+            peer_identity: peer,
+            connection_oriented: false,
+        },
+        dial_ms,
+        &mut node.index_allocator,
+    );
+    let _ = machine.set_conn_our_index(our_lease);
+    machine.set_conn_transport_id(transport);
+    machine.set_conn_source_addr(addr.clone());
+    machine.set_leg(conn.take_leg().unwrap());
+    node.peer_machines.raw().insert(link_id, machine);
+    node.peer_machines
+        .raw_timers()
+        .entry(link_id)
+        .or_default()
+        .insert(TimerKind::HandshakeTimeout, dial_ms + 30_000);
+    link_id
+}
+
+/// Link A and B with multipath enabled and B capable at A, let a dial of
+/// `origin` from A to B at another address time out, and return the
+/// candidate sources A then holds for that address.
+async fn lost_dial_sources(
+    origin: crate::peer::machine::DialOrigin,
+) -> Option<fips_core::proto::path::Sources> {
+    use super::paths::{capable_at, enabled, sources_at};
+    use super::rekey_parity::{linked_pair, pump};
+
+    let mut nodes = linked_pair(enabled(), enabled()).await;
+    let b_addr = *nodes[1].node.node_addr();
+    let t1 = nodes[0].transport_id;
+    let q = add_loopback_alias(&nodes[1].addr, nodes[1].transport_id);
+    nodes[0].node.offer_path(&b_addr, t1, q).await;
+    pump(&mut nodes).await;
+    assert!(capable_at(&nodes[0], &b_addr), "precondition: B is capable");
+    assert!(
+        nodes[0].node.active_peer_link_is_live(&b_addr),
+        "precondition: B is live at A"
+    );
+
+    // A's dial to B at another address, still unanswered: the leg that
+    // lost the race.
+    let lost = add_loopback_alias(&nodes[1].addr, nodes[1].transport_id);
+    let b_identity = PeerIdentity::from_npub(&nodes[1].node.npub()).unwrap();
+    let dial_ms = 1000u64;
+    let link_id = plant_lost_dial(&mut nodes[0].node, b_identity, t1, &lost, origin, dial_ms);
+    assert!(
+        sources_at(&nodes[0], &b_addr, t1, &lost).is_none(),
+        "precondition: the address is no candidate yet"
+    );
+
+    nodes[0].node.drive_peer_timers(dial_ms + 100_000).await;
+
+    assert!(
+        !nodes[0].node.peer_machines.contains_key(&link_id),
+        "the timed-out leg is reaped"
+    );
+    let sources = sources_at(&nodes[0], &b_addr, t1, &lost);
+    cleanup_nodes(&mut nodes).await;
+    sources
+}
+
+/// With multipath enabled, a dial to a peer that times out after the peer
+/// came up on another link — it raced a sibling dial and lost — leaves its
+/// address held as a path candidate, as a connect request for the live
+/// peer would, instead of dropping it with the dial.
+/// Mutation: drop the address with the timed-out dial.
+#[tokio::test]
+async fn a_dial_that_times_out_after_its_peer_came_up_elsewhere_leaves_a_path_candidate() {
+    let sources = lost_dial_sources(crate::peer::machine::DialOrigin::Addressed).await;
+    assert!(
+        sources.is_some_and(|s| s.has(fips_core::proto::path::Source::Request)),
+        "the lost dial's address is held as a candidate: {sources:?}"
+    );
+}
+
+/// The address of a lost dial an mDNS advert started is held as a local
+/// discovery candidate, not as a connect request.
+/// Mutation: hold every lost dial's address as a connect request.
+#[tokio::test]
+async fn a_lost_mdns_advert_dial_leaves_its_address_as_a_discovery_candidate() {
+    let sources = lost_dial_sources(crate::peer::machine::DialOrigin::MdnsAdvert).await;
+    assert!(
+        sources.is_some_and(|s| s.has(fips_core::proto::path::Source::Discovery)),
+        "the lost mDNS dial's address is held as a discovery candidate: {sources:?}"
+    );
+}
+
+/// A lost dial a transport neighbour's key claim started leaves no
+/// candidate: the neighbour is offered again while it stays.
+/// Mutation: hold a neighbour-claim dial's address too.
+#[tokio::test]
+async fn a_lost_neighbour_claim_dial_leaves_no_path_candidate() {
+    let sources = lost_dial_sources(crate::peer::machine::DialOrigin::NeighbourClaim).await;
+    assert!(
+        sources.is_none(),
+        "the lost neighbour-claim dial's address is not held: {sources:?}"
+    );
+}
+
 /// With multipath enabled, `connect` naming a new address of a live peer
 /// not known to implement multipath keeps the reply a node without
 /// multipath gives; the address is held as a candidate, which opens
@@ -1233,6 +1365,24 @@ fn held_pin(tn: &TestNode, peer: &NodeAddr) -> Option<fips_core::proto::path::Pi
         .and_then(|b| b.pin().cloned())
 }
 
+/// Assert that the dialer `tn` holds the peer on the dial's link, an
+/// outbound link other than `before`, where it `moved` to the dial's
+/// session, and on `before` otherwise: a move holds the link it dialed.
+fn assert_dialer_link(tn: &TestNode, after: LinkId, before: LinkId, moved: bool, case: &str) {
+    let held = tn.node.links.get(&after).map(|l| l.direction());
+    if moved {
+        assert!(
+            after != before && held == Some(LinkDirection::Outbound),
+            "precondition: the dialer holds the dial's link where it moved, got {after:?} ({held:?}) for {before:?} ({case})"
+        );
+    } else {
+        assert_eq!(
+            after, before,
+            "precondition: the dialer kept its link where it did not move ({case})"
+        );
+    }
+}
+
 /// Run the dialer's second dial to the peer at `alternate` to completion.
 async fn second_dial(nodes: &mut [TestNode], d: usize, p: usize, alternate: &TransportAddr) {
     let peer_npub = nodes[p].node.npub();
@@ -1251,9 +1401,10 @@ async fn second_dial(nodes: &mut [TestNode], d: usize, p: usize, alternate: &Tra
 /// One orientation of the second-dial pin tests below: both ends pin their
 /// link, then the dialer dials the peer it holds again on a second address
 /// of the peer's. The peer answers the dial as a fresh leg and both ends
-/// settle it by address order, as a crossed handshake, so neither end's
-/// link is replaced. Both pins are kept, whichever end dialled the peering
-/// and whether or not the dialer moves to the dial's session.
+/// settle it by address order, as a crossed handshake, so the peer's link
+/// is not replaced, and the dialer holds the dial's link where it moves to
+/// the dial's session and its own otherwise. Both pins are kept, whichever
+/// end dialled the peering and whether or not the dialer moves.
 async fn pin_across_a_second_dial(dialer_smaller: bool, dialer_dialled_first: bool) {
     let (mut nodes, d, p, alternate) = held_pair(dialer_smaller, dialer_dialled_first).await;
     let dialer_addr = *nodes[d].node.node_addr();
@@ -1270,14 +1421,20 @@ async fn pin_across_a_second_dial(dialer_smaller: bool, dialer_dialled_first: bo
     let dialer_after = link_view(&nodes[d], &peer_addr);
     let peer_after = link_view(&nodes[p], &dialer_addr);
     assert_eq!(
-        (dialer_after.link_id, peer_after.link_id),
-        (dialer_before.link_id, peer_before.link_id),
-        "precondition: neither end replaced the peering ({orientation})"
+        peer_after.link_id, peer_before.link_id,
+        "precondition: the peer did not replace the peering ({orientation})"
     );
+    let moved = dialer_after.our_index != dialer_before.our_index;
     assert_eq!(
-        dialer_after.our_index != dialer_before.our_index,
-        dialer_smaller,
+        moved, dialer_smaller,
         "precondition: the dialer moved to the second dial's session only when smaller ({orientation})"
+    );
+    assert_dialer_link(
+        &nodes[d],
+        dialer_after.link_id,
+        dialer_before.link_id,
+        moved,
+        &orientation,
     );
     assert_eq!(
         held_pin(&nodes[d], &peer_addr),
@@ -1319,10 +1476,10 @@ async fn a_pin_is_kept_when_our_second_dial_from_the_larger_address_to_a_peering
 /// a peering, made by its own dial when `dialer_dialled_first`, else by the
 /// peer's, and pins its link; the peer drops the peering (as its own
 /// link-dead reap does), and the dialer dials the peer again on a second
-/// address. The peer promotes the dial as a new peering; the dialer keeps
-/// its link and settles the dial by address order, as a crossed handshake,
-/// which it cannot tell this from. Its pin is kept, whether it moves to the
-/// dial's session or stays on its own.
+/// address. The peer promotes the dial as a new peering; the dialer
+/// settles the dial by address order, as a crossed handshake, which it
+/// cannot tell this from, holding the dial's link where it moves to the
+/// dial's session and its own otherwise. Its pin is kept either way.
 async fn pin_when_the_peer_dropped_the_peering_first(
     dialer_smaller: bool,
     dialer_dialled_first: bool,
@@ -1353,14 +1510,17 @@ async fn pin_when_the_peer_dropped_the_peering_first(
         "precondition: the peer holds the dialer again ({orientation})"
     );
     let dialer_after = link_view(&nodes[d], &peer_addr);
+    let moved = dialer_after.our_index != dialer_before.our_index;
     assert_eq!(
-        dialer_after.link_id, dialer_before.link_id,
-        "precondition: the dialer kept its link ({orientation})"
-    );
-    assert_eq!(
-        dialer_after.our_index != dialer_before.our_index,
-        dialer_smaller,
+        moved, dialer_smaller,
         "precondition: the dialer moved to the dial's session only when smaller ({orientation})"
+    );
+    assert_dialer_link(
+        &nodes[d],
+        dialer_after.link_id,
+        dialer_before.link_id,
+        moved,
+        &orientation,
     );
     assert_eq!(
         held_pin(&nodes[d], &peer_addr),
