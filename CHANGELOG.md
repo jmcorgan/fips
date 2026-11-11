@@ -205,6 +205,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as an OpenWrt network or wifi reload does, rebinds to the new interface
   within about five seconds. Before, the node kept beaconing but formed no links
   until it was restarted, and with `announce` off nothing recovered.
+- On macOS, an Ethernet transport receives through a 512 KiB BPF buffer, the
+  kernel's default maximum (`debug.bpf_maxbufsize`), instead of the 4 KiB a
+  new BPF descriptor gets. The 4 KiB buffer held two or three full frames, so
+  the kernel dropped most of any burst before the transport read it: a peer
+  sending to a Mac over Wi-Fi got about 10 Mbit/s through with half of it
+  lost, and TCP fell to 3-5 Mbit/s, on a link that carried 69 Mbit/s of plain
+  IP. The same link now carries 50 Mbit/s with no loss. Each Ethernet
+  transport on macOS takes about 1 MiB more kernel memory and 1.5 MiB more
+  process memory.
 
 #### TUN
 
