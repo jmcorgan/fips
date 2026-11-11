@@ -476,6 +476,7 @@ fn seat_each(node: &mut Node, peer: &NodeAddr) {
             target,
             packet_tx,
             std::sync::Arc::new(UdpStats::new()),
+            None,
         )
         .expect("precondition: the socket's recv drain starts");
         p.seat_socket(i, socket, drain);

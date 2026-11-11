@@ -34,6 +34,17 @@ pub fn is_punch_packet(data: &[u8]) -> bool {
     magic == PUNCH_MAGIC || magic == PUNCH_ACK_MAGIC
 }
 
+/// The classifier the Nostr rendezvous registers with every UDP transport
+/// instance: a punch packet is discarded before FMP sees it, anything else
+/// goes to FMP.
+pub fn classify_datagram(data: &[u8]) -> crate::transport::udp::DatagramClass {
+    if is_punch_packet(data) {
+        crate::transport::udp::DatagramClass::Discard
+    } else {
+        crate::transport::udp::DatagramClass::Fmp
+    }
+}
+
 /// Result of handing an established traversal session into FIPS.
 #[derive(Debug, Clone)]
 pub struct BootstrapHandoffResult {

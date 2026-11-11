@@ -18,7 +18,9 @@ mod tests;
 pub(crate) use signal::FRESHNESS_SKEW_TOLERANCE_MS;
 
 pub use driver::{AdvertTransportSnapshot, BootstrapPeer, MismatchEvidence, RendezvousDriver};
-pub use handoff::{BootstrapHandoffResult, EstablishedTraversal, is_punch_packet};
+pub use handoff::{
+    BootstrapHandoffResult, EstablishedTraversal, classify_datagram, is_punch_packet,
+};
 pub use runtime::NostrRendezvous;
 pub use types::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, BootstrapError, BootstrapEvent,

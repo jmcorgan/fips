@@ -3803,6 +3803,7 @@ impl Node {
             inherited_config,
             packet_tx,
         );
+        transport.set_classifier(crate::nostr::classify_datagram);
 
         transport
             .adopt_socket_async(traversal.socket)

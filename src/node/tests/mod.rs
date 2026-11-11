@@ -187,6 +187,7 @@ pub(super) fn install_connected_udp(
         peer_sa,
         packet_tx,
         std::sync::Arc::new(crate::transport::udp::UdpStats::new()),
+        None,
     )
     .expect("spawn the peer recv drain");
 

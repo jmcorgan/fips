@@ -1425,10 +1425,17 @@ impl Node {
             .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
             .collect();
 
-        // Create UDP transport instances
+        // Create UDP transport instances. With Nostr rendezvous enabled,
+        // each carries its datagram classifier from creation, so it is in
+        // place before the instance receives anything; without it, the
+        // default filter applies.
+        let nostr = self.config().node.rendezvous.nostr.enabled;
         for (name, udp_config) in udp_instances {
             let transport_id = self.allocate_transport_id();
-            let udp = UdpTransport::new(transport_id, name, udp_config, packet_tx.clone());
+            let mut udp = UdpTransport::new(transport_id, name, udp_config, packet_tx.clone());
+            if nostr {
+                udp.set_classifier(crate::nostr::classify_datagram);
+            }
             transports.push(TransportHandle::Udp(udp));
         }
 
