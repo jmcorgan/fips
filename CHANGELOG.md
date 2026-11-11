@@ -1653,6 +1653,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   BPF buffer overflowing went unseen, and neither the warning nor ECN marking
   could react to it.
 
+- On macOS, an Ethernet transport receives through a 512 KiB BPF buffer, the
+  kernel's default maximum (`debug.bpf_maxbufsize`), instead of the 4 KiB a
+  new BPF descriptor gets. The 4 KiB buffer held two or three full frames, so
+  the kernel dropped most of any burst before the transport read it: a peer
+  sending to a Mac over Wi-Fi got about 10 Mbit/s through with half of it
+  lost, and TCP fell to 3-5 Mbit/s, on a link that carried 69 Mbit/s of plain
+  IP. The same link now carries 50 Mbit/s with no loss. Each Ethernet
+  transport on macOS takes about 1 MiB more kernel memory and 1.5 MiB more
+  process memory.
+
 - A beacon heard just before an Ethernet interface went away no longer makes the
   node dial that neighbour on the interface it has just lost.
 

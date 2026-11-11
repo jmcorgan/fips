@@ -17,6 +17,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// Ethernet header size: dst(6) + src(6) + ethertype(2).
 const ETH_HDRLEN: usize = 14;
 
+/// The BPF buffer requested at open. macOS gives a new descriptor a buffer of
+/// `debug.bpf_bufsize` (4 KiB by default), which holds two or three full
+/// frames, so a burst that arrives before the reader thread wakes overflows
+/// it and the kernel drops the rest. The kernel clamps the request to
+/// `debug.bpf_maxbufsize` (512 KiB by default) and the size it grants is read
+/// back with `BIOCGBLEN`. It allocates two buffers of this size per
+/// descriptor.
+const BPF_BUFLEN_REQUEST: libc::c_uint = 512 * 1024;
+
 /// macOS SIOCGIFMTU ioctl constant.
 const SIOCGIFMTU: libc::c_ulong = 0xC0206933;
 
@@ -79,6 +88,10 @@ impl PacketSocket {
 
         // Look up interface index (for API compat; BPF binds by name)
         let if_index = get_if_index(interface)?;
+
+        // Size the buffer before binding: BIOCSBLEN is refused once the
+        // descriptor is bound to an interface.
+        set_bpf_buflen(fd, BPF_BUFLEN_REQUEST)?;
 
         // Bind to the interface
         bind_to_interface(fd, interface)?;
@@ -147,7 +160,8 @@ impl PacketSocket {
 
     /// Set the socket receive buffer size.
     ///
-    /// BPF devices use a fixed kernel buffer; silently ignored.
+    /// The BPF buffer is sized at open ([`BPF_BUFLEN_REQUEST`]) and cannot
+    /// change once the descriptor is bound; silently ignored.
     pub fn set_recv_buffer_size(&self, _size: usize) -> Result<(), TransportError> {
         Ok(())
     }
@@ -361,6 +375,7 @@ const BIOCSHDRCMPLT: libc::c_ulong = 0x80044275;
 const BIOCSETF: libc::c_ulong = 0x80104267;
 const BIOCGBLEN: libc::c_ulong = 0x40044266;
 const BIOCGSTATS: libc::c_ulong = 0x4008426F;
+const BIOCSBLEN: libc::c_ulong = 0xC0044266;
 
 /// BPF statistics (matches `struct bpf_stat` from `<net/bpf.h>`).
 #[repr(C)]
@@ -525,6 +540,21 @@ fn install_ethertype_filter(fd: RawFd, ethertype: u16) -> Result<(), TransportEr
     Ok(())
 }
 
+/// Request a BPF buffer of `len` bytes. The kernel clamps it to
+/// `debug.bpf_maxbufsize`; the size granted is read back with
+/// [`get_bpf_buflen`] once the descriptor is set up.
+fn set_bpf_buflen(fd: RawFd, len: libc::c_uint) -> Result<(), TransportError> {
+    let mut buflen = len;
+    let ret = unsafe { libc::ioctl(fd, BIOCSBLEN, &mut buflen) };
+    if ret < 0 {
+        return Err(TransportError::StartFailed(format!(
+            "BIOCSBLEN failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
 /// Get the BPF read buffer length.
 fn get_bpf_buflen(fd: RawFd) -> Result<usize, TransportError> {
     let mut buflen: libc::c_uint = 0;
@@ -630,6 +660,28 @@ mod tests {
         let fd = FdGuard(open_bpf_device().expect("open a BPF device"));
         bind_to_interface(fd.0, "lo0").expect("bind to lo0");
         assert_eq!(bpf_drop_count(fd.0).expect("BIOCGSTATS"), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // BPF buffer size
+    // -----------------------------------------------------------------------
+
+    /// A descriptor sized as `open` sizes it is granted more than the 4 KiB
+    /// macOS gives by default, which holds two or three full frames and
+    /// overflowed under any burst. Run with
+    /// `sudo cargo test --lib bpf_buffer -- --ignored`.
+    #[test]
+    #[ignore = "needs root: opens a BPF device"]
+    fn a_descriptor_is_granted_more_than_the_default_bpf_buffer() {
+        let fd = FdGuard(open_bpf_device().expect("open a BPF device"));
+        set_bpf_buflen(fd.0, BPF_BUFLEN_REQUEST).expect("BIOCSBLEN before binding");
+        bind_to_interface(fd.0, "lo0").expect("bind to lo0");
+        let granted = get_bpf_buflen(fd.0).expect("BIOCGBLEN");
+        assert!(
+            granted > 4096,
+            "the kernel granted {granted} bytes, no more than the 4 KiB default"
+        );
+        assert!(granted <= BPF_BUFLEN_REQUEST as usize);
     }
 
     // -----------------------------------------------------------------------
