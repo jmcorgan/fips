@@ -164,8 +164,13 @@ pub(crate) fn advance(d: Duration) {
 /// Stop this thread's monotonic clock where it reads now, so that from here
 /// on [`HostClock`] and [`mono_ms`] move only by [`advance`], however long the
 /// test takes to run. Moves nothing on other threads, nor [`wall_ms`].
+///
+/// The process's epoch is started first, so the frozen instant is never
+/// before it: otherwise, in a process whose first read comes after this,
+/// [`mono_ms`] would read 0 until an advance passed the gap.
 #[cfg(test)]
 pub(crate) fn freeze() {
+    LazyLock::force(&START);
     hooks::FROZEN.with(|f| f.set(Some(StdInstant::now())));
 }
 

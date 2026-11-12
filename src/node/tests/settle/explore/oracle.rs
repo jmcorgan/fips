@@ -20,10 +20,14 @@ use super::super::super::spanning_tree::cleanup_nodes;
 use super::super::audit::{Breach, audit};
 use super::super::settled;
 use super::explore::{Job, build, heal, jobs, named, parallel, paths, walk, walk_from};
+#[cfg(unix)]
+use super::explore::{Path, Vary};
 use super::model::Tap;
 #[cfg(unix)]
-use super::starts::pooled;
+use super::script::{Kind, Step};
 use super::starts::{Clause, Order, PINS, Reach, Start, starts};
+#[cfg(unix)]
+use super::starts::{lagging, pooled};
 use super::world::{Medium, World};
 use std::sync::{Arc, Mutex};
 
@@ -148,12 +152,12 @@ fn every_named_start_keeps_its_properties_on_a_real_pair_on_ble_with_multipath_o
     properties(Medium::Ble, true);
 }
 
-/// Every path of `start` in `order` with multipath set as `on`, a start
-/// whose nodes run a decrypt-worker pool: what breaks at each leaf. The
-/// leaf is healed, and then every node's decrypt workers must hold every
-/// current session it has (`link_index_audit::audit`, which panics on a
-/// breach, and `parallel` reports the panic against the path). The number
-/// of paths walked must be the start's stated reach.
+/// The paths of `start` in `order` with multipath set as `on` that `keep`
+/// selects, a start whose nodes run a decrypt-worker pool: what breaks at
+/// each leaf. The leaf is healed, and then every node's decrypt workers must
+/// hold every current session it has (`link_index_audit::audit`, which
+/// panics on a breach, and `parallel` reports the panic against the path).
+/// The number of paths walked must be `want`.
 ///
 /// The shell audit and `settle::settled` are not run here: their
 /// heartbeats are delivered by `settle::pump`, which hands a frame to the
@@ -161,10 +165,15 @@ fn every_named_start_keeps_its_properties_on_a_real_pair_on_ble_with_multipath_o
 /// heartbeat under a delegated session is never counted. Those properties
 /// of the crossing are the property tests', on start 1 with no pool.
 #[cfg(unix)]
-async fn offers((start, order, on): Job, at: Arc<Mutex<String>>) -> Vec<String> {
+async fn offers(
+    (start, order, on): Job,
+    at: Arc<Mutex<String>>,
+    keep: fn(&Start, Path) -> bool,
+    want: usize,
+) -> Vec<String> {
     let mut bad = Vec::new();
     let mut walked = 0;
-    for path in paths(&start) {
+    for path in paths(&start).into_iter().filter(|p| keep(&start, *p)) {
         let name = named(&start, order, on, path);
         *at.lock().expect("precondition: the path's name") = name.clone();
         let Some(mut world) = walk(&start, order, on, path).await else {
@@ -189,10 +198,10 @@ async fn offers((start, order, on): Job, at: Arc<Mutex<String>>) -> Vec<String> 
         }
         cleanup_nodes(&mut world.nodes).await;
     }
-    if walked != start.reach {
+    if walked != want {
         bad.push(format!(
-            "start {} {} ({order:?}, multipath on {on}): {walked} paths walked, {} stated",
-            start.number, start.name, start.reach
+            "start {} {} ({order:?}, multipath on {on}): {walked} paths walked, {want} stated",
+            start.number, start.name
         ));
     }
     bad
@@ -210,7 +219,7 @@ fn offered(on: bool) {
         .iter()
         .map(|&order| (start, order, on))
         .collect();
-    let bad = parallel(jobs, offers);
+    let bad = parallel(jobs, |job, at| offers(job, at, |_, _| true, job.0.reach));
     assert!(
         bad.is_empty(),
         "defect: on the crossing with the worker pool: {bad:#?}"
@@ -227,6 +236,51 @@ fn a_crossing_with_the_worker_pool_started_offers_the_moved_session() {
 #[test]
 fn a_crossing_with_the_worker_pool_started_offers_the_moved_session_with_multipath_on() {
     offered(true);
+}
+
+/// Whether `path` drops the msg1 a handshake step of `start`'s script
+/// names. On the crossing these are the paths whose lost dial stays open
+/// until its handshake timeout, so the heal moves time on a second at a
+/// time for about 30 s with frames still being exchanged.
+#[cfg(unix)]
+fn drops_a_msg1(start: &Start, path: Path) -> bool {
+    matches!(
+        path,
+        Some((i, Vary::Drop)) if matches!(start.script[i], Step::Handshake { kind: Kind::Msg1, .. })
+    )
+}
+
+/// Each path of the crossing whose decrypt workers lag (`starts::lagging`)
+/// that drops a msg1, in both orders, with multipath set as `on`, heals to
+/// one session per pair with every node's current session held by its
+/// workers: a round of the world's heal does not count quiet while a frame
+/// it handed a node is still on that node's worker, so the heal does not
+/// move time on past it. Two such paths per order.
+#[cfg(unix)]
+fn lagged(on: bool) {
+    let start = lagging();
+    let jobs = Order::BOTH
+        .iter()
+        .map(|&order| (start, order, on))
+        .collect();
+    let bad = parallel(jobs, |job, at| offers(job, at, drops_a_msg1, 2));
+    assert!(
+        bad.is_empty(),
+        "defect: on the crossing whose decrypt workers lag: {bad:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_crossing_whose_decrypt_workers_lag_heals_to_one_session_on_each_dropped_msg1_path() {
+    lagged(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_crossing_whose_decrypt_workers_lag_heals_to_one_session_on_each_dropped_msg1_path_with_multipath_on()
+ {
+    lagged(true);
 }
 
 /// Each pinned defect the map gives a start is found there: the start's

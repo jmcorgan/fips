@@ -357,6 +357,13 @@ faults! {
     /// for the doubling's next slot, up to 30 s later, before it is found
     /// again.
     DeadRecheckDoubles,
+    /// Heartbeat pacing reads `std::time::Instant` instead of the node's
+    /// monotonic clock, which the link-dead check reads.
+    HeartbeatsOnStdClock,
+    /// The explorer's world reads its nodes' decrypt-worker results without
+    /// waiting for the jobs dispatched before, so a round counts quiet with
+    /// a frame still on a worker thread.
+    WorldSkipsWorkerWait,
 }
 
 impl Fault {

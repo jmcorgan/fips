@@ -19,7 +19,9 @@ use crate::proto::mmp::{
 };
 use crate::proto::settle::output::Why;
 use crate::proto::stp::{Stp, TreeDecision};
+use crate::time::HostClock;
 use crate::transport::{TransportAddr, TransportId};
+use fips_core::time::Clock;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
@@ -37,6 +39,19 @@ use tracing::{debug, info, trace, warn};
 /// tick would make a stranded stream a stalled node. Once that write is
 /// bounded this can come down to the tick.
 const HEARTBEAT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The instant heartbeat pacing reads: the node's monotonic clock, the one
+/// the link-dead check and the FMP handshake timeout read, as the
+/// `std::time::Instant` the peer's heartbeat stamps hold. Outside test builds
+/// that clock is `std::time::Instant::now()`; in a test it moves with
+/// `crate::time::advance`, so a test that moves time past the heartbeat
+/// interval makes a heartbeat due as it makes a silent peer dead.
+pub(in crate::node) fn heartbeat_now() -> Instant {
+    if node_fault!(HeartbeatsOnStdClock) {
+        return Instant::now();
+    }
+    Instant::from(HostClock.now())
+}
 
 /// Decide whether a peer is due a heartbeat, from the two timestamps it keeps.
 ///
@@ -523,11 +538,12 @@ impl Node {
     /// The work of [`Self::check_link_heartbeats`], which audits the per-peer maps
     /// after it.
     async fn heartbeats_body(&mut self) {
-        let now = Instant::now();
-        // Monotonic ms for the MMP receiver's injected-`u64` liveness clock; the
-        // Instant `now` is still used for the shell-owned heartbeat timing. The
+        // Both clocks are the node's monotonic one: `now` as an `Instant` for
+        // the shell-owned heartbeat stamps, and `now_ms` as the milliseconds
+        // the MMP receiver's injected-`u64` liveness clock takes. The
         // session-start fallback is measured on the peer clock, which the
         // receiver's milliseconds also read.
+        let now = heartbeat_now();
         let now_ms = crate::time::mono_ms();
         let heartbeat_interval = Duration::from_secs(self.config().node.heartbeat_interval_secs);
         let dead_timeout = Duration::from_secs(self.config().node.link_dead_timeout_secs);

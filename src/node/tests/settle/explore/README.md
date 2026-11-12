@@ -42,16 +42,20 @@ helper that seeds a handshake machine by hand.
     hands each packet and each rekey poll to it to run, and tells it of each
     advance of the clock, rekey and restart.
   - A node that runs a decrypt-worker pool hands a frame under a delegated
-    session to its workers; each round of `flow` and `heal` first runs what
-    the workers sent back, as the receive loop does (below).
+    session to its workers; each round of `flow` and `heal` first waits for
+    every worker to handle what it was sent before (bounded at 60 s), then
+    runs what the workers sent back, as the receive loop does (below), so a
+    round never counts quiet with a frame on a worker.
   - The world's tests: a dial is the one `initiate_connection` makes on each
     transport (a connection-oriented link starts connecting, with a pending
     connect and no msg1; the loopback's is connected with its msg1 armed); a
     node is handed a msg1 or a msg2 only at the step that names it, on each
     transport; a held msg1 can be dropped, duplicated and swapped; a rekey, a
     restart and a redial each do what their step says; a dial on a second
-    loopback transport runs on it. Each runs with multipath off and, as its
-    `_with_multipath_on` sibling, on.
+    loopback transport runs on it; a pair on a frozen clock holds one
+    session while time passes a second at a time past the 30 s link-dead
+    timeout, a heal after each second. Each runs with multipath off and, as
+    its `_with_multipath_on` sibling, on.
   - For the shared schedules: `packets` gives what a node holds of one
     class, so a step can name a packet by what it carries; `clear` loses
     everything in flight; `hold` keeps established frames held too, until
@@ -72,8 +76,13 @@ helper that seeds a handshake machine by hand.
     finds its defect: a start, an order and the clause that breaks, or no
     start, with the reason. It was written before the explorer first ran.
   - `NOT_RUN`: the core's start numbers no real pair runs, with reasons.
+  - `Start.workers`: the decrypt-worker pool each node runs, if any: none,
+    the production worker, or a worker that sleeps a set time before each
+    job (`DecryptWorkerPool::slowed`).
   - `pooled`: start 1 with a decrypt-worker pool at each node (Unix only,
     where the pool exists), apart from `starts`, which run with none.
+    `lagging` is `pooled` with each worker sleeping 200 ms before each job,
+    as a worker thread descheduled on a loaded host is.
 - `explore.rs`: the explorer. `paths` gives a start's scripted path and one
   path per variation, `walk` runs one path to its leaf (`build` and
   `walk_from` are its two halves, for a world a test made itself), and
@@ -92,7 +101,8 @@ helper that seeds a handshake machine by hand.
   per setting, every transport in one test (below). And the crossing with a
   decrypt-worker pool (`pooled`): every path heals to one session per pair
   with every node's current session held by its workers, the session a
-  crossing moves its peer onto among them.
+  crossing moves its peer onto among them; and the same on each path of the
+  crossing whose workers lag (`lagging`) that drops a msg1.
 - `model.rs`: `Tap`, the reference model of `fips-core`
   (`proto::settle::model`) beside a world, one judge per node and peer: the
   world's packets turned into the model's history, and each change the
@@ -130,8 +140,12 @@ per node, in arrival order, and hands a packet over only through
 and `heal`: the frames the node's workers opened and the failures they
 reported, each through `process_decrypt_worker_event`, as the receive loop
 runs them, and each counts as a move. A worker runs on a thread of its own,
-so a result it has not finished when a round begins is run in a later one.
-A node with no pool sends none.
+so each round first waits for every worker to handle what it was sent
+before (`DecryptWorkerPool::barrier`, a message the worker answers once it
+reaches it in its queue, bounded at 60 s). Every job a round hands over then
+has its result run in the next round, and a round that moves nothing has no
+frame left on a worker, so a heal never moves the clock on past a frame a
+worker still holds. A node with no pool sends none.
 
 On the loopback a send is in the receiver's channel when it returns, so one
 round that moves nothing means the nodes are quiet, and a named packet that
@@ -276,11 +290,7 @@ does that the explorer does not, each because the core's world does it:
 - **An advance loses what is in flight**, before each second it passes.
 - **A heal is a minute**, a second at a time, with a dialer that holds
   neither its peer nor a dial in progress redialed, as a configured peer
-  is. The node times its heartbeats by the host's clock, which the world
-  does not move, while its link-dead check reads the clock the world
-  moves, so each time the walk passes a heartbeat interval every held
-  peer's heartbeat is made due; without it each link is reaped 31 s into
-  the minute.
+  is.
 
 A packet is named by its handshake: a msg1 by its sender index, a msg2 by
 the index it echoes, each handshake numbered in its dialer's life in the
@@ -315,6 +325,17 @@ panic that `parallel` reports against the path), and the paths walked must
 be the stated nine. The switch that leaves the moved session unoffered reds
 the scripted path in both orders, at node 0, the smaller.
 
+`lagging` is the same start with each node's one worker sleeping 200 ms
+before each job, the shape of a worker thread descheduled on a loaded host.
+Its test walks, in both orders and at both settings, the two paths that drop
+a msg1 (steps 0 and 1 of the script), whose lost dial stays open until its
+30 s handshake timeout, so the heal moves the clock on a second at a time
+for about 30 s; each is judged as above, and two paths must be walked per
+order. If a round counted quiet with a frame still on a worker, the heal
+would move simulated seconds on past it, and the node whose frames were held
+would count nothing from its peer and reap it, as the pooled
+crossing's test did on a loaded host.
+
 The leaf is not judged by the shell audit or `settle::settled`. Their
 heartbeats go through `settle::pump`, which hands a frame to the node but
 never runs what its workers send back, so on a pooled node no heartbeat
@@ -324,8 +345,13 @@ the property tests', on start 1 with no pool.
 ## What the world does not model
 
 - Time is the node's monotonic clock as `crate::time` serves it to the test
-  thread. A timer that reads another clock does not move with `advance`, and
-  the receive loop's own tick does not run: a node runs its timers only at an
+  thread. `World::new` freezes that clock in a loopback world, so only
+  `advance` moves it, and real time spent waiting, for a decrypt worker or
+  on a loaded host, does not. A TCP or BLE world's clock still runs with
+  real time: frozen, the TCP crossing with multipath on does not heal its
+  dropped-msg1 paths, which end with a connection open and unused. A timer
+  that reads another clock does not move with `advance`, and the receive
+  loop's own tick does not run: a node runs its timers only at an
   `advance`.
 - A node's receive loop, its periodic announces and its path tick between
   steps do not run. The world drives the node; it does not start it.

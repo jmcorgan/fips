@@ -25,8 +25,10 @@ traits, is `fips_core::time` (`core/src/time/`).
     the re-export, on the host clock and on a test instant whose whole
     range they can reach.
   - Test only: `step_wall` and `advance`, per-thread offsets on the
-    wall and monotonic clocks; `freeze`, which stops the thread's
-    monotonic clock so that only `advance` moves it; and `TestEpoch`
+    wall and monotonic clocks; `freeze`, which starts the process's
+    monotonic epoch if nothing has yet, so the frozen instant is never
+    before it, then stops the thread's monotonic clock so that only
+    `advance` moves it; and `TestEpoch`
     with `at::<C>(ms)`, an instant `ms` milliseconds after a clock's
     fixed test epoch.
 - `tests.rs`: the unit tests for `mod.rs`.

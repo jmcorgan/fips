@@ -117,8 +117,15 @@ pub(super) struct World {
 
 impl World {
     /// `count` nodes on `medium`, each with one transport, with multipath
-    /// set as `on`.
+    /// set as `on`. On the loopback the thread's monotonic clock is frozen
+    /// first, so from here on only `advance` moves it: real time, a wait for
+    /// a decrypt worker or a stalled host among it, does not reach the
+    /// nodes' timers. A TCP or BLE world's clock is left running: the TCP
+    /// crossing with multipath on does not heal on a frozen clock.
     pub(super) async fn new(medium: Medium, count: usize, on: bool) -> World {
+        if medium == Medium::Loopback {
+            crate::time::freeze();
+        }
         let config = with_path(Config::new(), on);
         #[cfg(ble_available)]
         let radio = ble::Radio::default();
@@ -377,13 +384,20 @@ impl World {
     /// Run what each node's decrypt workers sent back, the frames they
     /// opened and the failures they reported, as the receive loop does, and
     /// return how many. A world whose nodes run no pool has none. A worker
-    /// runs on a thread of its own, so what it has not finished when a round
-    /// begins is run in a later round.
+    /// runs on a thread of its own, so each node's workers are first waited
+    /// for until each has handled everything it was sent (bounded at 60 s):
+    /// every job a round handed over has its result run in the next round,
+    /// and a round that moves nothing has no frame left on a worker.
     async fn results(&mut self) -> usize {
         #[cfg(unix)]
         {
             let mut ran = 0;
             for tn in self.nodes.iter_mut() {
+                if let Some(pool) = tn.node.supervisor.decrypt_workers.as_ref()
+                    && !node_fault!(WorldSkipsWorkerWait)
+                {
+                    pool.barrier();
+                }
                 let Some(mut rx) = tn.node.decrypt_fallback_rx.take() else {
                     continue;
                 };
@@ -970,6 +984,57 @@ async fn a_dial_on_a_worlds_second_transport_runs_on_it() {
 #[tokio::test]
 async fn a_dial_on_a_worlds_second_transport_runs_on_it_with_multipath_on() {
     second_transport(true).await;
+}
+
+/// Whether `world`'s nodes 0 and 1 hold each other on one session, each
+/// end's index the other's peer index.
+fn one_session(world: &World) -> bool {
+    matches!(
+        (session(world, 0, 1), session(world, 1, 0)),
+        (Some((Some(a), Some(b))), Some((Some(c), Some(d)))) if a == d && b == c
+    )
+}
+
+/// A pair in a world, on a frozen clock, holds one session while time
+/// passes a second at a time for 40 s, past the 30 s link-dead timeout,
+/// with a heal after each second: each node's heartbeats fall due on the
+/// clock its link-dead check reads, so each hears the other in time.
+async fn held_past_dead(on: bool) {
+    crate::time::freeze();
+    let mut world = World::new(Medium::Loopback, 2, on).await;
+    let dial = Step::Dial {
+        from: 0,
+        to: 1,
+        transport: 0,
+    };
+    let settled_at_dial = run(&mut world, &[dial, Step::Connected { node: 0 }, Step::Heal]).await;
+    assert!(
+        settled_at_dial && one_session(&world),
+        "precondition: the dial left the pair on one session"
+    );
+    let mut lost = None;
+    for second in 1..=40 {
+        let quiet = run(&mut world, &[Step::Advance(1_000), Step::Heal]).await;
+        if lost.is_none() && !(quiet && one_session(&world)) {
+            lost = Some((second, quiet, session(&world, 0, 1), session(&world, 1, 0)));
+        }
+    }
+    cleanup_nodes(&mut world.nodes).await;
+    assert_eq!(
+        lost, None,
+        "defect: the pair lost its one session (second, quiet, node 0's, node 1's)"
+    );
+}
+
+#[tokio::test]
+async fn a_pair_in_a_world_holds_one_session_through_time_past_the_link_dead_timeout() {
+    held_past_dead(false).await;
+}
+
+#[tokio::test]
+async fn a_pair_in_a_world_holds_one_session_through_time_past_the_link_dead_timeout_with_multipath_on()
+ {
+    held_past_dead(true).await;
 }
 
 /// Whether `world`'s node `at` holds node `peer` as a peer.

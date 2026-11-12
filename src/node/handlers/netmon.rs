@@ -79,8 +79,6 @@
 //! an inbound peering is not established here, so the second group is not
 //! claimed to be empty in general.
 
-use std::time::Instant;
-
 use tracing::{debug, info, warn};
 
 use crate::NodeAddr;
@@ -180,7 +178,7 @@ impl Node {
         &mut self,
         moved: &[NodeAddr],
     ) -> usize {
-        let now = Instant::now();
+        let now = super::mmp::heartbeat_now();
         let heartbeat = [LinkMessageType::Heartbeat.to_byte()];
         let targets: Vec<NodeAddr> = moved
             .iter()
