@@ -60,6 +60,7 @@ mod path_accept;
 mod path_control;
 mod path_intake;
 mod path_load;
+mod path_narrow_hop;
 mod path_padding;
 mod paths;
 mod peer_restart;

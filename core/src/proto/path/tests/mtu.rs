@@ -323,3 +323,66 @@ fn no_size_search_runs_on_a_connection_oriented_transport() {
         "defect: no size search on a connection-oriented transport"
     );
 }
+
+#[test]
+fn a_path_proven_too_narrow_for_a_filter_announce_does_not_take_the_link_as_one_that_carries_it() {
+    // p's link MTU, 1000 bytes, cannot carry the 1071-byte frame of a
+    // FilterAnnounce. q's, 1280, could, but a hop on q carries no frame
+    // over 1000 bytes, so q proves a smaller size, and neither path
+    // carries the filter. The two answer at once and score alike, so
+    // nothing moves the link off p.
+    let fits = 1000 - FRAME_OVERHEAD;
+    let mut n = Node::capable(308).with(Stub::default().mtu(t(1), 1000));
+    let mut seen = Seen::default();
+    let out = n.candidate(t(2), addr(2));
+    hop(&mut n, &mut seen, out, &mut narrow(fits));
+    run_hop(&mut n, &mut seen, 30_000, &mut narrow(fits));
+    assert_eq!(state(&n, &q()), PathState::Live, "precondition: q proven");
+    let proven = path(&n, &q()).live().mtu();
+    assert!(
+        proven.is_some_and(|len| len <= fits),
+        "precondition: q proves a size the hop carries: {proven:?}"
+    );
+    assert_eq!(
+        active(&n),
+        Some(p()),
+        "defect: q, proven at {proven:?}, takes the link as a path that carries a FilterAnnounce"
+    );
+}
+
+#[test]
+fn a_stream_path_proven_below_its_link_mtu_by_one_lost_probe_still_carries_a_filter_announce() {
+    // p's link MTU, 1000 bytes, cannot carry the 1071-byte frame of a
+    // FilterAnnounce. q is on a connection-oriented transport at 1280 with
+    // no narrow hop: every size crosses once it is connected. Its first
+    // probe, padded, is lost, so the ladder proves three quarters of the
+    // padded size, and no search raises it on a stream. A proven size there
+    // says only that one probe was lost, so q is judged by its link MTU,
+    // carries the filter, and takes the link.
+    let mut n = Node::capable(309).with(Stub::default().mtu(t(1), 1000).oriented(t(2)));
+    let mut seen = Seen::default();
+    let lossy = &mut |at: u64, to: &PathRef, _: usize| *to == p() || at > 50;
+    let out = n.candidate(t(2), addr(2));
+    hop(&mut n, &mut seen, out, lossy);
+    n.now = TestInstant(50);
+    let out = n.step(Input::Connected {
+        transport: t(2),
+        addr: addr(2),
+        ok: true,
+    });
+    hop(&mut n, &mut seen, out, lossy);
+    run_hop(&mut n, &mut seen, 600_000, lossy);
+    let proven = path(&n, &q()).live().mtu();
+    assert_eq!(state(&n, &q()), PathState::Live, "precondition: q proven");
+    assert_eq!(
+        proven,
+        Some(RUNGS[0]),
+        "precondition: one lost probe proves a rung below the link MTU"
+    );
+    assert_eq!(
+        active(&n),
+        Some(q()),
+        "defect: q, a stream that carries 1280, proven at {proven:?} by one lost probe, \
+         takes the link as a path that carries a FilterAnnounce"
+    );
+}

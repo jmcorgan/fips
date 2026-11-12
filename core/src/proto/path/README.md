@@ -297,8 +297,10 @@ its node code steps it and acts on what it decides.
   names, while it names any, and then those on transports of the
   highest tier present, by the role the facts give each (`Normal` and
   `Preferred` above `Backup`, `Backup` above `Never`), and then those
-  whose link MTU, as the facts give it, carries the 1,071-byte frame of
-  a `FilterAnnounce` (Section 5.11), while any does, the least score
+  whose link MTU, as the facts give it, or on a connectionless
+  transport the smaller size the path is proven to carry, takes the
+  1,071-byte frame of a `FilterAnnounce` (Section 5.11), while any
+  does, the least score
   among those with `min_samples` round-trip samples, unless a `Preferred`
   one scores within `switch_margin` times that least, when the least
   scoring such path; else, when none has that many samples, the least
@@ -343,8 +345,8 @@ its node code steps it and acts on what it decides.
   active path is not Live, and at every change of active path. Its end
   is a wake. A path of the active path's role, which carries a
   `FilterAnnounce` exactly when the active path does, never takes its
-  place by scoring the same as it. While the active path's link MTU is
-  too small for the filter, the node cannot send its filter to the peer
+  place by scoring the same as it. While the active path is too small
+  for the filter, the node cannot send its filter to the peer
   at all, so within a tier carrying it outranks both the preferred
   precedence and the score; a backup path that carries it still waits
   behind a normal one that does not.
@@ -705,11 +707,18 @@ its node code steps it and acts on what it decides.
   the input phase can neither end the old hold first nor count toward
   the new one. The test shell checks after every step that changes path
   that `cost` at the step's instant is the same after it as before.
-- **Within the highest tier Live, a path whose link MTU carries a
-  `FilterAnnounce` is chosen over one whose link MTU does not.** Each
-  path's link MTU is read from the facts at each step and compared with
-  `FILTER_FRAME`, the frame the filter always travels in; the proven MTU
-  is not used, since the original path never has one. The preference
+- **Within the highest tier Live, a path that carries a
+  `FilterAnnounce` is chosen over one that does not.** Each path's link
+  MTU is read from the facts at each step, lowered to the size the path
+  is proven to carry where it has proven one, and compared with
+  `FILTER_FRAME`, the frame the filter always travels in
+  (`select::carried`, which the node reads for the peer's path MTU
+  too). A path proven at no size above the smallest, as the original
+  path is until a size is proven on it, is judged by its link MTU
+  alone, and so is a path on a connection-oriented transport: the
+  ladder steps down after any lost probe and no search raises the size
+  there, so a smaller size proven on a stream may say only that a probe
+  was lost. The preference
   comes after the pin and the tiers and before the preferred precedence
   and the score, and a change to a path for it alone waits for the
   dwell and the path's samples. With no Live path of that tier that

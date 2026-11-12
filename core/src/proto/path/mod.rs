@@ -56,7 +56,7 @@ pub use params::{
     ParamsError, RING,
 };
 pub use rules::{Rule, Scope};
-pub use select::Pin;
+pub use select::{Pin, carried, heeded};
 pub use set::{
     Admission, Match, Medium, PATH_MAX_PER_PEER, PATH_MAX_PER_TRANSPORT, PathRefused, PathSet,
     PathState, PeerPath, Rebind, Roam,

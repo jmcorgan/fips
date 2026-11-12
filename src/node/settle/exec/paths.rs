@@ -228,9 +228,9 @@ pub(super) fn link_claim(node: &mut Node, r: &mut Run) {
     }
 }
 
-/// Seed the peer's path MTU from the newly active pair, as a move to a new
-/// link seeds it, so a tighter value learned on the old path does not carry
-/// over.
+/// Seed the peer's path MTU from the newly active pair, its link MTU or the
+/// smaller size it is proven to carry, as a move to a new link seeds it, so
+/// a tighter value learned on the old path does not carry over.
 pub(super) fn seed_mtu(node: &mut Node, r: &mut Run) {
     if let Some(f) = of(r)
         && let Some(to) = &f.to
@@ -241,27 +241,14 @@ pub(super) fn seed_mtu(node: &mut Node, r: &mut Run) {
     }
 }
 
-/// Tighten every session whose next hop is the peer to the new pair's MTU
-/// at once.
+/// Tighten every session whose next hop is the peer to the new pair's MTU,
+/// or the smaller size the pair is proven to carry, at once.
 pub(super) fn tighten(node: &mut Node, r: &mut Run) {
     let Some(to) = of(r).and_then(|f| f.to.as_ref()) else {
         return;
     };
-    let Some(mtu) = node
-        .transports
-        .get(&to.transport)
-        .map(|t| t.link_mtu(&to.addr))
-    else {
-        return;
-    };
-    let dests: Vec<NodeAddr> = node.sessions.keys().copied().collect();
-    for dest in dests {
-        let via_peer = node
-            .find_next_hop(&dest)
-            .is_some_and(|hop| hop.node_addr() == &r.peer);
-        if via_peer && let Some(mmp) = node.sessions.get_mut(&dest).and_then(|s| s.mmp_mut()) {
-            mmp.path_mtu.seed_source_mtu(mtu);
-        }
+    if let Some(mtu) = node.effective_mtu(&r.peer, to.transport, &to.addr) {
+        node.tighten_via(&r.peer, mtu);
     }
 }
 

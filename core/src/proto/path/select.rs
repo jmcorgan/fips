@@ -13,12 +13,13 @@
 //! A path ranks first by the tier of its transport's role: a backup
 //! transport's paths below a normal or preferred one's, and a path held
 //! on a transport since set never to carry paths below them all. Within
-//! the highest tier present, a path whose link MTU carries a
-//! `FilterAnnounce` ([`FILTER_FRAME`], draft Section 5.11) is taken over
-//! one whose link MTU does not, whatever their scores, while any such path
-//! is a rival; among those, a path on a preferred transport is taken over
-//! a better-scoring one while its score is within the switch margin of
-//! the best.
+//! the highest tier present, a path that carries a `FilterAnnounce`
+//! ([`FILTER_FRAME`], draft Section 5.11), by its link MTU or, on a
+//! connectionless transport, the smaller size it is proven to carry
+//! ([`carried`]), is taken over one that does not, whatever their scores,
+//! while any such path is a rival; among those, a path on a preferred
+//! transport is taken over a better-scoring one while its score is within
+//! the switch margin of the best.
 //!
 //! A discretionary change away from the active path on score is held while
 //! the active path is the faster of the two at its best over the horizon,
@@ -62,6 +63,28 @@ use crate::transport::{TransportAddr, TransportId};
 /// (draft Section 5.11).
 pub(super) const FILTER_FRAME: usize = FRAME_OVERHEAD + 11 + (512 << V1_SIZE_CLASS);
 
+/// The largest frame a path carries, in bytes: its link MTU `link`, or the
+/// frame of the size `proven` it is proven to carry (a path message length)
+/// where that is smaller and [`heeded`] on a transport connection-oriented
+/// as `oriented` says (draft Section 5.11).
+pub fn carried(link: usize, proven: Option<usize>, oriented: bool) -> usize {
+    match proven {
+        Some(len) if heeded(oriented) => link.min(len.saturating_add(FRAME_OVERHEAD)),
+        Some(_) | None => link,
+    }
+}
+
+/// Whether the size a path proves bounds the frames it carries, on a
+/// transport connection-oriented as `oriented` says. On a connectionless
+/// transport it does: the size ladder steps down after any lost probe, and
+/// the upward search raises the size again once the path is Live. On a
+/// connection-oriented one it does not: no search runs there, since an
+/// oversized probe closes the connection, so a size proven below the link
+/// MTU may say only that a probe was lost, and the path keeps its link MTU.
+pub fn heeded(oriented: bool) -> bool {
+    !node_fault!(ProvenMtuUnused) && (!oriented || node_fault!(ProvenMtuOnStreams))
+}
+
 /// The score of the path whose liveness is `live`: the quality index of
 /// its ETX and its least round trip in milliseconds, lower being better.
 /// `None` until a round trip has been measured.
@@ -98,7 +121,8 @@ pub(super) struct Rival {
     pub(super) preferred: bool,
     /// Whether the operator's pin names it.
     pub(super) pinned: bool,
-    /// Whether its link MTU carries a frame of [`FILTER_FRAME`] bytes.
+    /// Whether it carries a frame of [`FILTER_FRAME`] bytes: its link MTU,
+    /// or the smaller size it is proven to carry, is at least that.
     pub(super) fits: bool,
 }
 

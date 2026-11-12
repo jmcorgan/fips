@@ -2606,21 +2606,11 @@ impl Node {
             });
         };
 
-        // Read the next hop's transport / link MTU for the
-        // SessionDatagram's path_mtu field. Saves a path_mtu round-
+        // Read the next hop's link MTU, or the smaller size its active path
+        // is proven to carry, for the SessionDatagram's path_mtu field. Saves a path_mtu round-
         // trip vs the legacy path where we'd seed in
         // send_session_datagram.
-        let mut path_mtu = u16::MAX;
-        if let Some(peer) = self.peers.get(&next_hop_addr)
-            && let Some(tid) = peer.transport_id()
-            && let Some(transport) = self.transports.get(&tid)
-        {
-            if let Some(addr) = peer.current_addr() {
-                path_mtu = path_mtu.min(transport.link_mtu(addr));
-            } else {
-                path_mtu = path_mtu.min(transport.mtu());
-            }
-        }
+        let path_mtu = self.next_mtu(&next_hop_addr).unwrap_or(u16::MAX);
 
         // Extract next-hop info in one peers/sessions borrow scope.
         let (their_index, transport_id, remote_addr, timestamp_ms, fmp_flags) = {
@@ -3050,16 +3040,9 @@ impl Node {
             }
         };
 
-        // Seed path_mtu from the first-hop transport MTU (same as forwarding path)
-        if let Some(peer) = self.peers.get(&next_hop_addr)
-            && let Some(tid) = peer.transport_id()
-            && let Some(transport) = self.transports.get(&tid)
-        {
-            if let Some(addr) = peer.current_addr() {
-                datagram.path_mtu = datagram.path_mtu.min(transport.link_mtu(addr));
-            } else {
-                datagram.path_mtu = datagram.path_mtu.min(transport.mtu());
-            }
+        // Seed path_mtu from the first hop's MTU (same as forwarding path)
+        if let Some(mtu) = self.next_mtu(&next_hop_addr) {
+            datagram.path_mtu = datagram.path_mtu.min(mtu);
         }
 
         // Source-side: seed our PathMtuState.current_mtu from the outbound

@@ -193,24 +193,15 @@ impl Node {
     }
 
     /// Resolve the next hop toward `dest` into its address plus the outgoing
-    /// link's transport MTU. Returns `None` when there is no route.
+    /// link's MTU, the smaller size its active path is proven to carry where
+    /// there is one (`Node::next_mtu`). Returns `None` when there is no route.
     ///
     /// The MTU defaults to `u16::MAX` (a no-op min-fold) when the peer's
     /// transport is not resolvable, matching the pre-refactor inline behavior
     /// where the MTU `if let` chain simply did not fire.
     fn resolve_next_hop(&mut self, dest: &NodeAddr) -> Option<NextHop> {
         let addr = *self.find_next_hop(dest)?.node_addr();
-        let link_mtu = if let Some(peer) = self.peers.get(&addr)
-            && let Some(tid) = peer.transport_id()
-            && let Some(transport) = self.transports.get(&tid)
-        {
-            match peer.current_addr() {
-                Some(link_addr) => transport.link_mtu(link_addr),
-                None => transport.mtu(),
-            }
-        } else {
-            u16::MAX
-        };
+        let link_mtu = self.next_mtu(&addr).unwrap_or(u16::MAX);
         Some(NextHop { addr, link_mtu })
     }
 

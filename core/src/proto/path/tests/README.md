@@ -400,8 +400,12 @@ module of that file, sees its private items and keeps its test names.
   `Output::Proven` in frame bytes; the search climbing to within 32
   bytes of the hop's size, stopping, and starting again ten minutes
   after it ended; a lost search probe neither a miss nor an ETX sample,
-  the path staying Live; and no search on a connection-oriented
-  transport.
+  the path staying Live; no search on a connection-oriented
+  transport; and a path proven below the frame of a `FilterAnnounce`
+  across a narrow hop, though its link MTU would carry it, not taking
+  the link from one that cannot carry it either; and a path on a
+  connection-oriented transport proven a rung low by one lost probe
+  still carrying it by its link MTU, and taking the link.
 - `params.rs`: tests for `params.rs` (`proto::path::params::tests::...`):
   the draft's values field by field, the refusal of a zero in each
   interval and count with the name it carries, of a switch margin below

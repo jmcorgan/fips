@@ -120,12 +120,30 @@ Probing entry at most, and that never carries data. Once a link has two
 paths, a path's address moves only on its own authenticated probe or
 matching ack, from a pair no other path holds.
 
-Probes on a Probing or Dead path are padded to the link MTU, so a path that
-carries small frames and drops large ones does not prove itself. Padding is
-a local choice. Since each end's link MTU is its own, a padded probe that
-goes unanswered is followed by the smallest size, and then the two
-alternate, so a path to a peer with a smaller MTU still proves itself. An
-ack is padded to the smaller of the probe and the answerer's own link MTU.
+Probes on a Probing or Dead path start padded to the link MTU, so a path
+that carries small frames and drops large ones does not prove itself at
+that size. Padding is a local choice. A padded probe that goes unanswered
+is followed by a short ladder of sizes, three quarters and half of the
+padded size and then the smallest, and the first size answered is the size
+the path is proven to carry. Since each end's link MTU is its own, a path
+to a peer with a smaller MTU, or across a hop narrower than both, still
+proves itself, at the size it carries; one that carries only the smallest
+size proves no size. On a connectionless transport a Live path proven
+below its link MTU searches upward with padded probes whose loss counts
+neither as a miss nor in its ETX. An ack is padded to the smaller of the
+probe and the answerer's own link MTU.
+
+On a connectionless transport the node takes the smaller of a path's link
+MTU and the size the path is proven to carry in three places: the peer's
+path MTU entry, which the TUN reader and the TCP clamp read, seeded at
+link setup, at a switch and whenever the active path's proven size
+changes, up or down; the MTU folded into session datagrams and lookup
+responses sent through the peer; and whether the path carries a
+`FilterAnnounce`. The top of the ladder and of the search stays the link
+MTU. A path on a connection-oriented transport is judged by its link MTU
+alone, since no search runs there to undo a step down the ladder that a
+lost probe caused, so a smaller size proven on a stream may say only that
+one probe was lost.
 
 On a connection-oriented transport the node opens a connection to a
 candidate before probing it. When a path goes, the node closes that
@@ -219,8 +237,9 @@ it is done. This node ranks them in order:
 2. Then the tier of the transport's `role`. A `backup` path ranks below a
    `normal` or `preferred` one, and a path held on a transport since set to
    `never` ranks below them all.
-3. Within the top tier present, a path whose link MTU carries a
-   `FilterAnnounce` is taken over one whose MTU does not, whatever their
+3. Within the top tier present, a path that carries a `FilterAnnounce`,
+   by its link MTU or, on a connectionless transport, the smaller size it
+   is proven to carry, is taken over one that does not, whatever their
    scores.
 4. Among those, a `preferred` path is taken over a better-scoring one while
    its score is within the switch margin of the best.

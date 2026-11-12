@@ -334,6 +334,24 @@ faults! {
     /// a slower path that the load followed, the return waits until that
     /// path's idle round trips have left its horizon.
     MoveToFasterHeld,
+    /// Nothing reads the size a path is proven to carry: the node seeds a
+    /// peer's path MTU, folds the next hop's MTU and tightens sessions from
+    /// the link MTU alone, so a path across a hop narrower than its link
+    /// MTU is used at the link MTU and its large frames are lost, and the
+    /// path machine counts such a path as carrying a `FilterAnnounce` by
+    /// its link MTU.
+    ProvenMtuUnused,
+    /// A change of the active path's proven size reseeds the peer's path
+    /// MTU under the never-loosen rule, so it only ever lowers it, and a
+    /// path whose hop widens keeps the narrow size it proved first.
+    ProvenMtuOnlyLowers,
+    /// The size a path on a connection-oriented transport proves bounds the
+    /// frames it carries, as on a connectionless one, though no search
+    /// raises it there: a padded probe lost while the path is probed leaves
+    /// the peer's path MTU entry, and whether the path carries a
+    /// `FilterAnnounce`, at a smaller rung of the ladder for as long as the
+    /// path is Live.
+    ProvenMtuOnStreams,
 }
 
 impl Fault {

@@ -1735,9 +1735,10 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
 
     /// The Live, acked paths, each in its slot as a rival of a choice: its
     /// score once it has `min_samples` round-trip samples, its latest round
-    /// trip, the tier of its transport's role, whether its link MTU carries
-    /// a `FilterAnnounce`, both read from the facts, and whether the
-    /// operator's pin names it.
+    /// trip, the tier of its transport's role, read from the facts, whether
+    /// it carries a `FilterAnnounce`, by its link MTU from the facts or the
+    /// smaller size it is proven to carry where that counts
+    /// (`select::carried`), and whether the operator's pin names it.
     fn rivals(&self, env: &Env<'_>) -> Field {
         let min = usize::from(self.params.cfg.min_samples);
         let mut field: Field = [None; PATH_MAX_PER_PEER];
@@ -1747,6 +1748,11 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             }
             let live = p.live();
             let role = env.facts.role(p.transport_id());
+            let carried = select::carried(
+                env.facts.mtu(p.transport_id(), p.addr()),
+                live.mtu(),
+                env.facts.oriented(p.transport_id()),
+            );
             let rival = Rival {
                 index: i,
                 score: select::score(live).filter(|_| live.samples() >= min),
@@ -1756,7 +1762,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 tier: select::tier(role),
                 preferred: role == Role::Preferred,
                 pinned: self.pin.as_ref().is_some_and(|pin| pin.names(&pair(p))),
-                fits: env.facts.mtu(p.transport_id(), p.addr()) >= select::FILTER_FRAME,
+                fits: carried >= select::FILTER_FRAME,
             };
             if let Some(slot) = field.get_mut(i) {
                 *slot = Some(rival);
