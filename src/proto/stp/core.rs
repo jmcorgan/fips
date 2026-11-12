@@ -55,9 +55,9 @@ pub(crate) enum TreeDecision {
 
     /// parent == from, no loop: keep parent, recompute, re-announce iff coords
     /// changed. Shell: capture `old_addrs` before mutation; `set_parent(parent,
-    /// new_seq, ts)`; recompute; sign; `invalidate_via_node`; reset_backoff; THEN
-    /// if `old_addrs != new_addrs` { metrics(ancestry_changed); send_all;
-    /// bloom.mark_changed_peers }.
+    /// new_seq, ts)`; recompute; sign; THEN if `old_addrs != new_addrs` {
+    /// `invalidate_via_node`; reset_backoff; metrics(ancestry_changed); send_all;
+    /// bloom.mark_changed_peers }. A sequence-only change keeps cached entries.
     AncestryUpdate { parent: NodeAddr, new_seq: u64 },
 
     /// Periodic no-change: re-broadcast our current declaration for eventual

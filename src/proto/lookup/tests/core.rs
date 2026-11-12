@@ -142,28 +142,6 @@ fn initiate_returns_empty_when_nothing_reaches_target() {
 }
 
 #[test]
-fn response_route_uses_recorded_reverse_path() {
-    let mut lookup = empty_lookup();
-    let from = make_node_addr(9);
-    lookup
-        .recent_requests
-        .insert(42, RecentRequest::new(from, make_node_addr(0xF0), 0));
-    match plan_response_route(&lookup, 42) {
-        ResponseRouteDecision::ReversePath(peer) => assert_eq!(peer, from),
-        ResponseRouteDecision::NeedsTreeRoute => panic!("expected ReversePath"),
-    }
-}
-
-#[test]
-fn response_route_needs_tree_route_when_no_record() {
-    let lookup = empty_lookup();
-    assert!(matches!(
-        plan_response_route(&lookup, 42),
-        ResponseRouteDecision::NeedsTreeRoute
-    ));
-}
-
-#[test]
 fn classify_response_transit_on_fresh_forwarded_request() {
     let from_peer = make_node_addr(0x11);
     let mut lookup = empty_lookup();
@@ -1453,4 +1431,39 @@ fn a_full_limiter_still_records_the_newcomer() {
         "with the limiter full, a repeat for the same target inside the interval was \
          forwarded: the newcomer was admitted without being recorded"
     );
+}
+
+#[test]
+fn poll_pending_retries_rather_than_times_out_under_a_ladder_of_256_entries() {
+    // `len() as u8` once made a 256-entry ladder count as zero attempts, so
+    // the first deadline was the final timeout.
+    let target = make_node_addr(0x33);
+    let mut lookup = empty_lookup();
+    let t0 = 10_000u64;
+    lookup
+        .pending_lookups
+        .insert(target, PendingLookup::new(t0));
+
+    let ladder = [1u64; 256];
+    let outcome = poll_pending(&mut lookup, t0 + 1000, &ladder);
+    assert!(
+        outcome.timeouts.is_empty(),
+        "a 256-entry ladder timed out at attempt 1"
+    );
+    assert_eq!(outcome.retries, vec![(target, 2)]);
+}
+
+#[test]
+fn poll_pending_neither_overflows_nor_times_out_on_a_huge_ladder_entry() {
+    let target = make_node_addr(0x34);
+    let mut lookup = empty_lookup();
+    let t0 = 10_000u64;
+    lookup
+        .pending_lookups
+        .insert(target, PendingLookup::new(t0));
+
+    let outcome = poll_pending(&mut lookup, t0 + 3_600_000, &[u64::MAX]);
+    assert!(outcome.retries.is_empty());
+    assert!(outcome.timeouts.is_empty());
+    assert!(lookup.pending_lookups.contains_key(&target));
 }

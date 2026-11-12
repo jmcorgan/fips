@@ -10,4 +10,7 @@ of its source file and can reach that file's private items.
   outside `[0.20, 1.0)` (below 0.20, 1.0 or more, or NaN) runs at 0.20, each
   with one warning naming the key, the configured value and the value used.
   A debounce of 500 ms or more and a cap in `[0.20, 1.0)` are left alone with
-  no warning.
+  no warning. An empty lookup retry ladder (`node.lookup.attempt_timeouts_secs`)
+  runs as the default ladder, and a ladder over 255 entries runs its first 255,
+  each with one warning; the default ladder and a 255-entry ladder are left
+  alone. A second `apply_floors` call changes nothing and warns nothing.

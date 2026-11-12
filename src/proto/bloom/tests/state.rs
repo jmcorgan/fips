@@ -949,3 +949,18 @@ fn test_bloom_ack_later_session_base_is_never_complete() {
     let resends = t.hold(2_000, 120_000, false, late);
     assert_eq!(resends, vec![(FALLBACK_MS, ResendReason::Timeout)]);
 }
+
+#[test]
+fn the_mtu_warning_is_given_once_per_peering_and_again_after_the_peer_is_removed() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let peer = make_node_addr(1);
+    let other = make_node_addr(2);
+
+    assert!(state.warn_mtu(&peer), "first refusal for a peering warns");
+    assert!(!state.warn_mtu(&peer), "a retry does not warn again");
+    assert!(state.warn_mtu(&other), "another peer warns on its own");
+
+    state.remove_peer_state(&peer);
+    assert!(state.warn_mtu(&peer), "a new peering warns again");
+    assert!(!state.warn_mtu(&other));
+}

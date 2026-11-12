@@ -10,6 +10,7 @@ mod acl;
 mod ble;
 mod bloom;
 mod bloom_hold;
+mod bloom_mtu;
 mod bloom_pacing;
 mod bloom_poison;
 mod bloom_send;
@@ -44,6 +45,7 @@ mod session;
 mod spanning_tree;
 mod stored_msg2;
 mod tcp;
+mod tree_gate;
 mod tree_send_failure;
 #[cfg(target_os = "linux")]
 mod tun_warning;

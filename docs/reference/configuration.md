@@ -258,7 +258,7 @@ the current coordinates of a mesh address the node already knows.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.lookup.ttl` | u8 | `64` | Hop limit for LookupRequest forwarding |
-| `node.lookup.attempt_timeouts_secs` | array&lt;u64&gt; | `[1, 2, 4, 8]` | Per-attempt timeouts. Each entry is the deadline for one `LookupRequest` before sending the next attempt with a fresh `request_id`. Length determines total attempt count; default gives 4 attempts and a 15s total budget |
+| `node.lookup.attempt_timeouts_secs` | array&lt;u64&gt; | `[1, 2, 4, 8]` | Per-attempt timeouts. Each entry is the deadline for one `LookupRequest` before sending the next attempt with a fresh `request_id`. Length determines total attempt count; default gives 4 attempts and a 15s total budget. An empty list runs as the default, and entries beyond the 255th are dropped, each with a warning |
 | `node.lookup.recent_expiry_secs` | u64 | `10` | Dedup cache expiry for recent request IDs |
 | `node.lookup.backoff_base_secs` | u64 | `0` | Optional post-failure suppression base in seconds; doubles per consecutive failure. `0` disables (default); the per-attempt sequence is the only retry pacing |
 | `node.lookup.backoff_max_secs` | u64 | `0` | Cap on optional post-failure backoff |

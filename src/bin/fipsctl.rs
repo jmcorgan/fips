@@ -819,6 +819,14 @@ fn sparkline(values: &[f64], min: f64, max: f64) -> String {
         .collect()
 }
 
+/// How long the client waits for a probe before giving up, in milliseconds.
+///
+/// An explicit `--timeout` wins. Otherwise the client allows the daemon's
+/// reported budget plus a margin for the last poll round-trips.
+fn probe_ceiling_ms(budget_ms: u64, timeout_secs: Option<u64>) -> u64 {
+    timeout_secs.map_or(budget_ms.saturating_add(5_000), |s| s.saturating_mul(1000))
+}
+
 /// Run a probe: start it, poll while the daemon works, render as it goes.
 ///
 /// Every control round-trip returns immediately; the stages run daemon-side on
@@ -844,7 +852,7 @@ fn run_probe(socket_path: &Path, npub: &str, json: bool, timeout_secs: Option<u6
         .get("budget_ms")
         .and_then(|v| v.as_u64())
         .unwrap_or(30_000);
-    let ceiling_ms = timeout_secs.map_or(budget_ms + 5_000, |s| s * 1000);
+    let ceiling_ms = probe_ceiling_ms(budget_ms, timeout_secs);
 
     let poll = build_command("probe_poll", serde_json::json!({"probe_id": probe_id}));
     let mut progress = (!json).then(ProbeProgress::new);
@@ -1677,6 +1685,10 @@ fn probe_close(report: &serde_json::Value) {
         println!("{note}");
     }
 }
+
+#[cfg(test)]
+#[path = "tests/fipsctl.rs"]
+mod probe_tests;
 
 #[cfg(test)]
 mod tests {

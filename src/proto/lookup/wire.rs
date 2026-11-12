@@ -10,8 +10,9 @@ use secp256k1::schnorr::Signature;
 /// Request to look up a node's coordinates.
 ///
 /// Routed through the spanning tree via bloom-filter-guided forwarding.
-/// Each transit node forwards only to tree peers whose bloom filter
-/// contains the target. TTL limits propagation depth.
+/// Each transit node forwards to tree peers whose bloom filter contains the
+/// target, or to matching non-tree peers when no tree peer matches. TTL limits
+/// propagation depth.
 #[derive(Clone, Debug)]
 pub struct LookupRequest {
     /// Unique request identifier.
@@ -20,7 +21,7 @@ pub struct LookupRequest {
     pub target: NodeAddr,
     /// Who's asking (for response routing).
     pub origin: NodeAddr,
-    /// Origin's coordinates (for return path).
+    /// Origin's coordinates. Carried on the wire, read by no receiver.
     pub origin_coords: TreeCoordinate,
     /// Remaining propagation hops.
     pub ttl: u8,
@@ -115,7 +116,7 @@ impl LookupRequest {
 
 /// Response to a lookup request with target's coordinates.
 ///
-/// Routed back to the origin using the origin_coords from the request.
+/// Routed back to the origin along the reverse path of the request.
 #[derive(Clone, Debug)]
 pub struct LookupResponse {
     /// Echoed request identifier.

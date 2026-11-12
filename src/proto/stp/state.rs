@@ -240,10 +240,11 @@ impl TreeState {
         let parent_changed = self.is_root() || *self.my_declaration.parent_id() != parent_id;
         self.my_declaration =
             ParentDeclaration::new(self.my_node_addr, parent_id, sequence, timestamp);
-        self.flap.mark_switch(now_ms);
-        // Record switch for flap detection only when parent actually changes;
-        // coordinates will be recomputed when ancestry is available
+        // The hold-down and flap detection run from a change of parent only;
+        // a same-parent re-declaration (an ancestry update) restarts neither.
+        // Coordinates are recomputed by the caller once ancestry is available.
         if parent_changed {
+            self.flap.mark_switch(now_ms);
             self.flap.record_parent_switch(now_ms)
         } else {
             false

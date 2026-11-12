@@ -1506,7 +1506,7 @@ impl Node {
         {
             debug!(
                 src = %self.peer_display_name(src_addr),
-                reason = "foreign root",
+                reason = "foreign-root",
                 "SessionAck coordinate hint refused"
             );
         }

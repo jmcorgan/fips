@@ -301,8 +301,9 @@ With link overhead: 1,071 bytes (16 header + 4 timestamp + 16 tag).
 ### LookupRequest (0x30)
 
 Coordinate discovery request, routed through the spanning tree via
-bloom-filter-guided forwarding. Each transit node forwards only to tree
-peers (parent + children) whose bloom filter contains the target.
+bloom-filter-guided forwarding. Each transit node forwards to tree peers
+(parent + children) whose bloom filter contains the target, or to matching
+non-tree peers when no tree peer matches.
 Request_id dedup in recent_requests handles edge cases from tree
 restructuring.
 

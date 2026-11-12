@@ -90,9 +90,9 @@ impl FlapDampener {
         self.flap_dampening_duration / 1000
     }
 
-    /// Stamp the time of a parent switch (called on every `set_parent`,
-    /// whether or not the parent actually changed). `now_ms` is the injected
-    /// monotonic time in milliseconds.
+    /// Stamp the time of a parent switch, which starts the hold-down.
+    /// `set_parent` calls it only when the parent actually changes. `now_ms`
+    /// is the injected monotonic time in milliseconds.
     pub(crate) fn mark_switch(&mut self, now_ms: u64) {
         self.last_parent_switch = Some(now_ms);
     }

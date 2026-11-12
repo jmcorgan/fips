@@ -170,10 +170,14 @@ pub enum DiscoveryReject {
     /// Tracked via
     /// [`DiscoveryStats::resp_unsolicited`](crate::node::stats::DiscoveryStats).
     RespUnsolicited,
-    /// Response could not be routed toward the origin: no reverse-path
-    /// entry for the `request_id` and no greedy tree route to the
-    /// origin. Tracked via
+    /// Response could not be routed toward the origin. Tracked via
     /// [`DiscoveryStats::resp_no_route`](crate::node::stats::DiscoveryStats).
+    ///
+    /// Frozen at zero: the target answers along the reverse path the
+    /// request has just recorded, so there is no routing decision left to
+    /// fail, and nothing records this reason any more. The variant and its
+    /// counter stay so an operator reading a dashboard across versions does
+    /// not find the series missing.
     RespNoRoute,
 }
 

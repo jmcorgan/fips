@@ -99,6 +99,23 @@ fn probe_at_rtt() -> (Probe, u64) {
 // ---- bloom and discovery ------------------------------------------------------------
 
 #[test]
+fn budgets_derived_from_a_ladder_with_a_huge_entry_saturate_instead_of_overflowing() {
+    let budgets = Budgets::derive(1_000, &[u64::MAX, 1]);
+    assert_eq!(budgets.discovery_ms, u64::MAX);
+    assert_eq!(budgets.total_ms(), u64::MAX);
+}
+
+#[test]
+fn a_probe_with_a_saturated_budget_starts_and_runs_instead_of_overflowing_its_deadline() {
+    // A wrapped deadline would land just before the start time, so the probe
+    // would end as timed out at its first step instead of opening a session.
+    let budgets = Budgets::derive(1_000, &[u64::MAX, 1]);
+    let mut probe = Probe::new(T0, budgets, preflight());
+    let actions = probe.step(&obs(T0));
+    assert_eq!(actions, vec![ProbeAction::OpenSession]);
+}
+
+#[test]
 fn both_lookup_stages_are_skipped_when_coords_are_cached() {
     let mut probe = Probe::new(T0, budgets(), preflight());
     let actions = probe.step(&obs(T0));
