@@ -81,6 +81,10 @@
 # Opt-in (require --with-tor; depend on live Tor network):
 #   tor-socks5, tor-directory
 #
+# Opt-in (run only when named with --only or --rerun):
+#   nostr-open-discovery  the Nostr open-discovery startup scenario; run by
+#                         hand when the Nostr rendezvous code changes
+#
 # Deliberately not run by either runner, with the reason for each. Recorded
 # here so that "not in the suite list" stops being indistinguishable from
 # "forgotten", which is what it was until 2026-07-23:
@@ -171,6 +175,9 @@
 #   tor-socks5     — requires live Tor network; opt-in via --with-tor,
 #                    unreliable on GitHub-hosted runners.
 #   tor-directory  — same; live Tor dependency.
+#   nostr-open-discovery — not run by default by either runner: it is the
+#                    acceptance check for changes to the Nostr rendezvous
+#                    code, run by hand with --only when that code changes.
 #
 # Deliberate GitHub-only (NOT in this local run), with reason:
 #   deb-install ubuntu22 on arm64 — this host is x86_64 and cannot run an
@@ -282,6 +289,8 @@ FIREWALL_SUITES=(firewall)
 IFACE_BINDING_SUITES=(iface-binding)
 NAT_SUITES=(cone symmetric lan)
 NOSTR_RELAY_SUITES=(nostr-publish-consume)
+# Opt-in: known to --only and --rerun, left out of the default run.
+NOSTR_OPEN_DISCOVERY_SUITES=(nostr-open-discovery)
 STUN_FAULTS_SUITES=(stun-faults)
 DNS_RESOLVER_SUITES=(dns-resolver)
 NATIVE_API_SUITES=(native-api)
@@ -335,6 +344,9 @@ list_suites() {
     echo ""
     echo "  Nostr publish/consume:"
     for s in "${NOSTR_RELAY_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  Nostr open-discovery (opt-in via --only):"
+    for s in "${NOSTR_OPEN_DISCOVERY_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  STUN fault-injection:"
     for s in "${STUN_FAULTS_SUITES[@]}"; do echo "    $s"; done
@@ -1480,6 +1492,7 @@ ci_release_nat_networks() {
         -f testing/nat/docker-compose.external-net.yml \
         --profile cone --profile symmetric --profile lan \
         --profile nostr-publish-consume --profile stun-faults \
+        --profile nostr-open-discovery --profile nostr-seed \
         down --volumes --remove-orphans >/dev/null 2>&1 || true
     [[ -n "${FIPS_NAT_WAN_NET:-}" ]] && \
         { docker network rm "$FIPS_NAT_WAN_NET" >/dev/null 2>&1 || true; }
@@ -1605,6 +1618,31 @@ run_nostr_publish_consume() {
 
     ci_release_nat_networks
     record "nostr-publish-consume" $rc
+}
+
+# Run the Nostr open-discovery startup scenario (opt-in, --only).
+# The relay is seeded with adverts from fresh keys, then one FIPS daemon with
+# `policy: open` and no configured peers starts and must cache every one of
+# them from the relay's replay within a bounded window.
+run_nostr_open_discovery() {
+    local rc=0
+    export COMPOSE_PROJECT_NAME="$(ci_project nat)"
+
+    info "[nostr-open-discovery] Claiming lab networks"
+    if ! ci_claim_nat_networks; then
+        record "nostr-open-discovery" 1
+        return
+    fi
+
+    local _extra
+    _extra="$(ci_nat_extra_compose)"
+    local -x FIPS_NAT_EXTRA_COMPOSE="$_extra"
+
+    info "[nostr-open-discovery] Running Nostr open-discovery startup scenario"
+    bash testing/nat/scripts/nostr-open-discovery-test.sh 2>&1 || rc=1
+
+    ci_release_nat_networks
+    record "nostr-open-discovery" $rc
 }
 
 # Run the STUN fault-injection integration test.
@@ -2065,6 +2103,8 @@ run_suite() {
             run_nat "${suite#nat-}" ;;
         nostr-publish-consume)
             run_nostr_publish_consume ;;
+        nostr-open-discovery)
+            run_nostr_open_discovery ;;
         stun-faults)
             run_stun_faults ;;
         chaos-*)

@@ -89,6 +89,13 @@ Run one scenario:
 - `scripts/stun-faults-test.sh`
   - cycles the daemon through STUN drop, delay and outage faults and asserts
     graceful behavior at each step
+- `scripts/nostr-open-discovery-test.sh`
+  - opt-in: seeds the relay with adverts from fresh keys (the `nostr-seed`
+    service, publishing with `testing/lib/nostr-publish.py`), then starts one
+    node with `policy: open` and no configured peers, and requires it to cache
+    every seeded advert within 10 s of its notify loop starting. Run it with
+    `./testing/ci-local.sh --only nostr-open-discovery`; neither local CI's
+    default run nor GitHub CI runs it
 
 ## Start order and interface waits
 

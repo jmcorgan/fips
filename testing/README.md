@@ -40,6 +40,10 @@ and a local STUN responder.
 | symmetric | UDP traversal fails under symmetric NAT, TCP fallback wins   |
 | lan       | Peers on the same LAN prefer local addresses over reflexive  |
 
+The same lab runs the Nostr suites: `nostr-publish-consume` and
+`stun-faults` in every run, and `nostr-open-discovery`, the open-discovery
+startup scenario, only when named (`ci-local.sh --only nostr-open-discovery`).
+
 ### [chaos/](chaos/) -- Stochastic Simulation
 
 Automated network testing with configurable node counts, topology
