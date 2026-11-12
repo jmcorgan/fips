@@ -84,14 +84,16 @@ pub(super) enum Fact {
     Kind(Option<Kind>),
     /// Its role.
     Role(Role),
+    /// Its medium.
+    Medium(Medium),
     /// Whether the node would accept the peer's handshake on it.
     Accepts(bool),
     /// Whether the node would dial the peer on it.
     Dials(bool),
 }
 
-/// The host's facts: every transport has a link MTU of 1280, is not a
-/// BLE binding, is connectionless, is clear, has the fixed kind Local, has
+/// The host's facts: every transport has a link MTU of 1280, has a
+/// medium the host does not know, is connectionless, is clear, has the fixed kind Local, has
 /// the role Normal, and accepts and dials the peer, unless the stub says
 /// otherwise. The latest fact given for a transport wins, so a test may
 /// change one between steps.
@@ -149,8 +151,15 @@ impl Facts for Stub {
             .map_or(1280, |&(_, m)| m)
     }
 
-    fn medium(&self, _transport: TransportId) -> Medium {
-        Medium::Other
+    fn medium(&self, transport: TransportId, _addr: &TransportAddr) -> Medium {
+        let pick = |f| {
+            if let Fact::Medium(m) = f {
+                Some(m)
+            } else {
+                None
+            }
+        };
+        self.latest(transport, pick).unwrap_or(Medium::Unknown)
     }
 
     fn oriented(&self, transport: TransportId) -> bool {

@@ -57,10 +57,10 @@ impl Facts for NodeFacts<'_> {
             .map_or(0, |h| usize::from(h.link_mtu(addr)))
     }
 
-    fn medium(&self, transport: TransportId) -> Medium {
+    fn medium(&self, transport: TransportId, _addr: &TransportAddr) -> Medium {
         match self.transports.get(&transport) {
             Some(handle) if is_ble(handle) => Medium::Ble,
-            Some(_) | None => Medium::Other,
+            Some(_) | None => Medium::Unknown,
         }
     }
 

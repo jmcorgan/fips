@@ -610,8 +610,8 @@ impl path::Facts for Clear {
         1280
     }
 
-    fn medium(&self, _transport: TransportId) -> path::Medium {
-        path::Medium::Other
+    fn medium(&self, _transport: TransportId, _addr: &TransportAddr) -> path::Medium {
+        path::Medium::Unknown
     }
 
     fn oriented(&self, _transport: TransportId) -> bool {

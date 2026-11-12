@@ -187,7 +187,23 @@ module of that file, sees its private items and keeps its test names.
   scores better and does not; with no Live path that carries it the
   score decides as before; a normal active path too small for it is
   kept over a backup path that carries it; and a link MTU of exactly
-  the frame's 1,071 bytes carries it, one byte less does not. Its helpers
+  the frame's 1,071 bytes carries it, one byte less does not. By
+  medium: a cable within the margin of a better-scoring wireless
+  network takes the link one dwell after its second sample, and a link
+  made on a cable stays there; a mandatory change takes a cable within
+  the margin over a better-scoring wireless network; outside the margin
+  the score decides, both ways; an unknown medium on either side keeps
+  the rule of score alone; a cable too small for a `FilterAnnounce`
+  does not take the link from a wireless network that carries one; a
+  preferred wireless network within the margin keeps the link over a
+  cable; an active path outside the margin of the best, a cable or
+  of unknown medium, gives way to a cable within it; and under load that
+  follows the link, a cable within the margin of a wireless network
+  faster at its best keeps the link until the load has lasted the
+  horizon and moves at most twice a horizon, as does a cable faster at
+  its best, and a wireless network faster at its best than a cable
+  outside the margin of it keeps the link until the load has lasted
+  the horizon and moves at most twice a horizon. Its helpers
   that build a node, set roles and round trips, offer a candidate and
   run the `Net` are shared with `pin.rs`.
 - `close.rs`: closing a path (`proto::path::tests::close::...`), driven
@@ -498,8 +514,9 @@ module of that file, sees its private items and keeps its test names.
   it and passed in every call's `Env`, and a `Stub` of the host's facts
   (link MTU per transport, 1280 by default; which transports are
   connection-oriented, none by default; and per transport a `Fact` for
-  its class, kind, role and whether the node accepts or dials the peer,
-  by default clear, fixed Local, `Normal`, and both, the latest fact
+  its class, kind, role, medium and whether the node accepts or dials
+  the peer, by default clear, fixed Local, `Normal`, unknown, and both,
+  the latest fact
   given winning, so `Stub::change` can change one between steps; the
   stub counts its changes, so the shell can tell a poll made with the
   facts unchanged since the last step). The
@@ -737,10 +754,23 @@ module of that file, sees its private items and keeps its test names.
   the score decide when none does, and keeps a normal rival too small
   for it over a backup one that carries it, a fitting normal rival over
   a preferred one within the margin that does not fit, and a pinned
-  rival that does not fit over one that does; the frame that carries
+  rival that does not fit over one that does; and among the scored
+  rivals within the margin of the best it takes the one on the fastest
+  known medium, a cable before a wireless network before BLE, the lower
+  score then the lower index between two of one medium, but not one
+  outside the margin, one with no score, or any where either medium is
+  unknown, and only after the preferred precedence and the
+  `FilterAnnounce`; the frame that carries
   the filter is the encoded `FilterAnnounce` plus the frame overhead,
   1,071 bytes; the best score a preferred rival is held to is the least
-  among the scored rivals of the highest tier; and a
+  among the scored rivals of the highest tier; a move from a loaded
+  cable to a wireless network faster at its best is held while the
+  cable is within the margin of it at their best, and not outside it,
+  with either medium unknown, from the slower medium, or once the load
+  has lasted the horizon; a move to a cable for its medium waits while
+  the cable is outside the margin of a loaded wireless network at its
+  best, and not within it, once the load has lasted the horizon, or
+  while the wireless network has no score over the horizon; and a
   hold on a link's cost lasts, at the dwell's end, until the second
   report, and before it whatever the reports.
 - `set.rs`: tests for `set.rs` (`proto::path::set::tests::...`), the set

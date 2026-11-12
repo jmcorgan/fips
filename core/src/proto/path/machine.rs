@@ -1756,7 +1756,8 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// trip, the tier of its transport's role, read from the facts, whether
     /// it carries a `FilterAnnounce`, by its link MTU from the facts or the
     /// smaller size it is proven to carry where that counts
-    /// (`select::carried`), and whether the operator's pin names it.
+    /// (`select::carried`), its medium, read from the facts, and whether the
+    /// operator's pin names it.
     fn rivals(&self, env: &Env<'_>) -> Field {
         let min = usize::from(self.params.cfg.min_samples);
         let mut field: Field = [None; PATH_MAX_PER_PEER];
@@ -1781,6 +1782,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 preferred: role == Role::Preferred,
                 pinned: self.pin.as_ref().is_some_and(|pin| pin.names(&pair(p))),
                 fits: carried >= select::FILTER_FRAME,
+                medium: env.facts.medium(p.transport_id(), p.addr()),
             };
             if let Some(slot) = field.get_mut(i) {
                 *slot = Some(rival);
@@ -1812,20 +1814,23 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// its samples, so a backup or never path gives way as soon as a path
     /// of a higher tier is Live. Otherwise the path must have
     /// enough samples to be scored, and either carry a `FilterAnnounce`
-    /// while `a` cannot, be preferred while `a` is not, or score better
-    /// than `a`, also scored, by more than the switch margin, or by any
-    /// amount when the latest change of active path was mandatory and left
-    /// it, or `a`, preferred and scored, must score more than the switch
-    /// margin times the best score [`select::best`] finds, so it has lost
-    /// its precedence; a change for any of those last three, on score, waits
-    /// while [`select::held`] holds it, so load on `a` alone does not hand
+    /// while `a` cannot, be preferred while `a` is not, run over a known
+    /// medium faster than `a`'s, also known ([`select::quicker`]), or score
+    /// better than `a`, also scored, by more than the switch margin, or by
+    /// any amount when the latest change of active path was mandatory and
+    /// left it, or `a`, scored, must score more than the switch margin
+    /// times the best score [`select::best`] finds, so it holds the link by
+    /// no precedence (the path taken may itself hold its place by one); a
+    /// change for any of those last three, on score, waits
+    /// while [`select::held`] holds it, and a change for a faster medium
+    /// while [`select::waits`] holds it, so load on `a` alone does not hand
     /// the link to a path slower at its best; and that must hold at every
     /// step for the switch dwell.
     /// The dwell starts at the first step at which it holds, starts again
     /// when the path ranked first changes, and ends at any step at which it
     /// does not hold, so a path that only scores the same as `a` never
-    /// takes its place unless it alone carries a `FilterAnnounce` or is
-    /// preferred.
+    /// takes its place unless it alone carries a `FilterAnnounce`, is
+    /// preferred, or runs over a faster known medium.
     fn better(&mut self, now: C::Instant, a: usize, env: &Env<'_>) -> Option<(usize, Switch)> {
         let margin = self.params.cfg.switch_margin;
         let field = self.rivals(env);
@@ -1851,12 +1856,14 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         let target = pick
             .filter(|(to, from)| {
                 to.score.is_some_and(|st| {
-                    let scored = from.score.is_some_and(|s| s > st * margin)
-                        || (from.preferred
-                            && from.score.zip(best).is_some_and(|(s, b)| s > b * margin))
+                    let scored = from
+                        .score
+                        .is_some_and(|s| s > st * margin || best.is_some_and(|b| s > b * margin))
                         || (back(to) && from.score.is_some_and(|s| s > st));
                     (to.fits && !from.fits)
                         || (to.preferred && !from.preferred)
+                        || (select::quicker(to.medium, from.medium)
+                            && !select::waits(to, from, margin))
                         || (scored && !select::held(to, from, margin))
                 })
             })
@@ -2177,7 +2184,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// discarded to make room, if one was, and holding back its pair;
     /// refuse it when no room can be made.
     fn admit(&mut self, to: PathRef, env: &Env<'_>, out: &mut Outputs<D>) -> Option<usize> {
-        let medium = env.facts.medium(to.transport);
+        let medium = env.facts.medium(to.transport, &to.addr);
         match self
             .set
             .admit(to.transport, to.addr.clone(), medium, draw::<E>)

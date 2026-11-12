@@ -1823,7 +1823,7 @@ async fn a_decrypt_worker_frame_on_a_second_ble_transport_keeps_the_bound_link_v
 
 /// The node tells the path machine that a BLE transport's paths are BLE
 /// ones, which hold one path per binding (multipath v1 draft, Section 5.1),
-/// and that every other transport's are not.
+/// and that every other transport's medium is unknown.
 #[tokio::test]
 async fn a_ble_transport_holds_its_paths_as_ble() {
     use crate::node::handlers::path::NodeFacts;
@@ -1845,8 +1845,9 @@ async fn a_ble_transport_holds_its_paths_as_ble() {
         transports: &tn.node.transports,
         denied: false,
     };
-    assert_eq!(facts.medium(ble), Medium::Ble);
+    let peer = crate::transport::TransportAddr::from_string("loopback:peer");
+    assert_eq!(facts.medium(ble, &peer), Medium::Ble);
     assert_eq!(facts.kind(ble), Some(Kind::Local));
-    assert_eq!(facts.medium(loopback), Medium::Other);
+    assert_eq!(facts.medium(loopback, &peer), Medium::Unknown);
     cleanup_nodes(std::slice::from_mut(&mut tn)).await;
 }

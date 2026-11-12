@@ -137,8 +137,10 @@ pub enum Source {
 pub trait Facts {
     /// The link MTU of `transport` toward `addr`, in frame bytes.
     fn mtu(&self, transport: TransportId, addr: &TransportAddr) -> usize;
-    /// The kind of `transport`, for the path limits.
-    fn medium(&self, transport: TransportId) -> Medium;
+    /// The medium of `transport` toward `addr`, for the path limits:
+    /// `Medium::Unknown` where the host cannot tell it. Given the address
+    /// as well, a host may answer for the route to it.
+    fn medium(&self, transport: TransportId, addr: &TransportAddr) -> Medium;
     /// Whether `transport` is connection-oriented, as TCP, Tor, Nym and BLE
     /// are: a path to a candidate on it needs a connection opened before
     /// its first probe can go.

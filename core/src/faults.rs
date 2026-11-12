@@ -370,6 +370,22 @@ faults! {
     /// waiting for the jobs dispatched before, so a round counts quiet with
     /// a frame still on a worker thread.
     WorldSkipsWorkerWait,
+    /// Choosing the active path ignores the medium a path runs over, as
+    /// before the medium ranked paths, so a cable within the switch margin
+    /// of a better-scoring Wi-Fi path never takes the link from it.
+    MediumIgnored,
+    /// A discretionary change on score to a path faster at its best than
+    /// the active path is never held, even from a cable within the switch
+    /// margin of it at their best, so load that follows the link hands it
+    /// from the cable to a Wi-Fi path and the cable's medium takes it back
+    /// one dwell later, over and over.
+    LoadLeavesCable,
+    /// A discretionary change for a faster known medium is never held, so
+    /// load that follows the link onto a Wi-Fi path faster at its best than
+    /// a cable outside the switch margin of it hands the link to the cable
+    /// as soon as the Wi-Fi path's window score passes the cable's, and the
+    /// Wi-Fi path takes it back once the load has followed, over and over.
+    MediumMoveUnheld,
 }
 
 impl Fault {

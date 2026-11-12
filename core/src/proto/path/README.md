@@ -318,7 +318,13 @@ its node code steps it and acts on what it decides.
   does, the least score
   among those with `min_samples` round-trip samples, unless a `Preferred`
   one scores within `switch_margin` times that least, when the least
-  scoring such path; else, when none has that many samples, the least
+  scoring such path; and then, among the scored paths within
+  `switch_margin` times the least (only the `Preferred` ones when a
+  `Preferred` one was taken), the one on the fastest known medium, a
+  cable before a wireless network before BLE, when its medium is faster
+  than that of the path taken so far and both are known (the facts give
+  each path's medium; an unknown one leaves the choice to the score);
+  else, when none has that many samples, the least
   latest round trip, one with none measured last. The best
   acked Suspect path has the least latest round trip, one with none
   measured last. Every tie goes to the lower index. Each change is an
@@ -339,13 +345,15 @@ its node code steps it and acts on what it decides.
   tier is higher than the active path's, the link moves to it at once,
   whatever its samples. Otherwise, when it has `min_samples` samples and
   either it carries a `FilterAnnounce` and the active path cannot, or it
-  is `Preferred` and the active path is not, or the active path also has
-  them and scores more than `switch_margin` times it, or more than it at
-  all when it is the path the latest change of active path left and that
-  change was mandatory, or the active path
-  is `Preferred`, has them, and scores more than `switch_margin` times
-  the best score among the paths `select.rs` ranks, so it has lost its
-  precedence, a switch dwell starts, keyed by the path's identifier, and
+  is `Preferred` and the active path is not, or it runs over a known
+  medium faster than the active path's, also known, or the active path
+  also has them and scores more than `switch_margin` times it, or more
+  than it at all when it is the path the latest change of active path
+  left and that change was mandatory, or the active path has them and
+  scores more than `switch_margin` times the best score among the paths
+  `select.rs` ranks, so it holds the link by no precedence (the path
+  ranked first may hold its place by the preferred precedence or by its
+  medium), a switch dwell starts, keyed by the path's identifier, and
   the link moves to it at the first step at or after `switch_dwell` from
   then at which all of that still holds. The return needs no margin
   because the path the link fled to may score within it of the path left
@@ -359,8 +367,20 @@ its node code steps it and acts on what it decides.
   raises its least round trip over the window within seconds, but over
   the horizon only once the load has lasted it, so the load alone does
   not hand the link to a path slower at its best for a horizon. A change
-  to a path faster at its best is never held, so a return to a path left
-  by a mandatory change keeps its timing.
+  to a path faster at its best is not held, so a return to a path left
+  by a mandatory change keeps its timing, unless the active path runs
+  over a known medium faster than the other's and its score over the
+  horizon is within `switch_margin` times the other's: idle, the active
+  path would take the link back on its medium one dwell later, so load
+  that followed the link would move it back and forth each dwell. A
+  change for a faster medium is held the same way (`select::waits`)
+  while the path ranked first scores more than `switch_margin` times
+  the active path's score over the horizon: idle, the two scores of the
+  active path agree and only the margin of the best decides, but load
+  on a wireless network faster at its best than a cable outside the
+  margin of it ranks the cable first within seconds, and the cable does
+  not take the link until the load has lasted the horizon, since the
+  wireless network would take it back once the load followed.
   The dwell starts again when the path ranked first changes, and ends at
   any step at which that does not hold, at any step at which the
   active path is not Live, and at every change of active path. Its end
@@ -549,9 +569,11 @@ its node code steps it and acts on what it decides.
   `Output` (with `Output::NotCapable`, and `Output::Proven`, a change of
   the size a path is proven to carry), `Outputs`, `Env` (the facts and
   the link's cost the host measures), the `Facts`
-  trait the host answers (link MTU, medium, whether it is
-  connection-oriented, anonymity class, fixed kind if any, role, and
-  whether the node would accept or dial the peer, per transport),
+  trait the host answers (link MTU and medium, per transport and peer
+  address, the medium `Medium::Unknown` where the host cannot tell it;
+  whether it is connection-oriented, anonymity class, fixed kind if
+  any, role, and whether the node would accept or dial the peer, per
+  transport),
   `PathRef`, `Why`, `Switch`, `Refusal` (with
   `Refusal::Rule` and `Refusal::Table`), `Source`, `Class`, the
   anonymity class, `Kind`, local or
@@ -596,8 +618,14 @@ its node code steps it and acts on what it decides.
   `names` says whether it names a pair; `Rival`, a Live, acked path a
   choice may take, with its score once it has `min_samples` round-trip
   samples, its latest round trip, its tier, whether its role is
-  `Preferred`, whether the pin names it and whether its link MTU carries
-  a `FilterAnnounce` (`fits`); `FILTER_FRAME`, the 1,071 bytes of the
+  `Preferred`, whether the pin names it, whether its link MTU carries
+  a `FilterAnnounce` (`fits`) and its medium; `quicker`, whether one
+  known medium is faster than another, a cable before a wireless network
+  before BLE; `held`, whether a change on score waits under load, and
+  `waits`, whether a change for a faster medium does, while the path
+  taken scores outside the margin of the active path's score over the
+  horizon;
+  `FILTER_FRAME`, the 1,071 bytes of the
   frame that carries a `FilterAnnounce`, the frame overhead and the
   encoded message with its filter sized by the shift the bloom encoder
   uses; `Field`, a choice's rivals
@@ -607,8 +635,12 @@ its node code steps it and acts on what it decides.
   the highest tier present, then those that fit while any does, and
   takes the least score among the scored ones, unless a scored
   `Preferred` one scores at most the margin it is given times that
-  least, when the least-scoring such one; else the least latest round
-  trip, one with none measured last; the lower index on every tie. The
+  least, when the least-scoring such one; then, of the scored ones
+  within the margin of the least, only `Preferred` ones when a
+  `Preferred` one was taken, the one on the fastest known medium, when
+  that is faster than the medium of the one taken so far, also known;
+  else the least latest round trip, one with none measured last; the
+  lower index on every tie. The
   preferred precedence has no band: the link moves to a `Preferred` path
   and leaves it on the same ratio, so a preferred path whose score drifts
   across the margin of the best changes the active path once per
@@ -631,7 +663,9 @@ its node code steps it and acts on what it decides.
   instants are the host's.
 - `set.rs`: `PathSet`, the paths to one peer, keyed by the pair (local
   transport, peer address), with `PeerPath`, `Admission`, `PathRefused`,
-  `Rebind`, `Roam`, `Medium`, `PathState` and the limits
+  `Rebind`, `Roam`, `Medium` (BLE, wired, wireless or unknown; a BLE
+  binding holds one path to a peer, every other medium up to
+  `PATH_MAX_PER_TRANSPORT`), `PathState` and the limits
   `PATH_MAX_PER_PEER` and `PATH_MAX_PER_TRANSPORT`. It admits and evicts
   paths, binds the original path, moves a path's address on an authentic
   frame (`roam`) and rebinds deliberately (`rebind`), and holds a renewed
@@ -744,6 +778,27 @@ its node code steps it and acts on what it decides.
   and the score, and a change to a path for it alone waits for the
   dwell and the path's samples. With no Live path of that tier that
   carries the filter, the paths are chosen as without it.
+- **A faster known medium wins within the margin, after the preferred
+  precedence.** The facts give each path's medium at each step. Among
+  the scored paths within `switch_margin` times the best, a cable is
+  taken over a wireless network, and a wireless network over BLE; a
+  medium the host does not know never takes or loses the link on this
+  rule, so where every medium is unknown the choice is the score's
+  alone. A change for it waits for the dwell and the path's samples,
+  and an active path that scores more than the margin times the best
+  gives way to the path ranked first, whatever its medium, as a
+  `Preferred` one does. A path too small for a
+  `FilterAnnounce` loses to one that carries it whatever its medium.
+  Load on an active path of the faster medium, within the margin of the
+  other at their best, does not move the link to the other before the
+  load has lasted the horizon, even when the other is faster at its
+  best, since the medium would take it back once the load followed it.
+  The change for the medium is held under load too: while the path of
+  the faster medium scores outside the margin of the active path's
+  score over the horizon, load on the active path does not hand it the
+  link before the load has lasted the horizon, so a loaded wireless
+  network faster at its best does not trade the link with a slower
+  cable as the load follows it.
 - **The preferred precedence has no band.** A `Preferred` path is taken,
   after the dwell, while it scores at most `switch_margin` times the
   best, and given up, after the dwell, once it scores more, so its score
@@ -753,8 +808,9 @@ its node code steps it and acts on what it decides.
   a `FilterAnnounce`.** It runs only
   while the active path is Live, takes only a Live path, and, between
   paths that the pin does not set apart, of which neither alone carries
-  a `FilterAnnounce`, and whose roles neither differ in tier nor make
-  one alone `Preferred`, needs a strict margin, so such
+  a `FilterAnnounce`, whose roles neither differ in tier nor make
+  one alone `Preferred`, and whose media are not both known and
+  different, needs a strict margin, so such
   a path that scores the same as the active one never replaces it. The
   test shell checks every discretionary and pinned change it sees
   against the path active before it and the states after the call.

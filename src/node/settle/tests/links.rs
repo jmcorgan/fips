@@ -110,7 +110,11 @@ fn a_flagged_peer_is_the_only_one_links_mirror_skips() {
     node.links.open(link(2, "10.0.0.2:2121"));
     let (flagged, mut first) = peer(one);
     let (wrong, second) = peer(two);
-    first.rebind_transport(TransportId::new(1), at("10.0.0.1:2121").addr, Medium::Other);
+    first.rebind_transport(
+        TransportId::new(1),
+        at("10.0.0.1:2121").addr,
+        Medium::Unknown,
+    );
     assert!(
         first.past_feed(),
         "precondition: the mutator flags the peer"
@@ -174,7 +178,7 @@ fn each_test_mutator_of_a_bundle_flags_its_peer() {
             p.account(peer_now(), t, o, 0, hb);
         }),
         ("rebind_transport", |p, t, _, o, _| {
-            p.rebind_transport(t, o.clone(), Medium::Other);
+            p.rebind_transport(t, o.clone(), Medium::Unknown);
         }),
         ("repin", |p, _, _, o, _| {
             p.repin(TransportId::new(2), o.clone())
