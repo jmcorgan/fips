@@ -527,7 +527,10 @@ pub struct NostrRendezvousConfig {
     #[serde(default = "NostrRendezvousConfig::default_advert_cache_max_entries")]
     pub advert_cache_max_entries: usize,
     /// Max seen-session IDs retained for replay detection.
-    /// Oldest entries are evicted when the cap is exceeded.
+    /// When it holds this many unexpired IDs, a new traversal offer is
+    /// refused until an entry expires; no unexpired ID is forgotten to make
+    /// room. The default holds every offer the inbound signal rate limit
+    /// admits in one `replay_window_secs`.
     #[serde(default = "NostrRendezvousConfig::default_seen_sessions_max_entries")]
     pub seen_sessions_max_entries: usize,
     /// Overall punch attempt timeout in seconds. A value below 10 runs as 10,
@@ -702,7 +705,7 @@ impl NostrRendezvousConfig {
     }
 
     fn default_seen_sessions_max_entries() -> usize {
-        2048
+        4096
     }
 
     fn default_attempt_timeout_secs() -> u64 {

@@ -355,7 +355,7 @@ peer-connection machinery:
 | Offer semaphore (`max_concurrent_incoming_offers`) | 16 | CPU and memory exhaustion from offer spam on DM relays. | Warn log, offer dropped. |
 | Per-npub offer allowance (`max_concurrent_offers_per_npub`) | 4 | One sender identity holding every offer slot and denying traversal onboarding to everyone else. Does not prevent the same denial from several throwaway npubs. | Debug log, offer dropped. |
 | Advert cache (`advert_cache_max_entries`) | 2048 | Memory growth from ambient advert traffic under `policy: open`. | New unconfigured authors refused until an entry expires; configured and linked authors kept. |
-| Seen-sessions (`seen_sessions_max_entries`) | 2048 | Replay of stale `sessionId` values. | Oldest entry evicted. |
+| Seen-sessions (`seen_sessions_max_entries`) | 4096 | Replay of stale `sessionId` values. | New offer refused until an entry expires. |
 | Signal TTL (`signal_ttl_secs`) | 120 s | Indefinite in-flight offers on relays. | Expired offers rejected at validation. |
 | Open discovery queue (`open_discovery_max_pending`) | 64 | Unbounded retry queue under ambient advert load. | New candidates skipped until the queue drains. |
 | Punch window (`punch_duration_ms`) | 10 s | Endless probe traffic after one side has given up. | Attempt declared failed; sockets discarded. |

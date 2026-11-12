@@ -737,17 +737,14 @@ pub(super) fn nonce() -> String {
 /// `signal_ttl_secs + 2 * FRESHNESS_SKEW_TOLERANCE_MS < replay_window_secs`, so
 /// that margin can no longer be configured away.
 ///
-/// That covers the expiry route only. `mark_session_seen` also evicts on
-/// capacity, dropping the entries nearest expiry once the cache exceeds
-/// `seen_sessions_max_entries`, and a session id dropped that way stays
-/// replayable for the rest of its freshness window whatever the time relation
-/// is. Nothing bounds that route: whether it is reachable depends on the
-/// admitted-offer rate against the cache size. The shipped defaults leave a
-/// wide margin — filling 2048 entries inside 300s needs about 6.8 admitted
-/// offers per second, against roughly 1.2/s from a 16-slot pool whose permits
-/// are held for the length of an attempt — but raising
-/// `max_concurrent_incoming_offers` narrows it. That admission rate is inferred
-/// from the attempt timeout, not measured.
+/// Capacity never removes a live entry. When `note_session_seen` finds
+/// `seen_sessions_max_entries` unexpired ids, it refuses the new offer and
+/// records nothing, so a full cache costs new traversals until an entry
+/// expires but never makes a recorded session replayable. The default is sized
+/// so that refusal is not reached through the signal gate: the gate admits at
+/// most its two sustained rates plus its two bursts (10/s and 40 signals at
+/// the shipped constants, 3040 over a 300s replay window), below the default
+/// of 4096.
 pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

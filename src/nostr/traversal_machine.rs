@@ -71,12 +71,16 @@ pub(super) enum OfferDisposition {
 /// [`TraversalMachine::note_session_seen`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SeenDecision {
-    /// First time we've seen this session id within the replay window. If a
-    /// cap eviction occurred, `evicted` carries `(evicted, retained)` for the
-    /// driver's overflow debug line.
-    Fresh { evicted: Option<(usize, usize)> },
+    /// First time we've seen this session id within the replay window; it is
+    /// now recorded.
+    Fresh,
     /// The session id is already present within the replay window.
     Replay,
+    /// The cache holds `seen_max_entries` ids that are all still inside the
+    /// replay window. The new id is refused and not recorded, because making
+    /// room would forget a session whose offer can still be fresh, and a copy
+    /// of that offer would then pass the replay check.
+    Full,
 }
 
 pub(super) struct TraversalMachine {
@@ -138,11 +142,12 @@ impl TraversalMachine {
     // --- replay / seen-sessions ----------------------------------------
 
     /// Record that `session_id` was seen at `now_ms`. Prunes expired entries,
-    /// rejects a replay, inserts the fresh id, then applies the size cap.
+    /// rejects a replay, then records the fresh id if there is room.
     ///
-    /// Returns [`SeenDecision::Replay`] in place of the old
-    /// `Err(BootstrapError::Replay)`, or [`SeenDecision::Fresh`] carrying the
-    /// `(evicted, retained)` pair when a cap eviction occurred.
+    /// Returns [`SeenDecision::Replay`] for an id still inside the replay
+    /// window, [`SeenDecision::Full`] when the cache holds `seen_max_entries`
+    /// live ids (the new id is not recorded), and [`SeenDecision::Fresh`]
+    /// otherwise. A live id is never removed to make room.
     pub(super) fn note_session_seen(&self, session_id: &str, now_ms: u64) -> SeenDecision {
         let expiry = now_ms + self.replay_window_ms;
         let mut seen = self.lock_seen();
@@ -150,22 +155,11 @@ impl TraversalMachine {
         if seen.contains_key(session_id) {
             return SeenDecision::Replay;
         }
-        seen.insert(session_id.to_string(), expiry);
-        if seen.len() > self.seen_max_entries {
-            let mut oldest = seen
-                .iter()
-                .map(|(session, expires_at)| (session.clone(), *expires_at))
-                .collect::<Vec<_>>();
-            oldest.sort_by_key(|(_, expires_at)| *expires_at);
-            let overflow = seen.len().saturating_sub(self.seen_max_entries);
-            for (session, _) in oldest.into_iter().take(overflow) {
-                seen.remove(&session);
-            }
-            return SeenDecision::Fresh {
-                evicted: Some((overflow, seen.len())),
-            };
+        if seen.len() >= self.seen_max_entries {
+            return SeenDecision::Full;
         }
-        SeenDecision::Fresh { evicted: None }
+        seen.insert(session_id.to_string(), expiry);
+        SeenDecision::Fresh
     }
 
     // --- lock helpers ---------------------------------------------------
@@ -277,10 +271,7 @@ mod tests {
     fn replay_first_then_repeat() {
         // First id Fresh; same id within window Replay.
         let m = machine();
-        assert_eq!(
-            m.note_session_seen("s1", 1000),
-            SeenDecision::Fresh { evicted: None }
-        );
+        assert_eq!(m.note_session_seen("s1", 1000), SeenDecision::Fresh);
         assert_eq!(m.note_session_seen("s1", 1500), SeenDecision::Replay);
     }
 
@@ -288,46 +279,21 @@ mod tests {
     fn replay_prunes_expired() {
         // An entry past its expiry is pruned, so re-seeing it is Fresh.
         let m = machine(); // replay_window_ms = 1_000_000
-        assert_eq!(
-            m.note_session_seen("s1", 1000),
-            SeenDecision::Fresh { evicted: None }
-        );
+        assert_eq!(m.note_session_seen("s1", 1000), SeenDecision::Fresh);
         // now well past s1's expiry (1000 + 1_000_000): s1 pruned by retain,
         // so s1 is Fresh again rather than Replay.
-        assert_eq!(
-            m.note_session_seen("s1", 5_000_000),
-            SeenDecision::Fresh { evicted: None }
-        );
+        assert_eq!(m.note_session_seen("s1", 5_000_000), SeenDecision::Fresh);
     }
 
     #[test]
-    fn replay_cap_evicts_oldest_by_expiry() {
-        // Cap overflow evicts oldest-by-expiry, returns (evicted, retained).
+    fn replay_cap_refuses_a_new_session_while_full_of_live_entries() {
+        // A full cache refuses a new id rather than forgetting a live one.
         let m = machine(); // cap = 3, window huge so nothing expires here
-        assert_eq!(
-            m.note_session_seen("s1", 1),
-            SeenDecision::Fresh { evicted: None }
-        );
-        assert_eq!(
-            m.note_session_seen("s2", 2),
-            SeenDecision::Fresh { evicted: None }
-        );
-        assert_eq!(
-            m.note_session_seen("s3", 3),
-            SeenDecision::Fresh { evicted: None }
-        );
-        assert_eq!(
-            m.note_session_seen("s4", 4),
-            SeenDecision::Fresh {
-                evicted: Some((1, 3))
-            }
-        );
-        // Oldest expiry (s1) was evicted, so re-seeing it is Fresh.
-        assert_eq!(
-            m.note_session_seen("s1", 5),
-            SeenDecision::Fresh {
-                evicted: Some((1, 3))
-            }
-        );
+        assert_eq!(m.note_session_seen("s1", 1), SeenDecision::Fresh);
+        assert_eq!(m.note_session_seen("s2", 2), SeenDecision::Fresh);
+        assert_eq!(m.note_session_seen("s3", 3), SeenDecision::Fresh);
+        assert_eq!(m.note_session_seen("s4", 4), SeenDecision::Full);
+        // Nothing was evicted, so s1 is still a replay.
+        assert_eq!(m.note_session_seen("s1", 5), SeenDecision::Replay);
     }
 }
