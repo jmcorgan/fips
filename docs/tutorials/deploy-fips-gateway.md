@@ -53,7 +53,7 @@ By the end you will have:
 - An inbound port forward exposing one LAN service to the mesh as
   `<your-gateway-npub>.fips:<port>`.
 - An understanding of which LAN-side glue OpenWrt automates for you
-  (DNS forwarding, RA route, IPv6 prefix) and which the operator owns
+  (DNS forwarding, default route, IPv6 prefix) and which the operator owns
   (port forwards, mesh firewall).
 
 ## Why an OpenWrt AP
@@ -187,10 +187,14 @@ Behind that single command, the init script
    an unassigned, unrouted part of IANA's `2001::/23` block to
    convince them otherwise. A LAN that already has an IPv6 address
    you set keeps it, and gets no address from the gateway.
-4. **Adds an RA route for the virtual pool.** A UCI `route6` entry
-   under `dhcp` tells `odhcpd` to advertise the pool CIDR via Router
-   Advertisement (RFC 4191), so LAN clients learn how to reach pool
-   addresses automatically. No per-client static routes needed.
+4. **Gives LAN clients a route to the virtual pool.** The init
+   script sets the LAN's `ra_default` to 2, so `odhcpd` advertises a
+   default route even when the router has no upstream IPv6, and LAN
+   clients reach pool addresses by that default route. It also adds a
+   kernel route for the pool CIDR on `br-lan`. No per-client static
+   routes needed. (It writes a UCI `route6` entry under `dhcp` too,
+   but `odhcpd` does not read that option, so no Router Advertisement
+   carries a route for the pool itself.)
 5. **Spawns `fips-gateway` under procd** with `--config
    /etc/fips/fips.yaml`, with crash-respawn.
 
@@ -225,7 +229,7 @@ This isolates the router-to-mesh path before involving the LAN
 segment. If this fails, the troubleshooting target is the daemon /
 mesh side, not the gateway-to-client side. If it succeeds and the
 LAN-client test below fails, the target is the LAN segment —
-`proxy_ndp`, the RA pool route, or DNS forwarding through dnsmasq.
+`proxy_ndp`, the advertised default route, or DNS forwarding through dnsmasq.
 
 Now from a phone or laptop on the AP's LAN — anything that does IPv6
 and DNS, with no FIPS software installed — try one of the public test
@@ -257,7 +261,7 @@ Expectations:
 > installed a proxy-NDP entry on `br-lan` so the client could resolve
 > the virtual IP at the link layer, and returned the virtual IP in
 > the AAAA reply. Your client then routed traffic to the virtual IP
-> via the RA-advertised pool route, the AP's kernel rewrote the
+> via the default route the AP advertises, the AP's kernel rewrote the
 > destination to the mesh address, and the daemon's adapter carried
 > the packets across the mesh. Return traffic followed conntrack
 > back. The client never knew the mesh existed.
@@ -449,8 +453,9 @@ service fips-gateway disable
 
 The init script's `stop_service` handler reverses most of the
 LAN-side integration on the way out: dnsmasq's `.fips` forwarder is
-pointed back at the daemon's port 5354 and the RA route for the pool
-is withdrawn from `odhcpd`. The global-scope IPv6 prefix on `br-lan`
+pointed back at the daemon's port 5354, the pool's kernel route is
+removed, and the LAN's `ra_default` goes back to the value the gateway
+replaced. The global-scope IPv6 prefix on `br-lan`
 stays while the service is enabled, so that a restart does not reload
 the network; `disable` removes it, with one network reload. (In the
 other order, `disable` then `stop`, the `stop` removes it.) The LAN
@@ -475,8 +480,9 @@ peering on the AP itself continues to work.
   table, one control socket, and one config block, but each half
   has its own use case.
 - **OpenWrt does the LAN-side glue for you.** The init script
-  reconfigures dnsmasq, installs the RA route, adds the global IPv6
-  prefix, and loads sysctls. On a non-OpenWrt host that integration
+  reconfigures dnsmasq, has `odhcpd` advertise a default route and adds
+  a kernel route for the pool, adds the global IPv6 prefix, and loads
+  sysctls. On a non-OpenWrt host that integration
   is manual — see [../how-to/deploy-gateway.md](../how-to/deploy-gateway.md).
 - **Inbound forwards stay manual on every distro.** The
   `port_forwards[]` block is uniform across hosts, and on every

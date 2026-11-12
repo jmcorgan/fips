@@ -42,9 +42,15 @@ if [ "$NO_BUILD" -eq 0 ]; then
     (cd "$PROJECT_ROOT" && cargo build --release)
 fi
 
+# Stage from the directory cargo built into, not a literal target/.
+# shellcheck source=SCRIPTDIR/../common/target-dir.sh
+. "${PROJECT_ROOT}/packaging/common/target-dir.sh"
+TARGET_DIR="$(target_dir "$PROJECT_ROOT" "$((1 - NO_BUILD))")" || exit 1
+BINARY_DIR="${TARGET_DIR}/release"
+
 for bin in fips fipsctl fipstop; do
-    [ -x "${PROJECT_ROOT}/target/release/${bin}" ] \
-        || { echo "error: target/release/${bin} missing (run without --no-build)" >&2; exit 1; }
+    [ -x "${BINARY_DIR}/${bin}" ] \
+        || { echo "error: ${BINARY_DIR}/${bin} missing (run without --no-build)" >&2; exit 1; }
 done
 
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/fips-pkg.XXXXXX")"
@@ -56,9 +62,9 @@ install -d "${STAGE}/usr/local/bin" \
            "${STAGE}/usr/local/etc/rc.d" \
            "${STAGE}/usr/local/libexec/fips"
 
-install -m 0755 "${PROJECT_ROOT}/target/release/fips" \
-                "${PROJECT_ROOT}/target/release/fipsctl" \
-                "${PROJECT_ROOT}/target/release/fipstop" \
+install -m 0755 "${BINARY_DIR}/fips" \
+                "${BINARY_DIR}/fipsctl" \
+                "${BINARY_DIR}/fipstop" \
                 "${STAGE}/usr/local/bin/"
 
 # Config ships sample-style: copied into place on install if absent,

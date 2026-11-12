@@ -76,12 +76,6 @@ DEPLOY_DIR="${PROJECT_ROOT}/deploy"
 STAGING_DIR="${DEPLOY_DIR}/${TARBALL_NAME}"
 STRIP_BIN="${STRIP:-strip}"
 
-if [[ -n "${TARGET_TRIPLE}" ]]; then
-    BINARY_DIR="${PROJECT_ROOT}/target/${TARGET_TRIPLE}/release"
-else
-    BINARY_DIR="${PROJECT_ROOT}/target/release"
-fi
-
 echo "Building FIPS v${VERSION} for ${ARCH}..."
 
 # Build release binaries
@@ -90,7 +84,18 @@ if [[ "${NO_BUILD}" -eq 0 ]]; then
     if [[ -n "${TARGET_TRIPLE}" ]]; then
         cargo_args+=(--target "${TARGET_TRIPLE}")
     fi
-    cargo "${cargo_args[@]}"
+    # From the root, so cargo sees the project's config as target_dir does.
+    (cd "${PROJECT_ROOT}" && cargo "${cargo_args[@]}")
+fi
+
+# Stage from the directory cargo built into, not a literal target/.
+# shellcheck source=SCRIPTDIR/../common/target-dir.sh
+. "${PACKAGING_DIR}/common/target-dir.sh"
+TARGET_DIR="$(target_dir "${PROJECT_ROOT}" "$((1 - NO_BUILD))")" || exit 1
+if [[ -n "${TARGET_TRIPLE}" ]]; then
+    BINARY_DIR="${TARGET_DIR}/${TARGET_TRIPLE}/release"
+else
+    BINARY_DIR="${TARGET_DIR}/release"
 fi
 
 # Create staging directory

@@ -78,19 +78,24 @@ STAGING_DIR="$(mktemp -d)"
 SCRIPTS_DIR="$(mktemp -d)"
 trap 'rm -rf "${STAGING_DIR}" "${SCRIPTS_DIR}"' EXIT
 
-if [[ -n "${TARGET_TRIPLE}" ]]; then
-    BINARY_DIR="${PROJECT_ROOT}/target/${TARGET_TRIPLE}/release"
-else
-    BINARY_DIR="${PROJECT_ROOT}/target/release"
-fi
-
 echo "Building FIPS v${VERSION} for macOS ${ARCH}..."
 
 # Build release binaries
 if [[ "${NO_BUILD}" -eq 0 ]]; then
     cargo_args=(build --release --manifest-path="${PROJECT_ROOT}/Cargo.toml")
     [[ -n "${TARGET_TRIPLE}" ]] && cargo_args+=(--target "${TARGET_TRIPLE}")
-    cargo "${cargo_args[@]}"
+    # From the root, so cargo sees the project's config as target_dir does.
+    (cd "${PROJECT_ROOT}" && cargo "${cargo_args[@]}")
+fi
+
+# Stage from the directory cargo built into, not a literal target/.
+# shellcheck source=SCRIPTDIR/../common/target-dir.sh
+. "${PACKAGING_DIR}/common/target-dir.sh"
+TARGET_DIR="$(target_dir "${PROJECT_ROOT}" "$((1 - NO_BUILD))")" || exit 1
+if [[ -n "${TARGET_TRIPLE}" ]]; then
+    BINARY_DIR="${TARGET_DIR}/${TARGET_TRIPLE}/release"
+else
+    BINARY_DIR="${TARGET_DIR}/release"
 fi
 
 # Verify binaries exist
