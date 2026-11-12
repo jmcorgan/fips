@@ -518,6 +518,10 @@ impl Node {
                     if outcome.dampened {
                         self.note_flap("loop-detected");
                     }
+
+                    // Tree structure changed — trigger bloom filter exchange with all peers
+                    let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+                    self.bloom_state.mark_all_updates_needed(all_peers);
                 }
             }
             TreeDecision::AncestryUpdate { parent, new_seq } => {
