@@ -269,16 +269,20 @@ pub(super) fn validate_traversal_answer_for_offer(
 ///   offset = ((T2 - T1) + (T3 - T4)) / 2
 /// where T1 = offer.issued_at, T2 = answer.offer_received_at,
 ///       T3 = answer.issued_at, T4 = answer_received_at.
+///
+/// T2 and T3 come from the responder. A timestamp outside the `i64` range, or
+/// values whose differences or sum overflow, yield `None` rather than a
+/// wrapped figure or a panic.
 pub(super) fn estimate_clock_skew(
     offer: &TraversalOffer,
     answer: &TraversalAnswer,
     answer_received_at: u64,
 ) -> Option<i64> {
-    let t1 = offer.issued_at as i64;
-    let t2 = answer.offer_received_at? as i64;
-    let t3 = answer.issued_at as i64;
-    let t4 = answer_received_at as i64;
-    Some(((t2 - t1) + (t3 - t4)) / 2)
+    let t1 = i64::try_from(offer.issued_at).ok()?;
+    let t2 = i64::try_from(answer.offer_received_at?).ok()?;
+    let t3 = i64::try_from(answer.issued_at).ok()?;
+    let t4 = i64::try_from(answer_received_at).ok()?;
+    Some(t2.checked_sub(t1)?.checked_add(t3.checked_sub(t4)?)? / 2)
 }
 
 /// Returns Ok(outcome) if the (issued_at, expires_at) pair is acceptable

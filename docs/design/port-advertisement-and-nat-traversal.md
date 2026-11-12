@@ -261,13 +261,17 @@ Before constructing any signaling message, the initiator:
 
 1. Allocates a fresh UDP punch socket bound to `0.0.0.0:0`.
 2. Sends a STUN Binding Request (RFC 8489) to one of its locally
-   configured STUN servers.
+   configured STUN servers, at the first resolved address of the
+   socket's family. A server with no such address is skipped. The
+   request is retransmitted with the same transaction id from 500 ms,
+   doubling, until the per-server deadline (RFC 8489 Section 6.2.1).
 3. Parses the Binding Response, extracts the
    `XOR-MAPPED-ADDRESS` attribute, and records that as its
    reflexive address. Other STUN attributes are ignored.
-4. Records local-candidate addresses for the same socket port:
-   active private non-loopback interface addresses (RFC1918 IPv4,
-   IPv6 ULA) and probed local egress addresses.
+4. Records local-candidate addresses for the same socket port, only
+   those of the socket's address family: active private non-loopback
+   interface addresses (RFC1918 IPv4, IPv6 ULA) and probed local
+   egress addresses.
 
 The punch socket must remain open across all subsequent phases.
 Closing or rebinding it discards the NAT mapping.

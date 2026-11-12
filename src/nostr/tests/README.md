@@ -13,6 +13,10 @@ This directory holds two kinds of test file.
 
 Child modules of `tests.rs`:
 
+- `clock_skew.rs`: the clock-skew estimate (`estimate_clock_skew` in
+  `signal.rs`) yields no estimate, rather than a panic or a wrapped figure,
+  when the responder's timestamps are outside the `i64` range or overflow
+  the offset arithmetic, and still estimates an ordinary round trip.
 - `notify_channels.rs`: the notify loop in `runtime.rs` logs a lag on
   either of its two channels and reads on, and ends only when a channel
   closes.
@@ -42,9 +46,23 @@ Child modules of `tests.rs`:
   advertisements twice the relay pool's notification channel size still
   reaches the traversal waiting for it, through the relay client's
   admission policy and the notify loop in `runtime.rs`.
+- `unknown_transport.rs`: an overlay advert with an endpoint of a transport
+  kind this node does not know keeps its known endpoints
+  (`OverlayTransportKind::Unknown` in `types.rs`, dropped by
+  `validate_overlay_advert` in `runtime.rs`); one whose only endpoint is of
+  an unknown kind is still refused; and an unknown endpoint cannot be
+  serialized, so it is never published.
 
 Tests of one file:
 
+- `stun.rs`, of `stun.rs`: the binding-success parser refuses truncated,
+  malformed and mismatched replies and skips unknown attributes; the
+  local-candidate filter keeps RFC 1918 and ULA addresses only;
+  `perform_stun` believes a reply only from the server it asked; an
+  observation survives one lost binding request, because the request is
+  retransmitted within the deadline; and only local candidates and server
+  addresses of the socket's address family are used (`offerable`,
+  `pick_family`).
 - `signal_route.rs`, of `signal_route.rs`: the admission policy takes a
   traversal signal off the pool's channel and queues it on its own, once
   however many relays deliver it, and leaves every other event to the pool.

@@ -285,6 +285,7 @@ pub(super) fn endpoint_advert_is_publicly_usable(endpoint: &OverlayEndpointAdver
             socket_addr.port() != 0 && !is_unroutable_direct_advert_ip(socket_addr.ip())
         }
         super::types::OverlayTransportKind::Tor => true,
+        super::types::OverlayTransportKind::Unknown => false,
     }
 }
 

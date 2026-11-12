@@ -255,6 +255,7 @@ impl RendezvousDriver {
             OverlayTransportKind::Udp => "udp",
             OverlayTransportKind::Tcp => "tcp",
             OverlayTransportKind::Tor => "tor",
+            OverlayTransportKind::Unknown => return None,
         };
         Some(
             PeerAddress::with_priority(transport, endpoint.addr.clone(), priority)
