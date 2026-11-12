@@ -31,7 +31,7 @@ use super::{
 };
 use super::{resolve_socket_addrs, take_finished_connect};
 use crate::config::TcpConfig;
-use crate::transport::framing::read_fmp_packet;
+use crate::transport::framing::{RECV_CEILING, read_fmp_packet};
 use pool::{
     ConnectingEntry, ConnectingPool, ConnectionPool, Direction, PoolKey, TcpConnection,
     key_for_remote,
@@ -55,16 +55,6 @@ use tracing::{debug, info, trace, warn};
 // ============================================================================
 // TCP Transport
 // ============================================================================
-
-/// The largest established frame a receive loop accepts: the largest `mtu`
-/// any peer can be configured with, since `mtu` is a `u16`, and so the
-/// largest frame any peer's `check_mtu` admits.
-///
-/// Nothing tells a TCP sender its peer's configured `mtu`, so bounding
-/// receives by the local value closes the connection on every frame
-/// between two peers' differing values. The bound guards allocation only:
-/// a stream does not tie a frame to a segment or to the local `mtu`.
-const RECV_CEILING: u16 = u16::MAX;
 
 /// TCP transport for FIPS.
 ///

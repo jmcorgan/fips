@@ -842,7 +842,6 @@ impl TorTransport {
                 remote_addr.clone(),
                 packet_tx,
                 pool,
-                mtu,
                 recv_stats,
                 Direction::Outbound,
                 // An outbound connection holds no capped inbound slot and is
@@ -1038,7 +1037,6 @@ impl TorTransport {
                 remote_addr.clone(),
                 packet_tx,
                 pool,
-                mtu,
                 recv_stats,
                 Direction::Outbound,
                 // An outbound connection holds no capped inbound slot and is
@@ -1160,7 +1158,6 @@ async fn tor_receive_loop(
     remote_addr: TransportAddr,
     packet_tx: PacketTx,
     pool: ProxiedPool<Direction>,
-    mtu: u16,
     stats: Arc<TorStats>,
     direction: Direction,
     deadline: Option<InboundDeadline>,
@@ -1172,7 +1169,6 @@ async fn tor_receive_loop(
         remote_addr.clone(),
         packet_tx,
         pool,
-        mtu,
         stats,
         "Tor",
         deadline,
@@ -1307,7 +1303,6 @@ async fn tor_accept_loop(
                 recv_addr,
                 recv_tx,
                 recv_pool,
-                mtu,
                 recv_stats,
                 Direction::Inbound,
                 Some(deadline),
@@ -1380,6 +1375,10 @@ fn validate_host_port(addr: &str, field_name: &str) -> Result<(), TransportError
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+#[path = "tests/mtu.rs"]
+mod mtu_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2308,7 +2307,6 @@ mod tests {
             remote.clone(),
             tx,
             pool.clone(),
-            1400,
             stats.clone(),
             Direction::Inbound,
             Some(InboundDeadline {
@@ -2365,7 +2363,6 @@ mod tests {
                 recv_addr,
                 tx,
                 recv_pool,
-                1400,
                 recv_stats,
                 Direction::Inbound,
                 Some(InboundDeadline {

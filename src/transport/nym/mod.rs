@@ -410,7 +410,6 @@ impl NymTransport {
                 remote_addr.clone(),
                 packet_tx,
                 pool,
-                mtu,
                 recv_stats,
             )
             .await;
@@ -588,7 +587,6 @@ impl NymTransport {
                 remote_addr.clone(),
                 packet_tx,
                 pool,
-                mtu,
                 recv_stats,
             )
             .await;
@@ -723,7 +721,6 @@ async fn nym_receive_loop(
     remote_addr: TransportAddr,
     packet_tx: PacketTx,
     pool: ProxiedPool<()>,
-    mtu: u16,
     stats: Arc<NymStats>,
 ) {
     proxied_receive_loop(
@@ -732,7 +729,6 @@ async fn nym_receive_loop(
         remote_addr.clone(),
         packet_tx,
         pool,
-        mtu,
         stats,
         "Nym",
         None,
@@ -773,6 +769,10 @@ fn validate_host_port(addr: &str, field: &str) -> Result<(), TransportError> {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+#[path = "tests/mtu.rs"]
+mod mtu_tests;
 
 #[cfg(test)]
 mod tests {

@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, trace};
 
-use crate::transport::framing::read_fmp_packet;
+use crate::transport::framing::{RECV_CEILING, read_fmp_packet};
 use crate::transport::tcp::InboundDeadline;
 use crate::transport::{
     ConnectionState, PacketTx, ReceivedPacket, TransportAddr, TransportError, TransportId,
@@ -177,6 +177,11 @@ pub(crate) trait ProxiedStats: Send + Sync + 'static {
 /// per-transport teardown accounting. The `label` is the in-loop log word
 /// ("Nym" / "Tor").
 ///
+/// Every frame is read up to `RECV_CEILING`, whatever the local `mtu`, as
+/// the TCP receive loop reads: nothing tells a sender its peer's `mtu`, so a
+/// peer configured higher sends frames above it, and bounding receives by
+/// the local value would drop the connection on the first of them.
+///
 /// Teardown/cleanup contract (reproduced exactly to stay behavior-neutral):
 /// the pool entry is removed, and `on_remove` fires **only** when the removal
 /// returned `Some`, taking the metadata from the removed entry, and after the
@@ -206,7 +211,6 @@ pub(crate) async fn proxied_receive_loop<S: ProxiedStats, M>(
     remote_addr: TransportAddr,
     packet_tx: PacketTx,
     pool: ProxiedPool<M>,
-    mtu: u16,
     stats: Arc<S>,
     label: &'static str,
     deadline: Option<InboundDeadline>,
@@ -237,7 +241,9 @@ pub(crate) async fn proxied_receive_loop<S: ProxiedStats, M>(
                 // as it keeps the socket open.
                 Some(d) => {
                     let limit = d.for_read(first);
-                    match tokio::time::timeout(limit, read_fmp_packet(&mut reader, mtu)).await {
+                    match tokio::time::timeout(limit, read_fmp_packet(&mut reader, RECV_CEILING))
+                        .await
+                    {
                         Ok(result) => result,
                         Err(_) => {
                             // Not a recv error: `record_recv_error` means framing
@@ -255,7 +261,7 @@ pub(crate) async fn proxied_receive_loop<S: ProxiedStats, M>(
                         }
                     }
                 }
-                None => read_fmp_packet(&mut reader, mtu).await,
+                None => read_fmp_packet(&mut reader, RECV_CEILING).await,
             };
             first = false;
 
