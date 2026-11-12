@@ -19,6 +19,7 @@ mod bootstrap;
 mod claim_dials;
 #[cfg(target_os = "linux")]
 mod claim_slots;
+mod clamp_release;
 mod connected_udp;
 mod control;
 mod coord_forgery;
@@ -42,6 +43,7 @@ mod routing;
 mod rx_stall;
 mod second_path_msg1;
 mod session;
+mod short_plaintext;
 mod spanning_tree;
 mod stored_msg2;
 mod tcp;

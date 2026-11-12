@@ -3,7 +3,7 @@
 use crate::node::Node;
 use crate::noise::NoiseError;
 use crate::proto::fmp::wire::{
-    EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP, strip_inner_header,
+    EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP, INNER_HEADER_SIZE, strip_inner_header,
 };
 use crate::proto::link::LinkMessageType;
 use crate::transport::ReceivedPacket;
@@ -435,6 +435,10 @@ impl Node {
     /// so the per-peer bookkeeping (stats, MMP, spin-bit RTT, ECN
     /// propagation, address-rotation handling, link-message dispatch)
     /// happens in exactly one place.
+    ///
+    /// A plaintext too short for the inner header (timestamp and message
+    /// type) is dropped before any of it, as the inline path drops it: a
+    /// frame with no message type is not a received frame.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::node) async fn process_authentic_fmp_plaintext(
         &mut self,
@@ -450,16 +454,20 @@ impl Node {
         fmp_plaintext: &[u8],
     ) {
         const INNER_TIMESTAMP_LEN: usize = 4;
-        let inner_ts = if fmp_plaintext.len() >= INNER_TIMESTAMP_LEN {
-            u32::from_le_bytes([
-                fmp_plaintext[0],
-                fmp_plaintext[1],
-                fmp_plaintext[2],
-                fmp_plaintext[3],
-            ])
-        } else {
+        if fmp_plaintext.len() < INNER_HEADER_SIZE {
+            debug!(
+                peer = %self.peer_display_name(node_addr),
+                len = fmp_plaintext.len(),
+                "Decrypted payload too short for inner header"
+            );
             return;
-        };
+        }
+        let inner_ts = u32::from_le_bytes([
+            fmp_plaintext[0],
+            fmp_plaintext[1],
+            fmp_plaintext[2],
+            fmp_plaintext[3],
+        ]);
         let now_ms = crate::time::mono_ms();
         let mut address_changed = false;
         let mut present = false;

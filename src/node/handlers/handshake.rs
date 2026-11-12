@@ -1629,6 +1629,7 @@ impl Node {
                 // Complete the rekey handshake on the ActivePeer
                 let mut rekey_completed = false;
                 let mut cycle_kept = false;
+                let mut restart_detected = false;
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     match peer.complete_rekey_msg2(noise_msg2) {
                         Ok((session, remote_epoch)) => {
@@ -1648,6 +1649,7 @@ impl Node {
                             }
 
                             if remote_epoch_changed {
+                                restart_detected = true;
                                 peer.note_restart();
                                 if self.sessions.remove(&peer_node_addr).is_some() {
                                     debug!(
@@ -1707,6 +1709,12 @@ impl Node {
                                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         }
                     }
+                }
+
+                // The restart cleared the session above. Its clamp entry goes
+                // with it, now that the peer borrow has ended.
+                if restart_detected {
+                    self.path_mtu_lookup_release(&peer_node_addr);
                 }
 
                 // Feed the control machine the completed-rekey observation so its
@@ -2233,6 +2241,7 @@ impl Node {
                             "Cleared stale FSP session after peer restart during promotion"
                         );
                     }
+                    self.path_mtu_lookup_release(&peer_node_addr);
                     info!(
                         peer = %self.peer_display_name(&peer_node_addr),
                         winner_link = %link_id,

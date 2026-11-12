@@ -3336,9 +3336,9 @@ impl Node {
         // The session's own source-side estimate described the same dead path,
         // and the increase ladder is the only thing that would ever raise it
         // again. Reset it here so the two halves of "this path is gone" stay
-        // together. The two timeout callers remove the session before calling
-        // this, so this arm is reached only from the PathBroken route, where
-        // the session survives the event.
+        // together. Every caller but the PathBroken route removes the session
+        // before calling this, so this arm is reached only from that route,
+        // where the session survives the event.
         //
         // It runs first so the `&mut self.sessions` borrow ends before the
         // shared `self.peers` borrow the reseed below takes.

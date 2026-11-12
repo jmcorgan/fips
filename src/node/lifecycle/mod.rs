@@ -819,8 +819,11 @@ impl Node {
             "Connection initiated"
         );
 
-        // Schedule the first msg1 resend; the wire itself is stored on the
-        // surviving carrier once the machine is in hand below.
+        // The peer machine arms the first msg1 resend when it starts the
+        // handshake, after this preparation, at its own fixed interval; the
+        // wire is stored on the surviving carrier below, where the retransmit
+        // driver reads it. The deadline computed here is handed to the
+        // carrier, which does not use it.
         let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
         let first_resend_at_ms = current_time_ms + resend_interval;
 

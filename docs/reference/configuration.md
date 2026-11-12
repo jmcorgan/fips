@@ -182,7 +182,7 @@ Handshake rate limiting protects against DoS on the Noise IK handshake path.
 | `node.rate_limit.handshake_timeout_secs` | u64 | `30` | Stale handshake cleanup timeout |
 | `node.rate_limit.handshake_resend_interval_ms` | u64 | `1000` | Initial handshake message resend interval |
 | `node.rate_limit.handshake_resend_backoff` | f64 | `2.0` | Resend backoff multiplier (1s, 2s, 4s, 8s, 16s with defaults) |
-| `node.rate_limit.handshake_max_resends` | u32 | `5` | Max resends per handshake attempt |
+| `node.rate_limit.handshake_max_resends` | u32 | `5` | Max resends per handshake attempt. For an attempt not yet established, resends fall only while `handshake_timeout_secs` lasts and do not extend it: at the defaults a link msg1 or a session's first SessionSetup, whose resends fall due at 1, 3, 7, 15 and 31 s, gets four. An initiator that has reached the established state and is resending SessionMsg3 is not reaped by that timeout and sends all five |
 | `node.rate_limit.established_handshake_burst` | u32 | derived | Burst capacity of the established-link bucket. Derived default is `node.limits.max_peers` (128) |
 | `node.rate_limit.established_handshake_rate` | f64 | derived | Refill rate of that bucket. Derived default is `(max_peers / max(node.rekey.after_secs, 1)) * (1 + handshake_max_resends)`, floored at 1.0/s — 6.4/s at shipped defaults |
 | `node.rate_limit.session_setup_burst` | u32 | `64` | Per-link-peer burst for inbound session-setup messages that would open a new session |

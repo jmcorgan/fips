@@ -463,6 +463,7 @@ impl Node {
             Self::log_session_mmp_teardown(&name, mmp);
         }
         self.sessions.remove(&job.target);
+        self.path_mtu_lookup_release(&job.target);
         debug!(probe_id = job.id, dest = %name, "Probe tore down the session it opened");
     }
 
