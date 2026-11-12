@@ -739,9 +739,14 @@ async fn a_probe_is_answered_on_the_pair_it_arrived_on() {
 /// Build two nodes with multipath enabled, let `prep` change their
 /// transports before they link, and link them, A (0) dialling B (1).
 pub(super) async fn prepared_pair(prep: impl FnOnce(&mut [TestNode])) -> Vec<TestNode> {
+    prepared_pair_with(enabled(), prep).await
+}
+
+/// As [`prepared_pair`], with both nodes built from `config`.
+async fn prepared_pair_with(config: Config, prep: impl FnOnce(&mut [TestNode])) -> Vec<TestNode> {
     let mut nodes = vec![
-        super::spanning_tree::make_test_node_with_config(enabled(), 1280).await,
-        super::spanning_tree::make_test_node_with_config(enabled(), 1280).await,
+        super::spanning_tree::make_test_node_with_config(config.clone(), 1280).await,
+        super::spanning_tree::make_test_node_with_config(config, 1280).await,
     ];
     prep(&mut nodes);
     super::spanning_tree::initiate_handshake(&mut nodes, 0, 1).await;
@@ -789,8 +794,9 @@ async fn probe_b(
 }
 
 /// The probe rules read their facts from the transports: a probe of another
-/// class, or on a transport that accepts no handshake, makes no path, and a
-/// link over Ethernet takes a local path and no Internet one.
+/// class, or on a transport that accepts no handshake, makes no path, and,
+/// with `mix_kinds` off, a link over Ethernet takes a local path and no
+/// Internet one.
 #[tokio::test]
 async fn policy_facts_come_from_the_configuration() {
     // (a) The link runs over Tor: a probe on B's clear transport is refused.
@@ -819,9 +825,12 @@ async fn policy_facts_come_from_the_configuration() {
     );
     cleanup_nodes(&mut nodes).await;
 
-    // (c) An Ethernet link takes local paths only: B's UDP transport makes a
-    // path to a private address and none to a public one.
-    let mut nodes = prepared_pair(|n| {
+    // (c) With `mix_kinds` off, an Ethernet link takes local paths only: B's
+    // UDP transport makes a path to a private address and none to a public
+    // one.
+    let mut unmixed = enabled();
+    unmixed.node.path.mix_kinds = false;
+    let mut nodes = prepared_pair_with(unmixed, |n| {
         loopback_mut(&mut n[1], TransportId::new(1))
             .typed(crate::transport::TransportType::ETHERNET)
     })

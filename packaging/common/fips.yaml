@@ -18,7 +18,7 @@ node:
   # path:
   #   enabled: false
   #   min_samples: 2
-  #   mix_kinds: false
+  #   mix_kinds: true
   #   switch:
   #     margin: 1.3
   #     dwell_secs: 2

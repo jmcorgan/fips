@@ -70,8 +70,9 @@ pub struct Config {
     /// (`PATH_PROBE_INTERVAL_STANDBY`), and the first interval of the Dead
     /// cadence.
     pub standby_interval: Duration,
-    /// Whether paths of another kind than the original path's are admitted
-    /// (draft Section 5.5 recommends the same kind by default).
+    /// Whether paths of another kind than the original path's are admitted.
+    /// A local choice the draft gives no value (Section 5.5); the node's
+    /// configuration sets it (`node.path.mix_kinds`, on by default).
     pub mix_kinds: bool,
     /// The floor of the probe timeout (`PATH_PROBE_TIMEOUT_MIN`).
     pub timeout: Duration,

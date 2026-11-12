@@ -28,12 +28,12 @@ fn load_one(text: &str) -> Result<Config, ConfigError> {
 
 /// Every `node.path` key reads from the documented shape, each of the six
 /// transports takes all four roles, UDP and TCP take both kinds, and a file
-/// that names none of them gets multipath off, the draft's values, the
-/// `normal` role and no kind.
+/// that names none of them gets multipath off, kinds mixed, the draft's
+/// values, the `normal` role and no kind.
 #[test]
 fn the_path_section_and_transport_roles_parse_with_their_defaults() {
     let config: Config = serde_yaml::from_str(
-        "node:\n  path:\n    enabled: true\n    min_samples: 5\n    mix_kinds: true\n    \
+        "node:\n  path:\n    enabled: true\n    min_samples: 5\n    mix_kinds: false\n    \
          switch:\n      margin: 1.5\n      dwell_secs: 7\n    \
          probe:\n      active_ms: 250\n      standby_ms: 3000\n",
     )
@@ -41,7 +41,7 @@ fn the_path_section_and_transport_roles_parse_with_their_defaults() {
     let path = &config.node.path;
     assert!(path.enabled);
     assert_eq!(path.min_samples, 5);
-    assert!(path.mix_kinds);
+    assert!(!path.mix_kinds);
     assert_eq!(path.switch.margin, 1.5);
     assert_eq!(path.switch.dwell_secs, 7);
     assert_eq!(path.probe.active_ms, 250);
@@ -87,7 +87,7 @@ fn the_path_section_and_transport_roles_parse_with_their_defaults() {
     let path = &bare.node.path;
     assert!(!path.enabled, "multipath must be off by default");
     assert_eq!(path.min_samples, 2);
-    assert!(!path.mix_kinds);
+    assert!(path.mix_kinds, "kinds must mix by default");
     assert_eq!(path.switch.margin, 1.3);
     assert_eq!(path.switch.dwell_secs, 2);
     assert_eq!(path.probe.active_ms, 200);

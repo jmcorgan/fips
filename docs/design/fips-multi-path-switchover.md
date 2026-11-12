@@ -358,10 +358,14 @@ Beyond that, each path has a **kind**, local or Internet. Ethernet, BLE and
 serial are local; Tor and Nym are Internet. UDP and TCP take the kind of the
 peer's address: loopback, link-local, RFC 1918 and ULA addresses are local,
 and everything else is Internet, `100.64.0.0/10` included. By default a link
-keeps to its original path's kind, which stops a LAN peering from quietly
-moving onto the Internet. `node.path.mix_kinds` allows both in one link, and
-a transport's `kind` overrides what the address implies: a VPN on RFC 1918
-space needs `kind: internet`, or it reads as local.
+may hold paths of both kinds (`node.path.mix_kinds: true`), so a link that
+came up over BLE or the LAN can move onto the peer's Internet address, as a
+phone leaving home does, with no new handshake. That peering then becomes
+visible to parties on the Internet path. Setting `mix_kinds: false` at either
+end keeps a link to its original path's kind, so a LAN peering never moves
+onto the Internet: a node with it off neither probes nor admits a path of the
+other kind. A transport's `kind` overrides what the address implies: a VPN on
+RFC 1918 space needs `kind: internet`, or it reads as local.
 
 ## Watching it
 

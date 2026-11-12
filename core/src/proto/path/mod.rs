@@ -84,8 +84,8 @@ pub enum Class {
 }
 
 /// Whether a path runs over a local medium or faces the Internet (multipath
-/// v1 draft, Section 5.5): by default a link's paths are all of its
-/// original path's kind.
+/// v1 draft, Section 5.5): unless `Config::mix_kinds` is set, a link's paths
+/// are all of its original path's kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// A local medium: a cable, a radio, or a local address.
