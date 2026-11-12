@@ -144,20 +144,25 @@ Explicit topologies exercising non-UDP transports.
   n01). The downed end loses presence and closes the path to its peer; the
   far end loses carrier. Each end must switch within 1 s, the bound with
   a signal, and within 500 ms (`signalled_ms`). The far end's probes to the
-  downed address are held to the draft's floor (`path_floor`), and with
+  downed address, a path that carried the link, are held to the node's
+  re-check and then the draft's floor (`path_floor`), and with
   the capture on and tx counters of its own veth they are the figures the
   draft's question 4 asks for (`figures.json`).
 - **forward-only**: dual-udp-flap's pair, under scheduled bidirectional
   load, with the veth failing in one direction: n02's frames dropped at
   n01's veth ingress for 30 s, then n01's at n02's. Neither end has a
-  signal; both must switch within the K-timeout bound (1300 ms).
+  signal. The end that hears nothing must switch within the K-timeout
+  bound (1300 ms); the dropped sender has 2600 ms (`sender_ms`), since it
+  still receives its peer's data and holds its probe verdicts until that
+  data stops, which is when the peer switches away.
   `reverse_heard` is the control that the step stayed one-directional:
   the undropped direction delivered to its end (against a capture) and
   neither end's neighbour entry failed. It counts the undropped end's
   path messages in the step's second half, or from its last one when the
   half holds none, since a Dead path's interval can grow longer than
-  the half. Probes to the stopped address are held to the floor and
-  counted against the capture at the far ingress.
+  the half. Probes to the stopped address are held to the floor, after the
+  re-check where the path carried the link, and counted against the capture
+  at the far ingress.
 - **loaded-standby**: the cable and a bridge half delayed 2 s each way,
   under bidirectional load for 40 s until the standby is Dead at both ends,
   then the cable taken down at n01. With nothing Live each end must probe
@@ -198,8 +203,9 @@ Explicit topologies exercising non-UDP transports.
 - **dead-grace-long**: run by hand, in neither runner. dual-path-carrier's
   pair with the cable down at n01 for 660 s, past the far end's 600 s
   `PATH_DEAD_GRACE`: the probes and bytes to the downed address over a
-  whole grace, all held to the floor (24 by the floor's arithmetic), the
-  path discarded with `why=Grace`, and the recovery after the return.
+  whole grace, all held to the floor after the re-check of the path that
+  carried the link (about 53 by that arithmetic), the path discarded with
+  `why=Grace`, and the recovery after the return.
 
 ### Congestion and ECN
 
@@ -390,7 +396,8 @@ against planted input:
 ```yaml
 assertions:
   path_switches: {min_total: 4, per_flap: 4, extra: 2}  # or max_total
-  switch_latency: {max_ms: 1300, each_end: true}  # signalled_ms: tighter
+  switch_latency: {max_ms: 1300, each_end: true}  # signalled_ms: tighter;
+                                    # sender_ms: a oneway down's dropped sender
   max_promotions: {per_node: 1}     # a second promotion is a re-peering
   max_dials: 0                      # no dial after a node's first promotion
   max_stall: {max_secs: 2}          # longest zero-byte run at a receiver;
@@ -435,7 +442,8 @@ stopped answering:
 
 ```yaml
 assertions:
-  path_floor: true        # draft 5.6: probes to a stopped path, 1, 1, 2, 4 s ...
+  path_floor: true        # draft 5.6: probes to a stopped path, 1, 1, 2, 4 s ...;
+                          # 1 s for 30 s first if the path carried the link
   discovery_limit: true   # at most 8 probes per Probing episode
 ```
 
@@ -444,7 +452,17 @@ answer, the peer's probe reviving it, or its release; it allows 50 ms for
 log-stamp error and exempts the two probes the draft does: the early probe
 when the peer clears `ACTIVE`, and the probe Section 5.7 requires at once
 when the active path fails with nothing Live (each in `sim/paths.py`, with
-how it is recognised). It refuses a
+how it is recognised). A stop of a path that carried the link takes the
+node's re-check instead (`PATH_DEAD_RECHECK_SPAN`): its probes may go every
+1 s while they go before 30 s after the path's silence clock started, and
+the gap doubles from there, with the one extra 1 s gap the node's own
+recurrence gives after the span (`least_gaps`). A stop carried the link when
+the path was the active path at its Dead entry, or when it last left Live
+since its previous stop, so a second stop with no Live between does not take
+it again. The silence clock is read as the node keeps it, from the first
+probe after the path's latest answer; the lines carry no probe ids, so an
+answer that came too late to count for the node still counts here, which can
+start the clock later than the node did. It refuses a
 stop it cannot place: one whose Dead entry came more than 60 s
 (`PATH_SILENCE_MAX`) after the path's first unanswered probe. Every run with
 path lines writes `figures.json` beside `analysis.txt` and a "Path figures"
@@ -457,7 +475,14 @@ the down and just after the restore; with carrier off a frame the far end
 sends is counted there but never reaches the capture's tap.
 
 `switch_latency` measures from the stamp each flap takes inside the
-container, in the same shell as the command that makes it. `paths_live`
+container, in the same shell as the command that makes it. `sender_ms`
+replaces `max_ms` for one end of each `oneway` down, its `from` end, whose
+own sends are dropped; the other end and both ends of any other down keep
+`max_ms`. Loading refuses it in a scenario with no `oneway` down. An end at
+which the down's path (the veth, by the other end's veth address or MAC) did
+not carry the link when it went down is not measured: its next switch is not
+one the down caused, so the run fails on that precondition, naming the end,
+the down and the address the link was on. `paths_live`
 and `max_dials` read `debug` lines, so a scenario declaring them must set
 `fips::node::handlers::path=debug` and `fips::node::lifecycle=debug` in
 `logging.rust_log`; loading refuses it otherwise.

@@ -40,9 +40,10 @@ start_udpserver() {
 }
 
 # The chaos harness writes this container's boot id (below) to VETH_READY
-# when it has finished setting up the container's veths, after the first
-# start and after every restart. The file outlives a restart, so the id is
-# what tells this start's word from an earlier one's.
+# when it has finished setting up the container's veths and applied their
+# initial netem, after the first start and after every restart. The file
+# outlives a restart, so the id is what tells this start's word from an
+# earlier one's.
 VETH_READY=/tmp/fips-veth-ready
 IFACE_WAIT_SECS=600
 
@@ -58,9 +59,15 @@ enable_ecn() {
 
 wait_for_ethernet() {
     # If config binds any transport to an interface (Ethernet, or a UDP
-    # instance with `interface:`), wait for those interfaces to be up. Veth
-    # pairs are created from the host after the container starts, and a UDP
-    # instance bound to an interface that is not there yet fails to start.
+    # instance with `interface:`), wait for the harness to say it is done
+    # with this container (VETH_READY, above). Veth pairs are created from
+    # the host after the container starts, and a UDP instance bound to an
+    # interface that is not there yet fails to start. The harness also
+    # applies its netem only once the veths exist, and a daemon started
+    # before that takes round trips no shaped link would give: unshaped,
+    # every path reads under a millisecond, and the path machine keeps its
+    # least round trip for a minute. So the word, not the interfaces being
+    # up, is what starts the daemon.
     #
     # Ready means `ip link show dev <name> up` lists it, not that
     # /sys/class/net/<name> exists. The harness renames a veth end to its
@@ -69,21 +76,19 @@ wait_for_ethernet() {
     # ENODEV meanwhile); `ip` looks the name up as the bind does. The
     # harness sets the interface up last, after the rename and the address.
     #
-    # The wait ends early when the harness says it has finished with this
-    # container's veths (VETH_READY, above), since an interface still
-    # missing then is not coming: a restored node whose neighbour churn has
-    # stopped. It has no fixed bound tied to how long setup takes, because
-    # setup is a run of docker calls whose time follows the host's load
-    # (37 to 41 s for one pair has been seen against the 30 s this wait
-    # used to allow). IFACE_WAIT_SECS is a backstop for a harness that
-    # never says, not a bound on setup.
+    # An interface still missing when the word comes is not coming: a
+    # restored node whose neighbour churn has stopped. The wait has no fixed
+    # bound tied to how long setup takes, because setup is a run of docker
+    # calls whose time follows the host's load (37 to 41 s for one pair has
+    # been seen against the 30 s this wait used to allow). IFACE_WAIT_SECS
+    # is a backstop for a harness that never says, not a bound on setup.
     local eth_ifaces=""
     eth_ifaces=$(grep '^\s*interface:' "$CONFIG" 2>/dev/null \
         | sed 's/.*interface:\s*//' \
         | tr -d ' "' || true)
 
     if [ -n "$eth_ifaces" ]; then
-        echo "Waiting for interfaces to be up: $eth_ifaces"
+        echo "Waiting for interfaces to be up and the harness ready: $eth_ifaces"
         local boot missing iface
         boot=$(bootid)
         local deadline=$((SECONDS + IFACE_WAIT_SECS))
@@ -94,12 +99,12 @@ wait_for_ethernet() {
                     missing="$missing $iface"
                 fi
             done
-            if [ -z "$missing" ]; then
-                echo "All interfaces up after ${SECONDS}s"
-                return 0
-            fi
             if [ "$(cat "$VETH_READY" 2>/dev/null)" = "$boot" ]; then
-                echo "Veth setup finished with interfaces not up:$missing"
+                if [ -z "$missing" ]; then
+                    echo "All interfaces up and the harness ready after ${SECONDS}s"
+                else
+                    echo "Veth setup finished with interfaces not up:$missing"
+                fi
                 return 0
             fi
             if [ $SECONDS -ge $deadline ]; then

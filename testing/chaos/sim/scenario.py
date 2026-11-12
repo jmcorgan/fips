@@ -482,14 +482,19 @@ class SwitchLatencyAssertion:
     before the command that made it, against the "Path switched" lines of
     the edge's endpoints. ``max_ms`` bounds the earliest switch at either
     end, or with ``each_end`` the first switch at every end; a down with
-    no switch inside the bound fails. ``signalled_ms``, when set, is a
-    tighter ceiling on each end's first switch, for a down the node has a
-    signal for rather than only probe timeouts.
+    no switch inside the bound fails. ``sender_ms``, when set, replaces
+    ``max_ms`` for one end of a ``oneway`` down: the end whose own sends
+    are dropped, which still hears its peer and so may switch later; the
+    other end, and both ends of a two-way down, keep ``max_ms``.
+    ``signalled_ms``, when set, is a tighter ceiling on each end's first
+    switch, for a down the node has a signal for rather than only probe
+    timeouts.
     """
 
     max_ms: int = 1000
     each_end: bool = False
     signalled_ms: int | None = None
+    sender_ms: int | None = None
 
 
 @dataclass
@@ -744,7 +749,7 @@ _ASSERTION_KEYS = {
     "path_switches": {"min_total", "max_total", "per_flap", "extra"},
     "active_timeouts": {"within_ms"},
     "max_promotions": {"per_node"},
-    "switch_latency": {"max_ms", "each_end", "signalled_ms"},
+    "switch_latency": {"max_ms", "each_end", "signalled_ms", "sender_ms"},
     "max_stall": {"max_secs", "stream"},
     "paths_live": {"min", "configured", "within_secs"},
     "lanes": {"cross_arrival", "stable"},
@@ -1478,12 +1483,16 @@ def _parsepaths(asrt: dict, s: Scenario):
         if not isinstance(each, bool):
             raise ValueError(f"{where}.each_end: must be true or false, got {each!r}")
         signalled = sl.get("signalled_ms")
+        sender = sl.get("sender_ms")
         s.assertions.switch_latency = SwitchLatencyAssertion(
             max_ms=_count(sl.get("max_ms", 1000), f"{where}.max_ms", 1),
             each_end=each,
             signalled_ms=(
                 _count(signalled, f"{where}.signalled_ms", 1)
                 if signalled is not None else None
+            ),
+            sender_ms=(
+                _count(sender, f"{where}.sender_ms", 1) if sender is not None else None
             ),
         )
     if "max_stall" in asrt:
@@ -1841,9 +1850,24 @@ def _checkreverse(s: Scenario):
             )
 
 
+def _checksender(s: Scenario):
+    """switch_latency's sender_ms applies only to a oneway down's dropped
+    sender: refuse it in a scenario that schedules no oneway down, where it
+    would bound nothing."""
+    sl = s.assertions.switch_latency
+    if sl is None or sl.sender_ms is None:
+        return
+    if not any(st.kind == "down" and st.mode == "oneway" for st in s.schedule):
+        raise ValueError(
+            "assertions.switch_latency.sender_ms: bounds the dropped sender of "
+            "a oneway down, and the schedule has none"
+        )
+
+
 def _validate(s: Scenario):
     """Validate scenario constraints."""
     _checkreverse(s)
+    _checksender(s)
     _validate_parent_switch_observability(s)
     _validate_error_observability(s)
     _checksteps(s)

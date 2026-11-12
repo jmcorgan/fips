@@ -218,6 +218,247 @@ def _():
     return A.evaluate_switch_latency(S.SwitchLatencyAssertion(), [], [])
 
 
+# The forward-only shape: n02's sends are dropped (it is the dropped sender
+# of the one-way down at T0) while n01's still reach it.
+SENDER = {T0: N2}
+FWD = S.SwitchLatencyAssertion(max_ms=1300, each_end=True, sender_ms=2600)
+
+
+def _sender(cfg, n1_delay, n2_delay, senders):
+    """switch_latency over one down at T0, ``senders`` naming its dropped
+    sender by stamp (empty for a two-way down)."""
+    r = logs(**{N1: [switched(T0 + n1_delay)], N2: [switched(T0 + n2_delay)]})
+    return A.evaluate_switch_latency(cfg, [(T0, N1, N2)], r.path_switches, senders)
+
+
+@case("switch_latency sender_ms 2600 passes the dropped sender at 2001 ms", True)
+def _():
+    return _sender(FWD, 1.0, 2.001, SENDER)
+
+
+@case("switch_latency sender_ms 2600 fails the dropped sender at 2700 ms", False)
+def _():
+    return _sender(FWD, 1.0, 2.7, SENDER)
+
+
+@case("switch_latency sender_ms keeps max_ms 1300 for the other end of a one-way down (1400 ms fails)", False)
+def _():
+    return _sender(FWD, 1.4, 2.0, SENDER)
+
+
+@case("switch_latency sender_ms does not apply to a two-way down (2001 ms fails under max_ms 1300)", False)
+def _():
+    return _sender(FWD, 1.0, 2.001, {})
+
+
+@case("switch_latency sender_ms applies to the dropped sender only, not to the other end at 2001 ms", False)
+def _():
+    return _sender(FWD, 2.001, 1.0, SENDER)
+
+
+@case("switch_latency without sender_ms gives today's verdict and detail for a dropped sender at 2001 ms", True)
+def _():
+    cfg = S.SwitchLatencyAssertion(max_ms=1300, each_end=True)
+    got = _sender(cfg, 1.0, 2.001, SENDER)
+    today = _latency(cfg, 1.0, 2.001)
+    return not got.passed and got.detail == today.detail
+
+
+@case("switch_latency either end passes a one-way down whose dropped sender alone switched within sender_ms", True)
+def _():
+    cfg = S.SwitchLatencyAssertion(max_ms=1300, sender_ms=2600)
+    r = logs(**{N2: [switched(T0 + 2.001)]})
+    return A.evaluate_switch_latency(cfg, [(T0, N1, N2)], r.path_switches, SENDER)
+
+
+@case("dropped_senders maps each oneway down's stamp to its from end's container, and no two-way down", True)
+def _():
+    records = [
+        {"mode": "netem", "src": None, "down": T0 - 50},
+        {"mode": "oneway", "src": "n02", "end": "n01", "down": T0},
+        {"mode": "oneway", "src": "n01", "end": "n02", "down": T0 + 70},
+    ]
+    return A.dropped_senders(records, lambda n: f"fips-node-{n}") == {T0: N2, T0 + 70: N1}
+
+
+@case("the runner hands switch_latency each oneway down's dropped sender", True)
+def _():
+    from types import SimpleNamespace
+
+    from sim import runner as R
+
+    r = R.SimRunner(_scenario(SCHEDULED))
+    r.scenario.assertions = S.AssertionsConfig(switch_latency=FWD)
+    r.topology = _twonodes()
+    r.schedule = SimpleNamespace(
+        records=[{"mode": "oneway", "src": "n02", "end": "n01", "down": T0}],
+        links=SimpleNamespace(flap_events=[(T0, "down", "n01", "n02")]),
+    )
+    r.assertion_outcomes = []
+    r._evaluatepaths(logs(**{
+        N1: [switched(T0 - 30, "discretionary", to="10.222.0.2:2122", transport="transport:2"),
+             switched(T0 + 1.0)],
+        N2: [switched(T0 - 30, "discretionary", to="10.222.0.1:2122", transport="transport:2"),
+             switched(T0 + 2.001)],
+    }), [], [])
+    out = r.assertion_outcomes
+    return len(out) == 1 and out[0].passed and "(dropped sender)" in out[0].detail
+
+
+def _twonodes():
+    """A stand-in topology of the forward-only pair: n01 at 10.222.0.1 on
+    its veth, n02 at 10.222.0.2, no Ethernet MACs."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        nodes={"n01": SimpleNamespace(ethernet_macs={}), "n02": SimpleNamespace(ethernet_macs={})},
+        container_name=lambda n: f"fips-node-{n}",
+        veth_ip=lambda node, peer: {"n01": "10.222.0.1", "n02": "10.222.0.2"}[node],
+    )
+
+
+@case("the runner refuses the end whose link was not on the down's veth address", True)
+def _():
+    from types import SimpleNamespace
+
+    from sim import runner as R
+
+    r = R.SimRunner(_scenario(SCHEDULED))
+    r.scenario.assertions = S.AssertionsConfig(switch_latency=FWD)
+    r.topology = _twonodes()
+    r.schedule = SimpleNamespace(
+        records=[{"mode": "oneway", "src": "n02", "end": "n01", "down": T0}],
+        links=SimpleNamespace(flap_events=[(T0, "down", "n01", "n02")]),
+    )
+    r.assertion_outcomes = []
+    r._evaluatepaths(logs(**{
+        N1: [switched(T0 - 30, "discretionary", to="10.222.0.2:2122", transport="transport:2"),
+             switched(T0 + 1.0, to="10.30.0.12:2121")],
+        N2: [switched(T0 + 40, "discretionary", to="10.222.0.1:2122", transport="transport:2")],
+    }), [], [])
+    out = r.assertion_outcomes
+    return (
+        len(out) == 1 and not out[0].passed
+        and f"{N2} after {N1}--{N2} down" in out[0].detail
+        and "precondition not met" in out[0].detail
+        and f"{N1}=1000" in out[0].detail
+    )
+
+
+# --- switch_latency: the down's path must carry the link ----------------------
+
+# The down's path at each end: the other end's veth address.
+DOWNPATH = {(T0, N1): {"10.222.0.2"}, (T0, N2): {"10.222.0.1"}}
+
+
+def _carriedlatency(n1_on_veth: bool, n2_on_veth: bool, cfg=FWD):
+    """switch_latency over the forward-only down at T0, each end's link on
+    the veth beforehand or not: an end on the veth switches to the bridge
+    1.0 or 2.0 s after the down, one on the bridge moves to the veth 40 s
+    after it (the fail-back after the restore)."""
+    def end(on_veth: bool, veth: str, bridge: str, delay: float) -> list[str]:
+        """One end's switch lines."""
+        if on_veth:
+            return [switched(T0 - 30, "discretionary", to=veth, transport="transport:2"),
+                    switched(T0 + delay, to=bridge)]
+        return [switched(T0 + 40, "discretionary", to=veth, transport="transport:2")]
+    r = logs(**{
+        N1: end(n1_on_veth, "10.222.0.2:2122", "10.30.0.12:2121", 1.0),
+        N2: end(n2_on_veth, "10.222.0.1:2122", "10.30.0.11:2121", 2.0),
+    })
+    downs = [(T0, N1, N2)]
+    un = A.uncarried_downs(downs, r.path_lines, DOWNPATH)
+    return (
+        A.evaluate_switch_latency(cfg, downs, r.path_switches, SENDER, un),
+        A.evaluate_switch_latency(cfg, downs, r.path_switches, SENDER),
+    )
+
+
+@case("switch_latency refuses a down whose path did not carry the link at that end, naming the end and the down", True)
+def _():
+    got, _today = _carriedlatency(n1_on_veth=False, n2_on_veth=True)
+    return (
+        not got.passed
+        and f"{N1} after {N1}--{N2} down at" in got.detail
+        and "precondition not met" in got.detail
+        and "(it was on 10.30.0.11:2121)" in got.detail
+        and "40000 ms" not in got.detail
+        and f"{N1}=not measured" in got.detail
+    )
+
+
+@case("switch_latency fails a run when a down's path did not carry the link at one end", False)
+def _():
+    return _carriedlatency(n1_on_veth=True, n2_on_veth=False)[0]
+
+
+@case("switch_latency gives today's verdict and detail for a down whose path carried the link at both ends", True)
+def _():
+    got, today = _carriedlatency(n1_on_veth=True, n2_on_veth=True)
+    return got.passed and got.detail == today.detail
+
+
+@case("switch_latency either end refuses a down whose path carried the link at neither end", True)
+def _():
+    cfg = S.SwitchLatencyAssertion(max_ms=1300, sender_ms=2600)
+    got, today = _carriedlatency(n1_on_veth=False, n2_on_veth=False, cfg=cfg)
+    return not got.passed and got.detail.count("precondition not met") == 2
+
+
+@case("uncarried_downs reads where the link was before its first switch from that switch's from", True)
+def _():
+    line = switched(T0 + 5, to="10.222.0.2:2122").replace(
+        "from=10.30.0.11:2121", "from=10.30.0.12:2121")
+    lines = logs(**{N1: [line]}).path_lines
+    return A.uncarried_downs([(T0, N1, N2)], lines, DOWNPATH) == {(T0, N1): "10.30.0.12:2121"}
+
+
+@case("uncarried_downs matches an Ethernet path by its MAC", True)
+def _():
+    mac = "e2:36:d0:87:92:fd"
+    lines = logs(**{N1: [switched(T0 - 30, to=mac, transport="transport:2")]}).path_lines
+    on = A.uncarried_downs([(T0, N1, N2)], lines, {(T0, N1): {mac.upper()}})
+    off = A.uncarried_downs([(T0, N1, N2)], lines, {(T0, N1): {"aa:bb:cc:dd:ee:ff"}})
+    return on == {} and off == {(T0, N1): mac}
+
+
+@case("forward-only declares the dropped sender's ceiling 2600 ms and 1300 ms at the other end", True)
+def _():
+    scen = S.load_scenario(os.path.join(HERE, "scenarios", "forward-only.yaml"))
+    sl = scen.assertions.switch_latency
+    return (sl.max_ms, sl.sender_ms, sl.each_end) == (1300, 2600, True)
+
+
+def _nooneway(sender: str = "2600") -> str:
+    """The schedule fixture (no oneway down) declaring ``sender_ms``."""
+    return SCHEDULED + (
+        "assertions:\n"
+        f"  switch_latency: {{max_ms: 1300, each_end: true, sender_ms: {sender}}}\n"
+    )
+
+
+@case("loading refuses switch_latency sender_ms in a scenario with no oneway down", False)
+def _():
+    try:
+        _scenario(_nooneway())
+    except ValueError as e:
+        return "sender_ms" not in str(e)
+    return True
+
+
+@case("loading refuses a switch_latency sender_ms that is not a positive integer", False)
+def _():
+    for bad in ("0", "true", "2.6"):
+        try:
+            _scenario(_nooneway(bad))
+        except ValueError as e:
+            if "sender_ms: must be an integer" not in str(e):
+                return True
+            continue
+        return True
+    return False
+
+
 # --- max_promotions ----------------------------------------------------------
 
 @case("max_promotions fails a second promotion on one node", False)
@@ -790,6 +1031,148 @@ def _():
     lines += [sent(T0 + 5.5, msg_type=83), sent(T0 + 5.50003)]
     lines.append(state(T0 + 6, 9, "Some(Dead)", "Some(Live)", "Answered"))
     return _floor(lines)
+
+
+def received(t: float, msg_type: int = 83, length: int = 27,
+             addr: str = "10.222.0.2:2122") -> str:
+    """A "Path message received" line at ``t``: by default an answer of
+    the smallest size, as a Live path's probes get."""
+    return (
+        f"{stamp(t)} DEBUG fips::node::handlers::path: Path message received "
+        f"peer=npub17cx8...wz28 transport_id=transport:2 remote_addr={addr} "
+        f"msg_type={msg_type} len={length}"
+    )
+
+
+VETH = "10.222.0.2:2122"
+
+
+def _carrier(before: list[str], dead: list[str], n: int, first: float = 1.0,
+             end: bool = True) -> list[str]:
+    """Path 9 created and Live, made the active path by a switch at
+    T0 - 28, then ``before`` (its lines before the stop) and ``dead`` (its
+    Dead entry at T0), then ``n`` probes, the first ``first`` s after the
+    stop and each later one 1 s after the last; answered 0.5 s after the
+    last probe unless not ``end``."""
+    lines = [
+        state(T0 - 30, 9, "None", "Some(Probing)", "Found"),
+        state(T0 - 29, 9, "Some(Probing)", "Some(Live)", "Answered"),
+        switched(T0 - 28, "discretionary", to=VETH, transport="transport:2"),
+    ] + before + dead
+    t = T0 + first
+    for _ in range(n):
+        lines.append(sent(t, length=27))
+        t += 1
+    if end:
+        lines.append(state(t - 0.5, 9, "Some(Dead)", "Some(Live)", "Answered"))
+    return lines
+
+
+def _closed(n: int, first: float = 1.0) -> list[str]:
+    """A carried stop from Live on the peer's close at T0, no probe
+    outstanding, so the re-check runs to T0 + 30 s; ``n`` probes at 1 s."""
+    return _carrier([], [state(T0, 9, "Some(Live)", "Some(Dead)", "Closed")], n, first)
+
+
+# The silence clock before a carried stop: an answer at T0 - 4.2 to the
+# probe before it, then four probes of the smallest size, the first
+# T0 - 4.0, and Suspect at T0 - 3.2 with the fourth still in flight, so
+# the node's clock starts at T0 - 4.0 (the re-check runs to T0 + 26.0)
+# where the three probes last sent before Suspect would place it at
+# T0 - 3.75.
+QUIET = [
+    sent(T0 - 4.25, length=27), received(T0 - 4.2),
+    sent(T0 - 4.0, length=27), sent(T0 - 3.75, length=27),
+    sent(T0 - 3.5, length=27), sent(T0 - 3.25, length=27),
+    state(T0 - 3.2, 9, "Some(Live)", "Some(Suspect)", "Timeout"),
+]
+QUIET_DEAD = [state(T0, 9, "Some(Suspect)", "Some(Dead)", "Timeout")]
+
+
+@case("path_floor passes a carried stop probed at 1 s inside the re-check span", True)
+def _():
+    return _floor(_closed(20))
+
+
+@case("path_floor passes a carried stop at 1 s to the span's end plus the one 1 s gap after it (32 probes)", True)
+def _():
+    return _floor(_closed(32))
+
+
+@case("path_floor fails a carried stop still at 1 s past the span plus that gap (33 probes)", False)
+def _():
+    return _floor(_closed(33))
+
+
+@case("path_floor counts a probe within the stamp allowance of the span's end inside it (first 1.04 s, 32 probes)", True)
+def _():
+    return _floor(_closed(32, first=1.04))
+
+
+@case("path_floor counts a probe past the span's end by more than the allowance outside it (first 1.06 s, 32 probes)", False)
+def _():
+    return _floor(_closed(32, first=1.06))
+
+
+@case("path_floor starts the re-check at the first probe since the latest answer (27 probes at 1 s from 1.1 s pass)", True)
+def _():
+    return _floor(_carrier(QUIET, QUIET_DEAD, 27, first=1.1))
+
+
+@case("path_floor starts the re-check at the first probe since the latest answer, not three before Suspect (28 probes fail)", False)
+def _():
+    return _floor(_carrier(QUIET, QUIET_DEAD, 28, first=1.1))
+
+
+@case("path_floor restarts the silence clock at an answer (28 probes at 1 s from 1.02 s pass)", True)
+def _():
+    return _floor(_carrier(QUIET, QUIET_DEAD, 28, first=1.02))
+
+
+@case("path_floor does not start the silence clock at an MTU search probe on the Live path (28 probes from 1.02 s pass)", True)
+def _():
+    before = QUIET[:2] + [sent(T0 - 4.1, length=1436)] + QUIET[2:]
+    return _floor(_carrier(before, QUIET_DEAD, 28, first=1.02))
+
+
+@case("path_floor fails an uncarried stop at 1, 1, 1 s: the link left the path before it left Live", False)
+def _():
+    lines = _carrier([switched(T0 - 20, to=BRIDGE)], [], 0, end=False)
+    lines += [
+        state(T0 - 1, 9, "Some(Live)", "Some(Suspect)", "Timeout"),
+        state(T0, 9, "Some(Suspect)", "Some(Dead)", "Timeout"),
+        sent(T0 + 1), sent(T0 + 2), sent(T0 + 3),
+        state(T0 + 3.5, 9, "Some(Dead)", "Some(Live)", "Answered"),
+    ]
+    return _floor(lines)
+
+
+def _twostops(switch_away: bool) -> list[str]:
+    """A carried stop at T0 probed at 1, 1 s, revived by the peer's probe
+    at T0 + 2.5 and probed in Probing, then Dead again at T0 + 4 with no
+    Live between, probed every 1 s six times; with ``switch_away`` the
+    link has moved to the bridge before the second Dead entry."""
+    lines = _closed(2)[:-1]
+    lines += [
+        state(T0 + 2.5, 9, "Some(Dead)", "Some(Probing)", "Probed"),
+        sent(T0 + 2.6), sent(T0 + 2.8),
+    ]
+    if switch_away:
+        lines.append(switched(T0 + 3.0, to=BRIDGE))
+    lines.append(state(T0 + 4.0, 9, "Some(Probing)", "Some(Dead)", "Timeout"))
+    lines += [sent(T0 + 4.0 + k) for k in range(1, 7)]
+    lines.append(state(T0 + 11.5, 9, "Some(Dead)", "Some(Live)", "Answered"))
+    return lines
+
+
+@case("path_floor fails a second stop in one Live departure at 1 s: the re-check is taken once", False)
+def _():
+    return _floor(_twostops(switch_away=True))
+
+
+@case("path_floor re-checks a second stop again when the path is active at its own Dead entry", True)
+def _():
+    return _floor(_twostops(switch_away=False))
 
 
 @case("a capture's tcpdump lines parse into frames with their sources", True)

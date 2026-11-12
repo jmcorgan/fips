@@ -5,14 +5,16 @@
 # with the cable taken down administratively at n01 for 660 s.
 #
 # At the far end (n02) the cable path goes Dead at once on n01's close and
-# is probed at the draft's floor until its grace runs out: by the floor's
-# arithmetic 24 probes, at 1, 2, 4, 8, 16 and 32 s, then every 30 s to
-# 600 s, and then discarded (`why=Grace`). The figures give those probes
-# and their bytes, all inside the floor (`path_floor`, its stop placed at
-# the Dead entry: the stop began there, though the outage is far longer
-# than PATH_SILENCE_MAX), and the recovery after the return: n01 probes
-# its returning interface at once, and n02, its path gone, takes n01's
-# probe as a new path.
+# is probed until its grace runs out, then discarded (`why=Grace`). It
+# carried the link, so the node re-checks it every 1 s until 30 s after it
+# went silent (PATH_DEAD_RECHECK_SPAN), and from there the draft's floor
+# doubles the gap, 2, 4, 8 and 16 s, then every 30 s to 600 s: about 53
+# probes by that arithmetic, where the floor alone would give 24. The
+# figures give those probes and their bytes, all inside that bound
+# (`path_floor`, its stop placed at the Dead entry: the stop began there,
+# though the outage is far longer than PATH_SILENCE_MAX), and the recovery
+# after the return: n01 probes its returning interface at once, and n02,
+# its path gone, takes n01's probe as a new path.
 #
 #   n01 ===eth=== n02      (admin down at n01 at 30 s for 660 s)
 #   n01 ---udp--- n02

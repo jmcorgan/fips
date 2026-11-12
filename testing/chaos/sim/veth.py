@@ -74,8 +74,8 @@ HELPER_CHECK_TIMEOUT_SECS = 30
 # The namespace name `_link_place` reports for the host's own.
 HOST_NS = "host"
 
-# Where `mark_ready` tells a node's entrypoint that its veths are set up
-# (testing/docker/entrypoint.sh, VETH_READY).
+# Where `mark_ready` tells a node's entrypoint that its veths and their netem
+# are set up (testing/docker/entrypoint.sh, VETH_READY).
 VETH_READY = "/tmp/fips-veth-ready"
 
 
@@ -182,16 +182,17 @@ class VethManager:
 
     def mark_ready(self, node_id: str) -> None:
         """Tell ``node_id``'s entrypoint that the harness has finished with
-        its veths for this start, so it stops waiting for its bound
-        interfaces even if one is still missing.
+        it for this start, its veths and their initial netem both, so it
+        starts the daemon, even if a bound interface is still missing.
 
-        The entrypoint waits until its interfaces are up or this word
-        comes, with no bound tied to how long setup takes, since that
-        follows the host's load. The file holds the container's boot id
-        (PID 1's start time), which a restart changes, so the word for an
-        earlier start does not end a restart's wait. A failed write is
-        logged and not raised: the entrypoint then still starts the daemon
-        once its interfaces are up.
+        The caller writes it only after the netem is in place: the
+        entrypoint of a node with bound interfaces starts the daemon on this
+        word and not before, with no bound tied to how long setup takes,
+        since that follows the host's load. The file holds the container's
+        boot id (PID 1's start time), which a restart changes, so the word
+        for an earlier start does not end a restart's wait. A failed write
+        is logged and not raised: the entrypoint then starts the daemon at
+        its backstop (IFACE_WAIT_SECS in testing/docker/entrypoint.sh).
         """
         docker_exec_quiet(
             self.topology.container_name(node_id),
