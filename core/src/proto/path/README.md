@@ -375,12 +375,19 @@ its node code steps it and acts on what it decides.
   that followed the link would move it back and forth each dwell. A
   change for a faster medium is held the same way (`select::waits`)
   while the path ranked first scores more than `switch_margin` times
-  the active path's score over the horizon: idle, the two scores of the
-  active path agree and only the margin of the best decides, but load
-  on a wireless network faster at its best than a cable outside the
-  margin of it ranks the cable first within seconds, and the cable does
-  not take the link until the load has lasted the horizon, since the
-  wireless network would take it back once the load followed.
+  the active path's score over the horizon. A horizon at least as long
+  as the round-trip window, as at the draft's values, holds every sample
+  the window does, so that score is never above the active path's score
+  over the window. Idle on a steady round trip the two are equal and
+  only the margin of the best decides. On an active path whose round
+  trip jitters they differ even idle: the least round trip over the
+  horizon is the lower, so the change also waits while the path ranked
+  first scores outside the margin of it, which can last as long as the
+  jitter does. Load on a wireless network faster at its best than a
+  cable outside the margin of it ranks the cable first within seconds,
+  and the cable does not take the link until the load has lasted the
+  horizon, since the wireless network would take it back once the load
+  followed.
   The dwell starts again when the path ranked first changes, and ends at
   any step at which that does not hold, at any step at which the
   active path is not Live, and at every change of active path. Its end

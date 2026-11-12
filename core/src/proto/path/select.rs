@@ -196,15 +196,20 @@ pub(super) fn held(to: &Rival, from: &Rival, margin: f64) -> bool {
 
 /// Whether a discretionary change for its faster known medium from the
 /// active path `from` to `to` is held: while `to` scores more than
-/// `margin` times `from`'s score over the horizon. Idle, `from`'s scores
-/// over the window and over the horizon agree, so the change waits only
-/// on the margin of the best that [`choose`] ranks it by. Load that
-/// follows the link raises `from`'s score over the window within seconds,
-/// until `to` ranks first on its medium, but its score over the horizon
-/// only once the load has lasted the horizon; so the change waits until
-/// then, as a change on score does ([`held`]), and the link does not
-/// follow the load back and forth between the two. Not held while `from`
-/// has no score over the horizon or `to` has no score.
+/// `margin` times `from`'s score over the horizon. A horizon at least as
+/// long as the round-trip window, as at the draft's values, holds every
+/// sample the window does, so that score is never above `from`'s score
+/// over the window. Idle on a steady round trip the two are equal, and the
+/// change waits only on the margin of the best that [`choose`] ranks it by.
+/// On a `from` whose round trip jitters they differ even idle: its least
+/// round trip over the horizon is the lower, so the change also waits
+/// while `to` scores outside the margin of it, which can last as long as
+/// the jitter does. Load that follows the link raises `from`'s score over
+/// the window within seconds, until `to` ranks first on its medium, but its
+/// score over the horizon only once the load has lasted the horizon; so the
+/// change waits until then, as a change on score does ([`held`]), and the
+/// link does not follow the load back and forth between the two. Not held
+/// while `from` has no score over the horizon or `to` has no score.
 pub(super) fn waits(to: &Rival, from: &Rival, margin: f64) -> bool {
     if node_fault!(MediumMoveUnheld) {
         return false;
