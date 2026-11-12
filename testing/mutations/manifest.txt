@@ -211,6 +211,12 @@ BleUnprovenIgnoresHeld	red	fips-mesh	node::tests::ble_lifecycle::a_channel_whose
 PathLaneShared	red	fips-mesh	transport::ble::lane_tests::a_path_message_is_queued_while_the_connections_data_queue_is_full
 PathLaneShared	red	fips-mesh	transport::ble::lane_tests::the_writer_sends_a_waiting_path_message_before_the_data_queued_ahead_of_it
 PathLaneShared	red	fips-mesh	node::tests::ble_queue::a_pinned_ble_path_loaded_past_its_rate_keeps_the_pin_and_stays_live
+PathLaneShared	red	fips-mesh	transport::tcp::lane_tests::a_path_message_is_queued_while_the_connections_data_queue_is_full
+PathLaneShared	red	fips-mesh	transport::tcp::lane_tests::the_writer_sends_a_waiting_path_message_before_the_data_queued_ahead_of_it
+PathLaneShared	red	fips-mesh	transport::socks5::lane_tests::a_tor_path_message_is_queued_while_the_connections_data_queue_is_full
+PathLaneShared	red	fips-mesh	transport::socks5::lane_tests::a_nym_path_message_is_queued_while_the_connections_data_queue_is_full
+PathLaneShared	red	fips-mesh	transport::socks5::lane_tests::the_tor_writer_sends_a_waiting_path_message_before_the_data_queued_ahead_of_it
+PathLaneShared	red	fips-mesh	transport::socks5::lane_tests::the_nym_writer_sends_a_waiting_path_message_before_the_data_queued_ahead_of_it
 MovedLeavesEntry	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	entry-pair
 ReleaseKeepsPairOpen	red	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_another_closes_its_connection_as_the_table_says_with_multipath_on
 ReleaseKeepsPairOpen	pass	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_it_keeps_its_connection_as_the_table_says_with_multipath_on

@@ -159,17 +159,17 @@ with a path's round trip. A link whose one path is Live is not probed,
 because the FMP heartbeat already covers it and there is nowhere to move
 to.
 
-A transport that queues frames for a writer task, as BLE does, keeps path
-messages in a queue of their own beside each connection's data queue, and
-its writer sends them first. A data queue full of the node's own traffic
-therefore neither refuses a probe nor holds it behind the data, so a loaded
-path is not read as failing for that reason alone. The path queue is
-bounded, holding eight messages, the probes a path keeps outstanding. A
-connection that has stopped draining still refuses its probes, they go
-unanswered, and the path fails as any other would. A refused probe counts
-as unanswered, as before. The node marks a frame as a path message where
-it builds one; the transport sees only ciphertext. Transports that send at
-once, with no queue of their own, are unaffected.
+A transport that queues frames for a writer task, as BLE, TCP, Tor and Nym
+do, keeps path messages in a queue of their own beside each connection's
+data queue, and its writer sends them first. A data queue full of the
+node's own traffic therefore neither refuses a probe nor holds it behind
+the data, so a loaded path is not read as failing for that reason alone.
+The path queue is bounded, holding eight messages, the probes a path keeps
+outstanding. A connection that has stopped draining still refuses its
+probes, they go unanswered, and the path fails as any other would. A
+refused probe counts as unanswered, as before. The node marks a frame as a
+path message where it builds one; the transport sees only ciphertext.
+Transports that send at once, with no queue of their own, are unaffected.
 
 The other inputs are faster than timeouts where the node has them. On
 interface-bound transports the node reads carrier for the links of more

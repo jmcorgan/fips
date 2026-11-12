@@ -1021,15 +1021,13 @@ impl TransportHandle {
         addr: &TransportAddr,
         data: &[u8],
     ) -> Result<usize, TransportError> {
-        // Read only by a transport that queues; unused where none is built.
-        let _ = lane;
         match self {
             TransportHandle::Udp(t) => t.send_async(addr, data).await,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             TransportHandle::Ethernet(t) => t.send_async(addr, data).await,
-            TransportHandle::Tcp(t) => t.send_existing(addr, data).await,
-            TransportHandle::Tor(t) => t.send_existing(addr, data).await,
-            TransportHandle::Nym(t) => t.send_existing(addr, data).await,
+            TransportHandle::Tcp(t) => t.send_lane(lane, addr, data).await,
+            TransportHandle::Tor(t) => t.send_lane(lane, addr, data).await,
+            TransportHandle::Nym(t) => t.send_lane(lane, addr, data).await,
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.send_lane(lane, addr, data).await,
             #[cfg(test)]
