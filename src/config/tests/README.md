@@ -1,9 +1,9 @@
 # Config unit tests
 
-Unit tests for the files in `src/config/`. Each file here is the test module
-of the source file of the same name, declared from that file as
-`#[cfg(test)] #[path = "tests/<file>.rs"] mod tests;`, so it is a child module
-of its source file and can reach that file's private items.
+Unit tests for the files in `src/config/`. Each file here is a test module of
+a source file one level up, declared from that file with
+`#[cfg(test)] #[path = "tests/<file>.rs"]`, so it is a child module of its
+source file and can reach that file's private items.
 
 - `floors.rs`: tests for `Config::apply_floors` (`src/config/floors.rs`). A
   bloom update debounce below 500 ms runs at 500, and a bloom acceptance cap
@@ -17,3 +17,7 @@ of its source file and can reach that file's private items.
   the default ladder, and a ladder over 255 entries runs its first 255, each
   with one warning; the default ladder and a 255-entry ladder are left alone.
   A second `apply_floors` call changes nothing and warns nothing.
+- `native_flows.rs`: tests for the native API flow ceiling in
+  `Config::validate`, declared from `mod.rs` as `mod native_flows`. A
+  `node.native_api.max_flows` of 0 is refused at load, naming the key, and 1,
+  the smallest working ceiling, is accepted.

@@ -15,17 +15,27 @@ source file's private items.
   veth, which gives it a new index and MAC. A third test moves the node's
   veth to another namespace and back, which keeps its index, and checks
   that the node is rebound all the same.
+- `frames.rs` tests `../mod.rs` as module `frame_tests`: the per-frame
+  receive rules in `dispatch_frame` and the destination check in
+  `parse_mac_addr`, with no socket. A beacon or data frame from a group
+  (multicast or broadcast) source address is dropped and counted in
+  `group_drops`, and a send to a group destination is refused; the same
+  frames from a unicast source are buffered or delivered. It is the only
+  unprivileged test of the receive path, and runs in the normal test run.
 
 ## Rules
 
 - Older tests in `src/transport/ethernet/` stay in their source files' inline
   `mod tests` blocks; new tests go here. `mod.rs` already has an inline
-  `tests` module, so its file here is declared under a different name.
-- The network-namespace tests need root. They are `#[ignore]`d, so the normal
-  test run skips them, and no CI job runs them: build with
-  `cargo test --lib --no-run` and run the test binary under `sudo` with
-  `--ignored rebind_tests`. That hand run is the only coverage of the rebind.
-- The module is declared `#[cfg(all(test, target_os = "linux"))]`, not per
+  `tests` module, so its files here are declared under different names.
+- The receive loop's per-frame decision lives in `dispatch_frame`, apart
+  from the socket, so a new receive rule gets its test in `frames.rs`.
+- The network-namespace tests in `rebind.rs` need root. They are
+  `#[ignore]`d, so the normal test run skips them, and no CI job runs them:
+  build with `cargo test --lib --no-run` and run the test binary under
+  `sudo` with `--ignored rebind_tests`. That hand run is the only coverage of
+  the rebind.
+- `rebind.rs` is declared `#[cfg(all(test, target_os = "linux"))]`, not per
   test, because its harness calls the Linux-only `testutil::run_ok` and
   `testutil::in_netns`, and the macOS cross-check type-checks test modules.
 - A transport opens its socket, and reopens it after a recreate, in the

@@ -20,6 +20,7 @@ pub struct EthernetStats {
     pub beacons_dropped: AtomicU64,
     pub frames_too_short: AtomicU64,
     pub frames_too_long: AtomicU64,
+    pub group_drops: AtomicU64,
 }
 
 impl EthernetStats {
@@ -37,6 +38,7 @@ impl EthernetStats {
             beacons_dropped: AtomicU64::new(0),
             frames_too_short: AtomicU64::new(0),
             frames_too_long: AtomicU64::new(0),
+            group_drops: AtomicU64::new(0),
         }
     }
 
@@ -77,6 +79,11 @@ impl EthernetStats {
         self.beacons_dropped.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record a received frame dropped for a group source address.
+    pub fn record_group(&self) {
+        self.group_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Take a snapshot of all counters.
     pub fn snapshot(&self) -> EthernetStatsSnapshot {
         EthernetStatsSnapshot {
@@ -91,6 +98,7 @@ impl EthernetStats {
             beacons_dropped: self.beacons_dropped.load(Ordering::Relaxed),
             frames_too_short: self.frames_too_short.load(Ordering::Relaxed),
             frames_too_long: self.frames_too_long.load(Ordering::Relaxed),
+            group_drops: self.group_drops.load(Ordering::Relaxed),
         }
     }
 }
@@ -115,4 +123,5 @@ pub struct EthernetStatsSnapshot {
     pub beacons_dropped: u64,
     pub frames_too_short: u64,
     pub frames_too_long: u64,
+    pub group_drops: u64,
 }

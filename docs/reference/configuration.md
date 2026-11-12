@@ -498,7 +498,7 @@ way to hand a file descriptor to another process at all, while macOS has
 | `node.native_api.socket_path` | string | *(auto)* | Socket file path. Resolved the same way as the control socket, with the filename `api.sock`: `/run/fips/api.sock` when `/run/fips` exists; then `/var/run/fips/api.sock` on FreeBSD when its private directory exists; then `$XDG_RUNTIME_DIR/fips/api.sock`; finally `/tmp/fips-api.sock` |
 | `node.native_api.pending_per_flow` | usize | `16` | Datagrams held for one flow while it waits to be accepted, or while an established flow's client is slow to read. Refused above 64 at startup: the whole batch is written onto a socket pair the client cannot read yet. Refused below 1: a flow that can hold nothing loses its peer's opening datagram between the arrival being announced and the client taking the flow |
 | `node.native_api.backlog` | usize | `16` | Flows announced on one listener and not yet taken by its task. Refused below 1 at startup: a listener with no backlog admits no flow, so every arrival would be dropped |
-| `node.native_api.max_flows` | usize | `256` | Flows this node holds at once |
+| `node.native_api.max_flows` | usize | `256` | Flows this node holds at once. Refused below 1 at startup: a node that can hold no flow refuses every client connect and drops every arrival |
 | `node.native_api.debug_commands` | bool | `false` | Answer the `inject`, `stats` and `arrive` debug commands. Not a supported interface |
 
 > **Security note:** the socket is mode `0770`, owned by group `fips`, and

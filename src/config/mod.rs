@@ -1975,15 +1975,24 @@ impl Config {
         }
 
         let native = &self.node.native_api;
-        // Both floors refuse a node that would start, answer every setup call
+        // These floors refuse a node that would start, answer every setup call
         // and then drop every datagram a peer sent. A zero `backlog` makes the
-        // registry refuse every arrival; a zero `pending_per_flow` makes it
-        // announce the arrival and then refuse the datagram that caused it, so
-        // a peer's opening message is lost with no refusal anywhere.
+        // registry refuse every arrival; a zero `max_flows` makes it refuse
+        // every flow, so each client connect fails with `EMFILE` as well; a
+        // zero `pending_per_flow` makes it announce the arrival and then refuse
+        // the datagram that caused it, so a peer's opening message is lost
+        // with no refusal anywhere.
         if native.backlog < 1 {
             return Err(ConfigError::Validation(
                 "node.native_api.backlog is 0 but must be at least 1: a listener with no \
                  backlog admits no flow, so every arrival would be dropped"
+                    .to_string(),
+            ));
+        }
+        if native.max_flows < 1 {
+            return Err(ConfigError::Validation(
+                "node.native_api.max_flows is 0 but must be at least 1: a node that can \
+                 hold no flow refuses every client connect and drops every arrival"
                     .to_string(),
             ));
         }
@@ -2200,6 +2209,10 @@ impl Config {
         serde_yaml::to_string(self)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/native_flows.rs"]
+mod native_flows;
 
 #[cfg(test)]
 mod tests {
