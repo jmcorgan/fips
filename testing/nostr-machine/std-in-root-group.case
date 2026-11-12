@@ -1,0 +1,5 @@
+# std as one root of a top-level use group.
+expect exit 1
+expect extra.rs:1: std at the root of a use tree
+=== extra.rs
+use {core::fmt, std::time::Instant};

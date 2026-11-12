@@ -1,0 +1,5 @@
+# socket2.
+expect exit 1
+expect mod.rs:1: socket2 at the root of a use tree
+=== mod.rs
+use socket2::Socket;

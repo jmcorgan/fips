@@ -1,0 +1,6 @@
+# A quote inside a line comment must not open a string.
+expect exit 1
+expect extra.rs:2: std path
+=== extra.rs
+// the "quote
+fn n() -> std::time::Instant { std::time::Instant::now() } // "

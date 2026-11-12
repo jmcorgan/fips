@@ -2,6 +2,7 @@ mod advert;
 mod driver;
 mod failure_state;
 mod handoff;
+pub(crate) mod machine;
 mod offer_admission;
 mod runtime;
 mod signal;

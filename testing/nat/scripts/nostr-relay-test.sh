@@ -132,7 +132,7 @@ publish_malformed_advert() {
 
     # Both of these must match the consumers' subscription filter, which is
     # kind + identifier and no author clause (src/nostr/runtime.rs:1041-1043).
-    # The literals are ADVERT_KIND and ADVERT_IDENTIFIER in src/nostr/types.rs
+    # The literals are ADVERT_KIND and ADVERT_IDENTIFIER in src/nostr/machine/types.rs
     # and are duplicated here rather than derived, so changing either there
     # silently stops this event reaching the daemons while the relay goes on
     # accepting it. `next` uses `fips-overlay-v1-next`, which is the one line

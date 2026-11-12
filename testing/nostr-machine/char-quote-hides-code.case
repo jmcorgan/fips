@@ -1,0 +1,7 @@
+# A '"' char literal must not open a string that hides the next line.
+expect exit 1
+expect extra.rs:2: std path
+=== extra.rs
+fn q() -> char { '"' }
+fn n() -> std::time::Instant { std::time::Instant::now() }
+fn s() -> &'static str { "x" }

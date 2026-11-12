@@ -1,0 +1,5 @@
+# tokio imported.
+expect exit 1
+expect mod.rs:1: tokio at the root of a use tree
+=== mod.rs
+use tokio::sync::Mutex;

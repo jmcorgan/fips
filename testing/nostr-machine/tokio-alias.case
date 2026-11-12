@@ -1,0 +1,6 @@
+# tokio aliased at the import.
+expect exit 1
+expect mod.rs:1: tokio at the root of a use tree
+=== mod.rs
+use tokio as t;
+async fn f() { t::task::yield_now().await }

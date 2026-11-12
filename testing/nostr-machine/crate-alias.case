@@ -1,0 +1,6 @@
+# The crate root aliased, then used through the alias.
+expect exit 1
+expect mod.rs:1: crate alias
+=== mod.rs
+use crate as root;
+fn f(_c: root::config::UdpConfig) {}

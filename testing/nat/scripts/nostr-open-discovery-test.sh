@@ -57,12 +57,12 @@ RELAY_CONTAINER="fips-nat-relay${FIPS_CI_NAME_SUFFIX:-}"
 SEED_COUNT=8
 WINDOW_SECS=10
 
-# The advert identifier is ADVERT_IDENTIFIER in src/nostr/types.rs, duplicated
+# The advert identifier is ADVERT_IDENTIFIER in src/nostr/machine/types.rs, duplicated
 # here rather than derived: the node subscribes by it and refuses an advert
 # whose content carries another. `next` uses `fips-overlay-v1-next`, which is
 # the one line that differs between the branches' copies of this script.
 ADVERT_IDENTIFIER="fips-overlay-v1"
-# The kind is ADVERT_KIND in src/nostr/types.rs.
+# The kind is ADVERT_KIND in src/nostr/machine/types.rs.
 ADVERT_KIND=37195
 # The `app` generate-configs.sh gives the lab's nodes; a seeded advert's
 # `protocol` tag must equal it.

@@ -1,0 +1,8 @@
+# A tests/ attachment with no #[cfg(test)]: its unscanned file builds into the module.
+expect exit 1
+expect adverts/extra.rs:2: test module without #[cfg(test)]
+=== adverts/extra.rs
+#[path = "tests/clock.rs"]
+pub mod clock;
+=== adverts/tests/clock.rs
+pub fn now() -> std::time::Instant { std::time::Instant::now() }

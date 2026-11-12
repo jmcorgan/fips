@@ -1,0 +1,9 @@
+# A tests module declared with no #[cfg(test)]: its unscanned file builds into the module.
+expect exit 1
+expect adverts/mod.rs:2: test module without #[cfg(test)]
+expect-absent adverts/mod.rs:1:
+=== adverts/mod.rs
+pub mod cache;
+pub mod tests;
+=== adverts/tests/mod.rs
+pub fn now() -> std::time::Instant { std::time::Instant::now() }

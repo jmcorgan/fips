@@ -1,0 +1,6 @@
+# A shell file pulled into the module by a path inside cfg_attr.
+expect exit 1
+expect extra.rs:1: path inside cfg_attr
+=== extra.rs
+#[cfg_attr(all(), path = "../runtime.rs")]
+pub mod shell;

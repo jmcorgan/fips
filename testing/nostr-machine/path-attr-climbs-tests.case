@@ -1,0 +1,6 @@
+# A tests/ prefix that climbs back out.
+expect exit 1
+expect mod.rs:1: path attribute outside tests/
+=== mod.rs
+#[path = "tests/../../runtime.rs"]
+mod shell;

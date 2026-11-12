@@ -1,0 +1,6 @@
+# std re-declared under another name.
+expect exit 1
+expect mod.rs:1: extern crate
+=== mod.rs
+extern crate std as host;
+fn n() -> host::time::Instant { host::time::Instant::now() }

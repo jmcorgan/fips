@@ -248,6 +248,13 @@ matrix; a divergence fails the run. GitHub
 runs the same check as its own `ci-parity` job. `--check-parity` runs it
 alone (see [check-ci-parity.sh](check-ci-parity.sh)).
 
+Both runners also run the static guards (`run_guards` here, the `ci-parity`
+job on GitHub). One of them,
+[check-nostr-machine.py](check-nostr-machine.py), holds the Nostr machine
+(`src/nostr/machine/`) to its fence: no `std`, `tokio`, `tracing` or
+`nostr_sdk` path and nothing in the root crate outside the module. Its
+fixtures are in [nostr-machine/](nostr-machine/).
+
 Note that `ci-local.sh` covers the integration suites and the glibc unit
 tests. GitHub additionally runs the library tests on macOS, Windows and
 **musl** (built for the musl target and run natively); the musl

@@ -1,0 +1,6 @@
+# A shell file pulled into the module by #[path].
+expect exit 1
+expect mod.rs:1: path attribute outside tests/
+=== mod.rs
+#[path = "../runtime.rs"]
+mod shell;

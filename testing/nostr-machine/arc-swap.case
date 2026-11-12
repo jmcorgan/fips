@@ -1,0 +1,5 @@
+# arc_swap.
+expect exit 1
+expect mod.rs:1: arc_swap at the root of a use tree
+=== mod.rs
+use arc_swap::ArcSwap;

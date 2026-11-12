@@ -1,0 +1,8 @@
+# A super inside a group wrapped over lines.
+expect exit 1
+expect adverts/extra.rs:1: super inside a use group
+=== adverts/extra.rs
+use super::{
+    f,
+    super::g,
+};

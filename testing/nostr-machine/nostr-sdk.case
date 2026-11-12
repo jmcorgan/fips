@@ -1,0 +1,5 @@
+# The relay client crate.
+expect exit 1
+expect mod.rs:1: nostr_sdk at the root of a use tree
+=== mod.rs
+use nostr_sdk::Client;

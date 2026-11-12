@@ -1,0 +1,5 @@
+# rand, inline.
+expect exit 1
+expect mod.rs:1: rand path
+=== mod.rs
+fn r() { let _ = rand::random::<u8>(); }

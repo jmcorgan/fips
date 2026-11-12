@@ -2276,6 +2276,23 @@ run_portable_atomics() {
     record "portable-atomics" $rc
 }
 
+# The Nostr machine (src/nostr/machine/) names no std, tokio, tracing or
+# nostr_sdk path and nothing in the root crate outside itself. Nothing builds it without
+# std, so this text check is what holds that fence. Its fixtures run first, so
+# a check that stopped seeing a banned path fails here rather than passing the
+# tree. Static, about a second, and needs nothing built. Mirrored in ci.yml's
+# ci-parity job by hand.
+run_nostr_machine() {
+    local rc=0
+    info "[nostr-machine] Checking that the Nostr machine stays inside its fence"
+    bash "$SCRIPT_DIR/nostr-machine/test.sh" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        python3 "$SCRIPT_DIR/check-nostr-machine.py" || rc=$?
+    fi
+    record "nostr-machine" $rc
+    return 0
+}
+
 # No bare mktemp result may become a docker bind-mount source. Under a private
 # /tmp, which the builder's CI worker has, the daemon cannot see that path and
 # mounts an empty directory instead, which no GitHub runner shows. Static, plus
@@ -2508,6 +2525,7 @@ run_guards() {
     run_comment_refs
     run_ignored_tests
     run_portable_atomics
+    run_nostr_machine
     run_mount_tmpdir
     run_ci_labels
     run_shellcheck

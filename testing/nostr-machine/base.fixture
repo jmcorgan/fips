@@ -1,0 +1,53 @@
+# The healthy tree every case starts from: in-module paths of each shape the
+# guard must let through. self::, crate::nostr::machine::, super:: from depth 1,
+# super::super:: and self::super:: from depth 2, a wrapped group with no inner
+# super, pub(super), core:: and alloc:: paths, a #[path] to tests/, test
+# modules under #[cfg(test)] (with a visibility, a doc comment, and either
+# attribute first), a cfg_attr with no path, include_str!, banned names inside
+# comments, strings, raw strings, C strings and after a '"' char literal, and
+# test files that use std (test files are not scanned). It must pass.
+expect exit 0
+expect check-nostr-machine: 3 files in
+expect , 0 flagged
+=== mod.rs
+//! The fence: std:: and tokio:: in a doc comment are text, not paths.
+pub mod adverts;
+use self::adverts::cache::Cache;
+use crate::nostr::machine::adverts;
+use core::fmt;
+use alloc::vec::Vec;
+/* a block comment naming std::time::Instant /* nested */ still text */
+pub(super) fn f() -> &'static str { "println!(x) tokio::spawn" }
+pub(crate) fn g() -> char { '"' }
+pub(crate) fn h() -> &'static str { r#"std::"thread_local!"#  }
+pub(crate) fn k() -> &'static core::ffi::CStr { cr#"tokio::"println!"# }
+pub(crate) fn m() -> &'static core::ffi::CStr { c"std::\"include!" }
+pub(crate) const N: &str = core::include_str!("tests/data.txt");
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct Probe;
+/// The shared test helpers.
+#[cfg(test)]
+pub(crate) mod tests;
+=== tests/mod.rs
+use std::time::Instant;
+=== adverts/mod.rs
+pub mod cache;
+use super::f;
+use self::super::g;
+=== adverts/cache.rs
+use super::super::f;
+use self::super::super::h;
+use super::super::{
+    adverts,
+    f as g,
+};
+pub(super) struct Cache;
+fn p() -> crate::nostr::machine::adverts::cache::Cache { Cache }
+#[cfg(test)]
+#[path = "tests/cache.rs"]
+mod tests;
+#[path = "tests/probe.rs"]
+#[cfg(test)]
+mod probe;
+=== adverts/tests/cache.rs
+use std::time::Instant;

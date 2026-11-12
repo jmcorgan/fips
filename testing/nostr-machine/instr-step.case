@@ -1,0 +1,5 @@
+# The root instrumentation macro, in textual scope.
+expect exit 1
+expect adverts/mod.rs:1: instr_step!
+=== adverts/mod.rs
+fn p() { instr_step!(X, { 1 }); }

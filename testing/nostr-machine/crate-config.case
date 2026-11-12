@@ -1,0 +1,5 @@
+# A root config type.
+expect exit 1
+expect adverts/extra.rs:1: crate path outside the module
+=== adverts/extra.rs
+use crate::config::UdpConfig;

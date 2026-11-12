@@ -1,0 +1,5 @@
+# Code pulled in by include!.
+expect exit 1
+expect mod.rs:1: include!
+=== mod.rs
+include!("../runtime.rs");

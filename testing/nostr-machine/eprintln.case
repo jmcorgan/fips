@@ -1,0 +1,5 @@
+# A std-only prelude macro.
+expect exit 1
+expect adverts/mod.rs:1: eprintln!
+=== adverts/mod.rs
+fn p() { eprintln!("x"); }

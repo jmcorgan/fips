@@ -1,0 +1,5 @@
+# A tracing macro reached by path.
+expect exit 1
+expect mod.rs:1: tracing path
+=== mod.rs
+fn t() { tracing::debug!("x"); }
