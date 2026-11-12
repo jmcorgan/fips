@@ -16,7 +16,7 @@ fn draft(f: impl FnOnce(&mut Config)) -> Result<Params, ParamsError> {
 type Zero = (fn(&mut Config), &'static str);
 
 /// Every interval and count that must be positive.
-const ZEROS: [Zero; 17] = [
+const ZEROS: [Zero; 18] = [
     (|c| c.switch_dwell = Duration::ZERO, "the switch dwell"),
     (
         |c| c.active_interval = Duration::ZERO,
@@ -28,6 +28,7 @@ const ZEROS: [Zero; 17] = [
     ),
     (|c| c.timeout = Duration::ZERO, "the probe timeout floor"),
     (|c| c.verdict_cap = Duration::ZERO, "the verdict cap"),
+    (|c| c.horizon = Duration::ZERO, "the horizon"),
     (|c| c.heartbeat = Duration::ZERO, "the heartbeat interval"),
     (
         |c| c.dead_interval = Duration::ZERO,
@@ -61,6 +62,8 @@ fn the_draft_values_are_the_draft_constants() {
         timeout: Duration::from_millis(400),
         // Not in Appendix A: the draft leaves the timeout to the node.
         verdict_cap: Duration::from_secs(3),
+        // Not in Appendix A: ranking is local (Section 5.7, its note).
+        horizon: Duration::from_secs(60),
         suspect: 3,
         retire: 10,
         discovery: 8,

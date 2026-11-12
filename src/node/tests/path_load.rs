@@ -1006,3 +1006,191 @@ async fn a_one_way_failure_under_a_queue_past_a_third_of_the_cap_is_left_within_
         "defect: A's link left lane a {left:?} after a cut of its own direction, past {bound:?}"
     );
 }
+
+/// Lane `b` of the lab's oscillation: as slow as lane `a`, 1 Mbit/s, with a
+/// 50 ms base delay, so idle it scores about twice `a`'s.
+const LANE_FAR: Spec = Spec {
+    name: "b",
+    transport: 2,
+    bps: 1_000_000,
+    base: Duration::from_millis(50),
+};
+
+/// The horizon the node keeps each path's least round trip over, beside
+/// the round-trip window.
+fn horizon() -> Duration {
+    fips_core::proto::path::Config::draft().horizon
+}
+
+/// Changes of A's active path over a loaded phase of `span` that the rule
+/// on the active path's longer-horizon round trip allows: a discretionary
+/// move away from a path its own load slowed comes only once that load has
+/// filled the horizon, so at most one departure per horizon, each followed
+/// by at most one return.
+fn allowed(span: Duration) -> u32 {
+    2 * (span.as_secs() / horizon().as_secs()) as u32
+}
+
+/// A rig on `specs` as [`Rig::new`] makes it, run idle with `reverse` on
+/// for the horizon, a sixth of it more and a second, so the round trips its
+/// paths measured while the nodes were set up, before the lanes paced
+/// anything, have left every path's horizon. Returns the rig, with the
+/// instant the idle run started, and its tally.
+async fn warmed(specs: &[Spec], reverse: Reverse) -> (Rig, Duration, Tally, Vec<String>) {
+    let mut rig = Rig::new(specs).await;
+    rig.reverse = reverse;
+    let mut tally = Tally::default();
+    let mut timeline = Vec::new();
+    let start = rig.at();
+    let idle = horizon() + horizon() / 6 + Duration::from_secs(1);
+    run(&mut rig, idle, start, &mut tally, &mut timeline).await;
+    assert_eq!(tally.changes, 0, "precondition: idle, the link stays on a");
+    (rig, start, tally, timeline)
+}
+
+/// Unpinned, with two lanes in the lab's shape (`a` with a 5 ms base delay,
+/// `b` with 50 ms) and load above both their rates keeping a 1 s queue on
+/// whichever lane carries the link, with reverse traffic: over 300 s the
+/// link changes active path no more often than the longer-horizon rule
+/// allows. Load on the active path raises its least round trip over the
+/// sample window within seconds; moving on that alone hands the link to the
+/// idle lane, whose own least round trip then rises under the load that
+/// follows it, and back, every few seconds (the lab's 17 bursts in 280 s).
+#[tokio::test]
+async fn an_unpinned_link_loaded_past_both_lanes_rates_does_not_oscillate_between_them() {
+    let (mut rig, start, _, mut timeline) = warmed(&[LANE_A, LANE_FAR], Reverse::Acks).await;
+    rig.load = Some(Load {
+        bps: 4 * LANE_A.bps,
+        target: Duration::from_secs(1),
+    });
+    let span = Duration::from_secs(300);
+    let mut loaded = Tally::default();
+    run(&mut rig, span, start, &mut loaded, &mut timeline).await;
+    report(
+        "1 s queue on both lanes in turn, unpinned, reverse on, 300 s",
+        &timeline,
+        &loaded,
+        &rig,
+    );
+    assert!(
+        loaded.queued >= Duration::from_millis(900),
+        "precondition: the load built its 1 s queue on lane a"
+    );
+    let bound = allowed(span);
+    assert!(
+        loaded.changes <= bound,
+        "defect: the loaded link changed active path {} times in {span:?}, past {bound}",
+        loaded.changes
+    );
+    cleanup_nodes(&mut rig.nodes).await;
+}
+
+/// Unpinned, lane `a` loaded so its round trip rises to about 125 ms (the
+/// second field report's loaded Wi-Fi samples ran from 103 to 164 ms), with
+/// reverse traffic, against an idle standby at BLE rate whose round trip is
+/// about 45 ms: for 60 s, two round-trip windows, the link spends no time
+/// on the slow lane after the first 5 s of load. Idle, `a` scores well
+/// within the standby's; only its own load lifts its windowed score past
+/// the standby's by the margin.
+#[tokio::test]
+async fn sustained_load_on_a_fast_lane_does_not_hand_the_link_to_an_idle_slow_standby() {
+    let (mut rig, start, mut tally, mut timeline) = warmed(&[LANE_A, LANE_C], Reverse::Acks).await;
+    rig.load = Some(Load {
+        bps: 4 * LANE_A.bps,
+        target: Duration::from_millis(120),
+    });
+    let onset = rig.at();
+    let mut slow = Duration::ZERO;
+    let until = onset + Duration::from_secs(60);
+    while rig.at() < until {
+        run(&mut rig, STEP, start, &mut tally, &mut timeline).await;
+        if rig.active() == 1 && rig.at() > onset + Duration::from_secs(5) {
+            slow += STEP;
+        }
+    }
+    report(
+        "120 ms queue on a, unpinned, reverse on, BLE-rate standby, 60 s",
+        &timeline,
+        &tally,
+        &rig,
+    );
+    println!("time on the slow lane after the first 5 s of load: {slow:?}");
+    assert!(
+        tally.rtt >= Duration::from_millis(100),
+        "precondition: lane a's round trip rose past 100 ms under load"
+    );
+    assert_eq!(
+        slow,
+        Duration::ZERO,
+        "defect: the link spent {slow:?} on the slow standby after the first 5 s of load"
+    );
+    cleanup_nodes(&mut rig.nodes).await;
+}
+
+/// Unpinned, lane `a` loaded with reverse traffic and a BLE-rate standby:
+/// a 2 s outage of `a` both ways moves the link to the standby by the
+/// mandatory rule, the load follows it there, and once `a` answers again
+/// the link returns to `a` as it does without the longer-horizon rule:
+/// within the sample window at the active cadence, filled by the
+/// standby's loaded round trips, plus the dwell and a second. The rule
+/// holds only moves to a path slower at its best than the active path; it
+/// never holds a move to a path faster at its best.
+#[tokio::test]
+async fn after_a_mandatory_move_to_a_slow_standby_the_return_to_the_fast_lane_is_not_held() {
+    let (mut rig, start, mut tally, mut timeline) = warmed(&[LANE_A, LANE_C], Reverse::Acks).await;
+    rig.load = Some(Load {
+        bps: 4 * LANE_A.bps,
+        target: Duration::from_millis(120),
+    });
+    run(
+        &mut rig,
+        Duration::from_secs(5),
+        start,
+        &mut tally,
+        &mut timeline,
+    )
+    .await;
+    assert_eq!(tally.changes, 0, "precondition: the link is still on a");
+    rig.cut(true);
+    run(
+        &mut rig,
+        Duration::from_secs(2),
+        start,
+        &mut tally,
+        &mut timeline,
+    )
+    .await;
+    assert_eq!(rig.active(), 1, "precondition: the outage moved the link");
+    for p in &mut rig.lanes[0].pacers {
+        p.cut = false;
+    }
+    let healed = rig.at();
+    let mut live = None;
+    let mut back = None;
+    let until = healed + Duration::from_secs(60);
+    while rig.at() < until && back.is_none() {
+        run(&mut rig, STEP, start, &mut tally, &mut timeline).await;
+        if live.is_none() && rig.state(0, 0) == Some(PathState::Live) {
+            live = Some(rig.at() - healed);
+        }
+        if rig.active() == 0 {
+            back = Some(rig.at() - healed);
+        }
+    }
+    report(
+        "2 s outage of loaded a, unpinned, reverse on, BLE-rate standby",
+        &timeline,
+        &tally,
+        &rig,
+    );
+    println!("after healing: a Live at A {live:?}, link back on a {back:?}");
+    let live = live.expect("precondition: lane a is Live again at A");
+    let window = Duration::from_millis(32 * 200);
+    let dwell = fips_core::proto::path::Config::draft().switch_dwell;
+    let bound = live + window + dwell + Duration::from_secs(1);
+    assert!(
+        back.is_some_and(|t| t <= bound),
+        "defect: the link returned to lane a {back:?} after the outage healed, past {bound:?}"
+    );
+    cleanup_nodes(&mut rig.nodes).await;
+}

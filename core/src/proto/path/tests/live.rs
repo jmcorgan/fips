@@ -66,23 +66,57 @@ fn the_window_keeps_the_least_round_trip_of_its_span() {
     let window = Duration::from_secs(30);
     let ms = Duration::from_millis;
     let mut l = Liveness::new();
-    l.sample(at(0), ms(50), window);
-    l.sample(at(1_000), ms(80), window);
-    l.sample(at(2_000), ms(30), window);
-    l.sample(at(3_000), ms(70), window);
+    l.sample(at(0), ms(50), window, window * 2);
+    l.sample(at(1_000), ms(80), window, window * 2);
+    l.sample(at(2_000), ms(30), window, window * 2);
+    l.sample(at(3_000), ms(70), window, window * 2);
     assert_eq!(l.min_rtt(), Some(ms(30)));
     assert_eq!(l.rtt(), Some(ms(70)), "the latest sample is kept apart");
     assert_eq!(l.samples(), 4);
     // At 33 s the first three samples are older than the window.
-    l.sample(at(33_000), ms(90), window);
+    l.sample(at(33_000), ms(90), window, window * 2);
     assert_eq!(l.samples(), 2);
     assert_eq!(l.min_rtt(), Some(ms(70)));
     // A full window gives up its oldest sample.
     for n in 0..40 {
-        l.sample(at(34_000 + n), ms(200 + n), window);
+        l.sample(at(34_000 + n), ms(200 + n), window, window * 2);
     }
     assert_eq!(l.samples(), SAMPLES);
     assert_eq!(l.min_rtt(), Some(ms(208)));
+}
+
+#[test]
+fn the_horizon_keeps_the_least_round_trip_of_at_least_its_span() {
+    let (window, horizon) = (Duration::from_secs(30), Duration::from_secs(60));
+    let ms = Duration::from_millis;
+    // A 500 ms sample every 200 ms from `from` to `until`.
+    let load = |l: &mut Liveness<TestInstant>, from: u64, until: u64| {
+        for t in (from..=until).step_by(200) {
+            l.sample(at(t), ms(500), window, horizon);
+        }
+    };
+    let mut l = Liveness::new();
+    // Idle at 10 ms, then loaded.
+    l.sample(at(0), ms(10), window, horizon);
+    load(&mut l, 200, 60_000);
+    assert_eq!(
+        l.min_rtt(),
+        Some(ms(500)),
+        "the window has lost the idle one"
+    );
+    assert_eq!(l.base_rtt(), Some(ms(10)), "the horizon has not");
+    // The span holding it ends within a sixth of the horizon of it, so it
+    // is gone once that and the horizon have passed.
+    load(&mut l, 60_200, 70_000);
+    assert_eq!(l.base_rtt(), Some(ms(500)));
+    // At the cadence the spans never run out: a fast sample amid the load
+    // is kept for the horizon after it.
+    load(&mut l, 70_200, 99_800);
+    l.sample(at(100_000), ms(20), window, horizon);
+    load(&mut l, 100_200, 160_000);
+    assert_eq!(l.base_rtt(), Some(ms(20)));
+    load(&mut l, 160_200, 180_000);
+    assert_eq!(l.base_rtt(), Some(ms(500)));
 }
 
 #[test]

@@ -1368,12 +1368,17 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             p.live_mut().resume();
         }
         let window = self.params.window;
+        let horizon = self.params.cfg.horizon;
         let sent = match (ring, held) {
             (Some(Answer::InTime(sent)), _) | (None, Some(sent)) => sent,
             (Some(Answer::Late(sent)), _) => {
                 if let Some(p) = self.set.path_mut(i) {
-                    p.live_mut()
-                        .sample(now, now.saturating_duration_since(sent.at), window);
+                    p.live_mut().sample(
+                        now,
+                        now.saturating_duration_since(sent.at),
+                        window,
+                        horizon,
+                    );
                 }
                 return;
             }
@@ -1391,7 +1396,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         };
         let from_state = path.state();
         let live = path.live_mut();
-        live.sample(now, now.saturating_duration_since(sent.at), window);
+        live.sample(now, now.saturating_duration_since(sent.at), window, horizon);
         // A capability probe is held outside the ring: its answer is no
         // loss sample, and at the smallest size it proves no MTU.
         let mut proved = false;
@@ -1746,6 +1751,8 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 index: i,
                 score: select::score(live).filter(|_| live.samples() >= min),
                 rtt: live.rtt(),
+                steady: select::steady(live).filter(|_| live.samples() >= min),
+                base: live.base_rtt(),
                 tier: select::tier(role),
                 preferred: role == Role::Preferred,
                 pinned: self.pin.as_ref().is_some_and(|pin| pin.names(&pair(p))),
@@ -1785,7 +1792,10 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// than `a`, also scored, by more than the switch margin, or `a`,
     /// preferred and scored, must score more than the switch margin times
     /// the best score [`select::best`] finds, so it has lost its
-    /// precedence; and that must hold at every step for the switch dwell.
+    /// precedence; a change for either of those last two, on score, waits
+    /// while [`select::held`] holds it, so load on `a` alone does not hand
+    /// the link to a path slower at its best; and that must hold at every
+    /// step for the switch dwell.
     /// The dwell starts at the first step at which it holds, starts again
     /// when the path ranked first changes, and ends at any step at which it
     /// does not hold, so a path that only scores the same as `a` never
@@ -1811,11 +1821,12 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         let target = pick
             .filter(|(to, from)| {
                 to.score.is_some_and(|st| {
+                    let scored = from.score.is_some_and(|s| s > st * margin)
+                        || (from.preferred
+                            && from.score.zip(best).is_some_and(|(s, b)| s > b * margin));
                     (to.fits && !from.fits)
                         || (to.preferred && !from.preferred)
-                        || from.score.is_some_and(|s| s > st * margin)
-                        || (from.preferred
-                            && from.score.zip(best).is_some_and(|(s, b)| s > b * margin))
+                        || (scored && !select::held(to, from, margin))
                 })
             })
             .and_then(|(to, _)| self.set.get(to.index).map(|p| (to.index, p.path_id())));

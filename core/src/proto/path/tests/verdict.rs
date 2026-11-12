@@ -141,21 +141,41 @@ fn the_timeout_follows_the_largest_round_trip_in_the_window_up_to_the_cap() {
     let window = Duration::from_secs(30);
     let mut live: Liveness<TestInstant> = Liveness::new();
     assert_eq!(live.timeout(floor, cap), floor, "no sample: the floor");
-    live.sample(TestInstant(0), Duration::from_millis(10), window);
+    live.sample(
+        TestInstant(0),
+        Duration::from_millis(10),
+        window,
+        window * 2,
+    );
     assert_eq!(
         live.timeout(floor, cap),
         floor,
         "short round trips: the floor"
     );
-    live.sample(TestInstant(100), Duration::from_millis(900), window);
-    live.sample(TestInstant(200), Duration::from_millis(10), window);
+    live.sample(
+        TestInstant(100),
+        Duration::from_millis(900),
+        window,
+        window * 2,
+    );
+    live.sample(
+        TestInstant(200),
+        Duration::from_millis(10),
+        window,
+        window * 2,
+    );
     assert_eq!(
         live.timeout(floor, cap),
         Duration::from_millis(2_700),
         "defect: the timeout is not three times the largest round trip in the window"
     );
-    live.sample(TestInstant(300), Duration::from_secs(2), window);
-    live.sample(TestInstant(400), Duration::from_millis(10), window);
+    live.sample(TestInstant(300), Duration::from_secs(2), window, window * 2);
+    live.sample(
+        TestInstant(400),
+        Duration::from_millis(10),
+        window,
+        window * 2,
+    );
     assert_eq!(
         live.timeout(floor, cap),
         cap,
@@ -163,12 +183,27 @@ fn the_timeout_follows_the_largest_round_trip_in_the_window_up_to_the_cap() {
     );
     // A latest round trip above the cap keeps today's timeout of three
     // times it, uncapped.
-    live.sample(TestInstant(500), Duration::from_secs(20), window);
+    live.sample(
+        TestInstant(500),
+        Duration::from_secs(20),
+        window,
+        window * 2,
+    );
     assert_eq!(live.timeout(floor, cap), Duration::from_secs(60));
     // A sample older than the window no longer counts.
     let mut aged: Liveness<TestInstant> = Liveness::new();
-    aged.sample(TestInstant(0), Duration::from_millis(900), window);
-    aged.sample(TestInstant(31_000), Duration::from_millis(10), window);
+    aged.sample(
+        TestInstant(0),
+        Duration::from_millis(900),
+        window,
+        window * 2,
+    );
+    aged.sample(
+        TestInstant(31_000),
+        Duration::from_millis(10),
+        window,
+        window * 2,
+    );
     assert_eq!(aged.timeout(floor, cap), floor);
 }
 

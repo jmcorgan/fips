@@ -34,6 +34,13 @@
 //! has been answered in time; while none has, its loss says nothing about
 //! its size and it waits.
 //!
+//! Beside the window, a path keeps its least round trip over the horizon,
+//! in spans: each span holds the least of the samples taken within its
+//! width of its first, and a span is dropped once its latest sample is
+//! older than the horizon. So the least round trip over the horizon covers
+//! at least its last horizon of samples, and at most one span more, in a
+//! fixed array whatever the probe cadence.
+//!
 //! A path's silence clock is the send instant of the earliest probe no
 //! matching answer has followed. Once the path has stopped answering
 //! (draft Section 5.6), its stop holds the instant from which its next
@@ -54,6 +61,11 @@ use crate::time::{Duration, Instant, deadline};
 
 /// Round-trip samples a path keeps for its minimum.
 const SAMPLES: usize = 32;
+
+/// Spans a path keeps its least round trip over the horizon in. A span is
+/// the horizon over two fewer than this wide, so the spans whose latest
+/// sample lies within the horizon always leave one free for a new span.
+const SPANS: usize = 8;
 
 /// Timed-out probes a path remembers, so that a late answer to one still
 /// gives a round-trip sample.
@@ -193,6 +205,15 @@ fn after(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) > 0
 }
 
+/// One span of a path's samples over the horizon: the instants of its
+/// first and latest samples, and the least round trip among them.
+#[derive(Clone, Copy, Debug)]
+struct Span<I> {
+    from: I,
+    to: I,
+    rtt: Duration,
+}
+
 /// One path's liveness: its outstanding probes, its `probe_id` sequence,
 /// its unanswered count, the measurements its answers gave, the frames
 /// received on it, the frames that failed to authenticate, its
@@ -218,6 +239,8 @@ pub struct Liveness<I> {
     rtt: Option<Duration>,
     /// The round-trip samples of the window, with the instant of each.
     rtts: [Option<(I, Duration)>; SAMPLES],
+    /// The spans of the samples over the horizon, in no order.
+    spans: [Option<Span<I>>; SPANS],
     /// The expected transmission count, smoothed: 1 when every probe is
     /// answered.
     etx: f64,
@@ -280,6 +303,7 @@ impl<I: Instant> Liveness<I> {
             answered: None,
             rtt: None,
             rtts: [None; SAMPLES],
+            spans: [None; SPANS],
             etx: 1.0,
             mtu: None,
             peer: false,
@@ -325,6 +349,12 @@ impl<I: Instant> Liveness<I> {
     /// The largest round trip among the window's samples.
     pub fn max_rtt(&self) -> Option<Duration> {
         self.rtts.iter().flatten().map(|&(_, rtt)| rtt).max()
+    }
+
+    /// The least round trip over the horizon: among the samples of at
+    /// least the last horizon, and at most one span more.
+    pub fn base_rtt(&self) -> Option<Duration> {
+        self.spans.iter().flatten().map(|s| s.rtt).min()
     }
 
     /// Round-trip samples in the window.
@@ -696,8 +726,9 @@ impl<I: Instant> Liveness<I> {
     }
 
     /// Record a round trip of `rtt` measured at `now`, keeping in the
-    /// window only the samples of the last `window`.
-    pub(super) fn sample(&mut self, now: I, rtt: Duration, window: Duration) {
+    /// window only the samples of the last `window`, and in the spans of
+    /// the horizon only those whose latest sample is within `horizon`.
+    pub(super) fn sample(&mut self, now: I, rtt: Duration, window: Duration, horizon: Duration) {
         self.rtt = Some(rtt);
         for s in self.rtts.iter_mut() {
             if s.is_some_and(|(at, _)| now.saturating_duration_since(at) > window) {
@@ -714,6 +745,42 @@ impl<I: Instant> Liveness<I> {
                 .map_or(0, |(i, _)| i),
         };
         self.rtts[slot] = Some((now, rtt));
+        self.span(now, rtt, horizon);
+    }
+
+    /// Fold a round trip of `rtt` measured at `now` into the spans of the
+    /// horizon: into the newest span while `now` is within its width of
+    /// its first sample, else into a new span, after dropping every span
+    /// whose latest sample is older than `horizon`.
+    fn span(&mut self, now: I, rtt: Duration, horizon: Duration) {
+        for s in self.spans.iter_mut() {
+            if s.is_some_and(|s| now.saturating_duration_since(s.to) > horizon) {
+                *s = None;
+            }
+        }
+        let width = horizon / (SPANS as u32 - 2);
+        let newest = self.spans.iter_mut().flatten().max_by_key(|s| s.from);
+        if let Some(s) = newest
+            && now.saturating_duration_since(s.from) < width
+        {
+            s.to = now;
+            s.rtt = s.rtt.min(rtt);
+            return;
+        }
+        let slot = match self.spans.iter().position(Option::is_none) {
+            Some(slot) => slot,
+            None => self
+                .spans
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, s)| s.map(|s| s.from))
+                .map_or(0, |(i, _)| i),
+        };
+        self.spans[slot] = Some(Span {
+            from: now,
+            to: now,
+            rtt,
+        });
     }
 
     /// Fold one probe's outcome into the ETX: the long average of the

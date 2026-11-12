@@ -225,7 +225,10 @@ it is done. This node ranks them in order:
 4. Among those, a `preferred` path is taken over a better-scoring one while
    its score is within the switch margin of the best.
 5. Otherwise the best score, where a path is scored only once it has
-   `node.path.min_samples` round trips.
+   `node.path.min_samples` round trips. A move on score away from the
+   active path is held while the active path is the faster of the two at
+   its best over the last 60 seconds, unless the other path also beats the
+   score the active path had at that best.
 
 A path's score is the quality index the spanning tree costs a link by: ETX
 times one plus the least round trip over 100 ms, lower being better. A
@@ -234,6 +237,24 @@ discretionary move needs another path to beat the active one by the margin
 millisecond round trips on a LAN put a cable and Wi-Fi inside that margin,
 which is what `role: preferred` is for: without it the handshake race, not
 the operator, decides which of the two carries traffic.
+
+**Load on the active path does not move the link.** The least round trip
+in a score is taken over the last 32 samples, about 6.4 seconds on the
+active path, so a queue that the link's own traffic builds lifts the active
+path's score within seconds while an idle standby keeps its own. Moving on
+that alone hands the link to a path that is slower at its best; the traffic
+follows it, the standby's score rises, the old path's falls, and the link
+moves back, reordering the frames in flight each time. So each path also
+keeps its least round trip over a longer horizon (60 seconds), and a move
+on score away from the active path waits while the active path is the
+faster of the two over that horizon, unless the other path also beats the
+active path's score at its best. A load that lasts the whole horizon can
+still move the link, once per horizon. A move to a path that is faster at
+its best is never held, so the return to the fast path after an outage
+under load keeps its timing, and failure, the pin, the tier, the
+`FilterAnnounce` size and `role: preferred` move the link as before. The
+cost is that a path whose base round trip really rises, after a route
+change for example, keeps the link for up to the horizon unless it fails.
 
 ## The link's cost and the tree
 

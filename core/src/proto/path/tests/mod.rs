@@ -13,6 +13,7 @@ mod charge;
 mod choice;
 mod close;
 mod connect;
+mod damping;
 mod disabled;
 mod exchange;
 mod floor;
@@ -95,6 +96,7 @@ const TESTS: &[(&str, &str)] = &[
     ("choice.rs", include_str!("choice.rs")),
     ("close.rs", include_str!("close.rs")),
     ("connect.rs", include_str!("connect.rs")),
+    ("damping.rs", include_str!("damping.rs")),
     ("disabled.rs", include_str!("disabled.rs")),
     ("exchange.rs", include_str!("exchange.rs")),
     ("floor.rs", include_str!("floor.rs")),

@@ -313,3 +313,10 @@ SeekOnStreams	pass	fips-core	proto::path::tests::mtu::the_search_stops_at_its_re
 SeekCountsLoss	red	fips-core	proto::path::tests::mtu::a_lost_search_probe_is_no_miss_and_no_loss_sample
 SeekCountsLoss	red	fips-core	proto::path::tests::mtu::the_search_stops_at_its_resolution_and_starts_again_after_its_raise_interval
 SeekCountsLoss	pass	fips-core	proto::path::tests::mtu::after_loss_steps_the_ladder_down_the_search_proves_the_link_mtu_again
+MoveOnWindowScore	red	fips-mesh	node::tests::path_load::an_unpinned_link_loaded_past_both_lanes_rates_does_not_oscillate_between_them
+MoveOnWindowScore	red	fips-mesh	node::tests::path_load::sustained_load_on_a_fast_lane_does_not_hand_the_link_to_an_idle_slow_standby
+MoveOnWindowScore	red	fips-core	proto::path::tests::damping::a_rival_that_beats_the_loaded_active_paths_window_but_not_its_horizon_does_not_take_the_link
+MoveOnWindowScore	pass	fips-mesh	node::tests::path_load::after_a_mandatory_move_to_a_slow_standby_the_return_to_the_fast_lane_is_not_held
+MoveToFasterHeld	red	fips-mesh	node::tests::path_load::after_a_mandatory_move_to_a_slow_standby_the_return_to_the_fast_lane_is_not_held
+MoveToFasterHeld	red	fips-core	proto::path::tests::damping::a_move_to_a_path_faster_at_its_best_than_the_loaded_active_path_is_not_held
+MoveToFasterHeld	pass	fips-mesh	node::tests::path_load::sustained_load_on_a_fast_lane_does_not_hand_the_link_to_an_idle_slow_standby

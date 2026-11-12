@@ -70,6 +70,14 @@ pub struct Config {
     /// probe timeout's term from the largest round trip in the path's
     /// window (draft Section 5.6 leaves the timeout to the node).
     pub verdict_cap: Duration,
+    /// The horizon, a local choice the draft gives no value: the least
+    /// span a path's least round trip is also kept over, beside the
+    /// round-trip window. A discretionary change away from the active path
+    /// on score must also beat the active path's score from that least
+    /// round trip, unless the path taken is the faster of the two at its
+    /// best over the horizon, so load on the active path alone does not
+    /// move the link to a path slower at its best for a horizon.
+    pub horizon: Duration,
     /// Consecutive unanswered probes before a Live path becomes Suspect
     /// (`PATH_TIMEOUT_K`).
     pub suspect: u8,
@@ -110,7 +118,8 @@ pub struct Config {
 
 impl Config {
     /// The values of the multipath v1 draft (Appendix A), and for the
-    /// verdict cap, which the draft leaves to the node, 3 s.
+    /// verdict cap and the horizon, which the draft leaves to the node, 3 s
+    /// and 60 s.
     pub const fn draft() -> Self {
         Self {
             enabled: true,
@@ -122,6 +131,7 @@ impl Config {
             mix_kinds: false,
             timeout: Duration::from_millis(400),
             verdict_cap: Duration::from_secs(3),
+            horizon: Duration::from_secs(60),
             suspect: 3,
             retire: 10,
             discovery: 8,
@@ -192,6 +202,7 @@ impl Params {
             (cfg.standby_interval, "the standby probe interval"),
             (cfg.timeout, "the probe timeout floor"),
             (cfg.verdict_cap, "the verdict cap"),
+            (cfg.horizon, "the horizon"),
             (cfg.heartbeat, "the heartbeat interval"),
             (cfg.dead_interval, "the Dead probe interval cap"),
             (cfg.grace, "the Dead grace"),

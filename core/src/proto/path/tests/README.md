@@ -4,8 +4,8 @@ Unit tests for the files one level up. `mod.rs` is the module's own
 tests module, `proto::path::tests`, declared from the module root, and
 declares `shell.rs`, `exchange.rs`, `account.rs`, `liveness.rs`,
 `active.rs`, `admit.rs`, `capability.rs`, `close.rs`, `charge.rs`,
-`choice.rs`, `connect.rs`, `disabled.rs`, `floor.rs`, `hold.rs`,
-`intake.rs`, `mtu.rs`, `pin.rs`, `renew.rs`, `sim.rs`, `stub.rs`,
+`choice.rs`, `connect.rs`, `damping.rs`, `disabled.rs`, `floor.rs`,
+`hold.rs`, `intake.rs`, `mtu.rs`, `pin.rs`, `renew.rs`, `sim.rs`, `stub.rs`,
 `verdict.rs` and `view.rs`,
 which drive
 the machine, `Bundle`,
@@ -213,6 +213,17 @@ module of that file, sees its private items and keeps its test names.
   pending, over minutes of polls and an early probe asked for by the
   peer's `ACTIVE` turning off; and a path a probe created needs no
   connection.
+- `damping.rs`: discretionary changes away from a loaded active path
+  (`proto::path::tests::damping::...`), driven as `choice.rs` drives its
+  tests and with its helpers and `pin.rs`'s `pin`, load being a rise of
+  p's round trip from 5 or 10 ms to 200 ms at 40 s: a standby that
+  scores better than p over the window under the load, but is slower than
+  p at its best, does not take the link before the horizon has passed;
+  once p's score over the horizon has risen past it by the margin it
+  takes the link one dwell later, the dwell set to end between probe
+  wakes; a standby faster at its best than p, within the margin of it
+  idle, takes the link one dwell after it leads p over the window, not
+  held; and a carrier loss and a pin still move the link at once.
 - `disabled.rs`: a bundle with multipath disabled
   (`proto::path::tests::disabled::...`), driven through `Bundle`'s
   inputs in the shell: given the peer's probes, candidates, an ack, a
@@ -350,24 +361,25 @@ module of that file, sees its private items and keeps its test names.
   probes while Probing, since that probe's timeout counts as no miss;
   an answer to it before its timeout still makes the path Live, and one
   after it is late and leaves the path Probing.
-- `live.rs`: tests for `live.rs` (`proto::path::live::tests::...`): a
-  full ring refuses a probe and spends no `probe_id` on it, an answer
-  takes its probe and leaves the rest in send order, the round-trip
-  window keeps the least sample of its span and gives up its oldest when
-  full, delivered probes bring the ETX toward one at the long
-  average's rate, the receive counts wrap modulo 2^32, a path's count
-  of authentication failures saturates rather than wrapping, a stop
-  keeps its first instant and its gaps double up to the bound, the
-  silence clock starts at the earliest probe since the last matching
-  answer, only an answer in time is a matching one, a connection's
-  slot moves the next free instant to its opening without doubling, a
-  probe sent before the path left Dead times out uncounted while an
-  answer to it in time still matches, and the first counted `probe_id`
-  is dropped once no probe before it is outstanding.
+- `live.rs`: tests for `live.rs` (`proto::path::live::tests::...`): a full
+  ring refuses a probe and spends no `probe_id` on it, an answer takes its
+  probe and leaves the rest in send order, the round-trip window keeps the
+  least sample of its span and gives up its oldest when full, the horizon
+  keeps an idle sample a loaded window has lost until its span and the horizon
+  have passed, and at a 200 ms cadence keeps a later fast sample for the
+  horizon after it, delivered probes bring the ETX toward one at the long
+  average's rate, the receive counts wrap modulo 2^32, a path's count of
+  authentication failures saturates rather than wrapping, a stop keeps its
+  first instant and its gaps double up to the bound, the silence clock starts
+  at the earliest probe since the last matching answer, only an answer in time
+  is a matching one, a connection's slot moves the next free instant to its
+  opening without doubling, a probe sent before the path left Dead times out
+  uncounted while an answer to it in time still matches, and the first counted
+  `probe_id` is dropped once no probe before it is outstanding.
 - `mod.rs`: declares `shell`, `exchange`, `account`, `liveness`,
   `active`, `admit`, `capability`, `close`, `charge`, `choice`, `connect`,
-  `disabled`, `floor`, `hold`, `intake`, `mtu`, `pin`, `renew`, `sim`,
-  `stub`, `verdict` and `view`, and
+  `damping`, `disabled`, `floor`, `hold`, `intake`, `mtu`, `pin`,
+  `renew`, `sim`, `stub`, `verdict` and `view`, and
   checks the module's source (`proto::path::tests::...`): the module
   root still denies
   wildcard match arms; no source file defines a `set_` setter, with a

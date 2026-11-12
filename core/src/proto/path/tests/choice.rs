@@ -21,7 +21,7 @@ pub(super) fn start(seed: u64, net: &mut Net<'_>) -> Node {
 }
 
 /// A node as [`start`] makes it, whose bundle runs with `cfg`.
-fn tuned(seed: u64, cfg: Config, net: &mut Net<'_>) -> Node {
+pub(super) fn tuned(seed: u64, cfg: Config, net: &mut Net<'_>) -> Node {
     built(seed, cfg, Stub::default(), net)
 }
 

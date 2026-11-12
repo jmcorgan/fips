@@ -33,6 +33,8 @@ fn on(role: Role, index: usize, score: Option<f64>, rtt: Option<u64>) -> Rival {
         index,
         score,
         rtt: rtt.map(ms),
+        steady: score,
+        base: rtt.map(ms),
         tier: tier(role),
         preferred: role == Role::Preferred,
         pinned: false,
@@ -63,7 +65,7 @@ fn the_score_is_the_etx_times_one_plus_the_least_round_trip_over_100_ms() {
     assert_eq!(score(&live), None, "no round trip measured, no score");
     let window = Duration::from_secs(30);
     for (at, rtt) in [(1_000, 250), (2_000, 200), (3_000, 300)] {
-        live.sample(TestInstant(at), ms(rtt), window);
+        live.sample(TestInstant(at), ms(rtt), window, window * 2);
     }
     let first = score(&live).expect("a score once measured");
     assert!(close(first, 3.0), "1 x (1 + 200 / 100), not {first}");

@@ -324,6 +324,16 @@ faults! {
     /// after the probe at its cadence, so its loss is a miss and an ETX loss
     /// sample.
     SeekCountsLoss,
+    /// A discretionary change away from the active path on score reads the
+    /// active path's score over the round-trip window only, as before, so
+    /// load on the active path alone hands the link to an idle path slower
+    /// at its best within seconds.
+    MoveOnWindowScore,
+    /// A discretionary change on score to a path faster at its best than
+    /// the active path is held like any other, so after a mandatory move to
+    /// a slower path that the load followed, the return waits until that
+    /// path's idle round trips have left its horizon.
+    MoveToFasterHeld,
 }
 
 impl Fault {

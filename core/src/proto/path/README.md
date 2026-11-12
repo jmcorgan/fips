@@ -58,59 +58,56 @@ its node code steps it and acts on what it decides.
   times out. The count never starts again on a link. Its accessors are
   public and read-only; what changes it is visible only inside this
   module.
-- `live.rs`: `Liveness`, one path's outstanding probes, what their
-  answers measured and the frames received on it: the ring of up to
-  `RING` (8) probes in send order, each with the instant it goes
-  unanswered; the last four probes that timed out, so a late answer still
-  gives a round trip; the path's `probe_id` sequence, from which a
-  capability probe held outside the ring also takes its identifier
-  (`take_id`), to be kept with the timed-out probes once it times out or
-  the peer turns capable (`lapse`); the count of
-  unanswered probes in a row, where a timeout counts only if no later
-  probe was answered in time; when the next probe is due and whether one
-  is asked for at once; whether the peer marks the path `ACTIVE`; the
-  latest round trip and the window of samples its minimum and maximum are
-  taken over, the smoothed ETX, the proven MTU, and the frames and bytes
-  received on the path (modulo 2^32, the `rx_frames` and `rx_bytes` its
-  acks report) with when the latest arrived and when the latest session
-  datagram arrived, when the path last left Live, and the
-  count of frames that failed to authenticate on it since the latest
-  authentic one, with the instant of a trip not yet applied, and whether
-  the path has the connection its probes need, needs one, or has one
-  being opened. It also holds the path's silence clock, the send instant
-  of the earliest probe since the latest matching answer (`quiet`), and,
-  once the path has stopped answering, its stop: the instant from which
-  its next probe on its own cadence may go, the least gap after that
-  one, doubling from `PATH_DEAD_PROBE_INTERVAL_MIN` to
-  `PATH_DEAD_PROBE_INTERVAL_MAX` with each probe counted (`halt`,
-  `held`, `spend`), and whether the latest slot counted went to a
-  connection, which its opening settles (`owe`, `rebase`); `resume`
-  ends the stop. `Answer::matching` says whether an answer is a
-  matching one: one in time is; a late one is not, anywhere (draft
-  Section 5.6), so it gives a round trip and does not end a stop. For
-  the size of a Probing or Dead path's probes it keeps the first
-  `probe_id` of the path's current state, whether a padded probe sent in
-  that state has timed out, and the length of the latest probe sent in
-  it, all started again by `fresh` at each change of state; `size`
-  gives the next probe's length: padded to the link MTU until a padded
-  probe of the state has timed out, and from then on the next step of
-  a ladder after the probe before (the link MTU, three quarters of it,
-  half of it, the smallest size, and the link MTU again). A probe still
-  outstanding from the state before does not count toward that. It
-  keeps the upward search for the size a Live path carries, in a small
-  record of `u16` sizes: the outstanding search probe, held outside the
-  ring, the smallest size lost and the instant the next may go
-  (`seek_size`, `seek_send`, `seek_answer`, `seek_proved`,
-  `seek_judge`). The search tries the link MTU first, then halfway
-  between the size proven and the smallest lost, ends within
-  `SEEK_STEP` (32 bytes) and starts again `SEEK_RAISE` (ten minutes)
-  later; a search probe is lost only once its timeout has passed and a
-  probe sent after it has been answered in time, and it is no miss and
-  no ETX sample. `fresh` starts the search afresh. `prove` says whether
-  the proven MTU changed. It also keeps the first `probe_id` sent since the
-  path last left Dead (`thaw`): an earlier probe still outstanding then
-  times out counting toward no unanswered count, and the mark is
-  dropped once no such probe is outstanding. Fixed arrays only, so
+- `live.rs`: `Liveness`, one path's outstanding probes, what their answers
+  measured and the frames received on it: the ring of up to `RING` (8) probes
+  in send order, each with the instant it goes unanswered; the last four
+  probes that timed out, so a late answer still gives a round trip; the path's
+  `probe_id` sequence, from which a capability probe held outside the ring
+  also takes its identifier (`take_id`), to be kept with the timed-out probes
+  once it times out or the peer turns capable (`lapse`); the count of
+  unanswered probes in a row, where a timeout counts only if no later probe
+  was answered in time; when the next probe is due and whether one is asked
+  for at once; whether the peer marks the path `ACTIVE`; the latest round trip
+  and the window of samples its minimum and maximum are taken over, its least
+  round trip over the horizon (`base_rtt`, kept in eight spans, each the
+  horizon over six wide, a span dropped once its latest sample is older than
+  the horizon), the smoothed ETX, the proven MTU, and the frames and bytes
+  received on the path (modulo 2^32, the `rx_frames` and `rx_bytes` its acks
+  report) with when the latest arrived and when the latest session datagram
+  arrived, when the path last left Live, and the count of frames that failed
+  to authenticate on it since the latest authentic one, with the instant of a
+  trip not yet applied, and whether the path has the connection its probes
+  need, needs one, or has one being opened. It also holds the path's silence
+  clock, the send instant of the earliest probe since the latest matching
+  answer (`quiet`), and, once the path has stopped answering, its stop: the
+  instant from which its next probe on its own cadence may go, the least gap
+  after that one, doubling from `PATH_DEAD_PROBE_INTERVAL_MIN` to
+  `PATH_DEAD_PROBE_INTERVAL_MAX` with each probe counted (`halt`, `held`,
+  `spend`), and whether the latest slot counted went to a connection, which
+  its opening settles (`owe`, `rebase`); `resume` ends the stop.
+  `Answer::matching` says whether an answer is a matching one: one in time is;
+  a late one is not, anywhere (draft Section 5.6), so it gives a round trip
+  and does not end a stop. For the size of a Probing or Dead path's probes it
+  keeps the first `probe_id` of the path's current state, whether a padded
+  probe sent in that state has timed out, and the length of the latest probe
+  sent in it, all started again by `fresh` at each change of state; `size`
+  gives the next probe's length: padded to the link MTU until a padded probe
+  of the state has timed out, and from then on the next step of a ladder after
+  the probe before (the link MTU, three quarters of it, half of it, the
+  smallest size, and the link MTU again). A probe still outstanding from the
+  state before does not count toward that. It keeps the upward search for the
+  size a Live path carries, in a small record of `u16` sizes: the outstanding
+  search probe, held outside the ring, the smallest size lost and the instant
+  the next may go (`seek_size`, `seek_send`, `seek_answer`, `seek_proved`,
+  `seek_judge`). The search tries the link MTU first, then halfway between the
+  size proven and the smallest lost, ends within `SEEK_STEP` (32 bytes) and
+  starts again `SEEK_RAISE` (ten minutes) later; a search probe is lost only
+  once its timeout has passed and a probe sent after it has been answered in
+  time, and it is no miss and no ETX sample. `fresh` starts the search afresh.
+  `prove` says whether the proven MTU changed. It also keeps the first
+  `probe_id` sent since the path last left Dead (`thaw`): an earlier probe
+  still outstanding then times out counting toward no unanswered count, and
+  the mark is dropped once no such probe is outstanding. Fixed arrays only, so
   nothing in it allocates. Its accessors are public and read-only; what
   changes it is visible only inside this module.
 - `machine.rs`: `Bundle<C, E, D>`, the machine of one link's paths, over
@@ -331,7 +328,16 @@ its node code steps it and acts on what it decides.
   the best score among the paths `select.rs` ranks, so it has lost its
   precedence, a switch dwell starts, keyed by the path's identifier, and
   the link moves to it at the first step at or after `switch_dwell` from
-  then at which all of that still holds.
+  then at which all of that still holds. Either of those last two, a
+  change on score, is held (`select::held`) while the active path is the
+  faster of the two at its least round trip over the horizon (`horizon`,
+  60 s), unless the path ranked first also beats the active path's score
+  from that least round trip by the margin: load on the active path
+  raises its least round trip over the window within seconds, but over
+  the horizon only once the load has lasted it, so the load alone does
+  not hand the link to a path slower at its best for a horizon. A change
+  to a path faster at its best is never held, so a return to a path left
+  by a mandatory change keeps its timing.
   The dwell starts again when the path ranked first changes, and ends at
   any step at which that does not hold, at any step at which the
   active path is not Live, and at every change of active path. Its end
@@ -531,7 +537,9 @@ its node code steps it and acts on what it decides.
   re-exports `Rule` and `Scope` from `rules` and `Pin` from `select`,
   and holds the module-wide `deny` of wildcard match arms.
 - `params.rs`: `Config`, the settings of a link's path machine, with
-  `Config::draft` giving the draft's values (Appendix A); `Params`, the
+  `Config::draft` giving the draft's values (Appendix A), and for the
+  verdict cap and the horizon, which the draft leaves to the node, 3 s and
+  60 s; `Params`, the
   validated settings and the round-trip window derived from them; and
   `ParamsError`. `Params::new` is the only way to a `Params`: it refuses
   zero for every interval and count, a switch margin that is not a
@@ -588,7 +596,10 @@ its node code steps it and acts on what it decides.
   covers the shorter of the two: about 6.4 seconds on an active path
   probed every 200 ms, the whole window on a standby probed every second.
   A comparison therefore leans slightly toward leaving the active path;
-  the score is local by the draft's note to Section 5.7. `Hold`, the
+  the score is local by the draft's note to Section 5.7. `steady` is the
+  same score from the least round trip over the horizon, and `held`
+  decides whether a change on score away from the active path waits for
+  it, as above; a `Rival` carries both. `Hold`, the
   hold on the link's cost after a change of active path, holds the cost
   from before the change, counts receiver reports (`report`) and gives
   the cost while it is in force (`held`): before the switch dwell has

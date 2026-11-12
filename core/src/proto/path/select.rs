@@ -20,6 +20,16 @@
 //! a better-scoring one while its score is within the switch margin of
 //! the best.
 //!
+//! A discretionary change away from the active path on score is held while
+//! the active path is the faster of the two at its best over the horizon,
+//! unless the path taken also beats the active path's score from its least
+//! round trip over the horizon by the margin ([`held`]). Load raises the
+//! active path's least round trip over the window within seconds, but its
+//! least over the horizon only once the load has lasted the horizon; so
+//! load on the active path alone does not move the link to a path slower
+//! at its best for a horizon, while a move to a path faster at its best is
+//! never held.
+//!
 //! An operator's [`Pin`] comes before tiers, the `FilterAnnounce` and
 //! scores: while a Live, acked path it names is held, only the paths it
 //! names are ranked.
@@ -60,6 +70,14 @@ pub(super) fn score<I: Instant>(live: &Liveness<I>) -> Option<f64> {
         .map(|rtt| quality_index(live.etx(), rtt.as_secs_f64() * 1000.0))
 }
 
+/// The score of the path whose liveness is `live` over the horizon: the
+/// quality index of its ETX and its least round trip over the horizon.
+/// `None` until a round trip has been measured.
+pub(super) fn steady<I: Instant>(live: &Liveness<I>) -> Option<f64> {
+    live.base_rtt()
+        .map(|rtt| quality_index(live.etx(), rtt.as_secs_f64() * 1000.0))
+}
+
 /// One Live, acked path a choice may take.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Rival {
@@ -69,6 +87,11 @@ pub(super) struct Rival {
     pub(super) score: Option<f64>,
     /// Its latest round trip.
     pub(super) rtt: Option<Duration>,
+    /// Its score over the horizon ([`steady`]), only once it has enough
+    /// round-trip samples to be scored.
+    pub(super) steady: Option<f64>,
+    /// Its least round trip over the horizon.
+    pub(super) base: Option<Duration>,
     /// The tier of its transport's role ([`tier`]).
     pub(super) tier: u8,
     /// Whether its transport's role is `Preferred`.
@@ -101,6 +124,22 @@ impl Pin {
     pub fn names(&self, to: &PathRef) -> bool {
         to.transport == self.transport && self.addr.as_ref().is_none_or(|a| *a == to.addr)
     }
+}
+
+/// Whether a discretionary change on score from the active path `from` to
+/// `to` is held: unless `to` is the faster of the two at its least round
+/// trip over the horizon, or its score beats `from`'s score over the
+/// horizon by `margin`. Not held either while `from` has no score over the
+/// horizon. Only a change on score is held, never one for a pin, a tier, a
+/// `FilterAnnounce` or a preferred transport, and never a mandatory one.
+pub(super) fn held(to: &Rival, from: &Rival, margin: f64) -> bool {
+    if node_fault!(MoveOnWindowScore) {
+        return false;
+    }
+    let faster =
+        to.base.zip(from.base).is_some_and(|(t, f)| t < f) && !node_fault!(MoveToFasterHeld);
+    let beats = |s: f64| to.score.is_some_and(|t| s > t * margin);
+    from.steady.is_some_and(|s| !faster && !beats(s))
 }
 
 /// The tier of a transport whose role is `role`, higher ranking first: a
