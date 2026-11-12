@@ -511,7 +511,7 @@ these messages work together to build and maintain the mesh.
 ## Metrics Measurement Protocol (MMP)
 
 MMP runs on every active link to provide per-link quality metrics
-(SRTT, loss, jitter, goodput, OWD trend, ETX) to the operator and to
+(SRTT, loss, jitter, goodput, ETX) to the operator and to
 the spanning tree layer for cost-based parent selection. Reports are
 exchanged peer-to-peer between direct neighbors at RTT-adaptive
 intervals clamped to `[1s, 5s]`, with a 200 ms cold-start floor for

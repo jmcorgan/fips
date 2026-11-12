@@ -122,9 +122,8 @@ pub(in crate::node) fn format_throughput(bps: f64) -> String {
 impl Node {
     /// Handle an incoming SenderReport from a peer.
     ///
-    /// The peer is telling us about what they sent. We feed this to our
-    /// receiver state for cross-reference (not currently used for metrics,
-    /// but stored for future use).
+    /// The peer is telling us about what they sent. It feeds no metric:
+    /// the report is decoded, traced and dropped.
     pub(in crate::node) fn handle_sender_report(&mut self, from: &NodeAddr, payload: &[u8]) {
         let sr = match SenderReport::decode(payload) {
             Ok(sr) => sr,
@@ -156,10 +155,6 @@ impl Node {
             interval_bytes = sr.interval_bytes_sent,
             "Received SenderReport"
         );
-
-        // Store sender's report in receiver state for cross-reference.
-        // Currently informational; the receiver already tracks its own
-        // counters and echoes timestamps from data frames.
     }
 
     /// Handle an incoming ReceiverReport from a peer.

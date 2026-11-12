@@ -300,6 +300,12 @@ impl MmpMetrics {
     ///
     /// Computes a per-interval delta (same as forward ratio) rather than
     /// a lifetime cumulative ratio, so ETX responds to recent conditions.
+    ///
+    /// The raw `etx` is recomputed here, but the smoothed `etx_trend` is not
+    /// stepped: it moves once per accepted ReceiverReport, in
+    /// [`Self::process_receiver_report`], and takes a reverse change at the
+    /// next report. Stepping it here as well moved it twice per report, and
+    /// once more after a stale one.
     pub fn update_reverse_delivery(&mut self, our_recv_packets: u64, peer_highest: u64) {
         if self.has_prev_reverse {
             let counter_span = peer_highest.saturating_sub(self.prev_reverse_highest);
@@ -309,7 +315,6 @@ impl MmpMetrics {
                 let delivery = (packets_delta as f64) / (counter_span as f64);
                 self.delivery_ratio_reverse = delivery.clamp(0.0, 1.0);
                 self.etx = compute_etx(self.delivery_ratio_forward, self.delivery_ratio_reverse);
-                self.etx_trend.update(self.etx);
             }
         }
 

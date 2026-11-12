@@ -6,6 +6,7 @@
 
 use super::{Config, LookupConfig};
 use crate::proto::bloom::ACCEPT_FPR_CAP;
+use crate::proto::mmp::{MAX_OWD_WINDOW_SIZE, MIN_OWD_WINDOW_SIZE};
 
 /// Least interval in ms between two filter announcements to one peer
 /// (FRC-1402 Section 4.5.2).
@@ -22,6 +23,7 @@ impl Config {
         self.floor_debounce();
         self.floor_fpr();
         self.floor_ladder();
+        self.floor_owd();
     }
 
     /// Raise `node.bloom.update_debounce_ms` to the 500 ms send interval.
@@ -90,6 +92,47 @@ impl Config {
                 "configured lookup ladder has more than 255 entries (configured and used are \
                  lengths); running its first 255"
             );
+        }
+    }
+
+    /// Bring both MMP one-way delay windows into 2 to 4096 samples.
+    ///
+    /// Below 2 no slope forms, and 0 turns off the ring's eviction so it grows
+    /// with every frame. The ring is allocated up front per peer and per
+    /// session, so above 4096 only the memory grows; nothing reads the trend
+    /// beyond display (FRC-1202 Section 4.3.6).
+    fn floor_owd(&mut self) {
+        let keys = [
+            (
+                "node.mmp.owd_window_size",
+                &mut self.node.mmp.owd_window_size,
+            ),
+            (
+                "node.session_mmp.owd_window_size",
+                &mut self.node.session_mmp.owd_window_size,
+            ),
+        ];
+        for (key, size) in keys {
+            let configured = *size;
+            if configured < MIN_OWD_WINDOW_SIZE {
+                *size = MIN_OWD_WINDOW_SIZE;
+                tracing::warn!(
+                    target: "fips::config",
+                    key,
+                    configured,
+                    used = MIN_OWD_WINDOW_SIZE,
+                    "configured value is below the 2 samples a slope needs; running at 2"
+                );
+            } else if configured > MAX_OWD_WINDOW_SIZE {
+                *size = MAX_OWD_WINDOW_SIZE;
+                tracing::warn!(
+                    target: "fips::config",
+                    key,
+                    configured,
+                    used = MAX_OWD_WINDOW_SIZE,
+                    "configured value is above the 4096-sample cap; running at 4096"
+                );
+            }
         }
     }
 }

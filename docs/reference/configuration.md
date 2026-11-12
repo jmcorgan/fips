@@ -448,7 +448,7 @@ Metrics Measurement Protocol for per-peer link measurement. See
 |-----------|------|---------|-------------|
 | `node.mmp.mode` | string | `"full"` | Operating mode: `full` (sender + receiver reports), `lightweight` (receiver reports only), or `minimal` (spin bit + CE echo only, no reports) |
 | `node.mmp.log_interval_secs` | u64 | `30` | Periodic operator log interval for link metrics |
-| `node.mmp.owd_window_size` | usize | `32` | One-way delay trend ring buffer size |
+| `node.mmp.owd_window_size` | usize | `32` | One-way delay trend window, in samples, from 2 to 4096; a value outside runs at the nearer bound with a warning |
 
 ### Session-Layer MMP (`node.session_mmp.*`)
 
@@ -460,7 +460,7 @@ every transit link, consuming bandwidth proportional to path length.
 |-----------|------|---------|-------------|
 | `node.session_mmp.mode` | string | `"full"` | Operating mode: `full`, `lightweight`, or `minimal` |
 | `node.session_mmp.log_interval_secs` | u64 | `30` | Periodic operator log interval for session metrics |
-| `node.session_mmp.owd_window_size` | usize | `32` | One-way delay trend ring buffer size |
+| `node.session_mmp.owd_window_size` | usize | `32` | One-way delay trend window, in samples, from 2 to 4096; a value outside runs at the nearer bound with a warning |
 
 ### Internal Buffers (`node.buffers.*`)
 

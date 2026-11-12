@@ -44,10 +44,11 @@ timestamp fields:
   Tracked as both instantaneous (per-interval) and long-term EWMA.
 - **Jitter** — Interarrival jitter (RFC 3550 algorithm) in
   microseconds.
-- **Goodput** — Bytes per second of payload data (excludes MMP
-  reports).
-- **OWD trend** — One-way delay trend (µs/s, signed). Indicates
-  congestion buildup before loss occurs.
+- **Goodput** — Bytes per second across every frame, MMP reports
+  included.
+- **OWD trend** — A signed slope of one-way delay over receive time, in
+  µs/s, over the last `owd_window_size` samples, carried in
+  ReceiverReports. Informational: no node reads it.
 - **ETX** — Expected Transmission Count, computed from bidirectional
   delivery ratios. Used in cost-based parent selection via
   `link_cost = etx * (1.0 + srtt_ms / 100.0)`, and in bloom-filter
@@ -55,7 +56,8 @@ timestamp fields:
   is the primary key when choosing among bloom-filter peers, with
   tree distance as the tie-breaker).
 - **Dual EWMA trends** — Short-term (α=1/4) and long-term (α=1/32)
-  trend indicators for both RTT and loss, enabling change detection.
+  trend indicators for RTT, loss, goodput, jitter and ETX, enabling
+  change detection.
 
 Session-layer MMP additionally tracks the observed forward-path MTU;
 see [fips-mtu.md](fips-mtu.md) for the end-to-end path-MTU mechanism.
@@ -67,7 +69,7 @@ MMP supports three modes:
 | Mode | Reports Exchanged | Metrics Available |
 | ---- | ----------------- | ----------------- |
 | **Full** (default) | SenderReport + ReceiverReport | All metrics including RTT, loss, jitter, goodput, OWD trend |
-| **Lightweight** | ReceiverReport only | Loss (from counter gaps), jitter, OWD trend. No RTT. |
+| **Lightweight** | ReceiverReport only | The same metrics as Full: they come from the peer's ReceiverReports, and SenderReports feed none. |
 | **Minimal** | None | Spin bit and CE echo flags only. No computed metrics. |
 
 The mode is configured per layer (`node.mmp.mode` and
@@ -75,9 +77,11 @@ The mode is configured per layer (`node.mmp.mode` and
 
 ## Report Scheduling
 
-Reports are sent at RTT-adaptive intervals computed as
-`clamp(2 × SRTT, low, high)`. A cold-start interval is used until SRTT
-has converged.
+Reports are sent at RTT-adaptive intervals: SenderReports at
+`clamp(2 × SRTT, low, high)` and ReceiverReports at
+`clamp(SRTT, low, high)`. A cold-start interval is used for the first
+five SRTT samples at the link layer, and until the first SRTT sample at
+the session layer.
 
 | Layer | Adaptive bounds | Cold-start |
 | ----- | --------------- | ---------- |
@@ -90,9 +94,10 @@ is proportional to path length.
 
 ## Spin Bit and RTT
 
-The SP (spin bit) flag in the FMP inner header follows the QUIC spin
-bit pattern: reflected on receive, toggled on send when the reflected
-value matches the last sent value. The spin bit state machine runs
+The SP (spin bit) flag in the flags byte of the FMP common prefix,
+sent in the clear, follows the QUIC spin bit pattern: reflected on
+receive, toggled on send when the reflected value matches the last
+sent value. The spin bit state machine runs
 for TX reflection, but **RTT samples from the spin bit are
 discarded**. In a mesh protocol where frames are sent irregularly
 (tree announces, bloom filters, MMP reports on different timers),
@@ -105,8 +110,8 @@ goodput, or ETX update. If receiver-side dwell time exceeds the wire
 field, the report keeps its counters but sends a zero timestamp echo so
 the sender cannot form an invalid RTT sample.
 
-The spin bit lives in the link-layer FMP inner header, so this
-mechanism applies to link-layer MMP only. Session-layer MMP carries
+The link-layer spin bit is that SP flag in the FMP common prefix, so
+this mechanism applies to link-layer MMP only. Session-layer MMP carries
 its spin bit in the FSP encrypted inner header but uses it the same
 way: reflected for diagnostic visibility, not used for SRTT.
 

@@ -1,6 +1,7 @@
-//! Tests for `Config::apply_floors`: a bloom setting or the lookup retry
-//! ladder outside its bound runs at the bound's value with one warning, and a
-//! setting inside its bound is left alone without one.
+//! Tests for `Config::apply_floors`: a bloom setting outside its protocol
+//! bound, the lookup retry ladder outside one to 255 entries, or an MMP
+//! one-way delay window outside 2 to 4096 samples runs at the bound's value
+//! with one warning, and a setting inside its bound is left alone without one.
 
 use super::*;
 use crate::testutil::capture_logs;
@@ -168,4 +169,81 @@ fn applying_the_floors_twice_changes_nothing_and_warns_nothing_the_second_time()
     let warnings = floor_warnings(&mut config);
     assert_eq!(config.node.lookup.attempt_timeouts_secs, ladder);
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// Reaches one window size inside a config.
+type WindowField = fn(&mut Config) -> &mut usize;
+
+/// The two MMP one-way delay window keys, with a setter for each.
+fn owd_keys() -> [(&'static str, WindowField); 2] {
+    [
+        ("\"node.mmp.owd_window_size\"", |c| {
+            &mut c.node.mmp.owd_window_size
+        }),
+        ("\"node.session_mmp.owd_window_size\"", |c| {
+            &mut c.node.session_mmp.owd_window_size
+        }),
+    ]
+}
+
+/// Assert that `size` at `key` ran as `used` with one warning naming the key
+/// and both values.
+fn assert_owd_bounded(key: &str, field: WindowField, size: usize, used: usize) {
+    let mut config = Config::default();
+    *field(&mut config) = size;
+    let warnings = floor_warnings(&mut config);
+    assert_eq!(
+        *field(&mut config),
+        used,
+        "defect: {key} = {size} must run at {used}"
+    );
+    assert_eq!(
+        warnings.len(),
+        1,
+        "defect: {key} = {size} must warn once: {warnings:?}"
+    );
+    let line = &warnings[0];
+    assert!(has_field(line, "key", key), "{line}");
+    assert!(has_field(line, "configured", &size.to_string()), "{line}");
+    assert!(has_field(line, "used", &used.to_string()), "{line}");
+}
+
+#[test]
+fn an_mmp_owd_window_below_two_samples_runs_at_two_with_one_warning_naming_the_key() {
+    // Below two samples no slope can form, and 0 turns off the ring's
+    // eviction, so it grows with every frame received.
+    for (key, field) in owd_keys() {
+        for size in [0usize, 1] {
+            assert_owd_bounded(key, field, size, 2);
+        }
+    }
+}
+
+#[test]
+fn an_mmp_owd_window_above_4096_runs_at_4096_with_one_warning_naming_the_key() {
+    // The ring is allocated up front, so a huge value panics or aborts at the
+    // first link or session.
+    for (key, field) in owd_keys() {
+        for size in [4097usize, 1_000_000] {
+            assert_owd_bounded(key, field, size, 4096);
+        }
+    }
+}
+
+#[test]
+fn an_mmp_owd_window_from_2_to_4096_is_left_alone_without_a_warning() {
+    for (key, field) in owd_keys() {
+        assert_eq!(
+            *field(&mut Config::default()),
+            32,
+            "precondition: {key} defaults to 32"
+        );
+        for size in [2usize, 32, 4096] {
+            let mut config = Config::default();
+            *field(&mut config) = size;
+            let warnings = floor_warnings(&mut config);
+            assert_eq!(*field(&mut config), size, "{key} = {size}");
+            assert!(warnings.is_empty(), "{key} = {size}: {warnings:?}");
+        }
+    }
 }
