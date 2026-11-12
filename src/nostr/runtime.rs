@@ -1671,16 +1671,10 @@ impl NostrRendezvous {
             SeenDecision::Replay => {
                 return Err(BootstrapError::Replay(offer.session_id.clone()));
             }
-            SeenDecision::Fresh { evicted } => {
-                if let Some((evicted, retained)) = evicted {
-                    debug!(
-                        evicted = evicted,
-                        retained = retained,
-                        cap = self.config.seen_sessions_max_entries,
-                        "seen-sessions cache overflow; evicted oldest entries"
-                    );
-                }
+            SeenDecision::Full => {
+                return Err(BootstrapError::Protocol("seen-sessions-full".to_string()));
             }
+            SeenDecision::Fresh => {}
         }
 
         // Resolve the answer's relays before binding a socket and running STUN.
