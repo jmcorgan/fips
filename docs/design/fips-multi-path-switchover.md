@@ -253,7 +253,9 @@ it is done. This node ranks them in order:
    `node.path.min_samples` round trips. A move on score away from the
    active path is held while the active path is the faster of the two at
    its best over the last 60 seconds, unless the other path also beats the
-   score the active path had at that best.
+   score the active path had at that best. A return to the path a failure
+   moved the link off needs no margin: once it is Live again, a better
+   score is enough.
 
 A path's score is the quality index the spanning tree costs a link by: ETX
 times one plus the least round trip over 100 ms, lower being better. A
@@ -280,6 +282,16 @@ under load keeps its timing, and failure, the pin, the tier, the
 `FilterAnnounce` size and `role: preferred` move the link as before. The
 cost is that a path whose base round trip really rises, after a route
 change for example, keeps the link for up to the horizon unless it fails.
+
+**The return after a failure needs no margin.** When the active path fails
+and the link moves to a slower one, the traffic follows it, but the slower
+path's score still comes from the round trips it measured idle until its
+own loaded ones fill its window, about 6.4 seconds. Held to the margin, the
+return to the recovered path waited out that window, over 7 seconds after a
+2 second outage under load. So once the path the failure left is Live
+again, the link returns to it as soon as it scores better than the path
+taken, by any amount, for the dwell. Only that path is exempt, and only
+until the link changes path again; any other move still needs the margin.
 
 ## The link's cost and the tree
 

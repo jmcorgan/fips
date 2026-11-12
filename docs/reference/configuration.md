@@ -605,7 +605,7 @@ link stays on its one path. Multipath is off by default: set
 | `node.path.min_samples` | u32 | `2` | Round-trip samples a path needs before it is chosen over the active path on its score. A failover does not wait for them. 1 to 255. |
 | `node.path.mix_kinds` | bool | `true` | Let a link hold paths of another kind than its original path's, local beside Internet, so a link that came up over a local medium can move onto the peer's Internet address. Applied at both ends: `false` at either end keeps the link to its original path's kind. Paths of another anonymity class (Tor, Nym) are refused either way. |
 | `node.path.switch.margin` | f64 | `1.3` | The factor by which another path's score must beat the active path's. A finite number of at least 1.0. |
-| `node.path.switch.dwell_secs` | u64 | `2` | How long the other path must stay better by the margin before the link moves. Not 0. A failed active path is left at once, with no dwell. |
+| `node.path.switch.dwell_secs` | u64 | `2` | How long the other path must stay better by the margin before the link moves. Not 0. A failed active path is left at once, with no dwell; the return to it once it is Live again needs only a better score, not the margin, for the dwell. |
 | `node.path.probe.active_ms` | u64 | `200` | Probe interval of a path either end sends data on. Not 0. |
 | `node.path.probe.standby_ms` | u64 | `1000` | Probe interval of a Live or Suspect standby path. Not 0. |
 

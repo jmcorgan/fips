@@ -334,6 +334,12 @@ faults! {
     /// a slower path that the load followed, the return waits until that
     /// path's idle round trips have left its horizon.
     MoveToFasterHeld,
+    /// The return to a path a mandatory change left, Live again, needs the
+    /// switch margin like any discretionary change on score, so after a
+    /// real outage of a fast path under load the link stays on the slower
+    /// path it fled to until that path's own loaded round trips fill its
+    /// window.
+    ReturnNeedsMargin,
     /// Nothing reads the size a path is proven to carry: the node seeds a
     /// peer's path MTU, folds the next hop's MTU and tightens sessions from
     /// the link MTU alone, so a path across a hop narrower than its link

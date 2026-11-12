@@ -5,7 +5,8 @@ tests module, `proto::path::tests`, declared from the module root, and
 declares `shell.rs`, `exchange.rs`, `account.rs`, `liveness.rs`,
 `active.rs`, `admit.rs`, `capability.rs`, `close.rs`, `charge.rs`,
 `choice.rs`, `connect.rs`, `damping.rs`, `disabled.rs`, `floor.rs`,
-`hold.rs`, `intake.rs`, `mtu.rs`, `pin.rs`, `renew.rs`, `sim.rs`, `stub.rs`,
+`hold.rs`, `intake.rs`, `mtu.rs`, `pin.rs`, `renew.rs`, `returns.rs`,
+`sim.rs`, `stub.rs`,
 `verdict.rs` and `view.rs`,
 which drive
 the machine, `Bundle`,
@@ -394,7 +395,7 @@ module of that file, sees its private items and keeps its test names.
 - `mod.rs`: declares `shell`, `exchange`, `account`, `liveness`,
   `active`, `admit`, `capability`, `close`, `charge`, `choice`, `connect`,
   `damping`, `disabled`, `floor`, `hold`, `intake`, `mtu`, `pin`,
-  `renew`, `sim`, `stub`, `verdict` and `view`, and
+  `renew`, `returns`, `sim`, `stub`, `verdict` and `view`, and
   checks the module's source (`proto::path::tests::...`): the module
   root still denies
   wildcard match arms; no source file defines a `set_` setter, with a
@@ -465,6 +466,14 @@ module of that file, sees its private items and keeps its test names.
   another pair, the link starts on a new path there with a slot of its
   own and no failed frame counted, and the old active path comes back
   released.
+- `returns.rs`: the return to the path a mandatory change left
+  (`proto::path::tests::returns::...`), driven as `choice.rs` drives its
+  tests and with its helpers, p answering in 5 ms and q in 25 ms, within
+  the margin of each other, and p's probes unanswered for 2 s from 40 s:
+  once p is Live again and scores better than q, by less than the margin,
+  the link returns to p one dwell later; and a third path r, offered after
+  the change and scoring better than q within the margin, does not take
+  the link from q, since only the path the change left needs no margin.
 - `rules.rs`: tests for `rules.rs` (`proto::path::rules::tests::...`),
   over a table of facts by transport: the scope of an address, every
   local range and its neighbours outside it, IPv6 with a scope
@@ -660,7 +669,9 @@ module of that file, sees its private items and keeps its test names.
   switch at both ends when the active wire is cut both ways and when only
   one direction is, with the peer's frames still arriving (these two run
   with `steady`, a margin no two paths reach, so an end leaves its active
-  wire only when the wire fails), the receive counts of each path, a run
+  wire only when the wire fails, and returns to it only once it is Live
+  again and scores better; the first checks both ends are off the cut wire
+  while the cut lasts), the receive counts of each path, a run
   replayed byte for byte from its seed, a wire marked at one end never
   becoming a path there nor proven at either end, each end settling
   without faults on the wire better by the margin or staying (fewer than

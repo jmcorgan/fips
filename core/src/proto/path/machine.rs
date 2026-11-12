@@ -405,6 +405,9 @@ pub struct Bundle<C: Clock, E: EntropySource, D: Default> {
     /// link would move to, and the instant from which it has scored better
     /// than the active path by the switch margin.
     dwell: Option<(u32, C::Instant)>,
+    /// Our `path_id` of the path the latest change of active path left, if
+    /// that change was mandatory: a return to it needs no switch margin.
+    left: Option<u32>,
     /// The operator's pin, until it is lifted, by the operator or by the
     /// host when the peer is replaced and the link kept, or its transport
     /// goes; a new bundle holds none, and [`Self::renew`] keeps it.
@@ -433,6 +436,7 @@ impl<C: Clock, E: EntropySource, D: Default + fmt::Debug> fmt::Debug for Bundle<
             .field("frame", &self.frame)
             .field("orphaned", &self.orphaned)
             .field("dwell", &self.dwell)
+            .field("left", &self.left)
             .field("pin", &self.pin)
             .field("hold", &self.hold)
             .finish()
@@ -474,6 +478,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             frame: None,
             orphaned: false,
             dwell: None,
+            left: None,
             pin: None,
             hold: None,
             source: PhantomData,
@@ -872,6 +877,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         self.frame = None;
         self.orphaned = false;
         self.dwell = None;
+        self.left = None;
         out
     }
 
@@ -1639,7 +1645,9 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// Every change of active path, and every step at which the active path
     /// is not Live, ends the switch dwell. Every change holds the link's
     /// cost at `held`, the cost at the start of the step, which is the
-    /// cost of a hold still in force if there is one. When the active path
+    /// cost of a hold still in force if there is one, and records the path
+    /// it left if it was mandatory, so a return to that path once it is
+    /// Live again needs no switch margin ([`Self::better`]). When the active path
     /// became Suspect or Dead or was discarded in this step and no path is
     /// Live, every acked Dead path that [`Self::again`] allows, and every
     /// acked path being probed again after Dead, is probed at once
@@ -1697,10 +1705,15 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             {
                 p.live_mut().urge();
             }
-            let from = from.and_then(|a| self.set.get(a)).map(pair);
+            let from = from.and_then(|a| self.set.get(a));
+            let left = from
+                .map(PeerPath::path_id)
+                .filter(|_| why == Switch::Mandatory);
+            let from = from.map(pair);
             if self.set.activate(i)
                 && let Some(p) = self.set.get(i)
             {
+                self.left = left;
                 out.push(Output::Switched {
                     from,
                     to: pair(p),
@@ -1800,10 +1813,11 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// of a higher tier is Live. Otherwise the path must have
     /// enough samples to be scored, and either carry a `FilterAnnounce`
     /// while `a` cannot, be preferred while `a` is not, or score better
-    /// than `a`, also scored, by more than the switch margin, or `a`,
-    /// preferred and scored, must score more than the switch margin times
-    /// the best score [`select::best`] finds, so it has lost its
-    /// precedence; a change for either of those last two, on score, waits
+    /// than `a`, also scored, by more than the switch margin, or by any
+    /// amount when the latest change of active path was mandatory and left
+    /// it, or `a`, preferred and scored, must score more than the switch
+    /// margin times the best score [`select::best`] finds, so it has lost
+    /// its precedence; a change for any of those last three, on score, waits
     /// while [`select::held`] holds it, so load on `a` alone does not hand
     /// the link to a path slower at its best; and that must hold at every
     /// step for the switch dwell.
@@ -1829,12 +1843,18 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             }
         }
         let best = select::best(&field);
+        let back = |to: &Rival| {
+            self.left
+                .is_some_and(|id| self.set.get(to.index).map(PeerPath::path_id) == Some(id))
+                && !node_fault!(ReturnNeedsMargin)
+        };
         let target = pick
             .filter(|(to, from)| {
                 to.score.is_some_and(|st| {
                     let scored = from.score.is_some_and(|s| s > st * margin)
                         || (from.preferred
-                            && from.score.zip(best).is_some_and(|(s, b)| s > b * margin));
+                            && from.score.zip(best).is_some_and(|(s, b)| s > b * margin))
+                        || (back(to) && from.score.is_some_and(|s| s > st));
                     (to.fits && !from.fits)
                         || (to.preferred && !from.preferred)
                         || (scored && !select::held(to, from, margin))

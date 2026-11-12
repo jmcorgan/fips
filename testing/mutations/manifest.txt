@@ -299,7 +299,6 @@ VerdictUncapped	red	fips-mesh	node::tests::path_load::a_one_way_failure_under_a_
 VerdictUncapped	red	fips-core	proto::path::tests::verdict::a_probe_whose_timeout_passes_while_session_datagrams_keep_arriving_is_counted_only_at_the_cap
 VerdictUncapped	red	fips-core	proto::path::tests::verdict::the_timeout_follows_the_largest_round_trip_in_the_window_up_to_the_cap
 VerdictUncapped	red	fips-core	proto::path::tests::sim::the_receive_counts_of_each_path_match_the_frames_its_wire_delivered	switch:
-VerdictUncapped	red	fips-core	proto::path::tests::sim::the_cost_seen_by_the_tree_is_held_across_every_switch	switch:
 VerdictUncapped	red	fips-core	proto::path::tests::sim::two_nodes_prove_every_path_at_both_ends_once_healed	live:
 VerdictUncapped	red	fips-core	proto::path::tests::sim::a_run_replays_byte_for_byte_from_its_seed	switch:
 VerdictCountsControl	red	fips-mesh	node::tests::path_accept::a_path_that_stops_carrying_our_frames_but_still_brings_the_peers_is_left_after_k_unanswered_probes	A left p within 3 s of the cut
@@ -320,6 +319,10 @@ MoveOnWindowScore	pass	fips-mesh	node::tests::path_load::after_a_mandatory_move_
 MoveToFasterHeld	red	fips-mesh	node::tests::path_load::after_a_mandatory_move_to_a_slow_standby_the_return_to_the_fast_lane_is_not_held
 MoveToFasterHeld	red	fips-core	proto::path::tests::damping::a_move_to_a_path_faster_at_its_best_than_the_loaded_active_path_is_not_held
 MoveToFasterHeld	pass	fips-mesh	node::tests::path_load::sustained_load_on_a_fast_lane_does_not_hand_the_link_to_an_idle_slow_standby
+ReturnNeedsMargin	red	fips-mesh	node::tests::path_load::after_a_mandatory_move_the_link_returns_to_the_recovered_fast_lane_within_the_dwell_and_a_second
+ReturnNeedsMargin	red	fips-core	proto::path::tests::returns::a_path_a_mandatory_change_left_is_returned_to_one_dwell_after_it_outscores_within_the_margin
+ReturnNeedsMargin	pass	fips-core	proto::path::tests::returns::after_a_mandatory_change_a_path_it_did_not_leave_still_needs_the_margin
+ReturnNeedsMargin	pass	fips-mesh	node::tests::path_load::after_a_mandatory_move_to_a_slow_standby_the_return_to_the_fast_lane_is_not_held
 ProvenMtuUnused	red	fips-mesh	node::tests::path_narrow_hop::a_path_across_a_hop_narrower_than_its_link_mtu_carries_the_largest_frame_the_node_admits_for_the_peer
 ProvenMtuUnused	pass	fips-mesh	node::tests::path_narrow_hop::a_path_across_a_hop_as_wide_as_its_link_mtu_carries_the_largest_frame_the_node_admits
 ProvenMtuUnused	pass	fips-mesh	node::tests::path_narrow_hop::a_path_whose_link_mtu_is_set_to_the_narrow_hops_carries_the_largest_frame_the_node_admits

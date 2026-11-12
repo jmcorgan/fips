@@ -1572,7 +1572,8 @@ fn cut(wire: usize, from: Option<usize>, start: u64, end: u64) -> Rule {
 
 /// The draft's settings with a switch margin no two paths reach, since
 /// the simulator's scores lie between 1 and 300: an end changes its active
-/// path only when that path fails.
+/// path only when that path fails, or to return to the path a failure left
+/// once it is Live again and scores better, which needs no margin.
 fn steady() -> Config {
     Config {
         switch_margin: 1e6,
@@ -1623,11 +1624,12 @@ fn a_failed_active_wire_moves_traffic_within_the_timeout_bound_at_both_ends() {
         w.run(start - 1);
         assert_eq!(w.active(A), Some(0), "seed {seed}");
         assert_eq!(w.active(B), Some(0), "seed {seed}");
+        w.run(end - 1);
+        assert_eq!(w.active(A), Some(1), "seed {seed}: A off the cut wire");
+        assert_eq!(w.active(B), Some(1), "seed {seed}: B off the cut wire");
         w.run(MINUTES);
         assert_eq!(w.seen.armed, [1, 1], "seed {seed}: both ends waited for");
         assert_eq!(w.seen.met, [1, 1], "seed {seed}: both ends switched");
-        assert_eq!(w.active(A), Some(1), "seed {seed}");
-        assert_eq!(w.active(B), Some(1), "seed {seed}");
     }
 }
 

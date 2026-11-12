@@ -340,12 +340,18 @@ its node code steps it and acts on what it decides.
   whatever its samples. Otherwise, when it has `min_samples` samples and
   either it carries a `FilterAnnounce` and the active path cannot, or it
   is `Preferred` and the active path is not, or the active path also has
-  them and scores more than `switch_margin` times it, or the active path
+  them and scores more than `switch_margin` times it, or more than it at
+  all when it is the path the latest change of active path left and that
+  change was mandatory, or the active path
   is `Preferred`, has them, and scores more than `switch_margin` times
   the best score among the paths `select.rs` ranks, so it has lost its
   precedence, a switch dwell starts, keyed by the path's identifier, and
   the link moves to it at the first step at or after `switch_dwell` from
-  then at which all of that still holds. Either of those last two, a
+  then at which all of that still holds. The return needs no margin
+  because the path the link fled to may score within it of the path left
+  only for a while: under load its window still holds the round trips it
+  measured idle, until its own loaded ones fill it, about 6.4 s at the
+  active cadence. Any of those last three, a
   change on score, is held (`select::held`) while the active path is the
   faster of the two at its least round trip over the horizon (`horizon`,
   60 s), unless the path ranked first also beats the active path's score

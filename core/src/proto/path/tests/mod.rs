@@ -23,6 +23,7 @@ mod liveness;
 mod mtu;
 mod pin;
 mod renew;
+mod returns;
 pub(crate) mod shell;
 mod sim;
 mod stub;
@@ -109,6 +110,7 @@ const TESTS: &[(&str, &str)] = &[
     ("params.rs", include_str!("params.rs")),
     ("pin.rs", include_str!("pin.rs")),
     ("renew.rs", include_str!("renew.rs")),
+    ("returns.rs", include_str!("returns.rs")),
     ("rules.rs", include_str!("rules.rs")),
     ("select.rs", include_str!("select.rs")),
     ("set.rs", include_str!("set.rs")),

@@ -1127,16 +1127,21 @@ async fn sustained_load_on_a_fast_lane_does_not_hand_the_link_to_an_idle_slow_st
     cleanup_nodes(&mut rig.nodes).await;
 }
 
-/// Unpinned, lane `a` loaded with reverse traffic and a BLE-rate standby:
-/// a 2 s outage of `a` both ways moves the link to the standby by the
-/// mandatory rule, the load follows it there, and once `a` answers again
-/// the link returns to `a` as it does without the longer-horizon rule:
-/// within the sample window at the active cadence, filled by the
-/// standby's loaded round trips, plus the dwell and a second. The rule
-/// holds only moves to a path slower at its best than the active path; it
-/// never holds a move to a path faster at its best.
-#[tokio::test]
-async fn after_a_mandatory_move_to_a_slow_standby_the_return_to_the_fast_lane_is_not_held() {
+/// When lane `a` answered again after the outage [`outage`] makes, and
+/// when the link was back on it, each counted from the outage healing.
+struct Return {
+    /// Lane `a` Live again at A.
+    live: Duration,
+    /// The link back on lane `a`, if it was within 60 s.
+    back: Option<Duration>,
+}
+
+/// Unpinned, lane `a` loaded with reverse traffic and a BLE-rate standby,
+/// warmed for the horizon: after 5 s of load, a 2 s outage of `a` both ways
+/// moves the link to the standby by the mandatory rule, and the load
+/// follows it there. Returns when `a` was Live again at A after the outage
+/// healed, and when the link was back on `a`.
+async fn outage() -> Return {
     let (mut rig, start, mut tally, mut timeline) = warmed(&[LANE_A, LANE_C], Reverse::Acks).await;
     rig.load = Some(Load {
         bps: 4 * LANE_A.bps,
@@ -1165,6 +1170,10 @@ async fn after_a_mandatory_move_to_a_slow_standby_the_return_to_the_fast_lane_is
         p.cut = false;
     }
     let healed = rig.at();
+    timeline.push(format!(
+        "t={:>6.2}s the outage of a heals",
+        (healed - start).as_secs_f64()
+    ));
     let mut live = None;
     let mut back = None;
     let until = healed + Duration::from_secs(60);
@@ -1184,7 +1193,21 @@ async fn after_a_mandatory_move_to_a_slow_standby_the_return_to_the_fast_lane_is
         &rig,
     );
     println!("after healing: a Live at A {live:?}, link back on a {back:?}");
-    let live = live.expect("precondition: lane a is Live again at A");
+    cleanup_nodes(&mut rig.nodes).await;
+    Return {
+        live: live.expect("precondition: lane a is Live again at A"),
+        back,
+    }
+}
+
+/// After [`outage`], the link returns to lane `a` as it does without the
+/// longer-horizon rule: within the sample window at the active cadence,
+/// filled by the standby's loaded round trips, plus the dwell and a second.
+/// The rule holds only moves to a path slower at its best than the active
+/// path; it never holds a move to a path faster at its best.
+#[tokio::test]
+async fn after_a_mandatory_move_to_a_slow_standby_the_return_to_the_fast_lane_is_not_held() {
+    let Return { live, back } = outage().await;
     let window = Duration::from_millis(32 * 200);
     let dwell = fips_core::proto::path::Config::draft().switch_dwell;
     let bound = live + window + dwell + Duration::from_secs(1);
@@ -1192,5 +1215,22 @@ async fn after_a_mandatory_move_to_a_slow_standby_the_return_to_the_fast_lane_is
         back.is_some_and(|t| t <= bound),
         "defect: the link returned to lane a {back:?} after the outage healed, past {bound:?}"
     );
-    cleanup_nodes(&mut rig.nodes).await;
+}
+
+/// After [`outage`], the link is back on lane `a` within the dwell and a
+/// second of the outage healing. Lane `a`, idle once the load has followed
+/// the link away, outscores the loaded standby as soon as it is Live
+/// again; the switch margin, which keeps the link from changing between
+/// paths of near scores, must not hold the return to the path a mandatory
+/// move left until the standby's own loaded round trips fill its window.
+#[tokio::test]
+async fn after_a_mandatory_move_the_link_returns_to_the_recovered_fast_lane_within_the_dwell_and_a_second()
+ {
+    let Return { back, .. } = outage().await;
+    let dwell = fips_core::proto::path::Config::draft().switch_dwell;
+    let bound = dwell + Duration::from_secs(1);
+    assert!(
+        back.is_some_and(|t| t <= bound),
+        "defect: the link returned to lane a {back:?} after the outage healed, past {bound:?}"
+    );
 }
