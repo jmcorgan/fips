@@ -614,7 +614,7 @@ Two per-transport settings go with these, and are read only with
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `role` | string | `"normal"` | This transport's part in a link's paths, on every transport. `never`: no new path is made on it, and a path held on it from before ranks last. `backup`: carries a link only while no `normal` or `preferred` path is Live. `normal`: ranked by score. `preferred`: carries a link whenever it is Live and scores within the switch margin of the best path. |
+| `role` | string | `"normal"` | This transport's part in a link's paths, on every transport. `never`: no new path is made on it, and a path held on it from before ranks last. `backup`: carries a link only while no `normal` or `preferred` path is Live. `normal`: ranked by score, and within the switch margin of the best score by a known medium. `preferred`: carries a link whenever it is Live and scores within the switch margin of the best path. |
 | `kind` | string | *(none)* | `local` or `internet`, in place of the kind the peer's address implies. UDP and TCP only: every other transport has the kind its medium fixes, and refuses the setting. |
 
 A path's kind decides which paths may share a link. Ethernet, BLE and serial are
@@ -625,10 +625,17 @@ on RFC 1918 space reads as local, and such a transport should set `kind:
 internet`. A link never mixes anonymity classes, whatever these settings say: a
 link reached over Tor gains no path over a clear transport or over Nym.
 
-To put a cable ahead of Wi-Fi, whose scores are usually within the margin of
-each other on a LAN, set `role: preferred` on the cable's transport. The peer
-needs multipath too, and the two transports need addresses for each other,
-which configuration, local discovery or a Nostr advert can supply.
+A cable and Wi-Fi usually score within the margin of each other on a LAN, so
+among the paths within the margin of the best score the node takes one on a
+faster medium: a cable before a wireless network, and a wireless network before
+BLE. It knows the medium of the Ethernet transport, which reads whether its
+interface is wired or wireless when it binds it, and of BLE. UDP and TCP paths
+are not ranked by medium: where a cable and Wi-Fi share a subnet, the paths to
+a peer's two addresses leave by the same interface. To put a cable ahead of
+Wi-Fi there, or wherever the medium is not known, set `role: preferred` on the
+cable's transport. The peer needs multipath too, and the two transports need
+addresses for each other, which configuration, local discovery or a Nostr
+advert can supply.
 
 ### Session / Data Plane (`node.session.*`)
 

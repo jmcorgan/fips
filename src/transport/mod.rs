@@ -15,6 +15,12 @@ pub mod udp;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod ethernet;
 
+/// The medium of an interface-bound transport's interface, wired or
+/// wireless, as the operating system reports it. Gated with the one
+/// transport that binds an interface today.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod medium;
+
 /// Kernel link-event notifications, shared by any transport or detector that
 /// needs to react to interface state without polling for it.
 ///
@@ -1124,6 +1130,27 @@ impl TransportHandle {
             TransportHandle::Ble(_) => None,
             #[cfg(test)]
             TransportHandle::Loopback(_) => None,
+        }
+    }
+
+    /// The medium this transport runs over, as a link's path machine ranks
+    /// paths by it: what an interface-bound transport read from its
+    /// interface when it last bound it, `Ble` for a BLE binding, and
+    /// `Unknown` for UDP, TCP, Tor and Nym, whose paths may leave by any
+    /// interface. Read from stored state, never from the operating system.
+    pub fn medium(&self) -> fips_core::proto::path::Medium {
+        use fips_core::proto::path::Medium;
+        match self {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(t) => t.medium(),
+            #[cfg(ble_available)]
+            TransportHandle::Ble(_) => Medium::Ble,
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.medium(),
+            TransportHandle::Udp(_)
+            | TransportHandle::Tcp(_)
+            | TransportHandle::Tor(_)
+            | TransportHandle::Nym(_) => Medium::Unknown,
         }
     }
 

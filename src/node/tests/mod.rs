@@ -63,6 +63,7 @@ mod path_kinds;
 mod path_load;
 mod path_narrow_hop;
 mod path_padding;
+mod path_score;
 mod paths;
 mod peer_restart;
 mod probe;

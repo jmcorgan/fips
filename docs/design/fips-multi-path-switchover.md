@@ -249,7 +249,13 @@ it is done. This node ranks them in order:
    scores.
 4. Among those, a `preferred` path is taken over a better-scoring one while
    its score is within the switch margin of the best.
-5. Otherwise the best score, where a path is scored only once it has
+5. Then, among the scored paths within the switch margin of the best score,
+   preferred ones only when step 4 took one, a path on a faster known
+   medium: a cable before a wireless network, and a wireless network before
+   BLE. A move to a faster medium waits for the dwell like any other
+   discretionary move. A path whose medium the node does not know is
+   ranked by step 6 alone.
+6. Otherwise the best score, where a path is scored only once it has
    `node.path.min_samples` round trips. A move on score away from the
    active path is held while the active path is the faster of the two at
    its best over the last 60 seconds, unless the other path also beats the
@@ -262,8 +268,26 @@ times one plus the least round trip over 100 ms, lower being better. A
 discretionary move needs another path to beat the active one by the margin
 (1.3) for the dwell (2 seconds), so two similar paths do not swap. Whole
 millisecond round trips on a LAN put a cable and Wi-Fi inside that margin,
-which is what `role: preferred` is for: without it the handshake race, not
-the operator, decides which of the two carries traffic.
+so round trip alone leaves the link on whichever path the handshake race
+gave it, and the medium decides between them instead.
+
+**The medium of a path** is that of its local transport, as the node reads
+it. An interface-bound transport reads its interface's medium when it
+binds the interface, at start and again after the interface changes, never
+on the send path. On Linux an interface with a `wireless` directory, a
+`phy80211` link or `DEVTYPE=wlan` under `/sys/class/net/<interface>` is
+wireless, and an Ethernet-framed interface backed by hardware that names
+no device type is wired. On macOS the node reads the interface's media
+type (`SIOCGIFMEDIA`), 802.11 or Ethernet; that read has not yet run on a
+Mac, and if Apple's Wi-Fi driver reports Ethernet there, Wi-Fi reads as
+wired and the score decides between the two as before. A bridge, a VLAN, a
+veth, a tunnel or anything else these facts do not settle is unknown,
+since what lies under it may be a radio. A BLE binding is BLE. UDP and TCP
+paths are unknown: where a cable and Wi-Fi share a subnet, as on most home
+LANs, the paths to a peer's two addresses leave by the same interface, so
+a route lookup could not tell them apart. For them, and for any transport
+that does not report a medium, `role: preferred` remains the way to put
+one path ahead of another within the margin.
 
 **Load on the active path does not move the link.** The least round trip
 in a score is taken over the last 32 samples, about 6.4 seconds on the
@@ -276,12 +300,22 @@ keeps its least round trip over a longer horizon (60 seconds), and a move
 on score away from the active path waits while the active path is the
 faster of the two over that horizon, unless the other path also beats the
 active path's score at its best. A load that lasts the whole horizon can
-still move the link, once per horizon. A move to a path that is faster at
-its best is never held, so the return to the fast path after an outage
-under load keeps its timing, and failure, the pin, the tier, the
-`FilterAnnounce` size and `role: preferred` move the link as before. The
-cost is that a path whose base round trip really rises, after a route
-change for example, keeps the link for up to the horizon unless it fails.
+still move the link, once per horizon. A move on score to a path that is
+faster at its best is not held, so the return to the fast path after an
+outage under load keeps its timing, except a move off a path on a faster
+known medium that is within the margin of the other at their best, a
+loaded cable beside Wi-Fi: the cable's medium would take the link back one
+dwell later, so that move waits out the horizon too. A move to a faster
+known medium waits the same way while the path it would take scores
+outside the margin of the active path's score over the horizon. Idle, the
+active path's two scores agree and a cable within the margin of Wi-Fi
+takes the link after the dwell; but load on Wi-Fi that is faster at its
+best than a cable outside the margin of it would rank the cable first
+within seconds, and the Wi-Fi would take the link back once the load
+followed. Failure, the pin, the tier, the `FilterAnnounce` size and
+`role: preferred` move the link as before. The cost is that a path whose
+base round trip really rises, after a route change for example, keeps the
+link for up to the horizon unless it fails.
 
 **The return after a failure needs no margin.** When the active path fails
 and the link moves to a slower one, the traffic follows it, but the slower

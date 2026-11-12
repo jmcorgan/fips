@@ -87,6 +87,10 @@ pub struct LoopbackTransport {
     /// The instance name the transport reports, standing in for a
     /// configured instance's name; none unless a test set one.
     name: Option<String>,
+    /// The medium the transport reports, standing in for the one an
+    /// interface-bound transport reads from its interface; unknown unless
+    /// a test set one.
+    medium: fips_core::proto::path::Medium,
 }
 
 impl LoopbackTransport {
@@ -122,6 +126,7 @@ impl LoopbackTransport {
             autoconnect: AtomicBool::new(false),
             role: crate::config::TransportRole::Normal,
             name: None,
+            medium: fips_core::proto::path::Medium::Unknown,
         }
     }
 
@@ -134,6 +139,17 @@ impl LoopbackTransport {
     /// with that `role` does.
     pub fn set_role(&mut self, role: crate::config::TransportRole) {
         self.role = role;
+    }
+
+    /// Report `medium` from now on, as an interface-bound transport does
+    /// once it has read its interface's medium.
+    pub fn set_medium(&mut self, medium: fips_core::proto::path::Medium) {
+        self.medium = medium;
+    }
+
+    /// The medium a test set, `Unknown` by default.
+    pub fn medium(&self) -> fips_core::proto::path::Medium {
+        self.medium
     }
 
     /// Report `name` as this transport's instance name from now on, as a

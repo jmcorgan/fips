@@ -58,10 +58,9 @@ impl Facts for NodeFacts<'_> {
     }
 
     fn medium(&self, transport: TransportId, _addr: &TransportAddr) -> Medium {
-        match self.transports.get(&transport) {
-            Some(handle) if is_ble(handle) => Medium::Ble,
-            Some(_) | None => Medium::Unknown,
-        }
+        self.transports
+            .get(&transport)
+            .map_or(Medium::Unknown, TransportHandle::medium)
     }
 
     fn oriented(&self, transport: TransportId) -> bool {
@@ -101,17 +100,6 @@ impl Facts for NodeFacts<'_> {
         // the ACL denies is dialled on no transport.
         !self.denied && self.transports.contains_key(&transport)
     }
-}
-
-/// Whether `handle` is a BLE transport, which holds one path per binding
-/// (draft Section 5.1).
-fn is_ble(handle: &TransportHandle) -> bool {
-    #[cfg(ble_available)]
-    if matches!(handle, TransportHandle::Ble(_)) {
-        return true;
-    }
-    let _ = handle;
-    false
 }
 
 /// The anonymity class of a transport of type `ty` (draft Section 3).

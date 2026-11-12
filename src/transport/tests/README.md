@@ -21,6 +21,18 @@ private items.
   `SendFailed` of it shows, the kernel's `ENETUNREACH`, `EHOSTUNREACH`
   and `ENETDOWN` among them, while leaving any other error a
   `SendFailed`, neither of them transient.
+- `medium.rs`: declared from `../medium.rs` as its `tests` module. The
+  medium classifiers, which are pure, from facts captured on a Linux VM
+  host's interfaces and from the layouts the kernel gives a Wi-Fi interface:
+  an 802.11 interface is wireless by any of `wireless`, `phy80211` or
+  `DEVTYPE=wlan`; an Ethernet-framed interface backed by hardware with no
+  device type is wired; a bridge, a veth, a tunnel, the loopback interface,
+  a WWAN or VLAN device and an absent interface are unknown. The sysfs read
+  gives back the facts a temporary tree lays out the way sysfs does, and a
+  name that would leave `/sys/class/net` is unknown without a read. BSD
+  media words, built from `<net/if_media.h>` rather than captured on a Mac,
+  are classified by their type bits. The macOS read itself
+  (`SIOCGIFMEDIA`) is compiled by the cross-check and not run.
 - `sockbuf.rs`: declared from `../sockbuf.rs` as its `tests` module. A
   buffer sized through `set_buffer` is never smaller than the plain socket
   option alone gives and is what the kernel reports, with or without
