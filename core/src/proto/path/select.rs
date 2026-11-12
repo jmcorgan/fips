@@ -82,7 +82,10 @@ pub fn carried(link: usize, proven: Option<usize>, oriented: bool) -> usize {
 /// oversized probe closes the connection, so a size proven below the link
 /// MTU may say only that a probe was lost, and the path keeps its link MTU.
 pub fn heeded(oriented: bool) -> bool {
-    !node_fault!(ProvenMtuUnused) && (!oriented || node_fault!(ProvenMtuOnStreams))
+    if node_fault!(ProvenMtuUnused) {
+        return false;
+    }
+    !oriented || node_fault!(ProvenMtuOnStreams)
 }
 
 /// The score of the path whose liveness is `live`: the quality index of
