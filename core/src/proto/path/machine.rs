@@ -78,8 +78,13 @@
 //! its own cadence, whatever its state, go no sooner than
 //! `PATH_DEAD_PROBE_INTERVAL_MIN` after the stop and after the first, and
 //! each later gap at least doubles, up to `PATH_DEAD_PROBE_INTERVAL_MAX`;
-//! a connection asked for in place of such a probe counts as one, and the
-//! probe sent when it opens starts the next gap. Exempt, neither held nor
+//! a path that was our active path when it left Live, or is at the stop,
+//! is first re-checked every `PATH_DEAD_PROBE_INTERVAL_MIN` until
+//! `PATH_DEAD_RECHECK_SPAN` after it went silent, its gaps doubling only
+//! from there, so a silent outage of the path that carried the link is
+//! found within about a second of its end; a connection asked for in
+//! place of such a probe counts as one, and the probe sent when it opens
+//! starts the next gap. Exempt, neither held nor
 //! counted: the probe at once when the peer's probe brings a Dead path
 //! back, those Section 5.7 requires at once, the early probe when the peer
 //! clears `ACTIVE`, and the probe sent when a connection opens. An answer
@@ -2091,13 +2096,14 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// path back from Dead ends it.
     fn stopped(&mut self, i: usize, now: C::Instant) -> Option<C::Instant> {
         let probing = self.state(i) == Some(PathState::Probing);
+        let active = self.set.active_index() == Some(i);
         let live = self.set.path_mut(i)?.live_mut();
         if !probing
             && !live.stopped()
             && let Some(at) = live.quiet().map(|quiet| deadline(quiet, PATH_SILENCE_MAX))
             && at <= now
         {
-            live.halt(at);
+            live.halt(at, active);
         }
         live.held()
     }
@@ -2398,8 +2404,12 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// proven so is no worse off than a link of one path between two nodes
     /// whose MTUs differ. Each change of the size proven goes to the shell
     /// in an `Output::Proven`, and a Live path proven below its link MTU
-    /// searches upward beside these probes ([`Self::seek`]). Otherwise the
-    /// probe is of the smallest size. It goes unanswered
+    /// searches upward beside these probes ([`Self::seek`]). A Dead path
+    /// on a connection-oriented transport, re-checked after it carried the
+    /// link, that has proven a size is probed at that size, not on the
+    /// ladder, so its probes never close the connection with one oversized.
+    /// On a connectionless transport such a path keeps the ladder, so a
+    /// path whose MTU shrank during its outage is still found. Otherwise the probe is of the smallest size. It goes unanswered
     /// after the probe timeout. Nothing goes when the path's ring is full.
     fn send(&mut self, i: usize, now: C::Instant, env: &Env<'_>, out: &mut Outputs<D>) {
         let flags = self.flags(i);
@@ -2410,14 +2420,19 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             return;
         };
         let to = pair(path);
-        let len = match path.state() {
-            PathState::Probing | PathState::Dead => path.live().size(
-                env.facts
-                    .mtu(to.transport, &to.addr)
-                    .saturating_sub(FRAME_OVERHEAD)
-                    .max(PATH_PROBE_MIN_SIZE),
-            ),
-            PathState::Live | PathState::Suspect => PATH_PROBE_MIN_SIZE,
+        let full = env
+            .facts
+            .mtu(to.transport, &to.addr)
+            .saturating_sub(FRAME_OVERHEAD)
+            .max(PATH_PROBE_MIN_SIZE);
+        let live = path.live();
+        let proven = live
+            .mtu()
+            .filter(|_| live.recheck().is_some() && env.facts.oriented(to.transport));
+        let len = match (path.state(), proven) {
+            (PathState::Dead, Some(mtu)) => mtu.clamp(PATH_PROBE_MIN_SIZE, full),
+            (PathState::Probing | PathState::Dead, _) => live.size(full),
+            (PathState::Live | PathState::Suspect, _) => PATH_PROBE_MIN_SIZE,
         };
         let path_id = path.path_id();
         let live = path.live_mut();
@@ -2567,8 +2582,10 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// the peer marks `ACTIVE`, else the standby interval. Probing: from
     /// the active interval, doubling with each unanswered probe up to the
     /// heartbeat interval. Dead: from the standby interval, doubling up to
-    /// the Dead cap. On a path that has stopped answering the floor may
-    /// hold a probe later than this.
+    /// the Dead cap, or, while its stop re-checks a path that carried the
+    /// link, the stop's least gap within the same bounds: the standby
+    /// interval through the span, then doubling. On a path that has
+    /// stopped answering the floor may hold a probe later than this.
     fn interval(&self, i: usize) -> Duration {
         let cfg = &self.params.cfg;
         let Some(p) = self.set.get(i) else {
@@ -2577,7 +2594,10 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         let misses = p.live().misses();
         match p.state() {
             PathState::Probing => backoff(misses, cfg.active_interval, cfg.heartbeat),
-            PathState::Dead => backoff(misses, cfg.standby_interval, cfg.dead_interval),
+            PathState::Dead => match p.live().recheck() {
+                Some(gap) => gap.min(cfg.dead_interval).max(cfg.standby_interval),
+                None => backoff(misses, cfg.standby_interval, cfg.dead_interval),
+            },
             PathState::Live | PathState::Suspect => {
                 if self.set.active_index() == Some(i) || p.live().peer() {
                     cfg.active_interval
@@ -2652,10 +2672,11 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// starts the unanswered count again (draft Section 5.6, path
     /// lifetime), and leaving Dead also keeps a probe still outstanding
     /// from before from counting when it times out. Leaving Live records
-    /// the instant. Entering Dead gives up the outstanding probes,
-    /// schedules the Dead cadence's first probe a standby interval on, and
-    /// stops the path answering, unless the silence clock stopped it sooner
-    /// or it already holds a stop.
+    /// the instant, and whether the path was our active path then.
+    /// Entering Dead gives up the outstanding probes, schedules the Dead
+    /// cadence's first probe a standby interval on, and stops the path
+    /// answering, unless the silence clock stopped it sooner or it already
+    /// holds a stop.
     fn shift(
         &mut self,
         i: usize,
@@ -2668,6 +2689,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             return;
         };
         let standby = self.params.cfg.standby_interval;
+        let active = self.set.active_index() == Some(i);
         if next == PathState::Dead {
             // Judged in the state the path is leaving: the sooner of the
             // two ways to stop answering holds.
@@ -2681,12 +2703,12 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 live.thaw();
             }
             if from == PathState::Live && next != PathState::Live {
-                live.left(now);
+                live.left(now, active);
             }
             if next == PathState::Dead {
                 live.clear();
                 live.schedule(Some(deadline(now, standby)));
-                live.halt(now);
+                live.halt(now, active);
             }
         }
         self.note(i, Some(from), why, out);

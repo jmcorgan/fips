@@ -257,8 +257,19 @@ module of that file, sees its private items and keeps its test names.
   floor's instant and not at each interval; the floor capped by the
   bound, not `Config::dead_interval`; a connection opened for a counted
   slot, after the revival's own connection took the first, starting the
-  next gap at its probe; and a stopped Probing path
-  keeping its stop when the peer's probe arrives.
+  next gap at its probe; a stopped Probing path
+  keeping its stop when the peer's probe arrives; the active path, silent
+  for 20 s with no carrier change, Live again within 1.5 s of the
+  outage's end; its re-check every second on its own cadence until 30 s
+  after it went silent, at most one probe a second, then gaps that grow
+  again to the cap (checked against the file's own `recheck_breaks`); a
+  silent standby keeping the doubling while the active path answers; the
+  silent active path brought back by the peer's probe within its span
+  probed at once; the re-check probes of a path that carried the link
+  going at the size it proved on a connection-oriented transport, not
+  down the ladder; and such a path on a connectionless transport, whose
+  wire returns narrower than the size it proved, stepping down the ladder
+  and Live again within 5 s.
 - `hold.rs`: the hold on a link's cost across a change of active path
   (`proto::path::tests::hold::...`), driven as `choice.rs` drives its
   tests and with its helpers and `pin.rs`'s `pin`, the link's cost set in
@@ -370,12 +381,16 @@ module of that file, sees its private items and keeps its test names.
   horizon after it, delivered probes bring the ETX toward one at the long
   average's rate, the receive counts wrap modulo 2^32, a path's count of
   authentication failures saturates rather than wrapping, a stop keeps its
-  first instant and its gaps double up to the bound, the silence clock starts
-  at the earliest probe since the last matching answer, only an answer in time
-  is a matching one, a connection's slot moves the next free instant to its
-  opening without doubling, a probe sent before the path left Dead times out
-  uncounted while an answer to it in time still matches, and the first counted
-  `probe_id` is dropped once no probe before it is outstanding.
+  first instant and its gaps double up to the bound, a stop on a path that
+  left Live as the active path keeps a 1 s gap until 30 s after it went silent
+  and then doubles, taking that span once per departure from Live, while a
+  standby's stop takes none and the active path at its stop, with no silence
+  clock, takes it from the stop, the silence clock starts at the earliest
+  probe since the last matching answer, only an answer in time is a matching
+  one, a connection's slot moves the next free instant to its opening without
+  doubling, a probe sent before the path left Dead times out uncounted while
+  an answer to it in time still matches, and the first counted `probe_id` is
+  dropped once no probe before it is outstanding.
 - `mod.rs`: declares `shell`, `exchange`, `account`, `liveness`,
   `active`, `admit`, `capability`, `close`, `charge`, `choice`, `connect`,
   `damping`, `disabled`, `floor`, `hold`, `intake`, `mtu`, `pin`,

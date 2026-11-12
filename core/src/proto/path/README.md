@@ -83,31 +83,34 @@ its node code steps it and acts on what it decides.
   instant from which its next probe on its own cadence may go, the least gap
   after that one, doubling from `PATH_DEAD_PROBE_INTERVAL_MIN` to
   `PATH_DEAD_PROBE_INTERVAL_MAX` with each probe counted (`halt`, `held`,
-  `spend`), and whether the latest slot counted went to a connection, which
-  its opening settles (`owe`, `rebase`); `resume` ends the stop.
-  `Answer::matching` says whether an answer is a matching one: one in time is;
-  a late one is not, anywhere (draft Section 5.6), so it gives a round trip
-  and does not end a stop. For the size of a Probing or Dead path's probes it
-  keeps the first `probe_id` of the path's current state, whether a padded
-  probe sent in that state has timed out, and the length of the latest probe
-  sent in it, all started again by `fresh` at each change of state; `size`
-  gives the next probe's length: padded to the link MTU until a padded probe
-  of the state has timed out, and from then on the next step of a ladder after
-  the probe before (the link MTU, three quarters of it, half of it, the
-  smallest size, and the link MTU again). A probe still outstanding from the
-  state before does not count toward that. It keeps the upward search for the
-  size a Live path carries, in a small record of `u16` sizes: the outstanding
-  search probe, held outside the ring, the smallest size lost and the instant
-  the next may go (`seek_size`, `seek_send`, `seek_answer`, `seek_proved`,
-  `seek_judge`). The search tries the link MTU first, then halfway between the
-  size proven and the smallest lost, ends within `SEEK_STEP` (32 bytes) and
-  starts again `SEEK_RAISE` (ten minutes) later; a search probe is lost only
-  once its timeout has passed and a probe sent after it has been answered in
-  time, and it is no miss and no ETX sample. `fresh` starts the search afresh.
-  `prove` says whether the proven MTU changed. It also keeps the first
-  `probe_id` sent since the path last left Dead (`thaw`): an earlier probe
-  still outstanding then times out counting toward no unanswered count, and
-  the mark is dropped once no such probe is outstanding. Fixed arrays only, so
+  `spend`), or, for a path that was our active path when it last left Live
+  (`left`) or is at the stop, held at `PATH_DEAD_PROBE_INTERVAL_MIN` until
+  `PATH_DEAD_RECHECK_SPAN` after its silence clock started (`recheck`), and
+  whether the latest slot counted went to a connection, which its opening
+  settles (`owe`, `rebase`); `resume` ends the stop. `Answer::matching` says
+  whether an answer is a matching one: one in time is; a late one is not,
+  anywhere (draft Section 5.6), so it gives a round trip and does not end a
+  stop. For the size of a Probing or Dead path's probes it keeps the first
+  `probe_id` of the path's current state, whether a padded probe sent in that
+  state has timed out, and the length of the latest probe sent in it, all
+  started again by `fresh` at each change of state; `size` gives the next
+  probe's length: padded to the link MTU until a padded probe of the state has
+  timed out, and from then on the next step of a ladder after the probe before
+  (the link MTU, three quarters of it, half of it, the smallest size, and the
+  link MTU again). A probe still outstanding from the state before does not
+  count toward that. It keeps the upward search for the size a Live path
+  carries, in a small record of `u16` sizes: the outstanding search probe,
+  held outside the ring, the smallest size lost and the instant the next may
+  go (`seek_size`, `seek_send`, `seek_answer`, `seek_proved`, `seek_judge`).
+  The search tries the link MTU first, then halfway between the size proven
+  and the smallest lost, ends within `SEEK_STEP` (32 bytes) and starts again
+  `SEEK_RAISE` (ten minutes) later; a search probe is lost only once its
+  timeout has passed and a probe sent after it has been answered in time, and
+  it is no miss and no ETX sample. `fresh` starts the search afresh. `prove`
+  says whether the proven MTU changed. It also keeps the first `probe_id` sent
+  since the path last left Dead (`thaw`): an earlier probe still outstanding
+  then times out counting toward no unanswered count, and the mark is dropped
+  once no such probe is outstanding. Fixed arrays only, so
   nothing in it allocates. Its accessors are public and read-only; what
   changes it is visible only inside this module.
 - `machine.rs`: `Bundle<C, E, D>`, the machine of one link's paths, over
@@ -210,7 +213,12 @@ its node code steps it and acts on what it decides.
   every 200 ms, a standby every second, a Probing path from 200 ms
   doubling to the heartbeat interval, and an acked Dead path from one
   second doubling to 30 seconds, which at the defaults meets the floor
-  below exactly. Each probe schedules the next at the
+  below exactly, except that a Dead path re-checked after it carried the
+  link is probed at the floor's gap, every second through the span and
+  doubling after it; on a connection-oriented transport it goes at the
+  size it has proven where it has proven one, not on the ladder, and on a
+  connectionless one it keeps the ladder, so a path narrower after its
+  outage is still found. Each probe schedules the next at the
   interval of the moment it went, and the send phase brings a path's next
   probe to no later than one interval of its cadence, so a path answered
   back to Live, made our active path or marked `ACTIVE` by the peer is
@@ -242,7 +250,14 @@ its node code steps it and acts on what it decides.
   probes on its own cadence, in whatever state, wait at least 1 s after
   the stop and after the first, and each later gap at least doubles, up
   to 30 s (`PATH_DEAD_PROBE_INTERVAL_MIN` and `_MAX`, constants, not
-  `Config::dead_interval`). A connection asked for in place of such a
+  `Config::dead_interval`). A path that was our active path when it left
+  Live, or is at the stop, is re-checked first: its gaps stay 1 s until
+  30 s after it went silent (`PATH_DEAD_RECHECK_SPAN`, a constant), and
+  double from there, so a silent outage of the path that carried the
+  link is found within about a second of its end. The draft's floor
+  doubles on every path; this span is a bound of an amendment to Section
+  5.6 not yet in the draft. A stop takes the re-check once each time the
+  path leaves Live. A connection asked for in place of such a
   probe counts as one, and when it opens the next probe waits that
   slot's gap from the opening. The probe at once when the peer's probe
   brings a Dead path back, those Section 5.7 requires at once, the early

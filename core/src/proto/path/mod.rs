@@ -52,8 +52,8 @@ pub use capable::Capability;
 pub use live::{Answer, Liveness, Sent};
 pub use machine::{Account, Bundle, Charge, PathView, PinView, View};
 pub use params::{
-    Config, PATH_DEAD_PROBE_INTERVAL_MAX, PATH_DEAD_PROBE_INTERVAL_MIN, PATH_SILENCE_MAX, Params,
-    ParamsError, RING,
+    Config, PATH_DEAD_PROBE_INTERVAL_MAX, PATH_DEAD_PROBE_INTERVAL_MIN, PATH_DEAD_RECHECK_SPAN,
+    PATH_SILENCE_MAX, Params, ParamsError, RING,
 };
 pub use rules::{Rule, Scope};
 pub use select::{Pin, carried, heeded};

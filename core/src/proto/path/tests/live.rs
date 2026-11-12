@@ -1,5 +1,5 @@
 //! Tests of `live.rs`: the probe ring, the round-trip window, the ETX
-//! fold and the receive counts.
+//! fold, the receive counts and the stop with its re-check.
 
 use super::*;
 use crate::testutil::TestInstant;
@@ -164,8 +164,8 @@ fn a_paths_failure_count_saturates() {
 fn a_stop_keeps_its_first_instant_and_its_gaps_double_up_to_the_bound() {
     let mut l: Liveness<TestInstant> = Liveness::new();
     assert!(!l.stopped());
-    l.halt(at(0));
-    l.halt(at(500));
+    l.halt(at(0), false);
+    l.halt(at(500), false);
     assert!(l.stopped());
     assert_eq!(l.held(), Some(at(1_000)), "the first stop's instant holds");
     // Each probe counted at the instant the floor frees: the gap after it
@@ -180,13 +180,73 @@ fn a_stop_keeps_its_first_instant_and_its_gaps_double_up_to_the_bound() {
 }
 
 #[test]
+fn a_stop_on_a_path_that_carried_the_link_keeps_a_one_second_gap_for_the_span_after_it_went_silent()
+{
+    // Silent from 5 s, left Live as the active path, stopped at 14 s: each
+    // gap stays 1 s until 35 s, 30 s after it went silent, then doubles.
+    let mut l: Liveness<TestInstant> = Liveness::new();
+    l.send(at(5_000), at(5_400), 27, || 1).unwrap();
+    l.left(at(5_600), true);
+    l.halt(at(14_000), false);
+    assert_eq!(
+        l.recheck(),
+        Some(Duration::from_secs(1)),
+        "defect: the stop of a path that left Live as the active path re-checks it"
+    );
+    let mut sent = Vec::new();
+    while sent.len() < 26 {
+        let at = l.held().unwrap();
+        l.spend(at);
+        sent.push(at.0);
+    }
+    let gaps: Vec<u64> = sent.windows(2).map(|w| w[1] - w[0]).collect();
+    assert_eq!(&gaps[..20], [1_000; 20], "1 s through the span: {sent:?}");
+    assert_eq!(
+        &gaps[20..],
+        [1_000, 2_000, 4_000, 8_000, 16_000],
+        "doubling from the span's end: {sent:?}"
+    );
+    // A second stop without leaving Live again takes no second span.
+    l.resume();
+    l.send(at(100_000), at(100_400), 27, || 1).unwrap();
+    l.halt(at(101_000), false);
+    assert_eq!(l.recheck(), None, "the span is taken once per departure");
+}
+
+#[test]
+fn a_stop_on_a_standby_takes_no_recheck_and_the_active_path_at_the_stop_does() {
+    let mut l: Liveness<TestInstant> = Liveness::new();
+    l.left(at(0), false);
+    l.halt(at(10_000), false);
+    assert_eq!(l.recheck(), None, "a standby doubles as before");
+    let mut l: Liveness<TestInstant> = Liveness::new();
+    l.halt(at(10_000), true);
+    assert_eq!(
+        l.recheck(),
+        Some(Duration::from_secs(1)),
+        "defect: the active path at its stop re-checked, with no silence clock from the stop"
+    );
+    for k in 0..29u64 {
+        l.spend(at(11_000 + k * 1_000));
+    }
+    assert_eq!(l.held(), Some(at(40_000)), "1 s gaps up to 40 s");
+    l.spend(at(40_000));
+    assert_eq!(
+        l.held(),
+        Some(at(41_000)),
+        "the last 1 s gap, from the span's end"
+    );
+    assert_eq!(l.recheck(), Some(Duration::from_secs(2)), "then doubling");
+}
+
+#[test]
 fn the_silence_clock_starts_at_the_earliest_probe_since_the_last_matching_answer() {
     let mut l: Liveness<TestInstant> = Liveness::new();
     assert_eq!(l.quiet(), None);
     l.send(at(0), at(400), 27, || 1).unwrap();
     l.send(at(5), at(405), 27, || 1).unwrap();
     assert_eq!(l.quiet(), Some(at(0)), "the earliest probe sets the clock");
-    l.halt(at(60_000));
+    l.halt(at(60_000), false);
     l.resume();
     assert_eq!((l.quiet(), l.held()), (None, None), "resumed");
     l.send(at(7), at(407), 27, || 1).unwrap();
@@ -211,7 +271,7 @@ fn only_an_answer_in_time_is_a_matching_one() {
 fn a_connection_slot_moves_the_next_free_instant_to_its_opening_without_doubling() {
     let counted = || {
         let mut l: Liveness<TestInstant> = Liveness::new();
-        l.halt(at(0));
+        l.halt(at(0), false);
         l.spend(at(10_000));
         l
     };

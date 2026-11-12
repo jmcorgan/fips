@@ -46,15 +46,21 @@
 //! (draft Section 5.6), its stop holds the instant from which its next
 //! probe on its own cadence may go and the least gap after that one, which
 //! doubles with each probe counted, from `PATH_DEAD_PROBE_INTERVAL_MIN` up
-//! to `PATH_DEAD_PROBE_INTERVAL_MAX`. The machine decides when a path
-//! stops and which probes count.
+//! to `PATH_DEAD_PROBE_INTERVAL_MAX`. A path that was our active path when
+//! it last left Live, or is at the stop, is re-checked first: its least
+//! gap stays `PATH_DEAD_PROBE_INTERVAL_MIN` until
+//! `PATH_DEAD_RECHECK_SPAN` after its silence clock started, and doubles
+//! from there. The machine decides when a path stops and which probes
+//! count.
 //!
 //! Sans-IO, with no allocation: the probe ring, the record of timed-out
 //! probes and the round-trip samples are fixed arrays. Every accessor is
 //! read-only; every method that changes a `Liveness` is visible only inside
 //! the path module, for the machine.
 
-use super::params::{PATH_DEAD_PROBE_INTERVAL_MAX, PATH_DEAD_PROBE_INTERVAL_MIN, RING};
+use super::params::{
+    PATH_DEAD_PROBE_INTERVAL_MAX, PATH_DEAD_PROBE_INTERVAL_MIN, PATH_DEAD_RECHECK_SPAN, RING,
+};
 use super::wire::PATH_PROBE_MIN_SIZE;
 use crate::proto::mmp::EWMA_LONG_ALPHA;
 use crate::time::{Duration, Instant, deadline};
@@ -152,6 +158,9 @@ struct Stop<I> {
     gap: Duration,
     /// The gap the latest probe counted used.
     used: Duration,
+    /// For a path re-checked after it carried the link, the instant until
+    /// which the least gap stays `PATH_DEAD_PROBE_INTERVAL_MIN`.
+    until: Option<I>,
     /// Whether the latest slot counted went to a connection asked for in
     /// place of a probe, not yet settled.
     owed: bool,
@@ -260,6 +269,9 @@ pub struct Liveness<I> {
     data_at: Option<I>,
     /// When the path last left Live.
     live_at: Option<I>,
+    /// Whether the path was our active path when it last left Live, until
+    /// a stop takes that for its re-check.
+    carried: bool,
     /// Frames of the link that failed to authenticate on the path since
     /// the latest authentic one (draft Section 5.3).
     fails: u32,
@@ -312,6 +324,7 @@ impl<I: Instant> Liveness<I> {
             heard_at: None,
             data_at: None,
             live_at: None,
+            carried: false,
             fails: 0,
             trip: None,
             connect: Link::Up,
@@ -421,13 +434,22 @@ impl<I: Instant> Liveness<I> {
     /// Record that the path stopped answering at `at`, unless it already
     /// has: its next probe on its own cadence goes no sooner than
     /// `PATH_DEAD_PROBE_INTERVAL_MIN` after `at`, and the one after that no
-    /// sooner than the same again after it.
-    pub(super) fn halt(&mut self, at: I) {
+    /// sooner than the same again after it. A path that is our active path
+    /// (`active`), or was when it last left Live, is re-checked: its least
+    /// gap stays `PATH_DEAD_PROBE_INTERVAL_MIN` until
+    /// `PATH_DEAD_RECHECK_SPAN` after its silence clock started, or after
+    /// `at` with no silence clock running. A stop takes the re-check once
+    /// for each time the path leaves Live.
+    pub(super) fn halt(&mut self, at: I, active: bool) {
         if self.stop.is_none() {
+            let recheck = (active || self.carried) && !node_fault!(DeadRecheckDoubles);
+            let from = self.quiet.unwrap_or(at);
+            self.carried = false;
             self.stop = Some(Stop {
                 free: deadline(at, PATH_DEAD_PROBE_INTERVAL_MIN),
                 gap: PATH_DEAD_PROBE_INTERVAL_MIN,
                 used: PATH_DEAD_PROBE_INTERVAL_MIN,
+                until: recheck.then(|| deadline(from, PATH_DEAD_RECHECK_SPAN)),
                 owed: false,
             });
         }
@@ -444,14 +466,26 @@ impl<I: Instant> Liveness<I> {
         self.stop.map(|s| s.free)
     }
 
+    /// While the path has stopped answering and its stop carries a
+    /// re-check, the least gap after its next probe on its own cadence:
+    /// `PATH_DEAD_PROBE_INTERVAL_MIN` within the span, doubling after it.
+    pub(super) fn recheck(&self) -> Option<Duration> {
+        self.stop.filter(|s| s.until.is_some()).map(|s| s.gap)
+    }
+
     /// Count a slot of the path's own cadence used at `at`, while it has
     /// stopped answering: the next waits the least gap, which then doubles
-    /// up to `PATH_DEAD_PROBE_INTERVAL_MAX`.
+    /// up to `PATH_DEAD_PROBE_INTERVAL_MAX`, except within a re-check's
+    /// span, where it stays `PATH_DEAD_PROBE_INTERVAL_MIN`.
     pub(super) fn spend(&mut self, at: I) {
         if let Some(s) = self.stop.as_mut() {
             s.used = s.gap;
             s.free = deadline(at, s.gap);
-            s.gap = s.gap.saturating_mul(2).min(PATH_DEAD_PROBE_INTERVAL_MAX);
+            s.gap = if s.until.is_some_and(|until| at < until) {
+                PATH_DEAD_PROBE_INTERVAL_MIN
+            } else {
+                s.gap.saturating_mul(2).min(PATH_DEAD_PROBE_INTERVAL_MAX)
+            };
             s.owed = false;
         }
     }
@@ -490,9 +524,11 @@ impl<I: Instant> Liveness<I> {
         self.live_at
     }
 
-    /// Record that the path left Live at `now`.
-    pub(super) fn left(&mut self, now: I) {
+    /// Record that the path left Live at `now`, and whether it was our
+    /// active path then (`active`).
+    pub(super) fn left(&mut self, now: I, active: bool) {
         self.live_at = Some(now);
+        self.carried = active;
     }
 
     /// Whether the peer's latest probe or matched ack on the path said it

@@ -352,6 +352,11 @@ faults! {
     /// `FilterAnnounce`, at a smaller rung of the ladder for as long as the
     /// path is Live.
     ProvenMtuOnStreams,
+    /// A path that carried the link and went silent is re-checked on the
+    /// doubling cadence like any other, so after a silent outage it waits
+    /// for the doubling's next slot, up to 30 s later, before it is found
+    /// again.
+    DeadRecheckDoubles,
 }
 
 impl Fault {

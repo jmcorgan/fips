@@ -8,7 +8,8 @@
 //! values of the multipath v1 draft, Appendix A. The draft's bounds on a
 //! path that has stopped answering, [`PATH_SILENCE_MAX`],
 //! [`PATH_DEAD_PROBE_INTERVAL_MIN`] and [`PATH_DEAD_PROBE_INTERVAL_MAX`],
-//! are constants, not settings: no node chooses a bound.
+//! and the re-check span [`PATH_DEAD_RECHECK_SPAN`], are constants, not
+//! settings: no node chooses a bound.
 
 use thiserror::Error;
 
@@ -31,6 +32,16 @@ pub const PATH_DEAD_PROBE_INTERVAL_MIN: Duration = Duration::from_secs(1);
 /// cadence of a path that has stopped answering (draft Section 5.6;
 /// `PATH_DEAD_PROBE_INTERVAL_MAX`, Appendix A).
 pub const PATH_DEAD_PROBE_INTERVAL_MAX: Duration = Duration::from_secs(30);
+
+/// How long after a path that carried the link went silent it is
+/// re-checked every [`PATH_DEAD_PROBE_INTERVAL_MIN`] before the doubling
+/// toward [`PATH_DEAD_PROBE_INTERVAL_MAX`] starts. The draft (Section 5.6)
+/// doubles every stopped path's gaps from the second on; this span is the
+/// bound of an amendment to it not yet in the draft, so that a silent
+/// outage of the path that carried the link is found within about a
+/// second of its end and not at the next slot of the doubling, up to 30 s
+/// later.
+pub const PATH_DEAD_RECHECK_SPAN: Duration = Duration::from_secs(30);
 
 /// The shortest round-trip window.
 const WINDOW: Duration = Duration::from_secs(30);

@@ -160,7 +160,13 @@ answered but do not decide this node's view.
   and every second otherwise.
 - **Suspect:** three probes in a row unanswered. Probed at the same cadence.
 - **Dead:** ten more unanswered, or given up. An acked path is probed from
-  one second, doubling to 30 seconds. A path never acked is not probed.
+  one second, doubling to 30 seconds. The path that carried the link when
+  it went silent is probed every second until 30 seconds after it went
+  silent, and doubles from there, so after a silent outage, one that
+  neither end sees as a carrier change, it is found again within about a
+  second of the outage's end. On a connection-oriented transport those
+  probes go at the size the path proved, so none closes the connection.
+  A path never acked is not probed.
 
 A probe goes unanswered at the largest of 400 ms, three times the latest
 round trip, and three times the largest round trip in the path's window,

@@ -300,7 +300,7 @@ VerdictUncapped	red	fips-core	proto::path::tests::verdict::a_probe_whose_timeout
 VerdictUncapped	red	fips-core	proto::path::tests::verdict::the_timeout_follows_the_largest_round_trip_in_the_window_up_to_the_cap
 VerdictUncapped	red	fips-core	proto::path::tests::sim::the_receive_counts_of_each_path_match_the_frames_its_wire_delivered	switch:
 VerdictUncapped	red	fips-core	proto::path::tests::sim::the_cost_seen_by_the_tree_is_held_across_every_switch	switch:
-VerdictUncapped	red	fips-core	proto::path::tests::sim::two_nodes_prove_every_path_at_both_ends_once_healed	switch:
+VerdictUncapped	red	fips-core	proto::path::tests::sim::two_nodes_prove_every_path_at_both_ends_once_healed	live:
 VerdictUncapped	red	fips-core	proto::path::tests::sim::a_run_replays_byte_for_byte_from_its_seed	switch:
 VerdictCountsControl	red	fips-mesh	node::tests::path_accept::a_path_that_stops_carrying_our_frames_but_still_brings_the_peers_is_left_after_k_unanswered_probes	A left p within 3 s of the cut
 VerdictCountsControl	red	fips-core	proto::path::tests::liveness::three_unanswered_probes_make_a_live_path_suspect_while_frames_still_arrive_on_it	assertion `left == right` failed
@@ -329,3 +329,11 @@ ProvenMtuOnlyLowers	pass	fips-mesh	node::tests::path_narrow_hop::a_path_across_a
 ProvenMtuOnStreams	red	fips-mesh	node::tests::path_narrow_hop::a_stream_path_proven_below_its_link_mtu_by_lost_probes_keeps_the_link_mtu_for_the_peer
 ProvenMtuOnStreams	pass	fips-mesh	node::tests::path_narrow_hop::a_path_across_a_hop_narrower_than_its_link_mtu_carries_the_largest_frame_the_node_admits_for_the_peer
 ProvenMtuOnStreams	red	fips-core	proto::path::tests::mtu::a_stream_path_proven_below_its_link_mtu_by_one_lost_probe_still_carries_a_filter_announce
+DeadRecheckDoubles	red	fips-core	proto::path::tests::floor::the_active_path_silent_for_20_s_with_no_carrier_change_is_live_within_1_5_s_of_healing
+DeadRecheckDoubles	red	fips-core	proto::path::tests::floor::the_recheck_of_a_silent_active_path_ends_after_its_span_and_the_doubling_resumes
+DeadRecheckDoubles	red	fips-core	proto::path::tests::floor::the_recheck_probes_of_a_path_that_carried_the_link_on_a_stream_binding_go_at_the_size_it_proved
+DeadRecheckDoubles	red	fips-core	proto::path::live::tests::a_stop_on_a_path_that_carried_the_link_keeps_a_one_second_gap_for_the_span_after_it_went_silent
+DeadRecheckDoubles	red	fips-core	proto::path::live::tests::a_stop_on_a_standby_takes_no_recheck_and_the_active_path_at_the_stop_does
+DeadRecheckDoubles	pass	fips-core	proto::path::tests::floor::a_silent_standby_keeps_the_doubling_floor_while_the_active_path_answers
+DeadRecheckDoubles	pass	fips-core	proto::path::tests::floor::the_silent_active_path_brought_back_by_the_peers_probe_in_its_span_resumes_at_once
+DeadRecheckDoubles	red	fips-core	proto::path::tests::floor::a_path_that_carried_the_link_and_returns_narrower_than_it_proved_steps_down_the_ladder_and_is_found
