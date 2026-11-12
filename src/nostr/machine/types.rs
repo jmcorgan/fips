@@ -11,6 +11,9 @@ pub const ADVERT_KIND: u16 = 37195;
 pub const ADVERT_IDENTIFIER: &str = "fips-overlay-v1";
 pub const ADVERT_VERSION: u32 = 1;
 pub const SIGNAL_KIND: u16 = 21059;
+// Defined with the punch codec; re-exported here beside the other wire
+// constants.
+pub use super::punch::{PUNCH_ACK_MAGIC, PUNCH_MAGIC};
 pub const PROTOCOL_VERSION: &str = "1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

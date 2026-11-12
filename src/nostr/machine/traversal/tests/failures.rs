@@ -1,13 +1,14 @@
 use super::*;
+use crate::nostr::machine::tests::ZeroEntropy;
 
 fn fs() -> FailureState {
     // threshold=3, cooldown=10s, warn-interval=5s, cap=8
-    FailureState::new(3, 10, 5, 8)
+    FailureState::new(3, 10, 5, 8, KeyedHasher::new::<ZeroEntropy>())
 }
 
 #[test]
 fn first_failure_warns_and_no_cooldown() {
-    let s = fs();
+    let mut s = fs();
     let d = s.record_failure("npub1a", 1000);
     assert_eq!(d.consecutive_failures, 1);
     assert!(d.should_warn);
@@ -17,7 +18,7 @@ fn first_failure_warns_and_no_cooldown() {
 
 #[test]
 fn warn_suppressed_inside_window_then_unsuppressed_after() {
-    let s = fs();
+    let mut s = fs();
     let d1 = s.record_failure("npub1a", 1000);
     let d2 = s.record_failure("npub1a", 1500);
     assert!(d1.should_warn);
@@ -32,7 +33,7 @@ fn warn_suppressed_inside_window_then_unsuppressed_after() {
 
 #[test]
 fn streak_threshold_triggers_cooldown_and_signals_crossing() {
-    let s = fs();
+    let mut s = fs();
     let _ = s.record_failure("npub1a", 1000);
     let _ = s.record_failure("npub1a", 1100);
     let d3 = s.record_failure("npub1a", 1200);
@@ -47,7 +48,7 @@ fn streak_threshold_triggers_cooldown_and_signals_crossing() {
 
 #[test]
 fn record_success_clears_streak() {
-    let s = fs();
+    let mut s = fs();
     for t in [1000u64, 1100, 1200, 1300] {
         let _ = s.record_failure("npub1a", t);
     }
@@ -59,7 +60,7 @@ fn record_success_clears_streak() {
 
 #[test]
 fn cooldown_until_returns_only_active_cooldowns() {
-    let s = fs();
+    let mut s = fs();
     for t in [1000u64, 1100, 1200] {
         let _ = s.record_failure("npub1a", t);
     }
@@ -71,7 +72,7 @@ fn cooldown_until_returns_only_active_cooldowns() {
 
 #[test]
 fn note_observed_skew_creates_entry_for_healthy_peer() {
-    let s = fs();
+    let mut s = fs();
     s.note_observed_skew("npub1healthy", 250, 1000);
     let snap = s.snapshot();
     assert_eq!(snap.len(), 1);
@@ -83,7 +84,7 @@ fn note_observed_skew_creates_entry_for_healthy_peer() {
 
 #[test]
 fn record_protocol_mismatch_fresh_entry_returns_true() {
-    let s = fs();
+    let mut s = fs();
     // 24h cooldown
     let cooldown_ms = 24 * 60 * 60 * 1000;
     assert!(
@@ -99,7 +100,7 @@ fn record_protocol_mismatch_fresh_entry_returns_true() {
 
 #[test]
 fn a_repeat_protocol_mismatch_inside_the_cooldown_does_not_extend_it() {
-    let s = fs();
+    let mut s = fs();
     let cooldown_ms = 24 * 60 * 60 * 1000;
     s.record_protocol_mismatch("npub1mismatch", 1000, cooldown_ms);
     for repeat in [
@@ -127,7 +128,7 @@ fn a_repeat_protocol_mismatch_inside_the_cooldown_does_not_extend_it() {
 
 #[test]
 fn a_transient_failure_inside_a_mismatch_cooldown_does_not_shorten_it_past_the_next_mismatch() {
-    let s = fs();
+    let mut s = fs();
     let cooldown_ms = 24 * 60 * 60 * 1000;
     s.record_protocol_mismatch("npub1mismatch", 1000, cooldown_ms);
     // A transient failure past the streak threshold writes its own,
@@ -142,7 +143,7 @@ fn a_transient_failure_inside_a_mismatch_cooldown_does_not_shorten_it_past_the_n
 
 #[test]
 fn record_protocol_mismatch_pins_streak_at_threshold() {
-    let s = fs();
+    let mut s = fs();
     s.record_protocol_mismatch("npub1mismatch", 1000, 60_000);
     // Snapshot reflects the threshold pin so show_peers renders the
     // entry as crossed-threshold.
@@ -156,7 +157,7 @@ fn record_protocol_mismatch_pins_streak_at_threshold() {
 
 #[test]
 fn record_protocol_mismatch_after_old_cooldown_lapsed_signals_fresh() {
-    let s = fs();
+    let mut s = fs();
     let cooldown_ms = 24 * 60 * 60 * 1000;
     s.record_protocol_mismatch("npub1mismatch", 1000, cooldown_ms);
     // Far in the future after cooldown elapsed: a *new* observation
@@ -170,7 +171,7 @@ fn record_protocol_mismatch_after_old_cooldown_lapsed_signals_fresh() {
 
 #[test]
 fn size_cap_evicts_oldest_by_last_failure_at() {
-    let s = fs(); // cap = 8
+    let mut s = fs(); // cap = 8
     for i in 0..10 {
         let npub = format!("npub1{i}");
         let _ = s.record_failure(&npub, 1000 + i as u64);

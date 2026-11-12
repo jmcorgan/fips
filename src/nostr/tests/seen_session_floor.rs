@@ -5,13 +5,15 @@
 //! copy of the offer, so the memory is all that refuses it.
 
 use super::super::FRESHNESS_SKEW_TOLERANCE_MS;
-use super::super::signal::validate_offer_freshness;
-use super::super::signal_gate::{
+use super::super::machine::tests::ZeroEntropy;
+use super::super::machine::traversal::election::{Election, SeenDecision};
+use super::super::machine::traversal::gate::{
     ANSWER_RESERVE_BURST, ANSWER_RESERVE_RATE_PER_SEC, SIGNAL_BURST, SIGNAL_RATE_PER_SEC,
 };
-use super::super::traversal_machine::{SeenDecision, TraversalMachine};
+use super::super::signal::validate_offer_freshness;
 use super::offer_between;
 use crate::config::NostrRendezvousConfig;
+use fips_core::utils::hash::KeyedHasher;
 
 /// The offer's sender and recipient, as the freshness check is given them.
 const SENDER: &str = "npub1sender";
@@ -28,9 +30,10 @@ const RESPONDER: &str = "npub1responder";
 fn a_recorded_session_is_remembered_until_its_offer_can_no_longer_be_fresh() {
     let defaults = NostrRendezvousConfig::default();
     let ttl_ms = defaults.signal_ttl_secs * 1000;
-    let machine = TraversalMachine::new(
+    let mut machine = Election::new(
         defaults.replay_window_secs * 1000,
         defaults.seen_sessions_max_entries,
+        KeyedHasher::new::<ZeroEntropy>(),
     );
 
     let t0 = 1_900_000_000_000u64;

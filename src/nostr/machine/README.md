@@ -46,7 +46,26 @@ host, under the `#[cfg(test)]` the guard requires, and may use `std`.
 ## Files
 
 - `mod.rs`: the module and its fence.
+- `error.rs`: the machine's `Error`. The shell's `types.rs` maps each variant
+  onto the `BootstrapError` variant of the same name with the same text.
+- `params.rs`: `Params`, the configuration values the machine's pieces read.
+  The machine cannot name the node's configuration, so the shell's `types.rs`
+  converts `NostrRendezvousConfig` into it, one field per key.
+- `signal.rs`: the traversal offer and answer bodies and their checks:
+  freshness against the caller's wall-clock reading, with
+  `FRESHNESS_SKEW_TOLERANCE_MS` of grace (configuration validation reads the
+  same constant), the answer's match to our offer, and the clock-skew
+  estimate. Sealing and unsealing the Nostr event stay in the shell's
+  `signal.rs`.
 - `types.rs`: the wire and payload types (the event kinds and identifiers, the
   advert, offer, answer and punch packet bodies, and the failure-state views
   the node reads). Their serde attributes are the wire format; the shell's
   `types.rs` re-exports every one.
+- `punch/`: the punch packet's prefixes and codec, punch planning, and the
+  suspicious-offer warning limit.
+- `stun/`: the STUN codec and local-candidate selection.
+- `traversal/`: what the node remembers about traversal attempts: the
+  failure streaks and cooldowns, the initiator election and the seen-sessions
+  cache, and the rate limit on inbound traversal signals.
+- `tests/`: the unit tests of the files above, and helpers the machine's
+  tests share.

@@ -26,12 +26,13 @@
 //!
 //! **Lock discipline.** `admit` takes `now` as a parameter rather than reading
 //! the clock, so the type is testable without sleeping and holds no state that
-//! has to be advanced by a timer. It does its whole decision under one
-//! `std::sync::Mutex` and never awaits inside it, as `offer_admission` does;
-//! moving anything awaited inside that lock would hold it across a decrypt.
+//! has to be advanced by a timer. It takes instants of any
+//! `fips_core::time::Instant` type and holds no lock: the runtime keeps the
+//! gate behind one `std::sync::Mutex`, makes its whole decision under it, and
+//! never awaits inside it, as `offer_admission` does; moving anything awaited
+//! inside that lock would hold it across a decrypt.
 
-use std::sync::Mutex;
-use std::time::Instant;
+use fips_core::time::Instant;
 
 /// Sustained inbound traversal signals per second admitted for decryption,
 /// across all senders and relays.
@@ -44,10 +45,10 @@ use std::time::Instant;
 /// the same multiple of decrypt work; lowering it starts shedding honest
 /// signals on a busy node, which shows up in the log as the shed counter
 /// rather than as silence.
-pub(super) const SIGNAL_RATE_PER_SEC: f64 = 5.0;
+pub(crate) const SIGNAL_RATE_PER_SEC: f64 = 5.0;
 
 /// Burst capacity of the shared allowance, in signals.
-pub(super) const SIGNAL_BURST: f64 = 20.0;
+pub(crate) const SIGNAL_BURST: f64 = 20.0;
 
 /// Sustained rate of the reserve, drawn only while this node has traversals
 /// of its own outstanding.
@@ -58,10 +59,10 @@ pub(super) const SIGNAL_BURST: f64 = 20.0;
 /// looks to an operator like relay flakiness. Lowering it re-exposes that
 /// case; raising it lets a flood arriving while we happen to be mid-traversal
 /// buy more decrypt work than the shared allowance alone would.
-pub(super) const ANSWER_RESERVE_RATE_PER_SEC: f64 = 5.0;
+pub(crate) const ANSWER_RESERVE_RATE_PER_SEC: f64 = 5.0;
 
 /// Burst capacity of the reserve, in signals.
-pub(super) const ANSWER_RESERVE_BURST: f64 = 20.0;
+pub(crate) const ANSWER_RESERVE_BURST: f64 = 20.0;
 
 /// Which allowance refused an inbound signal.
 ///
@@ -69,7 +70,7 @@ pub(super) const ANSWER_RESERVE_BURST: f64 = 20.0;
 /// signal while it had nothing of its own in flight, the second says a flood
 /// is now deep enough to reach traversals this node started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SignalShed {
+pub enum SignalShed {
     /// The shared allowance is exhausted.
     Shared,
     /// The shared allowance and the answer reserve are both exhausted.
@@ -78,15 +79,15 @@ pub(super) enum SignalShed {
 
 /// One token bucket, refilled from the caller's clock.
 #[derive(Debug)]
-struct Bucket {
+struct Bucket<I> {
     tokens: f64,
     burst: f64,
     rate_per_sec: f64,
-    last: Instant,
+    last: I,
 }
 
-impl Bucket {
-    fn new(rate_per_sec: f64, burst: f64, now: Instant) -> Self {
+impl<I: Instant> Bucket<I> {
+    fn new(rate_per_sec: f64, burst: f64, now: I) -> Self {
         Self {
             tokens: burst,
             burst,
@@ -96,7 +97,7 @@ impl Bucket {
     }
 
     /// Advance the bucket to `now`, capped at its burst.
-    fn refill(&mut self, now: Instant) {
+    fn refill(&mut self, now: I) {
         let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
         if elapsed > 0.0 {
             self.tokens = (self.tokens + elapsed * self.rate_per_sec).min(self.burst);
@@ -115,19 +116,15 @@ impl Bucket {
 }
 
 /// The pre-decrypt allowance for inbound traversal signals.
-pub(super) struct SignalGate {
-    inner: Mutex<Inner>,
-}
-
 #[derive(Debug)]
-struct Inner {
-    shared: Bucket,
-    reserve: Bucket,
+pub struct SignalGate<I> {
+    shared: Bucket<I>,
+    reserve: Bucket<I>,
 }
 
-impl SignalGate {
+impl<I: Instant> SignalGate<I> {
     /// Build a gate whose buckets start full as of `now`.
-    pub(super) fn new(now: Instant) -> Self {
+    pub fn new(now: I) -> Self {
         Self::with_limits(
             SIGNAL_RATE_PER_SEC,
             SIGNAL_BURST,
@@ -142,13 +139,11 @@ impl SignalGate {
         shared_burst: f64,
         reserve_rate: f64,
         reserve_burst: f64,
-        now: Instant,
+        now: I,
     ) -> Self {
         Self {
-            inner: Mutex::new(Inner {
-                shared: Bucket::new(shared_rate, shared_burst, now),
-                reserve: Bucket::new(reserve_rate, reserve_burst, now),
-            }),
+            shared: Bucket::new(shared_rate, shared_burst, now),
+            reserve: Bucket::new(reserve_rate, reserve_burst, now),
         }
     }
 
@@ -158,19 +153,18 @@ impl SignalGate {
     /// outstanding; only then may the reserve be drawn. The shared bucket is
     /// always tried first, so the reserve is spent only on what the flood
     /// would otherwise have shed.
-    pub(super) fn admit(&self, awaiting_answers: bool, now: Instant) -> Result<(), SignalShed> {
-        let mut inner = self.inner.lock().expect("signal-gate mutex poisoned");
-        inner.shared.refill(now);
-        if inner.shared.ready() {
-            inner.shared.take();
+    pub fn admit(&mut self, awaiting_answers: bool, now: I) -> Result<(), SignalShed> {
+        self.shared.refill(now);
+        if self.shared.ready() {
+            self.shared.take();
             return Ok(());
         }
         if !awaiting_answers {
             return Err(SignalShed::Shared);
         }
-        inner.reserve.refill(now);
-        if inner.reserve.ready() {
-            inner.reserve.take();
+        self.reserve.refill(now);
+        if self.reserve.ready() {
+            self.reserve.take();
             return Ok(());
         }
         Err(SignalShed::Reserve)
@@ -178,5 +172,5 @@ impl SignalGate {
 }
 
 #[cfg(test)]
-#[path = "tests/signal_gate.rs"]
+#[path = "tests/gate.rs"]
 mod tests;

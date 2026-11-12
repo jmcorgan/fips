@@ -12,4 +12,13 @@
 //! Its pieces arrive from the shell one at a time, each with its tests; the
 //! shell keeps the paths its callers already use by re-exporting them.
 
+pub mod error;
+pub mod params;
+pub mod punch;
+pub mod signal;
+pub mod stun;
+pub mod traversal;
 pub mod types;
+
+#[cfg(test)]
+pub(crate) mod tests;

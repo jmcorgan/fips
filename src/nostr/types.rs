@@ -6,10 +6,6 @@ use crate::config::PeerConfig;
 
 pub use super::machine::types::*;
 
-// Defined in the nostr `handoff` submodule; re-exported here so the
-// existing punch sender / receiver imports remain unchanged.
-pub use super::handoff::{PUNCH_ACK_MAGIC, PUNCH_MAGIC};
-
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
     #[error("bootstrap disabled")]
@@ -53,4 +49,31 @@ pub enum BootstrapEvent {
         peer_config: PeerConfig,
         reason: String,
     },
+}
+
+impl From<super::machine::error::Error> for BootstrapError {
+    /// The same variant with the same text, so every caller and every log
+    /// line sees what it saw before the code that failed moved.
+    fn from(e: super::machine::error::Error) -> Self {
+        use super::machine::error::Error;
+        match e {
+            Error::Protocol(reason) => BootstrapError::Protocol(reason),
+            Error::Stun(reason) => BootstrapError::Stun(reason),
+        }
+    }
+}
+
+impl From<&crate::config::NostrRendezvousConfig> for super::machine::params::Params {
+    /// The values the machine reads, each copied from its own configuration
+    /// key.
+    fn from(c: &crate::config::NostrRendezvousConfig) -> Self {
+        Self {
+            failure_streak_threshold: c.failure_streak_threshold,
+            extended_cooldown_secs: c.extended_cooldown_secs,
+            warn_log_interval_secs: c.warn_log_interval_secs,
+            failure_state_max_entries: c.failure_state_max_entries,
+            replay_window_secs: c.replay_window_secs,
+            seen_sessions_max_entries: c.seen_sessions_max_entries,
+        }
+    }
 }

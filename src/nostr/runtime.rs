@@ -24,22 +24,23 @@ use tracing::{debug, info, trace, warn};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::advert::{AdvertAdmission, AdvertMachine, PublishPlan};
-use super::failure_state::FailureState;
 use super::handoff::EstablishedTraversal;
+use super::machine::params::Params;
+use super::machine::traversal::election::{Election, OfferDisposition, SeenDecision};
+use super::machine::traversal::failures::FailureState;
+use super::machine::traversal::gate::SignalGate;
 use super::offer_admission::{AdmissionReject, OfferAdmission};
 use super::signal::{
     FRESHNESS_SKEW_TOLERANCE_MS, FreshnessOutcome, SignalEnvelope, build_signal_event,
     create_traversal_answer, create_traversal_offer, estimate_clock_skew, unwrap_signal_event,
     validate_offer_freshness, validate_traversal_answer_for_offer,
 };
-use super::signal_gate::SignalGate;
 use super::signal_route::SignalRouter;
 use super::stun::observe_traversal_addresses;
 use super::traversal::{
     PunchTargetTally, RefusalWarnGate, bind_traversal, is_doc_ip, is_never_punchable_ip,
     is_private_ip, nonce, now_ms, planned_remote_endpoints, run_punch_attempt,
 };
-use super::traversal_machine::{OfferDisposition, SeenDecision, TraversalMachine};
 use super::types::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, BootstrapError, BootstrapEvent,
     CachedOverlayAdvert, NostrFailureDecision, NostrPeerFailureView, NostrRefetchOutcome,
@@ -48,6 +49,8 @@ use super::types::{
 };
 use crate::PeerIdentity;
 use crate::config::{NostrRendezvousConfig, PeerConfig};
+use crate::time::{HostClock, HostInstant};
+use fips_core::time::Clock;
 
 const ADVERT_CACHE_STALE_GRACE_MULTIPLIER: u64 = 2;
 
@@ -320,7 +323,7 @@ pub struct NostrRendezvous {
     npub: String,
     config: NostrRendezvousConfig,
     advert: AdvertMachine,
-    traversal: TraversalMachine,
+    traversal: std::sync::Mutex<Election>,
     pending_answers: Mutex<HashMap<String, oneshot::Sender<SignalEnvelope<TraversalAnswer>>>>,
     /// Our outbound offer per peer npub while we wait for its answer, kept so
     /// a dual-init election that suppresses the peer's offer can re-send ours.
@@ -342,9 +345,9 @@ pub struct NostrRendezvous {
     #[cfg(test)]
     signal_rx: std::sync::Mutex<Option<broadcast::Receiver<RelayPoolNotification>>>,
     admission: OfferAdmission,
-    signal_gate: SignalGate,
+    signal_gate: std::sync::Mutex<SignalGate<HostInstant>>,
     /// Limits the suspicious-offer warning to one a minute.
-    refusal_warn: std::sync::Mutex<RefusalWarnGate>,
+    refusal_warn: std::sync::Mutex<RefusalWarnGate<HostInstant>>,
     /// Inbound traversal signals shed before decryption, since process start.
     shed_signals: AtomicU64,
     event_tx: mpsc::UnboundedSender<BootstrapEvent>,
@@ -355,7 +358,7 @@ pub struct NostrRendezvous {
     publish_notify: Notify,
     notify_task: Mutex<Option<JoinHandle<()>>>,
     advertise_task: Mutex<Option<JoinHandle<()>>>,
-    failure_state: FailureState,
+    failure_state: std::sync::Mutex<FailureState>,
     /// STUN-derived public address per advert-eligible UDP transport
     /// (keyed by `TransportId.as_u32()`). Populated on demand by
     /// `learn_public_udp_addr()` and refreshed by TTL.
@@ -460,17 +463,20 @@ impl NostrRendezvous {
             config.max_concurrent_offers_per_npub,
         );
 
+        let params = Params::from(&config);
         let failure_state = FailureState::new(
-            config.failure_streak_threshold,
-            config.extended_cooldown_secs,
-            config.warn_log_interval_secs,
-            config.failure_state_max_entries,
+            params.failure_streak_threshold,
+            params.extended_cooldown_secs,
+            params.warn_log_interval_secs,
+            params.failure_state_max_entries,
+            fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
         );
 
         let advert = advert_machine(npub.clone(), &config);
-        let traversal = TraversalMachine::new(
-            config.replay_window_secs * 1000,
-            config.seen_sessions_max_entries,
+        let traversal = Election::new(
+            params.replay_window_secs * 1000,
+            params.seen_sessions_max_entries,
+            fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
         );
         let runtime = Arc::new(Self {
             client,
@@ -479,7 +485,7 @@ impl NostrRendezvous {
             npub,
             config,
             advert,
-            traversal,
+            traversal: std::sync::Mutex::new(traversal),
             pending_answers: Mutex::new(HashMap::new()),
             inflight_offers: Mutex::new(HashMap::new()),
             #[cfg(test)]
@@ -491,7 +497,7 @@ impl NostrRendezvous {
             #[cfg(test)]
             signal_rx: std::sync::Mutex::new(None),
             admission,
-            signal_gate: SignalGate::new(Instant::now()),
+            signal_gate: std::sync::Mutex::new(SignalGate::new(HostClock.now())),
             refusal_warn: std::sync::Mutex::new(RefusalWarnGate::default()),
             shed_signals: AtomicU64::new(0),
             event_tx,
@@ -502,7 +508,7 @@ impl NostrRendezvous {
             publish_notify: Notify::new(),
             notify_task: Mutex::new(None),
             advertise_task: Mutex::new(None),
-            failure_state,
+            failure_state: std::sync::Mutex::new(failure_state),
             public_udp_addr_cache: RwLock::new(HashMap::new()),
             outbound_admission: AtomicBool::new(true),
         });
@@ -543,7 +549,7 @@ impl NostrRendezvous {
 
     pub async fn request_connect(self: &Arc<Self>, peer_config: PeerConfig) {
         let peer_npub = peer_config.npub.clone();
-        if !self.traversal.begin_initiator(&peer_npub) {
+        if !self.election().begin_initiator(&peer_npub) {
             return;
         }
 
@@ -557,15 +563,34 @@ impl NostrRendezvous {
                 },
             };
             let _ = runtime.event_tx.send(event);
-            runtime.traversal.end_initiator(&peer_npub);
+            runtime.election().end_initiator(&peer_npub);
         });
+    }
+
+    /// The initiator election and the seen-sessions cache, under their lock.
+    fn election(&self) -> std::sync::MutexGuard<'_, Election> {
+        self.traversal
+            .lock()
+            .expect("traversal-machine mutex poisoned")
+    }
+
+    /// The pre-decrypt signal allowance, under its lock.
+    fn gate(&self) -> std::sync::MutexGuard<'_, SignalGate<HostInstant>> {
+        self.signal_gate.lock().expect("signal-gate mutex poisoned")
+    }
+
+    /// The per-peer failure state, under its lock.
+    fn failures(&self) -> std::sync::MutexGuard<'_, FailureState> {
+        self.failure_state
+            .lock()
+            .expect("failure-state mutex poisoned")
     }
 
     /// Record a NAT-traversal failure for `npub`, returning the
     /// resulting decision (WARN suppression + extended cooldown +
     /// threshold-crossing flag for the B6 re-fetch).
     pub fn record_traversal_failure(&self, npub: &str, now_ms: u64) -> NostrFailureDecision {
-        let d = self.failure_state.record_failure(npub, now_ms);
+        let d = self.failures().record_failure(npub, now_ms);
         NostrFailureDecision {
             consecutive_failures: d.consecutive_failures,
             should_warn: d.should_warn,
@@ -576,13 +601,13 @@ impl NostrRendezvous {
 
     /// Record a successful traversal — clears the streak/cooldown.
     pub fn record_traversal_success(&self, npub: &str, now_ms: u64) {
-        self.failure_state.record_success(npub, now_ms);
+        self.failures().record_success(npub, now_ms);
     }
 
     /// Cooldown wall-clock ms if the peer is currently suppressed,
     /// else None. Used by the open-discovery sweep to skip enqueue.
     pub fn cooldown_until(&self, npub: &str, now_ms: u64) -> Option<u64> {
-        self.failure_state.cooldown_until(npub, now_ms)
+        self.failures().cooldown_until(npub, now_ms)
     }
 
     /// Record a fatal protocol mismatch (e.g. `Unknown FMP version` on a
@@ -599,7 +624,7 @@ impl NostrRendezvous {
             .config
             .protocol_mismatch_cooldown_secs
             .saturating_mul(1000);
-        self.failure_state
+        self.failures()
             .record_protocol_mismatch(npub, now_ms, cooldown_ms)
     }
 
@@ -611,7 +636,7 @@ impl NostrRendezvous {
 
     /// Snapshot of per-npub failure state for `show_peers` rendering.
     pub fn failure_state_snapshot(&self) -> Vec<NostrPeerFailureView> {
-        self.failure_state
+        self.failures()
             .snapshot()
             .into_iter()
             .map(|(npub, rec)| NostrPeerFailureView {
@@ -764,7 +789,7 @@ impl NostrRendezvous {
             }
             // Absent on relays. Evict any stale cache entry.
             self.advert.remove(peer_npub);
-            self.failure_state.reset_streak_after_refresh(peer_npub);
+            self.failures().reset_streak_after_refresh(peer_npub);
             return NostrRefetchOutcome::Evicted;
         };
         let relay_created_at = Self::effective_created_at_secs(ev.created_at.as_secs(), now_ms());
@@ -797,7 +822,7 @@ impl NostrRendezvous {
                     );
                     return NostrRefetchOutcome::Skipped;
                 }
-                self.failure_state.reset_streak_after_refresh(peer_npub);
+                self.failures().reset_streak_after_refresh(peer_npub);
                 NostrRefetchOutcome::Refreshed
             }
         }
@@ -1019,7 +1044,8 @@ impl NostrRendezvous {
             // reserve, it does not shed.
             Err(_) => true,
         };
-        if let Err(shed) = self.signal_gate.admit(awaiting_answers, Instant::now()) {
+        let admitted = self.gate().admit(awaiting_answers, HostClock.now());
+        if let Err(shed) = admitted {
             let total = self.shed_signals.fetch_add(1, Ordering::Relaxed) + 1;
             // Debug, not warn, per event: the party that trips this
             // is by definition sending faster than the node wants,
@@ -1437,7 +1463,7 @@ impl NostrRendezvous {
         if let Some(observed_skew_ms) =
             estimate_clock_skew(&offer, &answer.payload, answer_received_at)
         {
-            self.failure_state.note_observed_skew(
+            self.failures().note_observed_skew(
                 &peer_config.npub,
                 observed_skew_ms,
                 answer_received_at,
@@ -1511,8 +1537,7 @@ impl NostrRendezvous {
             "traversal: initiator punch succeeded"
         );
 
-        self.failure_state
-            .record_success(&peer_config.npub, now_ms());
+        self.failures().record_success(&peer_config.npub, now_ms());
 
         Ok(
             EstablishedTraversal::new(session_id, peer_config.npub, remote_addr, base_socket)
@@ -1633,11 +1658,14 @@ impl NostrRendezvous {
             PeerIdentity::from_npub(&sender_npub),
         ) {
             (Ok(ours), Ok(theirs)) => {
-                match self.traversal.classify_incoming_offer(
+                // Bound before the match: the Suppress arm awaits, and the
+                // election's lock must not be held across it.
+                let disposition = self.election().classify_incoming_offer(
                     &sender_npub,
                     ours.node_addr(),
                     theirs.node_addr(),
-                ) {
+                );
+                match disposition {
                     OfferDisposition::Suppress => {
                         debug!(
                             peer = %peer_short,
@@ -1660,10 +1688,10 @@ impl NostrRendezvous {
             }
         }
 
-        match self
-            .traversal
-            .note_session_seen(&offer.session_id, now_ms())
-        {
+        let seen = self
+            .election()
+            .note_session_seen(&offer.session_id, now_ms());
+        match seen {
             SeenDecision::Replay => {
                 return Err(BootstrapError::Replay(offer.session_id.clone()));
             }
@@ -2020,7 +2048,7 @@ impl NostrRendezvous {
             .refusal_warn
             .lock()
             .expect("refusal-warn mutex poisoned")
-            .decide(tally, Instant::now());
+            .decide(tally, HostClock.now());
         log_refusals(tally, peer, session, warn);
     }
 
@@ -2301,16 +2329,19 @@ impl NostrRendezvous {
             config.max_concurrent_offers_per_npub,
         );
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let params = Params::from(&config);
         let failure_state = FailureState::new(
-            config.failure_streak_threshold,
-            config.extended_cooldown_secs,
-            config.warn_log_interval_secs,
-            config.failure_state_max_entries,
+            params.failure_streak_threshold,
+            params.extended_cooldown_secs,
+            params.warn_log_interval_secs,
+            params.failure_state_max_entries,
+            fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
         );
         let advert = advert_machine(npub.clone(), &config);
-        let traversal = TraversalMachine::new(
-            config.replay_window_secs * 1000,
-            config.seen_sessions_max_entries,
+        let traversal = Election::new(
+            params.replay_window_secs * 1000,
+            params.seen_sessions_max_entries,
+            fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
         );
         Self {
             client,
@@ -2319,7 +2350,7 @@ impl NostrRendezvous {
             npub,
             config,
             advert,
-            traversal,
+            traversal: std::sync::Mutex::new(traversal),
             pending_answers: Mutex::new(HashMap::new()),
             inflight_offers: Mutex::new(HashMap::new()),
             sent_signals: std::sync::Mutex::new(Vec::new()),
@@ -2327,7 +2358,7 @@ impl NostrRendezvous {
             policy,
             signal_rx: std::sync::Mutex::new(Some(signals)),
             admission,
-            signal_gate: SignalGate::new(Instant::now()),
+            signal_gate: std::sync::Mutex::new(SignalGate::new(HostClock.now())),
             refusal_warn: std::sync::Mutex::new(RefusalWarnGate::default()),
             shed_signals: AtomicU64::new(0),
             event_tx,
@@ -2338,7 +2369,7 @@ impl NostrRendezvous {
             publish_notify: Notify::new(),
             notify_task: Mutex::new(None),
             advertise_task: Mutex::new(None),
-            failure_state,
+            failure_state: std::sync::Mutex::new(failure_state),
             public_udp_addr_cache: RwLock::new(HashMap::new()),
             outbound_admission: AtomicBool::new(true),
         }
@@ -2353,7 +2384,7 @@ impl NostrRendezvous {
         receiver: PublicKey,
         relays: Vec<String>,
     ) {
-        self.traversal.begin_initiator(peer_npub);
+        self.election().begin_initiator(peer_npub);
         self.inflight_offers.lock().await.insert(
             peer_npub.to_string(),
             InflightOffer {

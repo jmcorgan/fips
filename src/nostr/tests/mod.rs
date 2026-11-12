@@ -5,6 +5,12 @@ use std::time::Duration;
 
 use nostr::prelude::{EventBuilder, Kind, RelayUrl, Tag, Timestamp};
 
+use super::machine::error::Error as MachineError;
+use super::machine::params::Params;
+use super::machine::punch::parse_punch_packet;
+use super::machine::punch::plan::{PunchStrategy, plan_punch_targets};
+use super::machine::tests::TestInstant;
+use super::machine::traversal::election::suppress_responder_for_own_initiator;
 use super::runtime::{
     INBOX_LOOKBACK, NostrRendezvous, adversarial_offer_reject, inbox_relays,
     is_unroutable_direct_advert_ip, short_id, signal_relays,
@@ -18,11 +24,9 @@ use super::stun::{parse_stun_binding_success, parse_stun_url};
 #[cfg(target_os = "linux")]
 use super::traversal::run_punch_attempt;
 use super::traversal::{
-    PunchStrategy, RefusalWarnGate, SourceRank, build_punch_packet, is_doc_ip,
-    is_never_punchable_ip, is_private_ip, now_ms, parse_punch_packet, plan_punch_targets,
-    planned_remote_endpoints, rank_punch_source, session_hash,
+    RefusalWarnGate, SourceRank, build_punch_packet, is_doc_ip, is_never_punchable_ip,
+    is_private_ip, now_ms, planned_remote_endpoints, rank_punch_source, session_hash,
 };
-use super::traversal_machine::suppress_responder_for_own_initiator;
 use super::types::BootstrapError;
 use super::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, OverlayAdvert, OverlayEndpointAdvert,
@@ -479,7 +483,7 @@ fn an_answer_whose_in_reply_to_is_the_offer_event_id_rather_than_its_nonce_is_re
         "npub1server",
         "npub1client",
     ) {
-        Err(BootstrapError::Protocol(reason)) => assert_eq!(reason, "session-mismatch"),
+        Err(MachineError::Protocol(reason)) => assert_eq!(reason, "session-mismatch"),
         other => panic!("expected a session-mismatch refusal, got {other:?}"),
     }
 }
@@ -1010,10 +1014,10 @@ fn a_suspicious_offer_that_logs_nothing_does_not_use_up_the_next_ones_warning() 
     assert!(loud.suspicious());
 
     let mut gate = RefusalWarnGate::default();
-    let t = std::time::Instant::now();
+    let t = TestInstant(0);
     assert_eq!(gate.decide(&quiet, t), None);
     assert_eq!(
-        gate.decide(&loud, t + std::time::Duration::from_millis(1)),
+        gate.decide(&loud, TestInstant(1)),
         Some(0),
         "the warning went to an offer that logged nothing"
     );
@@ -2955,6 +2959,29 @@ fn an_event_of_another_kind_is_not_read_as_an_inbox_relay_list() {
         .sign_with_keys(&nostr::Keys::generate())
         .unwrap();
     assert!(inbox_relays(&event).is_empty());
+}
+
+/// Each machine setting is copied from its own configuration key: every key
+/// gets a distinct value, so two fields swapped in the conversion cannot both
+/// read right.
+#[test]
+fn the_machine_params_copy_each_value_from_its_own_config_key() {
+    let config = crate::config::NostrRendezvousConfig {
+        failure_streak_threshold: 7,
+        extended_cooldown_secs: 11,
+        warn_log_interval_secs: 13,
+        failure_state_max_entries: 17,
+        replay_window_secs: 19,
+        seen_sessions_max_entries: 23,
+        ..Default::default()
+    };
+    let params = Params::from(&config);
+    assert_eq!(params.failure_streak_threshold, 7);
+    assert_eq!(params.extended_cooldown_secs, 11);
+    assert_eq!(params.warn_log_interval_secs, 13);
+    assert_eq!(params.failure_state_max_entries, 17);
+    assert_eq!(params.replay_window_secs, 19);
+    assert_eq!(params.seen_sessions_max_entries, 23);
 }
 
 mod fixtures;

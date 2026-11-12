@@ -1,22 +1,19 @@
 mod advert;
 mod driver;
-mod failure_state;
 mod handoff;
 pub(crate) mod machine;
 mod offer_admission;
 mod runtime;
 mod signal;
-mod signal_gate;
 mod signal_route;
 mod stun;
 mod traversal;
-mod traversal_machine;
 mod types;
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) use signal::FRESHNESS_SKEW_TOLERANCE_MS;
+pub(crate) use machine::signal::FRESHNESS_SKEW_TOLERANCE_MS;
 
 pub use driver::{AdvertTransportSnapshot, BootstrapPeer, MismatchEvidence, RendezvousDriver};
 pub use handoff::{

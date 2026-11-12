@@ -41,14 +41,3 @@ fn classify_ack_matching_hash_is_matched() {
         PunchAction::Matched
     );
 }
-
-#[test]
-fn a_stranger_sending_refused_offers_gets_one_warning_a_minute() {
-    let mut gate = RefusalWarnGate::default();
-    let t = Instant::now();
-    assert_eq!(gate.admit(t), Some(0));
-    assert_eq!(gate.admit(t + Duration::from_millis(1)), None);
-    assert_eq!(gate.admit(t + Duration::from_millis(59_999)), None);
-    assert_eq!(gate.admit(t + Duration::from_millis(60_000)), Some(2));
-    assert_eq!(gate.admit(t + Duration::from_millis(60_001)), None);
-}

@@ -1,18 +1,20 @@
-//! Tests that the seen-sessions memory (`TraversalMachine::note_session_seen`
-//! in `traversal_machine.rs`) never forgets a session id whose offer can still
-//! be fresh: a full memory refuses a new session instead, both in the machine
-//! and through the incoming-offer handler in `runtime.rs`, and its default
-//! size holds every session the signal gate (`signal_gate.rs`) admits in one
-//! replay window.
+//! Tests that the seen-sessions memory (`Election::note_session_seen` in
+//! `machine/traversal/election.rs`) never forgets a session id whose offer can
+//! still be fresh: a full memory refuses a new session instead, both in the
+//! machine and through the incoming-offer handler in `runtime.rs`, and its
+//! default size holds every session the signal gate
+//! (`machine/traversal/gate.rs`) admits in one replay window.
 
-use super::super::runtime::NostrRendezvous;
-use super::super::signal_gate::{
+use super::super::machine::tests::ZeroEntropy;
+use super::super::machine::traversal::election::{Election, SeenDecision};
+use super::super::machine::traversal::gate::{
     ANSWER_RESERVE_BURST, ANSWER_RESERVE_RATE_PER_SEC, SIGNAL_BURST, SIGNAL_RATE_PER_SEC,
 };
-use super::super::traversal_machine::{SeenDecision, TraversalMachine};
+use super::super::runtime::NostrRendezvous;
 use super::super::types::BootstrapError;
 use super::offer_between;
 use crate::config::NostrRendezvousConfig;
+use fips_core::utils::hash::KeyedHasher;
 
 /// An explicit cap below the default, so the refusal tests turn on the
 /// memory's behaviour when full rather than on the default's size.
@@ -25,7 +27,7 @@ const EXPLICIT_CAP: usize = 2048;
 #[test]
 fn a_full_cache_refuses_a_new_session_rather_than_forgetting_a_live_one() {
     let window_ms = NostrRendezvousConfig::default().replay_window_secs * 1000;
-    let machine = TraversalMachine::new(window_ms, EXPLICIT_CAP);
+    let mut machine = Election::new(window_ms, EXPLICIT_CAP, KeyedHasher::new::<ZeroEntropy>());
     let t0 = 1_900_000_000_000u64;
     assert_eq!(
         machine.note_session_seen("captured", t0),
@@ -67,7 +69,7 @@ fn a_full_cache_refuses_a_new_session_rather_than_forgetting_a_live_one() {
 #[test]
 fn a_full_cache_admits_again_once_its_entries_expire() {
     let window_ms = 1_000;
-    let machine = TraversalMachine::new(window_ms, 4);
+    let mut machine = Election::new(window_ms, 4, KeyedHasher::new::<ZeroEntropy>());
     for i in 0..4u64 {
         assert_eq!(
             machine.note_session_seen(&format!("s{i}"), i),
