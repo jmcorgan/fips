@@ -175,3 +175,90 @@ fn parent_ancestry_change_on_same_root_leaves_better_peer_to_the_hold_down_veto(
     assert!(matches!(evaluate(&tree), ParentEval::Discretionary(p) if p == q));
     assert_ancestry_update(classify(&tree, true), 3);
 }
+
+/// Apply P's announce the way the announce handler does: classify it with the
+/// veto verdict the shell reads at `now_ms`, then drive a `Switch` or a
+/// `LoopDrop` (parent-loss recovery). Fails on any other decision, since P's
+/// ancestry now contains X and X must stop declaring P.
+fn drive_announce(tree: &mut TreeState, now_ms: u64) {
+    let suppressed = tree.is_switch_suppressed(now_ms);
+    match classify(tree, suppressed) {
+        TreeDecision::Switch {
+            new_parent,
+            new_seq,
+        } => {
+            tree.set_parent(new_parent, new_seq, 3000, now_ms);
+            tree.recompute_coords();
+        }
+        TreeDecision::LoopDrop => {
+            assert!(tree.recover(&BTreeMap::new(), 3000, now_ms).changed);
+        }
+        _ => panic!("expected Switch or LoopDrop for an announce whose ancestry contains us"),
+    }
+}
+
+#[test]
+fn loop_drop_takes_a_loop_free_candidate_on_the_same_root_while_hold_down_is_active() {
+    // P now declares X as its parent, so P's ancestry contains X. Q reaches the
+    // same root loop-free. `recover` documents that the node becomes root only
+    // when no alternative parent is available.
+    let q = make_node_addr(2);
+    let mut tree = under_parent(&[P, 1], &[(2, &[2, 1])], 30);
+    assert!(tree.is_switch_suppressed(1500), "hold-down must be engaged");
+    parent_reannounces(&mut tree, X, &[P, X, 9, 1]);
+
+    drive_announce(&mut tree, 1500);
+
+    assert!(
+        !tree.is_root(),
+        "defect: loop drop declared root although Q is a loop-free candidate"
+    );
+    assert_eq!(
+        *tree.my_declaration().parent_id(),
+        q,
+        "defect: loop drop did not take the loop-free candidate Q"
+    );
+}
+
+#[test]
+fn loop_drop_takes_a_loop_free_candidate_that_does_not_clear_the_hysteresis_margin() {
+    // No veto. Q's effective depth (3 + 1.0) equals the looping P's (3 + 1.0),
+    // so the discretionary margin is not met, yet P can no longer be a parent.
+    let q = make_node_addr(2);
+    let mut tree = under_parent(&[P, 1], &[(2, &[2, 8, 7, 1])], 0);
+    tree.set_parent_hysteresis(0.2);
+    parent_reannounces(&mut tree, X, &[P, X, 9, 1]);
+
+    drive_announce(&mut tree, 1500);
+
+    assert!(
+        !tree.is_root(),
+        "defect: loop drop declared root although Q is a loop-free candidate"
+    );
+    assert_eq!(
+        *tree.my_declaration().parent_id(),
+        q,
+        "defect: loop drop did not take the loop-free candidate Q"
+    );
+}
+
+#[test]
+fn loop_drop_with_only_candidates_reached_through_this_node_still_becomes_root() {
+    // R's stored path runs through X, so it is no candidate: with P looping
+    // there is no parent left and X must fall back to root.
+    let mut tree = under_parent(&[P, 1], &[(3, &[3, X, P, 1])], 0);
+    parent_reannounces(&mut tree, X, &[P, X, 9, 1]);
+
+    assert!(matches!(evaluate(&tree), ParentEval::None));
+    assert!(
+        matches!(classify(&tree, false), TreeDecision::LoopDrop),
+        "expected LoopDrop when no loop-free candidate exists"
+    );
+    drive_announce(&mut tree, 1500);
+
+    assert!(
+        tree.is_root(),
+        "a loop drop with no loop-free candidate must leave X root"
+    );
+    assert_eq!(tree.root(), &make_node_addr(X));
+}

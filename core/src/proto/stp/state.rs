@@ -427,9 +427,12 @@ impl TreeState {
     /// Returns a `ParentEval` describing whether a parent switch is warranted:
     /// `Mandatory` (path-breaking / root-correcting — always taken), `Discretionary`
     /// (an improvement the caller applies only if its veto is inactive), or `None`.
-    /// The root-correcting case fires when the best candidate advertises a smaller
-    /// root than ours, or a smaller root than the one our parent now advertises
-    /// by a path that does not run through our parent.
+    /// The path-breaking case fires when our parent is gone from the peer table
+    /// or its stored path contains this node (a loop), and a loop-free candidate
+    /// exists; with no candidate the result is `None` and the caller falls back
+    /// to root. The root-correcting case fires when the best candidate advertises
+    /// a smaller root than ours, or a smaller root than the one our parent now
+    /// advertises by a path that does not run through our parent.
     ///
     /// This core is clock-free: it no longer applies the flap-dampening / hold-down
     /// veto. The caller reads the clock, computes the veto verdict via
@@ -509,11 +512,15 @@ impl TreeState {
 
         // --- Mandatory switches (bypass the shell's hold-down / flap veto) ---
 
-        // If our current parent is gone from peer_ancestry, our path is broken — always switch
+        // If our current parent is gone from peer_ancestry, our path is broken — always switch.
+        // A parent whose stored path now contains us is lost the same way: it
+        // can no longer be our parent, so a loop-free candidate is taken now,
+        // regardless of the veto or the hysteresis margin.
         if !self.is_root()
-            && !self
+            && self
                 .peer_ancestry
-                .contains_key(self.my_declaration.parent_id())
+                .get(self.my_declaration.parent_id())
+                .is_none_or(|c| c.contains(&self.my_node_addr))
         {
             return ParentEval::Mandatory(best_peer_id);
         }

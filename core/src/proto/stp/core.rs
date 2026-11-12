@@ -45,9 +45,12 @@ pub enum TreeDecision {
     /// bloom.mark_all_updates_needed.
     SelfRoot,
 
-    /// parent == from && parent's ancestry now contains us: drop parent. Shell:
-    /// metrics(loop_detected); `handle_parent_lost` -> if changed { sign;
-    /// `invalidate_via_node` + `invalidate_other_roots`; reset_backoff; send_all }.
+    /// parent == from && parent's ancestry now contains us: drop parent. Reached
+    /// only when no loop-free candidate exists, since `evaluate_parent` makes a
+    /// looping parent a mandatory switch whenever one does (`Switch` above), so
+    /// the drop leaves this node root. Shell: metrics(loop_detected); `recover`
+    /// -> if changed { sign; `invalidate_via_node` + `invalidate_other_roots`;
+    /// reset_backoff; send_all; bloom.mark_all_updates_needed }.
     LoopDrop,
 
     /// parent == from, no loop: keep parent, recompute, re-announce iff coords

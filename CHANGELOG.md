@@ -1632,6 +1632,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read as empty and peers' inbox lists never took part in signal relay
   selection. The list is now published again every 24 hours, so a node up
   longer than 30 days stays inside its peers' lookup window.
+- When a node's parent announces a path to the root that runs back
+  through the node, the node now takes a loop-free parent on the same root
+  if it has one, instead of making itself root. Before, a parent-switch
+  hold-down still in force, or a loop-free peer that did not clear the
+  switching margin, left the node root although that parent was available.
+  The move counts in `parent_switches`, so `loop_detected` in
+  `fipsctl show tree` and `fipstop` now counts only loop drops that leave
+  the node root.
+- A loop drop that leaves the node root now refreshes the bloom filters it
+  sends its peers. Before, its peers kept filters built for the old tree
+  until some other change refreshed them.
+- With Nostr rendezvous enabled, a full seen-sessions memory now refuses a
+  new traversal offer instead of forgetting the session ids nearest expiry.
+  A forgotten id could be replayed until its offer stopped being fresh. The
+  default `node.rendezvous.nostr.seen_sessions_max_entries` rises from 2048
+  to 4096, more than the inbound signal rate limit admits in a 300 s replay
+  window, so the refusal is not reached at the defaults. A configured value
+  is kept as it is.
 
 #### Transports
 
@@ -1704,6 +1722,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scan loop probed with `auto_connect` off is closed the same way, and is
   not probed again until its address rotates or a new discovery session
   offers it.
+- On Linux, starting the BLE transport no longer unpairs the host's
+  Bluetooth devices. Scan start removed every device BlueZ had cached on
+  the adapter, which deletes pairing keys, trust and block settings and
+  drops a live connection, so starting a node unpaired keyboards, headsets
+  and other devices. It now removes only devices that are not paired,
+  trusted, blocked or connected.
+- On Linux, a BLE dial uses the address type BlueZ reports for the peer, so
+  a peer advertising from a random address (a BlueZ host with privacy
+  enabled, or Android) can be dialled. Before, every dial used the LE
+  public address type. A peer BlueZ has no record of is still dialled as
+  public.
 
 #### TUN
 

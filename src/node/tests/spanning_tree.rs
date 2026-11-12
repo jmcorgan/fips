@@ -1603,3 +1603,85 @@ async fn test_tree_announce_same_parent_ancestry_update() {
 
     cleanup_nodes(&mut nodes).await;
 }
+
+/// A loop drop that leaves no loop-free candidate makes the node its own root,
+/// which changes its tree peers and so its outgoing filters: every remaining
+/// peer must be marked for a filter update, as the switch and self-root paths
+/// do. P is forced under Q at a synthetic root, and R's stored path runs
+/// through P, so R is no candidate. Q then announces an ancestry through P.
+#[tokio::test]
+async fn a_loop_drop_to_self_root_marks_every_remaining_peer_for_a_filter_update() {
+    let mut nodes = run_tree_test(3, &[(0, 1), (0, 2)], false).await;
+
+    let (p_idx, q_idx, r_idx) = (0, 1, 2);
+    let p_addr = *nodes[p_idx].node.node_addr();
+    let q_addr = *nodes[q_idx].node.node_addr();
+    let r_addr = *nodes[r_idx].node.node_addr();
+    let root = make_node_addr(0);
+
+    // Force P into a child of Q rooted at `root`: coords [P, Q, root], with R
+    // a child of P: [R, P, Q, root].
+    {
+        let ts = nodes[p_idx].node.tree_state_mut();
+        ts.remove_peer(&q_addr);
+        ts.remove_peer(&r_addr);
+        ts.update_peer(
+            ParentDeclaration::new(q_addr, root, 1, 1000),
+            TreeCoordinate::from_addrs(vec![q_addr, root]).unwrap(),
+        );
+        ts.update_peer(
+            ParentDeclaration::new(r_addr, p_addr, 1, 1000),
+            TreeCoordinate::from_addrs(vec![r_addr, p_addr, q_addr, root]).unwrap(),
+        );
+        ts.set_parent(q_addr, 1, 1000, 1000);
+        ts.recompute_coords();
+    }
+    {
+        let identity = nodes[p_idx].node.identity().clone();
+        let decl_mut = nodes[p_idx].node.tree_state_mut().my_declaration_mut();
+        sign_declaration(decl_mut, &identity).unwrap();
+    }
+    assert_eq!(
+        nodes[p_idx].node.tree_state().my_declaration().parent_id(),
+        &q_addr
+    );
+
+    // Marks left over from convergence are cleared only by the tick's send
+    // pass; clear them so only a mark made by the loop drop is observed.
+    nodes[p_idx].node.bloom_state_mut().clear_pending_updates();
+    assert!(
+        !nodes[p_idx].node.bloom_state().needs_update(&r_addr),
+        "precondition: R must not be pending a filter update before the announce"
+    );
+
+    // Q announces [Q, P, root]: its ancestry now runs back through P.
+    let mut decl = ParentDeclaration::new(q_addr, p_addr, 5, 2000);
+    sign_declaration(&mut decl, nodes[q_idx].node.identity()).unwrap();
+    let announce = TreeAnnounce::new(
+        decl,
+        TreeCoordinate::from_addrs(vec![q_addr, p_addr, root]).unwrap(),
+    );
+    let encoded = announce.encode().unwrap();
+
+    let loop_before = nodes[p_idx].node.metrics().tree.loop_detected.get();
+    nodes[p_idx]
+        .node
+        .handle_tree_announce(&q_addr, &encoded[1..])
+        .await;
+
+    assert_eq!(
+        nodes[p_idx].node.metrics().tree.loop_detected.get(),
+        loop_before + 1,
+        "precondition: the announce must take the loop-drop path"
+    );
+    assert!(
+        nodes[p_idx].node.tree_state().is_root(),
+        "precondition: with no loop-free candidate P must fall back to root"
+    );
+    assert!(
+        nodes[p_idx].node.bloom_state().needs_update(&r_addr),
+        "defect: a loop drop to self-root did not mark R for a filter update"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}

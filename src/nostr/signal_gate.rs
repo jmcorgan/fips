@@ -44,10 +44,10 @@ use std::time::Instant;
 /// the same multiple of decrypt work; lowering it starts shedding honest
 /// signals on a busy node, which shows up in the log as the shed counter
 /// rather than as silence.
-const SIGNAL_RATE_PER_SEC: f64 = 5.0;
+pub(super) const SIGNAL_RATE_PER_SEC: f64 = 5.0;
 
 /// Burst capacity of the shared allowance, in signals.
-const SIGNAL_BURST: f64 = 20.0;
+pub(super) const SIGNAL_BURST: f64 = 20.0;
 
 /// Sustained rate of the reserve, drawn only while this node has traversals
 /// of its own outstanding.
@@ -58,10 +58,10 @@ const SIGNAL_BURST: f64 = 20.0;
 /// looks to an operator like relay flakiness. Lowering it re-exposes that
 /// case; raising it lets a flood arriving while we happen to be mid-traversal
 /// buy more decrypt work than the shared allowance alone would.
-const ANSWER_RESERVE_RATE_PER_SEC: f64 = 5.0;
+pub(super) const ANSWER_RESERVE_RATE_PER_SEC: f64 = 5.0;
 
 /// Burst capacity of the reserve, in signals.
-const ANSWER_RESERVE_BURST: f64 = 20.0;
+pub(super) const ANSWER_RESERVE_BURST: f64 = 20.0;
 
 /// Which allowance refused an inbound signal.
 ///
