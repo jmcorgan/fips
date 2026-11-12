@@ -349,13 +349,11 @@ jobs:
           IPK_VERSION: ${{ needs.determine-versioning.outputs.ipk_version }}
         run: ./packaging/openwrt-ipk/build-ipk.sh --arch ${{ matrix.build_arch }} --bin-dir "$GITHUB_WORKSPACE/bins"
 
-      - name: Install shellcheck (if missing)
+      # The version testing/install-shellcheck.sh pins, as ci.yml and
+      # ci-local.sh use, not the runner image's.
+      - name: Install the pinned shellcheck
         shell: bash
-        run: |
-          if ! command -v shellcheck >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
-          fi
-          shellcheck --version
+        run: bash testing/install-shellcheck.sh "$RUNNER_TEMP/shellcheck"
 
       # The scripts this package ships, as sh, and install-nak.sh and
       # blossom-upload.sh, as bash.
@@ -363,6 +361,8 @@ jobs:
       # too, so a branch push sees a finding before it reaches a trunk.
       - name: Lint shell scripts
         shell: bash
+        env:
+          SHELLCHECK: ${{ runner.temp }}/shellcheck/shellcheck
         run: bash testing/check-shellcheck.sh
 
       - name: Sysctl drop-in syntax check

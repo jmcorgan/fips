@@ -17,6 +17,11 @@
 # other two, a finding in a script edited on a topic branch first shows up
 # after the branch has reached a trunk.
 #
+# Those three run the shellcheck version testing/install-shellcheck.sh pins,
+# naming its binary in $SHELLCHECK; different versions report the same finding
+# under different codes. Run by hand, the guard uses whatever shellcheck is on
+# PATH, and the exclusions below hold under 0.9.0 as well as the pinned one.
+#
 # What is checked, and how:
 #   * Every script under packaging/openwrt-ipk/files/ and the maintainer
 #     scripts under packaging/openwrt-ipk/scripts/, as POSIX sh. Both the .ipk
@@ -28,16 +33,21 @@
 #     exclusions; it runs under FreeBSD's sh, which supports `local` too.
 #   * install-nak.sh, blossom-upload.sh, test-blossom-upload.sh,
 #     keep-pinned-toolchain.sh, the three
-#     testing/cross-check/ scripts, testing/check-crate.sh and
-#     testing/root-tests.sh as bash, with
+#     testing/cross-check/ scripts, testing/check-crate.sh,
+#     testing/root-tests.sh and testing/install-shellcheck.sh as bash, with
 #     no exclusions. They are CI scripts, not shipped ones, and the sh
 #     exclusion set below misfires on bash.
 #
 # The sh exclusions, with reason:
 #   SC1008  the init scripts' `#!/bin/sh /etc/rc.common` shebang, an
 #           interpreter line the linter does not recognise.
-#   SC2317  rc.common's start_service/stop_service/reload_service hooks,
-#           which nothing in the file itself calls.
+#   SC2317  functions nothing in the file itself calls: rc.common's
+#   SC2329  start_service/stop_service/reload_service hooks, and
+#           test-upgrade.sh's cleanup, which its EXIT trap runs. shellcheck
+#           0.9.0 reports such a function's body as unreachable (SC2317);
+#           0.11.0 reports the function itself as never invoked (SC2329)
+#           and keeps SC2317 for unreachable commands. Both stay excluded,
+#           so the one policy holds under either version.
 #   SC2034  the init scripts' USE_PROCD, START, STOP, EXTRA_COMMANDS and
 #           EXTRA_HELP, which rc.common reads rather than the script.
 #   SC3043  `local`, which POSIX leaves undefined and ash supports.
@@ -57,7 +67,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT" || { echo "check-shellcheck: cannot cd to $PROJECT_ROOT" >&2; exit 2; }
 
 IPK=packaging/openwrt-ipk
-SH_EXCLUDE=SC1008,SC2317,SC2034,SC3043
+SH_EXCLUDE=SC1008,SC2317,SC2329,SC2034,SC3043
 
 SH_TARGETS=(
     "$IPK/files/etc/init.d/fips"
@@ -78,13 +88,16 @@ BASH_TARGETS=(
     "testing/cross-check/check.sh"
     "testing/check-crate.sh"
     "testing/root-tests.sh"
+    "testing/install-shellcheck.sh"
     "testing/cross-check/zig-cc"
     "testing/cross-check/zig-ar"
 )
 
-if ! command -v shellcheck >/dev/null 2>&1; then
-    echo "check-shellcheck: shellcheck not found; cannot lint the shell scripts" >&2
-    echo "check-shellcheck: install it with 'apt-get install shellcheck'" >&2
+SHELLCHECK="${SHELLCHECK:-shellcheck}"
+if ! command -v "$SHELLCHECK" >/dev/null 2>&1; then
+    echo "check-shellcheck: $SHELLCHECK not found; cannot lint the shell scripts" >&2
+    echo "check-shellcheck: install the pinned version with" \
+        "'bash testing/install-shellcheck.sh <dir>' and set SHELLCHECK=<dir>/shellcheck" >&2
     exit 2
 fi
 if ! command -v git >/dev/null 2>&1; then
@@ -92,7 +105,7 @@ if ! command -v git >/dev/null 2>&1; then
     exit 2
 fi
 
-shellcheck --version | sed -n 's/^version: /check-shellcheck: shellcheck /p'
+"$SHELLCHECK" --version | sed -n 's/^version: /check-shellcheck: shellcheck /p'
 
 findings=0
 broken=0
@@ -132,7 +145,7 @@ lint() {
         return 0
     fi
     echo "==> shellcheck $* $f"
-    shellcheck "$@" "$f" || rc=$?
+    "$SHELLCHECK" "$@" "$f" || rc=$?
     case $rc in
         0) echo "    PASS" ;;
         1) echo "    FAIL"; findings=1 ;;

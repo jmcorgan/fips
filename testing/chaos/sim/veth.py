@@ -36,6 +36,7 @@ import logging
 import subprocess
 
 from .docker_exec import docker_exec_quiet
+from .naming import run_labels
 from .topology import SimTopology, veth_interface_name
 
 log = logging.getLogger(__name__)
@@ -235,9 +236,13 @@ def _run_host(cmd: list[str], image: str, check: bool = True) -> bool:
 
     ``--entrypoint ip`` overrides the image's default entrypoint so the
     simulation entrypoint script is not executed.
+
+    The helper carries the run labels itself, so the run's teardown can reap
+    it even when the image it starts has no run label of its own.
     """
     docker_cmd = [
         "docker", "run", "--rm",
+        *[f"--label={k}={v}" for k, v in run_labels().items()],
         "--privileged",
         "--net=host",
         "--pid=host",

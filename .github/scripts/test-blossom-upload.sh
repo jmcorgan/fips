@@ -39,7 +39,7 @@ done
 
 WORK=$(mktemp -d)
 STUB_PIDS=()
-# shellcheck disable=SC2317  # called by the EXIT trap
+# shellcheck disable=SC2317,SC2329  # called by the EXIT trap
 cleanup() {
   local pid
   for pid in "${STUB_PIDS[@]}"; do

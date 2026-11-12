@@ -23,11 +23,12 @@ are visible to every file, since the suites source that library.
 
 What is read: in sweep mode (no arguments), the files committed at HEAD that
 are `*.sh`, `.github/workflows/*.yml` or `*.yaml`, or start with an sh or bash
-shebang. File arguments replace the sweep and are read from disk, with the
-libraries read from beside this file, which is how the check is tested against
-uncommitted copies. A file argument inside the current git work tree is
-named, and scoped, by its path relative to the work-tree root, so
-`testing/x.sh` and `/abs/path/to/checkout/testing/x.sh` read the same.
+shebang, and the `*.py` files under testing/ and packaging/. File arguments
+replace the sweep and are read from disk, with the libraries read from beside
+this file, which is how the check is tested against uncommitted copies. A
+file argument inside the current git work tree is named, and scoped, by its
+path relative to the work-tree root, so `testing/x.sh` and
+`/abs/path/to/checkout/testing/x.sh` read the same.
 
 Lines whose first non-blank character is `#` are skipped, a trailing comment
 is ignored, and backslash continuations are joined. The rules:
@@ -44,11 +45,22 @@ is ignored, and backslash continuations are joined. The rules:
      create` or `docker volume create` with no run label, labelled or not,
      unless rule 1 already reported that logical line;
   4. a `# ci-labels:` exemption with no reason, or one following a
-     continuation backslash, where the comment ends the command on that line.
+     continuation backslash, where the comment ends the command on that line;
+  5. in a Python file under testing/ or packaging/, a list literal whose
+     leading strings are `docker run`, `docker create`, `docker container
+     run`, `docker container create`, `docker network create` or `docker
+     volume create`, unless the list, or the `+` concatenation it sits in,
+     carries the run label: a string naming `com.corganlabs.fips-ci.run=`
+     that is a `--label=` or `-l=` token or follows `--label` or `-l`, or a
+     starred element or concatenated operand that calls `run_labels`
+     (testing/chaos/sim/naming.py) or uses a name containing `label`.
 
 Rules 1 and 2 name the physical line holding the generic label: the literal,
 the variable reference or the array expansion. Rule 3 names the line holding
-the docker command, and rule 4 the line holding the comment.
+the docker command, rule 4 the line holding the comment, and rule 5 the line
+where the list opens. Python files are parsed with `ast`, so a string or a
+comment that names a docker command is not one; a file that does not parse
+exits 2.
 
 Rule 3 reads shell words, so a quoted message such as
 `fail "docker network create: $err"` is not a command. A command is found at
@@ -60,7 +72,8 @@ shared images carry fixed tags and no labels by design.
 A container that must not carry the labels, such as ci-cleanup.sh's own
 ip(8) helpers, is exempted from rule 3 by a trailing comment
 `# ci-labels: <reason>` on any physical line of the command other than one
-ending in a continuation backslash; put it on the last line.
+ending in a continuation backslash; put it on the last line. In Python the
+same comment on any line of the list exempts it from rule 5.
 
 Before reading anything, the check runs a self-test: planted cases for every
 rule and for the shapes that must not be flagged. A wrong verdict there exits
@@ -74,8 +87,9 @@ assigned in a file that is neither the same file nor testing/lib/*.sh is not
 resolved, and so is not seen as either label; a docker command held in a
 string and run later (testing/boringtun/scripts/generate-keys.sh), or written
 with docker's global options before the subcommand, is not read as a command;
-Python callers (chaos/sim/runner.py, chaos/sim/veth.py) and compose files are
-not read.
+in Python, a label passed through a name containing `label` is trusted, not
+resolved, and a list that gains its labels after it is built (`cmd += ...`)
+is not followed, so it reds rule 5; compose files are not read.
 Compose services carry only the generic label by design: ci-local.sh names
 every compose project per run and reaps by that prefix.
 
@@ -88,6 +102,7 @@ Exit codes:
 
 from __future__ import annotations
 
+import ast
 import re
 import shlex
 import subprocess
@@ -99,6 +114,7 @@ GENERIC = "com.corganlabs.fips-ci=1"
 RUN = "com.corganlabs.fips-ci.run="
 LIBRARY_DIR = "testing/lib/"
 RUN_SCOPE = ("testing/", "packaging/")
+LABEL_FLAGS = ("--label", "-l")
 
 DOCKER_RE = re.compile(
     r"(?<![\w-])docker\s+(?:run|create|build|buildx\s+build|network\s+create"
@@ -463,11 +479,127 @@ def scan(text: str, libraries: list[str], path: str) -> list[tuple[int, int]]:
     return sorted(found)
 
 
+def literal(node: ast.AST) -> str | None:
+    """Return the text of a string constant or f-string, its fields as `{}`."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(v.value if isinstance(v, ast.Constant) else "{}" for v in node.values)
+    return None
+
+
+def py_creates(node: ast.List) -> bool:
+    """Whether the list's leading strings are a docker command rule 5 covers."""
+    lead = []
+    for elt in node.elts:
+        text = literal(elt)
+        if text is None:
+            break
+        lead.append(text)
+    return bool(lead) and lead[0] == "docker" and any(
+        tuple(lead[1:1 + n]) in CREATES for n in (1, 2))
+
+
+def py_labelled(node: ast.AST) -> bool:
+    """Whether NODE calls run_labels or names something containing `label`."""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            f = sub.func
+            name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")
+            if name == "run_labels":
+                return True
+        if isinstance(sub, ast.Name) and "label" in sub.id.lower():
+            return True
+    return False
+
+
+def py_carries_run(elts: list[ast.expr]) -> bool:
+    """Whether a list's elements carry the run label (rule 5's forms)."""
+    prev = None
+    for elt in elts:
+        text = literal(elt)
+        if text is not None and RUN in text and (
+                text.startswith(tuple(f + "=" for f in LABEL_FLAGS)) or prev in LABEL_FLAGS):
+            return True
+        if isinstance(elt, ast.Starred) and py_labelled(elt):
+            return True
+        prev = text
+    return False
+
+
+def concat_operands(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> list[ast.AST]:
+    """Return the operands of the outermost `+` chain holding NODE, or [NODE]."""
+    top = node
+    while isinstance(parents.get(top), ast.BinOp) and isinstance(parents[top].op, ast.Add):
+        top = parents[top]
+    out: list[ast.AST] = []
+
+    def flat(n: ast.AST) -> None:
+        if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add):
+            flat(n.left)
+            flat(n.right)
+        else:
+            out.append(n)
+
+    flat(top)
+    return out
+
+
+def py_annotation(lines: list[str], node: ast.AST) -> tuple[bool, list[int]]:
+    """Return whether NODE's lines carry a valid exemption, and the lines of malformed ones."""
+    valid, bad = False, []
+    for n in range(node.lineno, (node.end_lineno or node.lineno) + 1):
+        text = lines[n - 1] if n - 1 < len(lines) else ""
+        code = strip_comment(text)
+        m = ANNOTATION_RE.match(text[len(code):].strip())
+        if m:
+            if m.group(1).strip():
+                valid = True
+            else:
+                bad.append(n)
+    return valid, bad
+
+
+def scan_python(text: str, path: str) -> list[tuple[int, int]]:
+    """Return the sorted (line, rule) findings for one Python file's text.
+
+    Raises SyntaxError when the text does not parse.
+    """
+    if not path.startswith(RUN_SCOPE):
+        return []
+    tree = ast.parse(text, filename=path)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    lines = text.split("\n")
+    found: set[tuple[int, int]] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.List) and py_creates(node)):
+            continue
+        exempt, bad = py_annotation(lines, node)
+        found |= {(n, 4) for n in bad}
+        if exempt:
+            continue
+        operands = concat_operands(node, parents)
+        ok = any(py_carries_run(op.elts) if isinstance(op, ast.List) else py_labelled(op)
+                 for op in operands)
+        if not ok:
+            found.add((node.lineno, 5))
+    return sorted(found)
+
+
+def scan_any(text: str, libraries: list[str], path: str) -> list[tuple[int, int]]:
+    """Scan PATH's text with the Python rule or the shell rules, by its suffix."""
+    if path.endswith(".py"):
+        return scan_python(text, path)
+    return scan(text, libraries, path)
+
+
 RULES = {
     1: "a docker command gives the generic CI label without the run label",
     2: "an array of docker arguments holds the generic CI label without the run label",
     3: "a CI container, network or volume is created without the run label",
     4: "a ci-labels exemption has no reason, or follows a continuation backslash",
+    5: "a docker command built in Python creates a container, network or volume "
+       "without the run label",
 }
 
 LIB = ('CI_LABELS=(\n    --label com.corganlabs.fips-ci=1\n'
@@ -477,6 +609,7 @@ LIB = ('CI_LABELS=(\n    --label com.corganlabs.fips-ci=1\n'
 # every shape the matchers must leave alone has a green, so a matcher that
 # drifts in either direction fails the run before it reads the tree.
 T = "testing/t.sh"
+P = "testing/t.py"
 CASES: list[tuple[str, str, str, set[tuple[int, int]]]] = [
     ("literal generic only", T,
      'docker run -d --label com.corganlabs.fips-ci=1 img\n', {(1, 1)}),
@@ -565,6 +698,41 @@ CASES: list[tuple[str, str, str, set[tuple[int, int]]]] = [
     ("array holding both labels", T,
      'B=(\n    --label com.corganlabs.fips-ci=1  # generic\n'
      '    --label "com.corganlabs.fips-ci.run=$R"\n)\n', set()),
+    ("python: unlabelled docker run list", P,
+     'cmd = [\n    "docker", "run", "--rm",\n    image,\n]\n', {(1, 5)}),
+    ("python: unlabelled network create", P,
+     'subprocess.run(["docker", "network", "create", name])\n', {(1, 5)}),
+    ("python: generic label only", P,
+     'c = ["docker", "run", "--label", "com.corganlabs.fips-ci=1", img]\n', {(1, 5)}),
+    ("python: run label as a plain argument is not a label", P,
+     'c = ["docker", "run", "-e", "com.corganlabs.fips-ci.run=x", img]\n', {(1, 5)}),
+    ("python: exemption with no reason", P,
+     'c = ["docker", "run", img]  # ci-labels:\n', {(1, 4), (1, 5)}),
+    ("python: literal run label pair", P,
+     'c = ["docker", "run", "--label", "com.corganlabs.fips-ci.run=x", img]\n', set()),
+    ("python: single-token run label in an f-string", P,
+     'c = ["docker", "create", f"--label=com.corganlabs.fips-ci.run={rid}", img]\n', set()),
+    ("python: labels concatenated, as netclaim does", P,
+     'c = (["docker", "network", "create", "--subnet", s]\n     + label_args\n     + [name])\n',
+     set()),
+    ("python: starred run_labels(), as the veth helper does", P,
+     'c = ["docker", "run", "--rm",\n     *[f"--label={k}={v}" for k, v in run_labels().items()],\n'
+     '     img]\n', set()),
+    ("python: starred run_labels() through its module", P,
+     'c = ["docker", "run", *[f"--label={k}={v}" for k, v in naming.run_labels().items()], img]\n',
+     set()),
+    ("python: a starred element without labels is not a label", P,
+     'c = ["docker", "run", *extra, img]\n', {(1, 5)}),
+    ("python: docker build is not rule 5's", P,
+     'c = ["docker", "build", "-t", tag, d]\n', set()),
+    ("python: docker exec is not rule 5's", P,
+     'c = ["docker", "exec", name, "ip", "link"]\n', set()),
+    ("python: a string naming docker run is not a command", P,
+     'msg = "docker run failed"\n', set()),
+    ("python: exempted helper with a reason", P,
+     'c = ["docker", "run", img]  # ci-labels: the reaper\'s helper\n', set()),
+    ("python: outside testing/ and packaging/", "examples/e.py",
+     'c = ["docker", "run", img]\n', set()),
 ]
 
 
@@ -572,7 +740,7 @@ def selftest() -> list[str]:
     """Run the planted cases; return a message for each wrong verdict."""
     errors = []
     for name, path, text, want in CASES:
-        got = set(scan(text, [LIB], path))
+        got = set(scan_any(text, [LIB], path))
         if got != want:
             errors.append(f"case '{name}': want {sorted(want)}, got {sorted(got)}")
     return errors
@@ -591,7 +759,8 @@ def git(root: str | None, *args: str) -> str:
 def wanted(path: str, first_line: str) -> bool:
     """True when PATH is a file the sweep reads."""
     workflow = path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))
-    return path.endswith(".sh") or workflow or bool(SHEBANG_RE.match(first_line))
+    python = path.endswith(".py") and path.startswith(RUN_SCOPE)
+    return path.endswith(".sh") or workflow or python or bool(SHEBANG_RE.match(first_line))
 
 
 def work_tree() -> Path | None:
@@ -684,7 +853,12 @@ def main(argv: list[str]) -> int:
 
     findings = []
     for path, text in files:
-        for line, rule in scan(text, libraries, path):
+        try:
+            found = scan_any(text, libraries, path)
+        except SyntaxError as e:
+            print(f"{NAME}: cannot parse {path}: {e}", file=sys.stderr)
+            return 2
+        for line, rule in found:
             findings.append(f"{path}:{line}: rule {rule}: {RULES[rule]}")
 
     if findings:
@@ -698,6 +872,8 @@ def main(argv: list[str]) -> int:
               file=sys.stderr)
         print("--label com.corganlabs.fips-ci=1", file=sys.stderr)
         print("--label \"com.corganlabs.fips-ci.run=${FIPS_CI_RUN_ID:-manual}\".", file=sys.stderr)
+        print("In Python, add the labels from testing/chaos/sim/naming.py's", file=sys.stderr)
+        print("run_labels().", file=sys.stderr)
         print("A container that must stay unlabelled takes a trailing", file=sys.stderr)
         print("'# ci-labels: <reason>' on the command's last line.", file=sys.stderr)
         return 1

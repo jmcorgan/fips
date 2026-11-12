@@ -19,6 +19,20 @@ def name_suffix() -> str:
     return os.environ.get("FIPS_CI_NAME_SUFFIX", "")
 
 
+def run_labels() -> dict[str, str]:
+    """Return the labels every docker object this run creates must carry.
+
+    The generic label marks the object as CI's and the run label names the
+    run, which is what ci-local.sh's teardown reaps by. The run id comes from
+    ``FIPS_CI_RUN_ID`` and is ``manual`` for a hand run, as in
+    testing/lib/image-build.sh's ``CI_LABELS``.
+    """
+    return {
+        "com.corganlabs.fips-ci": "1",
+        "com.corganlabs.fips-ci.run": os.environ.get("FIPS_CI_RUN_ID", "manual"),
+    }
+
+
 def veth_token(suffix: str) -> str:
     """Shorten a name suffix to four hex characters.
 

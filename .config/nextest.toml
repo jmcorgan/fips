@@ -85,7 +85,7 @@ filter = 'package(fips-mesh) & test(/^node::tests::(bloom::test_bloom_filter_con
 test-group = 'node-large'
 
 [[profile.default.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|instr_capture|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
 
 [[profile.ci.overrides]]
@@ -93,7 +93,7 @@ filter = 'package(fips-mesh) & test(/^node::tests::(bloom::test_bloom_filter_con
 test-group = 'node-large'
 
 [[profile.ci.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|instr_capture|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
 
 # The known-slow tests get 480 s instead of 300: the six 100-node tests (the
@@ -106,7 +106,7 @@ test-group = 'node-synthetic'
 # only on master and next, and package() naming a package the workspace lacks
 # is a hard error, while a test() name a branch lacks matches nothing. One
 # filter therefore serves every branch. testing/check-node-test-groups.py reads
-# only overrides that set a test-group, so it does not check this one.
+# this override's slow-timeout, to keep terminate-after, and not its filter.
 [[profile.default.overrides]]
 filter = 'test(/^(node::tests::(bloom::test_bloom_filter_convergence_100_nodes|discovery::test_discovery_100_nodes|routing::test_routing_reachability_100_nodes|routing::test_routing_source_only_coords_100_nodes|session::test_session_100_nodes|spanning_tree::test_spanning_tree_convergence_100_nodes)|proto::routing::tests::limits::the_map_stays_bounded_when_a_sender_mints_distinct_destination_keys|proto::rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals)$/)'
 slow-timeout = { period = "60s", terminate-after = 8 }

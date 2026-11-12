@@ -890,19 +890,23 @@ print(exe)
 
 # ── Stage 3: Integration Tests ─────────────────────────────────────────────
 
-# Copy release binaries into a testing subdirectory
+# Copy release binaries into a testing subdirectory. They come from the
+# directory run_release built into: cargo writes under $CARGO_TARGET_DIR when it
+# is set, which parallel worktree runs use, and under target/ otherwise. No
+# cargo config in the tree sets build.target-dir.
 install_binaries() {
     local dest="$1"
-    cp target/release/fips "$dest/fips"
-    cp target/release/fipsctl "$dest/fipsctl"
-    [[ -f target/release/fipstop ]] && cp target/release/fipstop "$dest/fipstop" || true
-    [[ -f target/release/fips-gateway ]] && cp target/release/fips-gateway "$dest/fips-gateway" || true
+    local out="${CARGO_TARGET_DIR:-target}/release"
+    cp "$out/fips" "$dest/fips"
+    cp "$out/fipsctl" "$dest/fipsctl"
+    [[ -f "$out/fipstop" ]] && cp "$out/fipstop" "$dest/fipstop" || true
+    [[ -f "$out/fips-gateway" ]] && cp "$out/fips-gateway" "$dest/fips-gateway" || true
     # Not optional: the native-api harness runs native-echo as one end of its
     # echo check and native-surface as its surface walk, so a missing one must
     # fail the image build rather than fail a check later with the container
     # exiting on a missing entrypoint.
-    cp target/release/examples/native-echo "$dest/native-echo"
-    cp target/release/examples/native-surface "$dest/native-surface"
+    cp "$out/examples/native-echo" "$dest/native-echo"
+    cp "$out/examples/native-surface" "$dest/native-surface"
     chmod +x "$dest/fips" "$dest/fipsctl" "$dest/native-echo" "$dest/native-surface"
     [[ -f "$dest/fipstop" ]] && chmod +x "$dest/fipstop" || true
     [[ -f "$dest/fips-gateway" ]] && chmod +x "$dest/fips-gateway" || true
@@ -1807,10 +1811,22 @@ run_ci_labels() {
 # OpenWrt Package workflow lints them on GitHub, but only for trunk pushes,
 # tags and pull requests, so this is where a branch first sees a finding.
 # Mirrored in ci.yml's ci-parity job by hand. Static, about a second.
+#
+# It runs the shellcheck version install-shellcheck.sh pins, as the GitHub jobs
+# do, not the host's package: versions report the same finding under different
+# codes. The verified tarball is kept in the user's cache directory, so only the
+# first run on a host downloads it. If the pinned binary cannot be installed the
+# stage is red; falling back to the host's shellcheck would lint with a version
+# GitHub does not use.
 run_shellcheck() {
-    local rc=0
+    local rc=0 dir="${XDG_CACHE_HOME:-$HOME/.cache}/fips-ci/shellcheck"
     info "[shellcheck] Linting the OpenWrt package's shell scripts"
-    bash "$SCRIPT_DIR/check-shellcheck.sh" || rc=$?
+    if bash "$SCRIPT_DIR/install-shellcheck.sh" "$dir"; then
+        SHELLCHECK="$dir/shellcheck" bash "$SCRIPT_DIR/check-shellcheck.sh" || rc=$?
+    else
+        rc=2
+        fail "[shellcheck] the pinned shellcheck could not be installed; nothing was linted"
+    fi
     record "shellcheck" $rc
 }
 
@@ -1877,6 +1893,19 @@ run_relay_verdict_test() {
     info "[relay-verdict] Running the NAT lab relay start and guard unit tests"
     bash "$SCRIPT_DIR/lib/relay-verdict-test.sh" || rc=$?
     record "relay-verdict" $rc
+    return 0
+}
+
+# Unit tests for run_container, the container start the native API suite uses.
+# Hermetic: docker and sleep are stubbed, no containers, well under a second.
+# It decides whether a daemon refusal is retried and then reported as
+# infrastructure, or reds the suite as a FIPS start failure, so it is gated
+# here, before anything is built. Mirrored in ci.yml's ci-parity job by hand.
+run_dockerrun() {
+    local rc=0
+    info "[docker-run] Running the container start retry unit tests"
+    bash "$SCRIPT_DIR/lib/docker-run-test.sh" || rc=$?
+    record "docker-run" $rc
     return 0
 }
 
@@ -1975,6 +2004,7 @@ run_guards() {
     run_shellcheck
     run_wait_converge
     run_relay_verdict_test
+    run_dockerrun
     run_package_versions
     run_nextest_flaky
     run_node_test_groups

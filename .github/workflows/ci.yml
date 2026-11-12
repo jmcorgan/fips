@@ -118,14 +118,14 @@ jobs:
         run: python3 testing/check-ci-labels.py
       # The OpenWrt Package workflow runs this too, but only on trunk pushes,
       # tags and pull requests; here a branch push sees a finding first.
-      # Kept in step with ci-local.sh's run_shellcheck by hand.
-      - name: Install shellcheck (if missing)
-        run: |
-          if ! command -v shellcheck >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
-          fi
-          shellcheck --version
+      # Kept in step with ci-local.sh's run_shellcheck by hand. The version is
+      # the one testing/install-shellcheck.sh pins, not the runner image's, so
+      # an image update cannot change what the lint reports.
+      - name: Install the pinned shellcheck
+        run: bash testing/install-shellcheck.sh "$RUNNER_TEMP/shellcheck"
       - name: Check the OpenWrt package's shell scripts with shellcheck
+        env:
+          SHELLCHECK: ${{ runner.temp }}/shellcheck/shellcheck
         run: bash testing/check-shellcheck.sh
       # Hermetic: synthetic ping functions, no containers, ~45s. Lives beside
       # the other two so both runners gate on it identically — putting it in
@@ -139,6 +139,11 @@ jobs:
       # reason as the convergence-gate step above.
       - name: Run NAT lab relay start and guard unit tests
         run: bash testing/lib/relay-verdict-test.sh
+      # Hermetic: docker and sleep stubbed, no containers. The native API
+      # suite's container start retry. Kept in step with ci-local.sh's
+      # run_dockerrun by hand.
+      - name: Run container start retry unit tests
+        run: bash testing/lib/docker-run-test.sh
       # Runs the packaging workflows' own version derivations on a release
       # tag, a candidate tag and a branch. Not a matrix suite either, so it is
       # kept in step with ci-local.sh's run_package_versions by hand.
@@ -970,7 +975,7 @@ jobs:
         if: matrix.type == 'nostr-publish-consume' && failure()
         run: |
           docker compose -f testing/nat/docker-compose.yml \
-            --profile nostr-publish-consume logs --no-color | tail -300
+            --profile nostr-publish-consume logs --no-color
 
       - name: Stop containers (nostr-publish-consume)
         if: matrix.type == 'nostr-publish-consume' && always()
@@ -987,7 +992,7 @@ jobs:
         if: matrix.type == 'stun-faults' && failure()
         run: |
           docker compose -f testing/nat/docker-compose.yml \
-            --profile stun-faults logs --no-color | tail -300
+            --profile stun-faults logs --no-color
 
       - name: Stop containers (stun-faults)
         if: matrix.type == 'stun-faults' && always()

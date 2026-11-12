@@ -294,6 +294,11 @@ Runs iperf3 with:
 - Parallel streams: 8 (`-P 8`)
 - Protocol: TCP over IPv6
 
+Each path reports its aggregate sender bandwidth: the `[SUM]` line with more
+than one stream, or the stream's own `sender` line with `PARALLEL=1`, where
+iperf3 prints no `[SUM]` line. A path whose bandwidth cannot be read counts as
+failed.
+
 For before/after measurements across commits or branches:
 
 ```bash

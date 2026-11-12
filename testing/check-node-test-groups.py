@@ -66,6 +66,10 @@ The pinned nextest version is checked too: `nextest-version.required` in the
 config must equal the version of every `tool: nextest@<ver>` install step in
 .github/workflows, and an unpinned one is a finding.
 
+So is a per-test limit that has lost `terminate-after`: each profile's own
+`slow-timeout`, and every override's that sets one, must carry it, or a hung
+test runs until the job's timeout cancels the job and no result names it.
+
 Exit 0: every flagged module and every lock holder is in its group, in both
 profiles. Exit 1: a finding. Exit 2: the check could not run meaningfully:
 no test modules, no flagged module, no lock holder, a filter of another shape,
@@ -648,6 +652,15 @@ def load_config(path: Path) -> tuple[dict[str, list[Override]], str, list[str]]:
     if not isinstance(required, str) or not SEMVER_RE.match(required):
         raise CannotCheck(f"{path}: nextest-version.required must be an exact "
                           f"version, found {required!r}")
+    for p in PROFILES:
+        prof = data.get("profile", {}).get(p, {})
+        tables = [("the profile", prof.get("slow-timeout"))] + [
+            (f"override {i + 1}", o["slow-timeout"])
+            for i, o in enumerate(prof.get("overrides", [])) if "slow-timeout" in o]
+        for name, limit in tables:
+            if not (isinstance(limit, dict) and "terminate-after" in limit):
+                problems.append(f"{path} [profile.{p}] {name}: slow-timeout must set "
+                                "terminate-after, or a hung test runs to the job timeout")
     profiles = {}
     for p in PROFILES:
         overrides = []

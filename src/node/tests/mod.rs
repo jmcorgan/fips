@@ -33,6 +33,8 @@ mod forged_initial_msg2;
 mod forwarding;
 mod handshake;
 mod heartbeat;
+#[cfg(feature = "profiling")]
+mod instr_capture;
 mod lan_label;
 mod lookup_echo;
 mod mmp_chartests;
