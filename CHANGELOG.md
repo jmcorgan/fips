@@ -134,20 +134,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon logs one more line at start, `IPv6 adapter status socket listening`.
 
 - Multipath: a link can now hold several paths to a peer, across transports
-  and addresses of one anonymity class and, unless `node.path.mix_kinds` is
-  set, of one kind, and move between them with no new handshake and one Noise
-  session throughout. Each node proves each path with an authenticated probe
-  and its answer, watches every path, and sends on one active path, leaving a
-  failed one at once and changing to a better one only past a margin and a
-  dwell. This implements the FIPS multipath version 1 draft
-  at its switchover level: Sections 4, 5, 7 and 8 and Appendix A, with every
-  `PathAck` field filled as Section 6.5 requires. Aggregation is not
-  implemented. The path messages are three new link message types, `0x52` to
-  `0x54`, inside the existing encrypted link. A peer without multipath
-  discards them, and the pair behaves as before. `node.path.*` sets the
-  behaviour, each transport's `role` (`never`, `backup`, `normal`, `preferred`)
-  ranks its paths, and UDP's and TCP's `kind` (`local`, `internet`) overrides
-  the kind the peer's address implies, which a VPN on RFC 1918 space needs.
+  and addresses of one anonymity class, and move between them with no new
+  handshake and one Noise session throughout. Each node proves each path with
+  an authenticated probe and its answer, watches every path, and sends on one
+  active path, leaving a failed one at once and changing to a better one only
+  past a margin and a dwell. A link may mix local and Internet paths: one that
+  came up on a local medium (BLE, the LAN) may gain a path to the peer's
+  Internet address and move onto it, so a peering that began on the LAN can
+  become visible to parties on that Internet path. Either end setting
+  `node.path.mix_kinds: false` keeps a link to its first path's kind. The
+  anonymity-class rule still holds: a link gains no path over Tor or Nym from
+  a clear transport, or the other way round. This implements the FIPS
+  multipath version 1 draft at its switchover level (Sections 4, 5, 7 and 8
+  and Appendix A, with every `PathAck` field filled as Section 6.5 requires)
+  but for one rule: the path that carried the link when it went silent is
+  probed every second for 30 s before the gaps between its probes double,
+  where Section 5.6 has every path that has stopped answering double its gaps
+  from 1 s up to 30 s. Holding a probe's verdict while the peer's session
+  datagrams still arrive on its path is within the probe timeout the draft
+  leaves to the node. Taking a path's MTU from a smaller size the path has
+  proven it carries is not yet described in the draft (Section 5.11), and
+  whether FRC-1201's path-MTU rules (Section 3.6) admit it is still open.
+  Aggregation is not implemented. The path messages are three new link
+  message types, `0x52` to `0x54`, inside the existing encrypted link. A peer
+  without multipath discards them, and the pair behaves as before.
+  `node.path.*` sets the behaviour, each transport's `role` (`never`,
+  `backup`, `normal`, `preferred`) ranks its paths, and UDP's and TCP's `kind`
+  (`local`, `internet`) overrides the kind the peer's address implies, which a
+  VPN on RFC 1918 space needs.
   `fipsctl path show`, `pin` and `unpin` (control commands `path_show`,
   `path_pin` and `path_unpin`) show a link's paths and pin it to a transport or
   to one path, `show_peers` lists each peer's `paths`, and fipstop shows them.
@@ -1536,6 +1550,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a restart: the LAN path stayed missing until the desktop left the LAN and
   came back. A dial a transport neighbour's key claim started is left out.
   Nothing on the wire changes.
+
+- With multipath on, path probes and acks no longer wait in a full transport
+  send queue. BLE, TCP, Tor and Nym connections queue frames for a writer and
+  refuse a frame once the queue is full (16 frames on BLE, 64 on TCP and
+  through the Tor and Nym proxy), and a probe refused behind the node's own
+  traffic counted as unanswered, so a loaded path read as failing while it
+  still carried data: a link pinned to BLE under load changed path about once
+  a second. Each such connection now has a second queue of 8 frames for path
+  messages, which its writer sends first. That queue is bounded, so a
+  connection that has stopped draining still refuses its probes and its path
+  still fails over.
+
+- With multipath on, a working path under bulk load is no longer declared
+  failing as the load starts. Its probes waited behind the data, three
+  answers arriving after the probe timeout made it Suspect, and the link
+  moved to a slower path for a few seconds at every onset, although the
+  peer's traffic was arriving on the path the whole time. The probe timeout
+  now also covers three times the largest round trip in the path's recent
+  window, that term capped at 3 s, and a probe is not judged missed while the
+  peer's session datagrams have arrived on its path since it was sent, up to
+  the same 3 s. On an idle link a failure in the node's own direction is
+  still found in about a second, and under load within the 3 s cap. Nothing
+  on the wire changes.
+
+- With multipath on, load on the active path no longer moves the link to a
+  path that is slower at its best. A path's score comes from its least round
+  trip over about the last 6.4 s, so load raised the active path's score past
+  an idle standby's, the link moved, the load followed it, and the link moved
+  back: in a test a loaded fast path handed the link to a BLE-rate standby for
+  26 of 60 s, and every change reorders the frames in flight. Each path now
+  also keeps its least round trip over the last 60 s, and a change on score
+  away from the active path waits while the active path is the faster of the
+  two over that minute, unless the other path also beats the active path's
+  score at its best by the switch margin. A move to a path faster at its
+  best is not held, nor is one made because the active path failed, for a
+  pin, for the transports' roles or for the FilterAnnounce frame size.
+
+- With multipath on, a path across a hop narrower than its link MTU no longer
+  shows Live while every large frame on it is lost. A padded probe that went
+  unanswered was followed by the smallest probe, which proves no size, and
+  the peer's path MTU came from the link MTU, so large frames were admitted
+  and then dropped at the hop while small traffic passed. Discovery probes
+  now step down from the link MTU to three quarters of it, half of it and the
+  smallest size, and the first size answered is the size the path is proven
+  to carry. A Live path proven below its link MTU searches upward again, to
+  recover a size that ordinary loss stepped it down from. The peer's path MTU
+  is now the smaller of the link MTU and the proven size, and follows the
+  active path's proven size up or down; sessions through the peer are lowered
+  to it when it falls. The path MTU folded into forwarded and originated
+  datagrams and into lookup responses, and whether a path carries the
+  1,071-byte FilterAnnounce frame, use the same value. On TCP, Tor, Nym and
+  BLE, where an oversized probe would close the connection, nothing searches
+  upward and the link MTU is kept.
+
+- With multipath on, the path that was carrying the link when it went silent
+  is probed every second for 30 s after it went silent, and only then do the
+  gaps between its probes double. Before, its gaps doubled from 1 s toward
+  30 s at once, so after an outage of about 20 s the path came back only at
+  the next doubled slot, seconds after it was reachable again, and the link
+  stayed on the worse path meanwhile; in a test a path silent for 20 s is now
+  Live again 400 ms after the outage ends, against 5.4 s before. Other silent
+  paths keep the doubling. On TCP, Tor, Nym and BLE these probes go at the
+  size the path has proven, so none of them can close the connection by its
+  size. This departs from the multipath draft, which has every path that has
+  stopped answering keep the doubling.
+
+- With multipath on, a link moved off a failed path returns to it once it is
+  Live again and has scored better than the path the link moved to, by any
+  amount, for the switch dwell. Before, the return needed the switch margin,
+  and the slower path's score still came from round trips it measured while
+  idle, so the return waited for its window of about 6.4 s to fill with
+  loaded samples: in a test a 2 s outage of a loaded fast path left the link
+  on a BLE-rate standby for 7.45 s after the outage ended, where it now
+  returns in 2.24 s, and a path within the margin of the one taken was never
+  returned to at all. Every other change on score still needs the margin.
+
+- With multipath on, a link prefers a cable to Wi-Fi, and Wi-Fi to BLE, among
+  the paths whose scores are within the switch margin of the best. A cable
+  and Wi-Fi on one LAN score within the margin of each other, so the link
+  stayed on whichever path it was made on unless the cable's transport had
+  `role: preferred`. The Ethernet transport now reads its interface's medium
+  each time it binds the interface: on Linux from `/sys/class/net/<interface>`,
+  and on macOS from the interface's media word, a read that has not yet been
+  run on a Mac. A bridge, a VLAN, a veth, a tunnel, the loopback interface and
+  anything else those facts do not settle stays unknown, as do UDP, TCP, Tor
+  and Nym paths, which may leave by any interface; there the score decides as
+  before, and `role: preferred` still puts a cable first. The medium ranks
+  after a pin, the transports' role tiers, the FilterAnnounce fit and
+  `role: preferred`, a move to a faster medium waits for the switch dwell,
+  and a path outside the margin of the best never keeps the link for its
+  medium. Under sustained
+  load the link no longer swaps between a cable and Wi-Fi every few seconds:
+  either move waits until the load has lasted 60 s, so the link changes path
+  at most twice a minute.
 
 - At `max_peers`, a msg1 from a node this node is itself dialing is dropped,
   as from any other node it does not hold. Before, the node answered it with
