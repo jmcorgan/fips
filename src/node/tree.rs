@@ -497,7 +497,9 @@ impl Node {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                let outcome = self.tree_state.recover(&peer_costs, timestamp, mono_now_ms);
+                let outcome = self
+                    .tree_state
+                    .recover(&peer_costs, &skip, timestamp, mono_now_ms);
                 if outcome.changed {
                     // Clone identity up front to avoid a split borrow against the
                     // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
@@ -855,7 +857,12 @@ impl Node {
         // Removal is not a pure classify: `handle_parent_lost` is a &mut mutator
         // whose returned `changed` bool IS the decision. Drive it and map the
         // outcome onto the TreeDecision vocabulary.
-        let outcome = self.tree_state.recover(&peer_costs, now_secs, mono_now_ms);
+        // Recover with the skip set the announce path classifies with, so a
+        // non-transit peer is never taken as the new parent.
+        let skip = self.non_full_peers();
+        let outcome = self
+            .tree_state
+            .recover(&peer_costs, &skip, now_secs, mono_now_ms);
         let decision = if outcome.changed {
             TreeDecision::ParentLost
         } else {

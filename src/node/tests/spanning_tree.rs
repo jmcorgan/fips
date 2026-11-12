@@ -1765,3 +1765,146 @@ async fn test_tree_announce_same_parent_ancestry_update() {
 
     cleanup_nodes(&mut nodes).await;
 }
+
+/// Put the node at `x` under its peer `p`, both rooted at the synthetic `root`
+/// (a smaller address than any real node): X's coordinates become
+/// `[X, P, root]`. The parent switch is stamped at the node's own monotonic
+/// clock, so the hold-down it arms is active for the rest of the test.
+fn place_under(nodes: &mut [TestNode], x: usize, p: usize, root: NodeAddr) {
+    let p_addr = *nodes[p].node.node_addr();
+    {
+        let ts = nodes[x].node.tree_state_mut();
+        ts.remove_peer(&p_addr);
+        ts.update_peer(
+            ParentDeclaration::new(p_addr, root, 1, 1000),
+            TreeCoordinate::from_addrs(vec![p_addr, root]).unwrap(),
+        );
+        ts.set_parent(p_addr, 1, 1000, crate::time::mono_ms());
+        ts.recompute_coords();
+    }
+    let identity = nodes[x].node.identity().clone();
+    sign_declaration(
+        nodes[x].node.tree_state_mut().my_declaration_mut(),
+        &identity,
+    )
+    .unwrap();
+    assert!(!nodes[x].node.tree_state().is_root());
+    assert_eq!(
+        nodes[x].node.tree_state().my_declaration().parent_id(),
+        &p_addr
+    );
+}
+
+/// Deliver to the node at `to` a TreeAnnounce signed by the node at `from`,
+/// declaring `parent` at sequence `seq` with ancestry `path`.
+async fn deliver_announce(
+    nodes: &mut [TestNode],
+    from: usize,
+    to: usize,
+    parent: NodeAddr,
+    path: Vec<NodeAddr>,
+    seq: u64,
+) {
+    let from_addr = *nodes[from].node.node_addr();
+    let mut decl = ParentDeclaration::new(from_addr, parent, seq, 2000);
+    sign_declaration(&mut decl, nodes[from].node.identity()).unwrap();
+    let announce = TreeAnnounce::new(decl, TreeCoordinate::from_addrs(path).unwrap());
+    let encoded = announce.encode().unwrap();
+    nodes[to]
+        .node
+        .handle_tree_announce(&from_addr, &encoded[1..])
+        .await;
+}
+
+/// Build X (Full) with a Full peer P and a NonRouting peer N, put X under P at
+/// a synthetic root, and have N announce a loop-free path `[N, root]` to that
+/// same root. Returns the nodes, indexed X = 0, P = 1, N = 2, and the root.
+async fn x_under_p_with_non_routing_n() -> (Vec<TestNode>, NodeAddr) {
+    use crate::proto::fmp::NodeProfile;
+    let mut nodes = run_tree_test_with_profiles(
+        &[
+            NodeProfile::Full,
+            NodeProfile::Full,
+            NodeProfile::NonRouting,
+        ],
+        &[(0, 1), (0, 2)],
+        false,
+    )
+    .await;
+    let root = make_node_addr(0);
+    let n_addr = *nodes[2].node.node_addr();
+    place_under(&mut nodes, 0, 1, root);
+    deliver_announce(&mut nodes, 2, 0, root, vec![n_addr, root], 1000).await;
+
+    let x = &nodes[0].node;
+    let stored: Option<Vec<NodeAddr>> = x
+        .tree_state()
+        .peer_coords(&n_addr)
+        .map(|c| c.node_addrs().copied().collect());
+    assert_eq!(
+        stored,
+        Some(vec![n_addr, root]),
+        "precondition: X stores the non-routing peer's announced ancestry"
+    );
+    assert!(
+        x.non_full_peers().contains(&n_addr),
+        "precondition: X counts N as a non-transit peer"
+    );
+    assert_eq!(
+        x.tree_state().my_declaration().parent_id(),
+        nodes[1].node.node_addr(),
+        "precondition: N's announce leaves X under P"
+    );
+    (nodes, root)
+}
+
+/// A NonRouting peer announces, so its ancestry sits in the tree state beside
+/// the Full peers'. When the parent goes away, recovery must apply the same
+/// skip set the announce path does and leave the non-routing peer out, rather
+/// than adopt it as a parent that cannot forward transit.
+#[tokio::test]
+async fn a_node_whose_parent_is_removed_does_not_adopt_a_non_routing_peer_as_parent() {
+    let (mut nodes, _root) = x_under_p_with_non_routing_n().await;
+    let p_addr = *nodes[1].node.node_addr();
+    let n_addr = *nodes[2].node.node_addr();
+
+    assert!(
+        nodes[0].node.remove_active_peer(&p_addr).is_some(),
+        "precondition: P was an active peer of X"
+    );
+
+    assert_ne!(
+        nodes[0].node.tree_state().my_declaration().parent_id(),
+        &n_addr,
+        "defect: X adopted the non-routing peer N as parent after losing P"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The parent's announce runs back through this node, so the node drops it.
+/// The only other path to the root is through a NonRouting peer, which the
+/// announce path skips; the recovery that follows must skip it too.
+#[tokio::test]
+async fn a_loop_drop_does_not_adopt_a_non_routing_peer_as_parent() {
+    let (mut nodes, root) = x_under_p_with_non_routing_n().await;
+    let x_addr = *nodes[0].node.node_addr();
+    let p_addr = *nodes[1].node.node_addr();
+    let n_addr = *nodes[2].node.node_addr();
+
+    let loop_before = nodes[0].node.metrics().tree.loop_detected.get();
+    deliver_announce(&mut nodes, 1, 0, x_addr, vec![p_addr, x_addr, root], 1000).await;
+    assert_eq!(
+        nodes[0].node.metrics().tree.loop_detected.get(),
+        loop_before + 1,
+        "precondition: P's announce took the loop-drop arm"
+    );
+
+    assert_ne!(
+        nodes[0].node.tree_state().my_declaration().parent_id(),
+        &n_addr,
+        "defect: X adopted the non-routing peer N as parent after a loop drop"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}

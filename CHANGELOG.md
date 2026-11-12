@@ -1869,6 +1869,13 @@ with v0.5.x or earlier peers.
   read as empty and peers' inbox lists never took part in signal relay
   selection. The list is now published again every 24 hours, so a node up
   longer than 30 days stays inside its peers' lookup window.
+- A node whose parent goes away no longer takes a non-routing or leaf peer as
+  its parent. Choosing a parent from an announce already left such peers out,
+  since they do not forward transit, but the recovery after a parent was lost
+  considered every peer, so a node could attach under a peer that would not
+  carry its traffic and stay there until the topology changed. Recovery now
+  leaves out the same peers, and a node with no other candidate makes itself
+  root.
 
 #### Transports
 

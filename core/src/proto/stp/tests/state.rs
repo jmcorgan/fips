@@ -1352,7 +1352,7 @@ fn parent_loss_takes_the_unmeasured_peer_on_a_smaller_root_rather_than_self_root
 
     state.remove_peer(&make_node_addr(60));
     let costs = make_costs(&[(61, 1.0)]);
-    assert!(state.recover(&costs, 2000, 2000).changed);
+    assert!(state.recover(&costs, &BTreeSet::new(), 2000, 2000).changed);
 
     assert!(!state.is_root());
     assert_eq!(*state.my_declaration().parent_id(), make_node_addr(70));

@@ -381,7 +381,7 @@ fn test_parent_loss_recovery_reports_the_engagement_that_arms_dampening() {
 
     // Parent disappears; recovery picks peer_b and crosses the threshold.
     state.remove_peer(&peer_a);
-    let outcome = state.recover(&BTreeMap::new(), 2000, 2000);
+    let outcome = state.recover(&BTreeMap::new(), &BTreeSet::new(), 2000, 2000);
 
     assert!(outcome.changed);
     assert_eq!(state.my_declaration().parent_id(), &peer_b);
@@ -412,7 +412,7 @@ fn test_parent_loss_recovery_to_self_root_reports_no_engagement() {
     state.recompute_coords();
 
     state.remove_peer(&peer_a);
-    let outcome = state.recover(&BTreeMap::new(), 2000, 2000);
+    let outcome = state.recover(&BTreeMap::new(), &BTreeSet::new(), 2000, 2000);
 
     assert!(outcome.changed);
     assert!(state.is_root());

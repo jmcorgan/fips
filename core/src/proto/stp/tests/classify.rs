@@ -3,7 +3,8 @@
 //! Each test builds a `TreeState` for node X (address 5) under parent P
 //! (address 4), stores P's new declaration the way the announce path does
 //! (`update_peer` first, no `recompute_coords`), then classifies the announce.
-//! Costs are cold-start (empty map, every link 1.0) and no peer is skipped.
+//! Costs are cold-start (empty map, every link 1.0), and no peer is skipped
+//! except in the last test, which covers recovery with the caller's skip set.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 
@@ -174,4 +175,55 @@ fn parent_ancestry_change_on_same_root_leaves_better_peer_to_the_hold_down_veto(
 
     assert!(matches!(evaluate(&tree), ParentEval::Discretionary(p) if p == q));
     assert_ancestry_update(classify(&tree, true), 3);
+}
+
+/// N (address 2) reaches root 1 loop-free, but is in the caller's skip set as
+/// a non-transit peer. P's announce runs back through X, so X drops P; the
+/// recovery that follows, given the same skip set, must not adopt N, and a
+/// periodic evaluation with that set must not leave X under N.
+#[test]
+fn recover_after_a_loop_drop_does_not_adopt_a_peer_in_the_skip_set() {
+    let n = make_node_addr(2);
+    let mut tree = under_parent(&[P, 1], &[(2, &[2, 1])], 30);
+    parent_reannounces(&mut tree, X, &[P, X, 9, 1]);
+    let skip: BTreeSet<NodeAddr> = [n].into_iter().collect();
+    let suppressed = tree.is_switch_suppressed(1500);
+    assert!(
+        suppressed,
+        "precondition: the hold-down armed at 1000 ms is active"
+    );
+    let decision = Stp::classify_announce(
+        &tree,
+        make_node_addr(P),
+        &BTreeMap::new(),
+        &skip,
+        suppressed,
+    );
+    assert!(
+        matches!(decision, TreeDecision::LoopDrop),
+        "precondition: classifying with the skip set gives LoopDrop"
+    );
+
+    assert!(tree.recover(&BTreeMap::new(), &skip, 3000, 1500).changed);
+    assert_ne!(
+        *tree.my_declaration().parent_id(),
+        n,
+        "defect: recover adopted a peer in the skip set as parent"
+    );
+
+    let periodic = Stp::classify_periodic(
+        &tree,
+        &BTreeMap::new(),
+        &skip,
+        tree.is_switch_suppressed(1500),
+    );
+    let parent_after = match periodic {
+        TreeDecision::Switch { new_parent, .. } => new_parent,
+        TreeDecision::SelfRoot => make_node_addr(X),
+        _ => *tree.my_declaration().parent_id(),
+    };
+    assert_ne!(
+        parent_after, n,
+        "defect: a periodic evaluation with the skip set leaves X under N"
+    );
 }

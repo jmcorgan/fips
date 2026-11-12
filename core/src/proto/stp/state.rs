@@ -676,13 +676,18 @@ impl TreeState {
     /// `now_secs` is the injected wall-clock Unix seconds stamped onto the new
     /// declaration; `now_ms` is the monotonic milliseconds driving the parent
     /// re-evaluation's flap timers (the two clock bases must not be crossed).
+    ///
+    /// No peer is skipped: this recovers with an empty skip set. A caller
+    /// that skips non-transit peers when classifying calls
+    /// [`TreeState::recover`] with that skip set instead.
     pub fn handle_parent_lost(
         &mut self,
         peer_costs: &BTreeMap<NodeAddr, f64>,
         now_secs: u64,
         now_ms: u64,
     ) -> bool {
-        self.recover(peer_costs, now_secs, now_ms).changed
+        self.recover(peer_costs, &BTreeSet::new(), now_secs, now_ms)
+            .changed
     }
 
     /// Handle loss of current parent, reporting whether the recovery switch
@@ -692,16 +697,22 @@ impl TreeState {
     /// here. A caller holding a metrics handle uses this one so the
     /// engagement can be counted and logged; the published signature stays
     /// `bool`.
+    ///
+    /// `skip_peers` is the skip set the caller gives `classify_announce`
+    /// (the non-transit peers), so recovery never adopts a parent the
+    /// classification would skip. When every candidate is skipped the node
+    /// becomes its own root.
     pub fn recover(
         &mut self,
         peer_costs: &BTreeMap<NodeAddr, f64>,
+        skip_peers: &BTreeSet<NodeAddr>,
         now_secs: u64,
         now_ms: u64,
     ) -> ParentLoss {
         // Try to find an alternative parent. The veto is computed at the edge and
         // applied only to a discretionary result; a mandatory switch bypasses it.
         let suppressed = self.is_switch_suppressed(now_ms);
-        let alt = match self.evaluate_parent(peer_costs, &BTreeSet::new()) {
+        let alt = match self.evaluate_parent(peer_costs, skip_peers) {
             ParentEval::Mandatory(p) => Some(p),
             ParentEval::Discretionary(p) if !suppressed => Some(p),
             ParentEval::Discretionary(_) | ParentEval::None => None,
