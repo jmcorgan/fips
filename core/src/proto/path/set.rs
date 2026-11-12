@@ -32,15 +32,22 @@ pub const PATH_MAX_PER_PEER: usize = 8;
 /// Most paths a node holds to one peer on one local transport (Appendix A).
 pub const PATH_MAX_PER_TRANSPORT: usize = 4;
 
-/// The kind of local transport a path runs over, as far as the set's limits
-/// depend on it.
+/// The medium a path's local transport runs over, as the host knows it:
+/// the set's limits depend on whether it is a BLE binding, and the choice
+/// of the active path on how fast a known medium is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Medium {
     /// A BLE binding: it holds at most one path to a peer (FRC-1301 Section
     /// 6.5.4 keeps one verified BLE channel to a node per binding).
     Ble,
-    /// Any other transport: up to `PATH_MAX_PER_TRANSPORT` paths to a peer.
-    Other,
+    /// A cable: up to `PATH_MAX_PER_TRANSPORT` paths to a peer.
+    Wired,
+    /// A wireless network other than BLE, such as Wi-Fi: up to
+    /// `PATH_MAX_PER_TRANSPORT` paths to a peer.
+    Wireless,
+    /// A medium the host does not know: up to `PATH_MAX_PER_TRANSPORT`
+    /// paths to a peer.
+    Unknown,
 }
 
 impl Medium {
@@ -48,7 +55,7 @@ impl Medium {
     fn limit(self) -> usize {
         match self {
             Medium::Ble => 1,
-            Medium::Other => PATH_MAX_PER_TRANSPORT,
+            Medium::Wired | Medium::Wireless | Medium::Unknown => PATH_MAX_PER_TRANSPORT,
         }
     }
 }
@@ -622,7 +629,7 @@ impl<I: Instant, D: Default> PathSet<I, D> {
         ids: impl FnMut() -> u32,
     ) -> Roam {
         if self.paths.is_empty() {
-            return match self.bind(transport_id, addr, Medium::Other, ids) {
+            return match self.bind(transport_id, addr, Medium::Unknown, ids) {
                 Ok(evicted) => {
                     debug_assert!(evicted.is_none(), "an empty set has nothing to evict");
                     Roam::Bound
@@ -706,7 +713,7 @@ impl<I: Instant, D: Default> PathSet<I, D> {
         addr: TransportAddr,
         ids: impl FnMut() -> u32,
     ) -> Result<Option<PeerPath<I, D>>, PathRefused> {
-        self.bind(transport_id, addr, Medium::Other, ids)
+        self.bind(transport_id, addr, Medium::Unknown, ids)
     }
 
     /// Admit (`transport_id`, `addr`) on a transport of kind `medium` as the

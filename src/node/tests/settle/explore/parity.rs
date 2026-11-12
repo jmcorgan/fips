@@ -29,15 +29,11 @@
 //!   the core's world loses what is in flight when its clock moves;
 //! - a restart and a rekey are the world's own.
 //!
-//! Two things the world does not do for itself, the walk does. The core's
+//! One thing the world does not do for itself, the walk does. The core's
 //! world configures each dialer with its peer, so a node that dials a peer
 //! in a script redials it whenever it holds none; a real node here is
 //! configured with none, so a heal redials, before each second, a dialer
-//! that holds neither its peer nor a dial in progress. And a node times its
-//! heartbeats by the host's clock, which the world does not move, while its
-//! link-dead check reads the clock the world moves; so each time the walk
-//! passes a multiple of the heartbeat interval, every held peer's heartbeat
-//! is made due.
+//! that holds neither its peer nor a dial in progress.
 //!
 //! After each step each end's [`Mark`] is read from the node: whether it
 //! holds the peer; whose dial its current session came from, by the role
@@ -107,8 +103,6 @@ struct Walk {
     /// Each world node's handshakes, by the sender index its msg1 carries,
     /// in the order each was first seen in flight.
     begun: [Vec<SessionIndex>; 2],
-    /// The time the walk has let pass.
-    elapsed: Duration,
 }
 
 impl Walk {
@@ -128,7 +122,6 @@ impl Walk {
             transport: script.transports[0],
             order,
             begun: [Vec::new(), Vec::new()],
-            elapsed: Duration::ZERO,
         }
     }
 
@@ -218,32 +211,6 @@ impl Walk {
         }
     }
 
-    /// Let `ms`, at most a second, pass, each node running its timers once.
-    /// When the walk passes a multiple of the heartbeat interval, every held
-    /// peer's heartbeat is first made due (the module's doc says why).
-    async fn pass(&mut self, ms: u64) {
-        let every = Duration::from_secs(
-            self.world.nodes[0]
-                .node
-                .config()
-                .node
-                .heartbeat_interval_secs,
-        );
-        let next = self.elapsed + Duration::from_millis(ms);
-        if next.as_millis() / every.as_millis() > self.elapsed.as_millis() / every.as_millis() {
-            let then = std::time::Instant::now().checked_sub(every);
-            for x in 0..2 {
-                let peer = *self.world.nodes[1 - x].node.node_addr();
-                if let (Some(p), Some(then)) = (self.world.nodes[x].node.get_peer_mut(&peer), then)
-                {
-                    p.mark_heartbeat_sent(then);
-                }
-            }
-        }
-        self.world.advance(ms).await;
-        self.elapsed = next;
-    }
-
     /// Hand over everything in flight until the nodes are quiet, then let a
     /// minute pass a second at a time, redialing what `dials` names and
     /// handing everything over after each second.
@@ -254,7 +221,7 @@ impl Walk {
         }
         for second in 1..=60 {
             self.redial(dials).await;
-            self.pass(1_000).await;
+            self.world.advance(1_000).await;
             if !self.world.heal().await {
                 return Err(format!(
                     "the nodes did not go quiet {second} s into the heal"
@@ -272,7 +239,7 @@ impl Walk {
             let now = left.min(1_000);
             self.note();
             self.world.clear();
-            self.pass(now).await;
+            self.world.advance(now).await;
             self.note();
             left -= now;
         }

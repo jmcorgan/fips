@@ -286,7 +286,7 @@ fn set_current_addr_roams_inside_the_bound_transport_only() {
     // new path to be probed, and moves nothing yet.
     let wifi_addr = TransportAddr::from_string("10.0.0.7:1");
     assert_eq!(
-        peer.rebind_transport(wifi, wifi_addr.clone(), crate::peer::Medium::Other),
+        peer.rebind_transport(wifi, wifi_addr.clone(), crate::peer::Medium::Unknown),
         crate::peer::Rebind::Refused
     );
     assert_eq!(peer.transport_id(), Some(cable));
@@ -303,7 +303,7 @@ fn set_current_addr_roams_inside_the_bound_transport_only() {
 
     // Held but not yet acked, the pair still does not carry the link.
     assert_eq!(
-        peer.rebind_transport(wifi, wifi_addr.clone(), crate::peer::Medium::Other),
+        peer.rebind_transport(wifi, wifi_addr.clone(), crate::peer::Medium::Unknown),
         crate::peer::Rebind::Refused
     );
     assert_eq!(peer.transport_id(), Some(cable));
@@ -311,7 +311,7 @@ fn set_current_addr_roams_inside_the_bound_transport_only() {
     // Once one of our probes on it is answered, a rebind onto it crosses.
     peer.ack_path(wifi, &wifi_addr);
     assert_eq!(
-        peer.rebind_transport(wifi, wifi_addr.clone(), crate::peer::Medium::Other),
+        peer.rebind_transport(wifi, wifi_addr.clone(), crate::peer::Medium::Unknown),
         crate::peer::Rebind::Switched
     );
     assert_eq!(peer.transport_id(), Some(wifi));
@@ -339,7 +339,7 @@ fn a_promoted_peer_holds_one_path_and_a_rebind_admits_another_without_moving() {
     assert!(peer.paths().is_empty());
     let cable_addr = TransportAddr::from_string("10.0.0.1:1");
     assert_eq!(
-        peer.rebind_transport(cable, cable_addr.clone(), crate::peer::Medium::Other),
+        peer.rebind_transport(cable, cable_addr.clone(), crate::peer::Medium::Unknown),
         Rebind::Switched
     );
     let original = peer.active_path().unwrap().path_id();
@@ -347,7 +347,7 @@ fn a_promoted_peer_holds_one_path_and_a_rebind_admits_another_without_moving() {
         peer.rebind_transport(
             wifi,
             TransportAddr::from_string("10.0.0.7:1"),
-            crate::peer::Medium::Other
+            crate::peer::Medium::Unknown
         ),
         Rebind::Refused
     );
@@ -355,7 +355,7 @@ fn a_promoted_peer_holds_one_path_and_a_rebind_admits_another_without_moving() {
     assert_eq!(peer.transport_id(), Some(cable));
     assert_eq!(peer.active_path().unwrap().path_id(), original);
     assert_eq!(
-        peer.rebind_transport(cable, cable_addr, crate::peer::Medium::Other),
+        peer.rebind_transport(cable, cable_addr, crate::peer::Medium::Unknown),
         Rebind::Unchanged
     );
 }

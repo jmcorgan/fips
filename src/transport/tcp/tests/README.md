@@ -15,6 +15,15 @@ can reach its private items.
   the whole file is Linux only, because the transport reads the MSS only on
   Linux and the file uses the `TCP_MAXSEG` socket option, so nothing in it
   builds on other platforms.
+- `lane.rs`, declared from `mod.rs` as `mod lane_tests`: the path-message
+  lane. A connection whose data queue is full still takes a path message;
+  the writer sends a waiting path message before every frame still in the
+  data queue; and a connection that has stopped draining refuses path
+  messages once their own queue of `PATH_QUEUE_DEPTH` is full, so its path
+  still fails. Each test dials a listener that does not read, with small
+  socket buffers at both ends, and fills the data queue until the writer
+  waits in `write_all`. Frames go through the transport handle's lane send,
+  as the node's do.
 
 The rules every connection-oriented transport keeps, among them the receive
 bound when the two ends are configured with different `mtu` values, are

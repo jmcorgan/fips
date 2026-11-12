@@ -13,12 +13,33 @@
 //! A path ranks first by the tier of its transport's role: a backup
 //! transport's paths below a normal or preferred one's, and a path held
 //! on a transport since set never to carry paths below them all. Within
-//! the highest tier present, a path whose link MTU carries a
-//! `FilterAnnounce` ([`FILTER_FRAME`], draft Section 5.11) is taken over
-//! one whose link MTU does not, whatever their scores, while any such path
-//! is a rival; among those, a path on a preferred transport is taken over
-//! a better-scoring one while its score is within the switch margin of
-//! the best.
+//! the highest tier present, a path that carries a `FilterAnnounce`
+//! ([`FILTER_FRAME`], draft Section 5.11), by its link MTU or, on a
+//! connectionless transport, the smaller size it is proven to carry
+//! ([`carried`]), is taken over one that does not, whatever their scores,
+//! while any such path is a rival; among those, a path on a preferred
+//! transport is taken over a better-scoring one while its score is within
+//! the switch margin of the best; and then a path on a faster known
+//! medium, a cable before a wireless network before BLE, is taken over the
+//! one so far chosen while its score is within the switch margin of the
+//! best ([`quicker`]). A medium the host does not know leaves the choice
+//! to the score.
+//!
+//! A discretionary change away from the active path on score is held while
+//! the active path is the faster of the two at its best over the horizon,
+//! unless the path taken also beats the active path's score from its least
+//! round trip over the horizon by the margin ([`held`]). Load raises the
+//! active path's least round trip over the window within seconds, but its
+//! least over the horizon only once the load has lasted the horizon; so
+//! load on the active path alone does not move the link to a path slower
+//! at its best for a horizon, while a move to a path faster at its best is
+//! never held, unless the active path runs over a faster known medium and
+//! is within the margin of it at their best, when the medium would take
+//! the link back as soon as the load followed it. A discretionary change
+//! for a faster known medium is held in the same way while the path taken
+//! scores outside the margin of the active path's score over the horizon
+//! ([`waits`]), so load on a wireless network faster at its best does not
+//! move the link to a slower cable and back as the load follows it.
 //!
 //! An operator's [`Pin`] comes before tiers, the `FilterAnnounce` and
 //! scores: while a Live, acked path it names is held, only the paths it
@@ -36,7 +57,7 @@
 
 use super::live::Liveness;
 use super::set::PATH_MAX_PER_PEER;
-use super::{PathRef, Role};
+use super::{Medium, PathRef, Role};
 use crate::proto::bloom::V1_SIZE_CLASS;
 use crate::proto::fmp::wire::FRAME_OVERHEAD;
 use crate::proto::mmp::quality_index;
@@ -52,11 +73,44 @@ use crate::transport::{TransportAddr, TransportId};
 /// (draft Section 5.11).
 pub(super) const FILTER_FRAME: usize = FRAME_OVERHEAD + 11 + (512 << V1_SIZE_CLASS);
 
+/// The largest frame a path carries, in bytes: its link MTU `link`, or the
+/// frame of the size `proven` it is proven to carry (a path message length)
+/// where that is smaller and [`heeded`] on a transport connection-oriented
+/// as `oriented` says (draft Section 5.11).
+pub fn carried(link: usize, proven: Option<usize>, oriented: bool) -> usize {
+    match proven {
+        Some(len) if heeded(oriented) => link.min(len.saturating_add(FRAME_OVERHEAD)),
+        Some(_) | None => link,
+    }
+}
+
+/// Whether the size a path proves bounds the frames it carries, on a
+/// transport connection-oriented as `oriented` says. On a connectionless
+/// transport it does: the size ladder steps down after any lost probe, and
+/// the upward search raises the size again once the path is Live. On a
+/// connection-oriented one it does not: no search runs there, since an
+/// oversized probe closes the connection, so a size proven below the link
+/// MTU may say only that a probe was lost, and the path keeps its link MTU.
+pub fn heeded(oriented: bool) -> bool {
+    if node_fault!(ProvenMtuUnused) {
+        return false;
+    }
+    !oriented || node_fault!(ProvenMtuOnStreams)
+}
+
 /// The score of the path whose liveness is `live`: the quality index of
 /// its ETX and its least round trip in milliseconds, lower being better.
 /// `None` until a round trip has been measured.
 pub(super) fn score<I: Instant>(live: &Liveness<I>) -> Option<f64> {
     live.min_rtt()
+        .map(|rtt| quality_index(live.etx(), rtt.as_secs_f64() * 1000.0))
+}
+
+/// The score of the path whose liveness is `live` over the horizon: the
+/// quality index of its ETX and its least round trip over the horizon.
+/// `None` until a round trip has been measured.
+pub(super) fn steady<I: Instant>(live: &Liveness<I>) -> Option<f64> {
+    live.base_rtt()
         .map(|rtt| quality_index(live.etx(), rtt.as_secs_f64() * 1000.0))
 }
 
@@ -69,14 +123,23 @@ pub(super) struct Rival {
     pub(super) score: Option<f64>,
     /// Its latest round trip.
     pub(super) rtt: Option<Duration>,
+    /// Its score over the horizon ([`steady`]), only once it has enough
+    /// round-trip samples to be scored.
+    pub(super) steady: Option<f64>,
+    /// Its least round trip over the horizon.
+    pub(super) base: Option<Duration>,
     /// The tier of its transport's role ([`tier`]).
     pub(super) tier: u8,
     /// Whether its transport's role is `Preferred`.
     pub(super) preferred: bool,
     /// Whether the operator's pin names it.
     pub(super) pinned: bool,
-    /// Whether its link MTU carries a frame of [`FILTER_FRAME`] bytes.
+    /// Whether it carries a frame of [`FILTER_FRAME`] bytes: its link MTU,
+    /// or the smaller size it is proven to carry, is at least that.
     pub(super) fits: bool,
+    /// The medium its transport runs over toward the peer, as the host
+    /// knows it.
+    pub(super) medium: Medium,
 }
 
 /// An operator's pin of a link: to one of its paths, by the pair, or to
@@ -103,6 +166,54 @@ impl Pin {
     }
 }
 
+/// Whether a discretionary change on score from the active path `from` to
+/// `to` is held: unless `to` is the faster of the two at its least round
+/// trip over the horizon, or its score beats `from`'s score over the
+/// horizon by `margin`. Not held either while `from` has no score over the
+/// horizon. Being faster at its best does not free `to` while `from` runs
+/// over a known medium faster than `to`'s ([`quicker`]) and scores over
+/// the horizon within `margin` times `to`'s: idle, `from` would take the
+/// link back on its medium one dwell later. Only a change on score is
+/// held here, never one for a pin, a tier, a `FilterAnnounce` or a
+/// preferred transport, and never a mandatory one; a change for a medium
+/// is held by [`waits`].
+pub(super) fn held(to: &Rival, from: &Rival, margin: f64) -> bool {
+    if node_fault!(MoveOnWindowScore) {
+        return false;
+    }
+    let kept = quicker(from.medium, to.medium)
+        && from
+            .steady
+            .zip(to.steady)
+            .is_some_and(|(f, t)| f <= t * margin)
+        && !node_fault!(LoadLeavesCable);
+    let faster = !kept
+        && to.base.zip(from.base).is_some_and(|(t, f)| t < f)
+        && !node_fault!(MoveToFasterHeld);
+    let beats = |s: f64| to.score.is_some_and(|t| s > t * margin);
+    from.steady.is_some_and(|s| !faster && !beats(s))
+}
+
+/// Whether a discretionary change for its faster known medium from the
+/// active path `from` to `to` is held: while `to` scores more than
+/// `margin` times `from`'s score over the horizon. Idle, `from`'s scores
+/// over the window and over the horizon agree, so the change waits only
+/// on the margin of the best that [`choose`] ranks it by. Load that
+/// follows the link raises `from`'s score over the window within seconds,
+/// until `to` ranks first on its medium, but its score over the horizon
+/// only once the load has lasted the horizon; so the change waits until
+/// then, as a change on score does ([`held`]), and the link does not
+/// follow the load back and forth between the two. Not held while `from`
+/// has no score over the horizon or `to` has no score.
+pub(super) fn waits(to: &Rival, from: &Rival, margin: f64) -> bool {
+    if node_fault!(MediumMoveUnheld) {
+        return false;
+    }
+    from.steady
+        .zip(to.score)
+        .is_some_and(|(f, t)| t > f * margin)
+}
+
 /// The tier of a transport whose role is `role`, higher ranking first: a
 /// normal or preferred transport above a backup one, and a transport set
 /// never to carry paths below both, so a path held on it from before
@@ -115,6 +226,25 @@ pub(super) fn tier(role: Role) -> u8 {
     }
 }
 
+/// The rank of `medium` by speed, lower being faster: a cable, then a
+/// wireless network, then BLE. `None` for a medium the host does not know.
+fn speed(medium: Medium) -> Option<u8> {
+    if node_fault!(MediumIgnored) {
+        return None;
+    }
+    match medium {
+        Medium::Wired => Some(0),
+        Medium::Wireless => Some(1),
+        Medium::Ble => Some(2),
+        Medium::Unknown => None,
+    }
+}
+
+/// Whether `a` is a faster medium than `b`, both known.
+pub(super) fn quicker(a: Medium, b: Medium) -> bool {
+    speed(a).zip(speed(b)).is_some_and(|(a, b)| a < b)
+}
+
 /// The rivals of one choice, each in its path's slot.
 pub(super) type Field = [Option<Rival>; PATH_MAX_PER_PEER];
 
@@ -123,21 +253,40 @@ pub(super) type Field = [Option<Rival>; PATH_MAX_PER_PEER];
 /// those the rivals that carry a `FilterAnnounce` while any does: the
 /// least score among the scored rivals, unless a scored preferred rival
 /// scores at most `margin` times that least, in which case the
-/// least-scoring such rival; with none scored, the least latest round
-/// trip, a rival with none measured last. Every tie goes to the lower
-/// index. `None` for an empty field.
+/// least-scoring such rival; and then, of the scored rivals within
+/// `margin` times the least, preferred ones only when that took a
+/// preferred one, the one on the fastest known medium, the least score
+/// among those, when its medium is faster than that of the rival taken so
+/// far, also known. With none scored, the least latest round trip, a
+/// rival with none measured last. Every tie goes to the lower index.
+/// `None` for an empty field.
 pub(super) fn choose(field: &Field, margin: f64) -> Option<usize> {
     let rivals = ranked(field);
     let least = |r: &Rival| r.score.map(|s| (s, r.index));
     let order = |a: &(f64, usize), b: &(f64, usize)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
     if let Some((best, index)) = rivals.clone().filter_map(least).min_by(order) {
+        let near = move |r: &&Rival| r.score.is_some_and(|s| s <= best * margin);
         let preferred = rivals
             .clone()
             .filter(|r| r.preferred)
+            .filter(near)
             .filter_map(least)
-            .filter(|&(s, _)| s <= best * margin)
             .min_by(order);
-        return Some(preferred.map_or(index, |(_, i)| i));
+        let pick = preferred.map_or(index, |(_, i)| i);
+        let medium = field.get(pick).copied().flatten().map(|r| r.medium);
+        let quickest = rivals
+            .clone()
+            .filter(near)
+            .filter(|r| r.preferred || preferred.is_none())
+            .filter(|r| medium.is_some_and(|m| quicker(r.medium, m)))
+            .min_by(|a, b| {
+                let key = |r: &Rival| (speed(r.medium), r.score.unwrap_or(f64::INFINITY));
+                let ((sa, xa), (sb, xb)) = (key(a), key(b));
+                sa.cmp(&sb)
+                    .then(xa.total_cmp(&xb))
+                    .then(a.index.cmp(&b.index))
+            });
+        return Some(quickest.map_or(pick, |r| r.index));
     }
     rivals
         .min_by_key(|r| (r.rtt.is_none(), r.rtt, r.index))

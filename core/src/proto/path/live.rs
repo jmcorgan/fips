@@ -6,25 +6,62 @@
 //!
 //! On a Probing or Dead path, a path's probes are padded to the link MTU
 //! until a padded one sent in its current state goes unanswered; from
-//! then on, until its state changes, each probe takes the other size
-//! from the one before it, the smallest after a padded one. So a path to
-//! a receiver that drops a frame of the sender's link MTU is still
-//! proven, by a probe of the smallest size, which proves no MTU.
+//! then on, until its state changes, each probe steps down a short ladder
+//! from the one before it: the link MTU, three quarters of it, half of it,
+//! then the smallest size, and back to the link MTU after the smallest. So
+//! a path across a hop narrower than the link MTU, or to a receiver whose
+//! buffer is smaller, proves the first size of the ladder it carries; one
+//! that carries only the smallest is still proven, by a probe that proves
+//! no MTU.
+//!
+//! A probe's timeout is the largest of the floor, three times the latest
+//! round trip, and three times the largest round trip in the window, that
+//! last term capped at the verdict cap. A probe whose timeout has passed
+//! after a session datagram arrived on the path since it was sent is not
+//! judged yet: its verdict waits until the cap from its sending, while the
+//! peer's traffic shows the path still carries data and the probe may only
+//! be queued behind it. The peer's probes, heartbeats and other link
+//! control hold no verdict.
+//!
+//! On a Live path on a connectionless transport whose proven size is
+//! above the smallest and below the link MTU, the machine searches upward:
+//! a padded search probe at most once per gap, held outside the ring, the
+//! link MTU first and then halfway between the largest size proven and the
+//! smallest lost, until the two lie within `SEEK_STEP` bytes; the search
+//! starts again from the size proven `SEEK_RAISE` later, and afresh at
+//! every change of state. A search probe's loss is no miss and no loss
+//! sample, and neither is its answer a matching answer: it only proves a
+//! size. It is lost once its timeout has passed and a probe sent after it
+//! has been answered in time; while none has, its loss says nothing about
+//! its size and it waits.
+//!
+//! Beside the window, a path keeps its least round trip over the horizon,
+//! in spans: each span holds the least of the samples taken within its
+//! width of its first, and a span is dropped once its latest sample is
+//! older than the horizon. So the least round trip over the horizon covers
+//! at least its last horizon of samples, and at most one span more, in a
+//! fixed array whatever the probe cadence.
 //!
 //! A path's silence clock is the send instant of the earliest probe no
 //! matching answer has followed. Once the path has stopped answering
 //! (draft Section 5.6), its stop holds the instant from which its next
 //! probe on its own cadence may go and the least gap after that one, which
 //! doubles with each probe counted, from `PATH_DEAD_PROBE_INTERVAL_MIN` up
-//! to `PATH_DEAD_PROBE_INTERVAL_MAX`. The machine decides when a path
-//! stops and which probes count.
+//! to `PATH_DEAD_PROBE_INTERVAL_MAX`. A path that was our active path when
+//! it last left Live, or is at the stop, is re-checked first: its least
+//! gap stays `PATH_DEAD_PROBE_INTERVAL_MIN` until
+//! `PATH_DEAD_RECHECK_SPAN` after its silence clock started, and doubles
+//! from there. The machine decides when a path stops and which probes
+//! count.
 //!
 //! Sans-IO, with no allocation: the probe ring, the record of timed-out
 //! probes and the round-trip samples are fixed arrays. Every accessor is
 //! read-only; every method that changes a `Liveness` is visible only inside
 //! the path module, for the machine.
 
-use super::params::{PATH_DEAD_PROBE_INTERVAL_MAX, PATH_DEAD_PROBE_INTERVAL_MIN, RING};
+use super::params::{
+    PATH_DEAD_PROBE_INTERVAL_MAX, PATH_DEAD_PROBE_INTERVAL_MIN, PATH_DEAD_RECHECK_SPAN, RING,
+};
 use super::wire::PATH_PROBE_MIN_SIZE;
 use crate::proto::mmp::EWMA_LONG_ALPHA;
 use crate::time::{Duration, Instant, deadline};
@@ -32,9 +69,48 @@ use crate::time::{Duration, Instant, deadline};
 /// Round-trip samples a path keeps for its minimum.
 const SAMPLES: usize = 32;
 
+/// Spans a path keeps its least round trip over the horizon in. A span is
+/// the horizon over two fewer than this wide, so the spans whose latest
+/// sample lies within the horizon always leave one free for a new span.
+const SPANS: usize = 8;
+
 /// Timed-out probes a path remembers, so that a late answer to one still
 /// gives a round-trip sample.
 const LATE: usize = 4;
+
+/// The resolution of the upward size search: it ends once the largest size
+/// proven and the smallest lost lie within this many bytes.
+const SEEK_STEP: usize = 32;
+
+/// How long a size search that ended below the link MTU waits before it
+/// starts again from the size proven.
+const SEEK_RAISE: Duration = Duration::from_secs(600);
+
+/// The padded rungs of the ladder below the link MTU, as fractions of it,
+/// largest first. The smallest size follows the last.
+const LADDER: [(usize, usize); 2] = [(3, 4), (1, 2)];
+
+/// The size a probe of a Probing or Dead path takes after one of `last`
+/// bytes, once a padded probe of the path's current state has timed out,
+/// with the padded size `full`: the largest of `full` and the rungs of the
+/// ladder below `last`, the smallest size after the last rung, and `full`
+/// after the smallest. A rung no larger than the smallest size is skipped.
+fn rung(full: usize, last: usize) -> usize {
+    if node_fault!(DiscoveryAlternates) {
+        return if last > PATH_PROBE_MIN_SIZE {
+            PATH_PROBE_MIN_SIZE
+        } else {
+            full
+        };
+    }
+    if last <= PATH_PROBE_MIN_SIZE {
+        return full;
+    }
+    core::iter::once(full)
+        .chain(LADDER.iter().map(|&(num, den)| full * num / den))
+        .find(|&len| len < last && len > PATH_PROBE_MIN_SIZE)
+        .unwrap_or(PATH_PROBE_MIN_SIZE)
+}
 
 /// One probe sent on a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,9 +159,44 @@ struct Stop<I> {
     gap: Duration,
     /// The gap the latest probe counted used.
     used: Duration,
+    /// For a path re-checked after it carried the link, the instant until
+    /// which the least gap stays `PATH_DEAD_PROBE_INTERVAL_MIN`.
+    until: Option<I>,
     /// Whether the latest slot counted went to a connection asked for in
     /// place of a probe, not yet settled.
     owed: bool,
+}
+
+/// A Live path's upward search for the size it carries, kept small: sizes
+/// as `u16`, with 0 for none, since every path's record moves by value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Seek<I> {
+    /// With a search probe outstanding, its send instant; otherwise the
+    /// instant from which the next may go, `None` for at once.
+    at: Option<I>,
+    /// The outstanding search probe's `probe_id`.
+    probe_id: u32,
+    /// The outstanding search probe's length; 0 when none is outstanding.
+    len: u16,
+    /// The smallest size lost in this search; 0 when none is.
+    lost: u16,
+}
+
+impl<I> Seek<I> {
+    /// A search not started.
+    const fn new() -> Self {
+        Self {
+            at: None,
+            probe_id: 0,
+            len: 0,
+            lost: 0,
+        }
+    }
+}
+
+/// `len` as a `u16`, saturating.
+fn short(len: usize) -> u16 {
+    u16::try_from(len).unwrap_or(u16::MAX)
 }
 
 /// Whether a path has the connection its probes need.
@@ -102,6 +213,15 @@ enum Link {
 /// Whether `a` comes after `b` in a `probe_id` sequence, modulo 2^32.
 fn after(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) > 0
+}
+
+/// One span of a path's samples over the horizon: the instants of its
+/// first and latest samples, and the least round trip among them.
+#[derive(Clone, Copy, Debug)]
+struct Span<I> {
+    from: I,
+    to: I,
+    rtt: Duration,
 }
 
 /// One path's liveness: its outstanding probes, its `probe_id` sequence,
@@ -133,6 +253,8 @@ pub struct Liveness<I> {
     rtt: Option<Duration>,
     /// The round-trip samples of the window, with the instant of each.
     rtts: [Option<(I, Duration)>; SAMPLES],
+    /// The spans of the samples over the horizon, in no order.
+    spans: [Option<Span<I>>; SPANS],
     /// The expected transmission count, smoothed: 1 when every probe is
     /// answered.
     etx: f64,
@@ -148,8 +270,13 @@ pub struct Liveness<I> {
     bytes: u32,
     /// When the latest of them arrived.
     heard_at: Option<I>,
+    /// When the latest of them that was a session datagram arrived.
+    data_at: Option<I>,
     /// When the path last left Live.
     live_at: Option<I>,
+    /// Whether the path was our active path when it last left Live, until
+    /// a stop takes that for its re-check.
+    carried: bool,
     /// Frames of the link that failed to authenticate on the path since
     /// the latest authentic one (draft Section 5.3).
     fails: u32,
@@ -167,6 +294,8 @@ pub struct Liveness<I> {
     /// last changed state; `None` before its first probe, when every
     /// probe is of the current state.
     epoch: Option<u32>,
+    /// The upward search for the size the path carries.
+    seek: Seek<I>,
     /// Whether a padded probe sent in the current state has timed out.
     fallen: bool,
     /// The length of the latest probe sent in the current state.
@@ -192,19 +321,23 @@ impl<I: Instant> Liveness<I> {
             answered: None,
             rtt: None,
             rtts: [None; SAMPLES],
+            spans: [None; SPANS],
             etx: 1.0,
             mtu: None,
             peer: false,
             frames: 0,
             bytes: 0,
             heard_at: None,
+            data_at: None,
             live_at: None,
+            carried: false,
             fails: 0,
             trip: None,
             connect: Link::Up,
             quiet: None,
             stop: None,
             epoch: None,
+            seek: Seek::new(),
             fallen: false,
             last: None,
             since: None,
@@ -230,6 +363,17 @@ impl<I: Instant> Liveness<I> {
     /// The least round trip among the window's samples.
     pub fn min_rtt(&self) -> Option<Duration> {
         self.rtts.iter().flatten().map(|&(_, rtt)| rtt).min()
+    }
+
+    /// The largest round trip among the window's samples.
+    pub fn max_rtt(&self) -> Option<Duration> {
+        self.rtts.iter().flatten().map(|&(_, rtt)| rtt).max()
+    }
+
+    /// The least round trip over the horizon: among the samples of at
+    /// least the last horizon, and at most one span more.
+    pub fn base_rtt(&self) -> Option<Duration> {
+        self.spans.iter().flatten().map(|s| s.rtt).min()
     }
 
     /// Round-trip samples in the window.
@@ -265,6 +409,11 @@ impl<I: Instant> Liveness<I> {
         self.heard_at
     }
 
+    /// When the latest session datagram attributed to the path arrived.
+    pub fn data_at(&self) -> Option<I> {
+        self.data_at
+    }
+
     /// When the next probe is due; `None` for at once, once the path is
     /// probed at all.
     pub fn next_at(&self) -> Option<I> {
@@ -291,13 +440,22 @@ impl<I: Instant> Liveness<I> {
     /// Record that the path stopped answering at `at`, unless it already
     /// has: its next probe on its own cadence goes no sooner than
     /// `PATH_DEAD_PROBE_INTERVAL_MIN` after `at`, and the one after that no
-    /// sooner than the same again after it.
-    pub(super) fn halt(&mut self, at: I) {
+    /// sooner than the same again after it. A path that is our active path
+    /// (`active`), or was when it last left Live, is re-checked: its least
+    /// gap stays `PATH_DEAD_PROBE_INTERVAL_MIN` until
+    /// `PATH_DEAD_RECHECK_SPAN` after its silence clock started, or after
+    /// `at` with no silence clock running. A stop takes the re-check once
+    /// for each time the path leaves Live.
+    pub(super) fn halt(&mut self, at: I, active: bool) {
         if self.stop.is_none() {
+            let recheck = (active || self.carried) && !node_fault!(DeadRecheckDoubles);
+            let from = self.quiet.unwrap_or(at);
+            self.carried = false;
             self.stop = Some(Stop {
                 free: deadline(at, PATH_DEAD_PROBE_INTERVAL_MIN),
                 gap: PATH_DEAD_PROBE_INTERVAL_MIN,
                 used: PATH_DEAD_PROBE_INTERVAL_MIN,
+                until: recheck.then(|| deadline(from, PATH_DEAD_RECHECK_SPAN)),
                 owed: false,
             });
         }
@@ -314,14 +472,26 @@ impl<I: Instant> Liveness<I> {
         self.stop.map(|s| s.free)
     }
 
+    /// While the path has stopped answering and its stop carries a
+    /// re-check, the least gap after its next probe on its own cadence:
+    /// `PATH_DEAD_PROBE_INTERVAL_MIN` within the span, doubling after it.
+    pub(super) fn recheck(&self) -> Option<Duration> {
+        self.stop.filter(|s| s.until.is_some()).map(|s| s.gap)
+    }
+
     /// Count a slot of the path's own cadence used at `at`, while it has
     /// stopped answering: the next waits the least gap, which then doubles
-    /// up to `PATH_DEAD_PROBE_INTERVAL_MAX`.
+    /// up to `PATH_DEAD_PROBE_INTERVAL_MAX`, except within a re-check's
+    /// span, where it stays `PATH_DEAD_PROBE_INTERVAL_MIN`.
     pub(super) fn spend(&mut self, at: I) {
         if let Some(s) = self.stop.as_mut() {
             s.used = s.gap;
             s.free = deadline(at, s.gap);
-            s.gap = s.gap.saturating_mul(2).min(PATH_DEAD_PROBE_INTERVAL_MAX);
+            s.gap = if s.until.is_some_and(|until| at < until) {
+                PATH_DEAD_PROBE_INTERVAL_MIN
+            } else {
+                s.gap.saturating_mul(2).min(PATH_DEAD_PROBE_INTERVAL_MAX)
+            };
             s.owed = false;
         }
     }
@@ -360,9 +530,11 @@ impl<I: Instant> Liveness<I> {
         self.live_at
     }
 
-    /// Record that the path left Live at `now`.
-    pub(super) fn left(&mut self, now: I) {
+    /// Record that the path left Live at `now`, and whether it was our
+    /// active path then (`active`).
+    pub(super) fn left(&mut self, now: I, active: bool) {
         self.live_at = Some(now);
+        self.carried = active;
     }
 
     /// Whether the peer's latest probe or matched ack on the path said it
@@ -405,10 +577,26 @@ impl<I: Instant> Liveness<I> {
         self.next_at = at;
     }
 
-    /// The probe timeout: the larger of `floor` and three times the latest
-    /// round trip (draft Section 5.6).
-    pub(super) fn timeout(&self, floor: Duration) -> Duration {
-        floor.max(self.rtt.map_or(Duration::ZERO, |r| r.saturating_mul(3)))
+    /// The probe timeout, a local choice (draft Section 5.6): the largest
+    /// of `floor`, three times the latest round trip, and three times the
+    /// largest round trip in the window capped at `cap`. Capping only the
+    /// last term keeps a path whose latest round trip is long on today's
+    /// timeout, and lets a path whose round trip has just jumped under load
+    /// wait for the answers queued behind the data.
+    pub(super) fn timeout(&self, floor: Duration, cap: Duration) -> Duration {
+        let latest = self.rtt.map_or(Duration::ZERO, |r| r.saturating_mul(3));
+        if node_fault!(TimeoutFromLatest) {
+            return floor.max(latest);
+        }
+        let largest = self
+            .max_rtt()
+            .map_or(Duration::ZERO, |r| r.saturating_mul(3));
+        let largest = if node_fault!(VerdictUncapped) {
+            largest
+        } else {
+            largest.min(cap)
+        };
+        floor.max(latest).max(largest)
     }
 
     /// Whether another probe may go out with at most `cap` outstanding.
@@ -483,11 +671,23 @@ impl<I: Instant> Liveness<I> {
     /// the late record. Returns whether it counted as unanswered: it does
     /// unless a probe sent after it has been answered in time, or it was
     /// sent before the path last left Dead ([`Self::thaw`]).
-    pub(super) fn expire(&mut self, now: I, overdue: bool) -> Option<bool> {
-        let slot = self
-            .ring
-            .iter()
-            .position(|s| s.is_some_and(|s| s.due < now || (!overdue && s.due == now)))?;
+    ///
+    /// A probe due then after whose sending a session datagram has arrived
+    /// on the path is not timed out while `cap` from its sending is still
+    /// ahead: it becomes due at that instant instead ([`Self::defer`]).
+    pub(super) fn expire(&mut self, now: I, overdue: bool, cap: Duration) -> Option<bool> {
+        let passed = |due: I| due < now || (!overdue && due == now);
+        let slot = loop {
+            let slot = self
+                .ring
+                .iter()
+                .position(|s| s.is_some_and(|s| passed(s.due)))?;
+            let sent = self.ring[slot]?;
+            match self.defer(&sent, cap).filter(|&until| !passed(until)) {
+                Some(until) => self.ring[slot] = Some(Sent { due: until, ..sent }),
+                None => break slot,
+            }
+        };
         let sent = self.ring[slot].take()?;
         self.compact();
         self.remember(sent);
@@ -503,16 +703,38 @@ impl<I: Instant> Liveness<I> {
         Some(counted)
     }
 
+    /// The instant a probe whose timeout has passed waits to before it is
+    /// judged, when a session datagram has arrived on the path since it
+    /// was sent: `cap` from its sending. The peer's traffic arriving shows
+    /// the path still carries data, and the probe or its answer may be
+    /// queued behind it; at the cap the probe is judged as any other, so a
+    /// failure of this node's own direction is still found while the
+    /// peer's traffic arrives (draft Section 5.6).
+    fn defer(&self, sent: &Sent<I>, cap: Duration) -> Option<I> {
+        if node_fault!(VerdictIgnoresData) {
+            return None;
+        }
+        let data = self.data_at.filter(|&at| at > sent.at)?;
+        if node_fault!(VerdictUncapped) {
+            // The defect's shape: judged only once the peer has sent
+            // nothing on the path for the cap.
+            return Some(deadline(data, cap));
+        }
+        Some(deadline(sent.at, cap))
+    }
+
     /// Start the unanswered count again, as every change of state does
     /// (draft Section 5.6, path lifetime), start the choice of probe size
-    /// again ([`Self::small`]), and let a beacon bring a probe forward
+    /// again ([`Self::size`]), and let a beacon bring a probe forward
     /// again ([`Self::beaconed`]): a probe sent before the change, still
     /// outstanding, is not of the new state, so its timeout does not
-    /// count toward that choice.
+    /// count toward that choice. The size search starts afresh, and its
+    /// outstanding probe is given up: an answer to it matches nothing.
     pub(super) fn fresh(&mut self) {
         self.misses = 0;
         self.beaconed = false;
         self.epoch = self.next_id;
+        self.seek = Seek::new();
         self.fallen = false;
         self.last = None;
     }
@@ -533,14 +755,19 @@ impl<I: Instant> Liveness<I> {
         self.since.is_none_or(|s| !after(s, probe_id))
     }
 
-    /// Whether the next probe of a Probing or Dead path goes at the
-    /// smallest size rather than padded: once a padded probe sent in its
-    /// current state has timed out, its probes alternate, the smallest
-    /// after a padded one and padded after the smallest, until its state
-    /// changes. A receiver whose buffer is smaller than our link MTU drops
-    /// every padded probe, and the smallest one still proves the path.
-    pub(super) fn small(&self) -> bool {
-        self.fallen && self.last.is_some_and(|len| len > PATH_PROBE_MIN_SIZE)
+    /// The length of the next probe of a Probing or Dead path whose
+    /// padded size is `full`: `full` until a padded probe sent in its
+    /// current state has timed out, and from then on, until its state
+    /// changes, the next size of the ladder after the probe before it
+    /// ([`rung`]). A hop narrower than our link MTU, or a receiver whose
+    /// buffer is smaller, drops every probe over its size, and the first
+    /// rung it carries proves that size; the smallest still proves the
+    /// path, though no MTU.
+    pub(super) fn size(&self, full: usize) -> usize {
+        match self.last {
+            Some(last) if self.fallen => rung(full, last),
+            Some(_) | None => full,
+        }
     }
 
     /// Give up every outstanding probe, as a path entering Dead does. The
@@ -554,8 +781,9 @@ impl<I: Instant> Liveness<I> {
     }
 
     /// Record a round trip of `rtt` measured at `now`, keeping in the
-    /// window only the samples of the last `window`.
-    pub(super) fn sample(&mut self, now: I, rtt: Duration, window: Duration) {
+    /// window only the samples of the last `window`, and in the spans of
+    /// the horizon only those whose latest sample is within `horizon`.
+    pub(super) fn sample(&mut self, now: I, rtt: Duration, window: Duration, horizon: Duration) {
         self.rtt = Some(rtt);
         for s in self.rtts.iter_mut() {
             if s.is_some_and(|(at, _)| now.saturating_duration_since(at) > window) {
@@ -572,6 +800,42 @@ impl<I: Instant> Liveness<I> {
                 .map_or(0, |(i, _)| i),
         };
         self.rtts[slot] = Some((now, rtt));
+        self.span(now, rtt, horizon);
+    }
+
+    /// Fold a round trip of `rtt` measured at `now` into the spans of the
+    /// horizon: into the newest span while `now` is within its width of
+    /// its first sample, else into a new span, after dropping every span
+    /// whose latest sample is older than `horizon`.
+    fn span(&mut self, now: I, rtt: Duration, horizon: Duration) {
+        for s in self.spans.iter_mut() {
+            if s.is_some_and(|s| now.saturating_duration_since(s.to) > horizon) {
+                *s = None;
+            }
+        }
+        let width = horizon / (SPANS as u32 - 2);
+        let newest = self.spans.iter_mut().flatten().max_by_key(|s| s.from);
+        if let Some(s) = newest
+            && now.saturating_duration_since(s.from) < width
+        {
+            s.to = now;
+            s.rtt = s.rtt.min(rtt);
+            return;
+        }
+        let slot = match self.spans.iter().position(Option::is_none) {
+            Some(slot) => slot,
+            None => self
+                .spans
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, s)| s.map(|s| s.from))
+                .map_or(0, |(i, _)| i),
+        };
+        self.spans[slot] = Some(Span {
+            from: now,
+            to: now,
+            rtt,
+        });
     }
 
     /// Fold one probe's outcome into the ETX: the long average of the
@@ -583,9 +847,137 @@ impl<I: Instant> Liveness<I> {
         self.etx = (1.0 / next.max(0.01)).clamp(1.0, 100.0);
     }
 
-    /// Record `mtu` bytes as proven.
-    pub(super) fn prove(&mut self, mtu: usize) {
+    /// Record `mtu` bytes as proven. Returns whether the proven MTU
+    /// changed.
+    pub(super) fn prove(&mut self, mtu: usize) -> bool {
+        let changed = self.mtu != Some(mtu);
         self.mtu = Some(mtu);
+        changed
+    }
+
+    /// The length of the next search probe of a Live path whose padded size
+    /// is `full`, if one may go at `now`: none while one is outstanding,
+    /// before the search's next instant, while no size above the smallest
+    /// is proven, once `full` is, or once the search has ended. The first
+    /// of a search is `full`; each later one lies halfway between the size
+    /// proven and the smallest lost.
+    pub(super) fn seek_size(&self, full: usize, now: I) -> Option<usize> {
+        if self.seek.len != 0 || self.seek.at.is_some_and(|at| now < at) {
+            return None;
+        }
+        let proven = self.mtu?;
+        let full = usize::from(short(full));
+        if proven >= full {
+            return None;
+        }
+        match usize::from(self.seek.lost) {
+            0 => Some(full),
+            lost if lost > proven + SEEK_STEP => Some(proven + (lost - proven) / 2),
+            _ => None,
+        }
+    }
+
+    /// Record a search probe of `len` bytes sent at `at`, held outside the
+    /// ring, and return its `probe_id`, the path's next.
+    pub(super) fn seek_send(&mut self, at: I, len: usize, draw: impl FnOnce() -> u32) -> u32 {
+        let probe_id = self.take_id(draw);
+        self.seek.at = Some(at);
+        self.seek.probe_id = probe_id;
+        self.seek.len = short(len);
+        probe_id
+    }
+
+    /// Record a search probe of `len` bytes in the ring, as an ordinary
+    /// probe unanswered at `due`, for the switch that puts back a search
+    /// counted as loss. The next search probe may go `gap` after `at`.
+    pub(super) fn seek_ring(
+        &mut self,
+        at: I,
+        due: I,
+        gap: Duration,
+        len: usize,
+        draw: impl FnOnce() -> u32,
+    ) -> Option<u32> {
+        let probe_id = self.send(at, due, len, draw)?;
+        self.seek.at = Some(deadline(at, gap));
+        Some(probe_id)
+    }
+
+    /// Match an answer to the outstanding search probe `probe_id`, taking
+    /// it, and return its length. The next search probe may go `gap` after
+    /// it was sent.
+    pub(super) fn seek_answer(&mut self, probe_id: u32, gap: Duration) -> Option<usize> {
+        if self.seek.len == 0 || self.seek.probe_id != probe_id {
+            return None;
+        }
+        Some(self.unseek(gap))
+    }
+
+    /// Apply at `now` the answer, `acked` bytes long, to a search probe of
+    /// `sent` bytes: the smaller of the two is proven when it is larger
+    /// than the size proven and than the smallest size. An answer shorter
+    /// than the probe caps the search below the probe. Returns whether the
+    /// proven MTU changed.
+    pub(super) fn seek_proved(&mut self, sent: usize, acked: usize, now: I) -> bool {
+        let size = sent.min(acked);
+        let raised = size > PATH_PROBE_MIN_SIZE && self.mtu.is_none_or(|m| size > m);
+        if raised {
+            self.mtu = Some(size);
+        }
+        if acked < sent {
+            self.lose(sent, now);
+        } else {
+            self.end(now);
+        }
+        raised
+    }
+
+    /// Judge the outstanding search probe at `now`, `timeout` being the
+    /// probe timeout: once the timeout has passed since it was sent and a
+    /// probe sent after it has been answered in time, it is lost and the
+    /// search goes on below its size, the next search probe free to go
+    /// `gap` after it was sent. Until then it waits: a loss with no later
+    /// answer says nothing about its size.
+    pub(super) fn seek_judge(&mut self, now: I, timeout: Duration, gap: Duration) {
+        let Some(at) = self.seek.at.filter(|_| self.seek.len != 0) else {
+            return;
+        };
+        let id = self.seek.probe_id;
+        if now < deadline(at, timeout) || self.answered.is_none_or(|a| !after(a, id)) {
+            return;
+        }
+        let len = self.unseek(gap);
+        self.lose(len, now);
+    }
+
+    /// Take the outstanding search probe, returning its length; the next
+    /// may go `gap` after it was sent.
+    fn unseek(&mut self, gap: Duration) -> usize {
+        let len = usize::from(core::mem::take(&mut self.seek.len));
+        self.seek.at = self.seek.at.map(|at| deadline(at, gap));
+        len
+    }
+
+    /// Record `len` bytes lost by the search at `now`.
+    fn lose(&mut self, len: usize, now: I) {
+        let len = short(len);
+        self.seek.lost = match self.seek.lost {
+            0 => len,
+            lost => lost.min(len),
+        };
+        self.end(now);
+    }
+
+    /// End the search at `now` once the size proven and the smallest lost
+    /// lie within `SEEK_STEP`: it starts again from the size proven after
+    /// `SEEK_RAISE`.
+    fn end(&mut self, now: I) {
+        let proven = self.mtu.unwrap_or(PATH_PROBE_MIN_SIZE);
+        let lost = usize::from(self.seek.lost);
+        if lost != 0 && lost <= proven.saturating_add(SEEK_STEP) {
+            self.seek.lost = 0;
+            self.seek.at = Some(deadline(now, SEEK_RAISE));
+        }
     }
 
     /// Count one authentic frame of `len` bytes received at `now`. The
@@ -596,6 +988,12 @@ impl<I: Instant> Liveness<I> {
         self.bytes = self.bytes.wrapping_add(len as u32);
         self.heard_at = Some(now);
         self.fails = 0;
+    }
+
+    /// Record that a session datagram attributed to the path arrived at
+    /// `now`, after [`Self::heard`] counted its frame.
+    pub(super) fn carried(&mut self, now: I) {
+        self.data_at = Some(now);
     }
 
     /// Take back one frame of `len` bytes from the counts, as a path

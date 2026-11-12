@@ -1,9 +1,13 @@
 //! Tests of `live.rs`: the probe ring, the round-trip window, the ETX
-//! fold and the receive counts.
+//! fold, the receive counts and the stop with its re-check.
 
 use super::*;
 use crate::testutil::TestInstant;
 use alloc::vec::Vec;
+
+/// The verdict cap these tests pass; no session datagram arrives in them,
+/// so it holds no verdict.
+const CAP: Duration = Duration::from_secs(3);
 
 /// The instant `ms` milliseconds after the test clock's epoch.
 fn at(ms: u64) -> TestInstant {
@@ -62,23 +66,57 @@ fn the_window_keeps_the_least_round_trip_of_its_span() {
     let window = Duration::from_secs(30);
     let ms = Duration::from_millis;
     let mut l = Liveness::new();
-    l.sample(at(0), ms(50), window);
-    l.sample(at(1_000), ms(80), window);
-    l.sample(at(2_000), ms(30), window);
-    l.sample(at(3_000), ms(70), window);
+    l.sample(at(0), ms(50), window, window * 2);
+    l.sample(at(1_000), ms(80), window, window * 2);
+    l.sample(at(2_000), ms(30), window, window * 2);
+    l.sample(at(3_000), ms(70), window, window * 2);
     assert_eq!(l.min_rtt(), Some(ms(30)));
     assert_eq!(l.rtt(), Some(ms(70)), "the latest sample is kept apart");
     assert_eq!(l.samples(), 4);
     // At 33 s the first three samples are older than the window.
-    l.sample(at(33_000), ms(90), window);
+    l.sample(at(33_000), ms(90), window, window * 2);
     assert_eq!(l.samples(), 2);
     assert_eq!(l.min_rtt(), Some(ms(70)));
     // A full window gives up its oldest sample.
     for n in 0..40 {
-        l.sample(at(34_000 + n), ms(200 + n), window);
+        l.sample(at(34_000 + n), ms(200 + n), window, window * 2);
     }
     assert_eq!(l.samples(), SAMPLES);
     assert_eq!(l.min_rtt(), Some(ms(208)));
+}
+
+#[test]
+fn the_horizon_keeps_the_least_round_trip_of_at_least_its_span() {
+    let (window, horizon) = (Duration::from_secs(30), Duration::from_secs(60));
+    let ms = Duration::from_millis;
+    // A 500 ms sample every 200 ms from `from` to `until`.
+    let load = |l: &mut Liveness<TestInstant>, from: u64, until: u64| {
+        for t in (from..=until).step_by(200) {
+            l.sample(at(t), ms(500), window, horizon);
+        }
+    };
+    let mut l = Liveness::new();
+    // Idle at 10 ms, then loaded.
+    l.sample(at(0), ms(10), window, horizon);
+    load(&mut l, 200, 60_000);
+    assert_eq!(
+        l.min_rtt(),
+        Some(ms(500)),
+        "the window has lost the idle one"
+    );
+    assert_eq!(l.base_rtt(), Some(ms(10)), "the horizon has not");
+    // The span holding it ends within a sixth of the horizon of it, so it
+    // is gone once that and the horizon have passed.
+    load(&mut l, 60_200, 70_000);
+    assert_eq!(l.base_rtt(), Some(ms(500)));
+    // At the cadence the spans never run out: a fast sample amid the load
+    // is kept for the horizon after it.
+    load(&mut l, 70_200, 99_800);
+    l.sample(at(100_000), ms(20), window, horizon);
+    load(&mut l, 100_200, 160_000);
+    assert_eq!(l.base_rtt(), Some(ms(20)));
+    load(&mut l, 160_200, 180_000);
+    assert_eq!(l.base_rtt(), Some(ms(500)));
 }
 
 #[test]
@@ -126,8 +164,8 @@ fn a_paths_failure_count_saturates() {
 fn a_stop_keeps_its_first_instant_and_its_gaps_double_up_to_the_bound() {
     let mut l: Liveness<TestInstant> = Liveness::new();
     assert!(!l.stopped());
-    l.halt(at(0));
-    l.halt(at(500));
+    l.halt(at(0), false);
+    l.halt(at(500), false);
     assert!(l.stopped());
     assert_eq!(l.held(), Some(at(1_000)), "the first stop's instant holds");
     // Each probe counted at the instant the floor frees: the gap after it
@@ -142,13 +180,73 @@ fn a_stop_keeps_its_first_instant_and_its_gaps_double_up_to_the_bound() {
 }
 
 #[test]
+fn a_stop_on_a_path_that_carried_the_link_keeps_a_one_second_gap_for_the_span_after_it_went_silent()
+{
+    // Silent from 5 s, left Live as the active path, stopped at 14 s: each
+    // gap stays 1 s until 35 s, 30 s after it went silent, then doubles.
+    let mut l: Liveness<TestInstant> = Liveness::new();
+    l.send(at(5_000), at(5_400), 27, || 1).unwrap();
+    l.left(at(5_600), true);
+    l.halt(at(14_000), false);
+    assert_eq!(
+        l.recheck(),
+        Some(Duration::from_secs(1)),
+        "defect: the stop of a path that left Live as the active path re-checks it"
+    );
+    let mut sent = Vec::new();
+    while sent.len() < 26 {
+        let at = l.held().unwrap();
+        l.spend(at);
+        sent.push(at.0);
+    }
+    let gaps: Vec<u64> = sent.windows(2).map(|w| w[1] - w[0]).collect();
+    assert_eq!(&gaps[..20], [1_000; 20], "1 s through the span: {sent:?}");
+    assert_eq!(
+        &gaps[20..],
+        [1_000, 2_000, 4_000, 8_000, 16_000],
+        "doubling from the span's end: {sent:?}"
+    );
+    // A second stop without leaving Live again takes no second span.
+    l.resume();
+    l.send(at(100_000), at(100_400), 27, || 1).unwrap();
+    l.halt(at(101_000), false);
+    assert_eq!(l.recheck(), None, "the span is taken once per departure");
+}
+
+#[test]
+fn a_stop_on_a_standby_takes_no_recheck_and_the_active_path_at_the_stop_does() {
+    let mut l: Liveness<TestInstant> = Liveness::new();
+    l.left(at(0), false);
+    l.halt(at(10_000), false);
+    assert_eq!(l.recheck(), None, "a standby doubles as before");
+    let mut l: Liveness<TestInstant> = Liveness::new();
+    l.halt(at(10_000), true);
+    assert_eq!(
+        l.recheck(),
+        Some(Duration::from_secs(1)),
+        "defect: the active path at its stop re-checked, with no silence clock from the stop"
+    );
+    for k in 0..29u64 {
+        l.spend(at(11_000 + k * 1_000));
+    }
+    assert_eq!(l.held(), Some(at(40_000)), "1 s gaps up to 40 s");
+    l.spend(at(40_000));
+    assert_eq!(
+        l.held(),
+        Some(at(41_000)),
+        "the last 1 s gap, from the span's end"
+    );
+    assert_eq!(l.recheck(), Some(Duration::from_secs(2)), "then doubling");
+}
+
+#[test]
 fn the_silence_clock_starts_at_the_earliest_probe_since_the_last_matching_answer() {
     let mut l: Liveness<TestInstant> = Liveness::new();
     assert_eq!(l.quiet(), None);
     l.send(at(0), at(400), 27, || 1).unwrap();
     l.send(at(5), at(405), 27, || 1).unwrap();
     assert_eq!(l.quiet(), Some(at(0)), "the earliest probe sets the clock");
-    l.halt(at(60_000));
+    l.halt(at(60_000), false);
     l.resume();
     assert_eq!((l.quiet(), l.held()), (None, None), "resumed");
     l.send(at(7), at(407), 27, || 1).unwrap();
@@ -160,7 +258,7 @@ fn only_an_answer_in_time_is_a_matching_one() {
     let mut l: Liveness<TestInstant> = Liveness::new();
     let first = l.send(at(0), at(400), 27, || 10).unwrap();
     let second = l.send(at(1), at(401), 27, || 10).unwrap();
-    assert_eq!(l.expire(at(400), false), Some(true));
+    assert_eq!(l.expire(at(400), false, CAP), Some(true));
     let late = l.answer(first).expect("a late answer");
     assert!(matches!(late, Answer::Late(_)));
     assert!(!late.matching(), "a late answer is not a matching one");
@@ -173,7 +271,7 @@ fn only_an_answer_in_time_is_a_matching_one() {
 fn a_connection_slot_moves_the_next_free_instant_to_its_opening_without_doubling() {
     let counted = || {
         let mut l: Liveness<TestInstant> = Liveness::new();
-        l.halt(at(0));
+        l.halt(at(0), false);
         l.spend(at(10_000));
         l
     };
@@ -206,7 +304,7 @@ fn a_probe_sent_before_a_path_leaves_dead_times_out_uncounted_and_an_answer_in_t
     // The path leaves Dead with both outstanding.
     l.fresh();
     l.thaw();
-    assert_eq!(l.expire(at(400), false), Some(false), "not counted");
+    assert_eq!(l.expire(at(400), false, CAP), Some(false), "not counted");
     assert_eq!(l.misses(), 0);
     let Some(Answer::InTime(sent)) = l.answer(second) else {
         panic!("an answer in time to a probe from before still matches");
@@ -215,7 +313,7 @@ fn a_probe_sent_before_a_path_leaves_dead_times_out_uncounted_and_an_answer_in_t
     assert!(matches!(l.answer(first), Some(Answer::Late(_))));
     // A probe sent since counts as before.
     l.send(at(500), at(900), 27, || 10).unwrap();
-    assert_eq!(l.expire(at(900), false), Some(true));
+    assert_eq!(l.expire(at(900), false, CAP), Some(true));
     assert_eq!(l.misses(), 1);
 }
 
@@ -230,10 +328,10 @@ fn the_first_counted_probe_id_is_dropped_once_no_probe_before_it_is_outstanding(
     // still told apart.
     l.send(at(100), at(500), 27, || 10).unwrap();
     assert_eq!(l.since, Some(11));
-    assert_eq!(l.expire(at(400), false), Some(false));
+    assert_eq!(l.expire(at(400), false, CAP), Some(false));
     // Dropped at the next probe, so the comparison never spans half the
     // `probe_id` space however long the path lives.
     l.send(at(450), at(850), 27, || 10).unwrap();
     assert_eq!(l.since, None);
-    assert_eq!(l.expire(at(500), false), Some(true));
+    assert_eq!(l.expire(at(500), false, CAP), Some(true));
 }

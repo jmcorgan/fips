@@ -19,8 +19,8 @@ impl Facts for Table {
         1280
     }
 
-    fn medium(&self, _transport: TransportId) -> Medium {
-        Medium::Other
+    fn medium(&self, _transport: TransportId, _addr: &TransportAddr) -> Medium {
+        Medium::Unknown
     }
 
     fn oriented(&self, _transport: TransportId) -> bool {

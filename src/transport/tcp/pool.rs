@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::transport::stream::{ConnId, PooledConn};
-use crate::transport::{TransportAddr, TransportError};
+use crate::transport::{Lane, TransportAddr, TransportError};
 
 /// Direction of a pooled connection, used to drive separate
 /// `pool_inbound` / `pool_outbound` accounting for the
@@ -35,6 +35,12 @@ pub(crate) enum Direction {
 /// within a tick or two rather than after megabytes have piled up behind it.
 pub(crate) const SEND_QUEUE_DEPTH: usize = 64;
 
+/// How many path messages may be queued for one connection, apart from its
+/// data, before sends of them fail: the number of probes a path keeps
+/// outstanding. Bounded, so a connection that has stopped draining still
+/// refuses its probes and the path still fails.
+pub(crate) const PATH_QUEUE_DEPTH: usize = 8;
+
 /// State for a single TCP connection to a peer.
 pub(crate) struct TcpConnection {
     /// Frames queued for the writer task. Sending is an enqueue, never a
@@ -42,6 +48,10 @@ pub(crate) struct TcpConnection {
     /// block on it. A full queue is a peer that has stopped draining, and the
     /// send fails rather than waiting.
     pub(crate) send_tx: mpsc::Sender<Vec<u8>>,
+    /// Path messages queued for the writer task, which sends them before
+    /// anything in [`Self::send_tx`], so a queue full of data neither
+    /// refuses nor holds them back.
+    pub(crate) path_tx: mpsc::Sender<Vec<u8>>,
     /// Writer task for this connection. Owns the write half of the split
     /// stream, so the only code that can ever await `write_all` is this task.
     pub(crate) send_task: JoinHandle<()>,
@@ -62,6 +72,16 @@ pub(crate) struct TcpConnection {
     /// carries this id, so a loop that outlives its connection cannot remove
     /// a newer connection at the same address.
     pub(crate) id: ConnId,
+}
+
+impl TcpConnection {
+    /// The connection's send queue for `lane`.
+    pub(crate) fn queue(&self, lane: Lane) -> &mpsc::Sender<Vec<u8>> {
+        match lane {
+            Lane::Data => &self.send_tx,
+            Lane::Path => &self.path_tx,
+        }
+    }
 }
 
 impl PooledConn for TcpConnection {

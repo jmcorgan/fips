@@ -12,8 +12,16 @@
 //! Section 5.7 requires at once, the early probe when the peer clears
 //! `ACTIVE` and the probe sent when a connection opens are neither held
 //! nor counted.
+//! A path that was our active path when it went silent is re-checked
+//! every 1 s until 30 s after it went silent (`PATH_DEAD_RECHECK_SPAN`),
+//! and its gaps double from there; a standby keeps the doubling from the
+//! stop. On a connection-oriented transport the re-check probes go at the
+//! size the path proved, if it proved one; on a connectionless one they
+//! step down the ladder, so a path narrower after its outage is found.
 //! Every test drives a `Bundle` in the shell, which checks every step.
 
+use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -665,3 +673,310 @@ fn a_standby_answered_in_time_at_a_long_round_trip_then_cut_is_held_to_the_floor
         panic!("{e}; last answer at {last} ms, Dead at {dead} ms");
     }
 }
+
+/// The span after the active path goes silent in which it is re-checked
+/// every `PATH_DEAD_PROBE_INTERVAL_MIN`, in milliseconds.
+const SPAN: u64 = 30_000;
+
+/// The instant, in milliseconds, from which probes on p go unanswered in
+/// the re-check tests.
+const QUIET_P: u64 = 5_000;
+
+/// Probes on p sent in `[QUIET_P, heal)` ms go unanswered, as across a wire
+/// that drops everything while neither end sees its carrier change; every
+/// other probe is answered.
+fn silent_p(heal: u64) -> impl FnMut(u64, &PathRef) -> bool {
+    move |ms, to| *to != p() || !(QUIET_P..heal).contains(&ms)
+}
+
+/// The first probe of `cadence` that breaks the re-check bound for a path
+/// that stopped answering at `stop` ms after going silent at `quiet` ms:
+/// each probe no sooner than 1 s after the one before (the first, 1 s
+/// after the stop) until `quiet` + 30 s, then each gap at least twice the
+/// one before, up to 30 s.
+fn recheck_breaks(quiet: u64, stop: u64, cadence: &[u64]) -> Option<String> {
+    let mut free = stop + MIN;
+    let mut gap = MIN;
+    for (k, &at) in cadence.iter().enumerate() {
+        if at < free {
+            return Some(alloc::format!(
+                "probe {} at {at} ms is before {free} ms (silent at {quiet} ms, stopped at \
+                 {stop} ms): {cadence:?}",
+                k + 1
+            ));
+        }
+        free = at + gap;
+        if at >= quiet + SPAN {
+            gap = (gap * 2).min(FLOOR_MAX);
+        }
+    }
+    None
+}
+
+#[test]
+fn the_active_path_silent_for_20_s_with_no_carrier_change_is_live_within_1_5_s_of_healing() {
+    let heal = QUIET_P + 20_000;
+    let mut n = two(70);
+    let mut log = Log::default();
+    run(&mut n, &mut log, QUIET_P, &mut all);
+    assert_eq!(active(&n), Some(p()), "precondition: p carries the link");
+    run(&mut n, &mut log, heal + 40_000, &mut silent_p(heal));
+    let dead = deaths(&log, &p());
+    assert!(
+        dead.first().is_some_and(|d| d.0 < heal),
+        "precondition: p went Dead in the outage: {dead:?}"
+    );
+    let back = log
+        .changes(&p())
+        .iter()
+        .find(|c| c.0 >= heal && c.2 == Some(PathState::Live))
+        .map(|c| c.0)
+        .expect("p Live again after the outage");
+    assert!(
+        back <= heal + 1_500,
+        "defect: the path that carried the link is Live again {} ms after the outage ends, \
+         not within 1.5 s; its probes after going Dead at {} ms: {:?}",
+        back - heal,
+        dead[0].0,
+        on_p_after(&log, dead[0].0)
+    );
+}
+
+/// The instants of the probes on p strictly after `from` ms.
+fn on_p_after(log: &Log, from: u64) -> Vec<u64> {
+    log.on(&p()).into_iter().filter(|at| *at > from).collect()
+}
+
+#[test]
+fn the_recheck_of_a_silent_active_path_ends_after_its_span_and_the_doubling_resumes() {
+    let mut n = two(71);
+    let mut log = Log::default();
+    run(&mut n, &mut log, QUIET_P, &mut all);
+    assert_eq!(active(&n), Some(p()), "precondition: p carries the link");
+    run(&mut n, &mut log, 200_000, &mut silent_p(u64::MAX));
+    let quiet = on_p_after(&log, QUIET_P - 1)[0];
+    let stop = deaths(&log, &p())
+        .first()
+        .map(|d| d.0)
+        .expect("precondition: p went Dead");
+    let cadence = on_p_after(&log, stop);
+    if let Some(e) = recheck_breaks(quiet, stop, &cadence) {
+        panic!("{e}");
+    }
+    let held: Vec<u64> = cadence
+        .iter()
+        .copied()
+        .filter(|at| *at < quiet + SPAN)
+        .collect();
+    assert!(
+        held.len() as u64 <= SPAN / MIN + 1,
+        "at most one probe a second on its own cadence in the span: {held:?}"
+    );
+    assert!(
+        held.len() >= 2 && held.windows(2).all(|w| w[1] - w[0] <= MIN + 100),
+        "defect: p, which carried the link, re-checked about every second once stopped: {held:?}"
+    );
+    let later: Vec<u64> = cadence
+        .iter()
+        .copied()
+        .filter(|at| *at >= quiet + SPAN)
+        .collect();
+    let gaps: Vec<u64> = later.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(
+        gaps.len() >= 5 && gaps.windows(2).all(|g| g[1] >= g[0]),
+        "the gaps grow again after the span: {later:?}"
+    );
+    assert!(
+        gaps.last().is_some_and(|g| *g >= FLOOR_MAX),
+        "and reach the cap: {later:?}"
+    );
+}
+
+#[test]
+fn a_silent_standby_keeps_the_doubling_floor_while_the_active_path_answers() {
+    let (_, log, dead) = dead_q(72);
+    let after = on_q_after(&log, dead);
+    assert!(
+        after.len() >= 5,
+        "precondition: q probed while Dead: {after:?}"
+    );
+    if let Some(e) = floor_breaks(dead, &after) {
+        panic!("{e}");
+    }
+    assert!(
+        after.windows(2).skip(1).all(|w| w[1] - w[0] >= 2 * MIN),
+        "q's gaps double from its second probe: {after:?}"
+    );
+}
+
+#[test]
+fn the_silent_active_path_brought_back_by_the_peers_probe_in_its_span_resumes_at_once() {
+    let heal = QUIET_P + 20_000;
+    let mut n = two(73);
+    let mut log = Log::default();
+    run(&mut n, &mut log, QUIET_P, &mut all);
+    run(&mut n, &mut log, heal - 5_000, &mut silent_p(heal));
+    assert_eq!(state(&n, &p()), PathState::Dead, "precondition: p Dead");
+    let back = heal - 5_000 + 100;
+    run(&mut n, &mut log, back, &mut silent_p(heal));
+    let found = Input::Probe {
+        transport: t(1),
+        addr: addr(1),
+        msg: probe_from(peer(&p()), 1, 1200),
+    };
+    let out = at(&mut n, &mut log, back, found);
+    assert_eq!(
+        sent_acks(&out).len(),
+        1,
+        "the peer's probe answered: {out:?}"
+    );
+    assert_eq!(
+        probes(&out).iter().filter(|(to, _)| *to == p()).count(),
+        1,
+        "p probed at once: {out:?}"
+    );
+    assert_eq!(state(&n, &p()), PathState::Probing, "p revived");
+}
+
+/// Poll at every wake up to `until` milliseconds, as [`run`] does, but
+/// answering each probe that `answers` accepts given the instant in
+/// milliseconds, the probe's pair and its length.
+fn run_sized(
+    n: &mut Node,
+    log: &mut Log,
+    until: u64,
+    answers: &mut dyn FnMut(u64, &PathRef, usize) -> bool,
+) {
+    while let Some(out) = n.tick(TestInstant(until)) {
+        let mut queue = VecDeque::from([out]);
+        while let Some(out) = queue.pop_front() {
+            log.add(n.now, &out);
+            for (to, probe) in probes(&out) {
+                if answers(n.now.0, &to, probe.len) {
+                    let ack = ack_for(&probe, peer(&to));
+                    queue.push_back(n.ack(to.transport, to.addr.clone(), ack));
+                }
+            }
+        }
+    }
+}
+
+/// The wire of the proven-size tests: p goes silent from 5 s to 30 s, so
+/// the link moves to q, proven at its link MTU in discovery; from 40 s q
+/// goes silent while p answers, so the link moves back to p and q is
+/// re-checked. From `back` ms q's wire carries probes again, but only
+/// those of at most `narrow` bytes.
+fn narrowed(back: u64, narrow: usize) -> impl FnMut(u64, &PathRef, usize) -> bool {
+    move |ms, to, len| {
+        if *to == p() {
+            !(QUIET_P..30_000).contains(&ms)
+        } else {
+            ms < 40_000 || (ms >= back && len <= narrow)
+        }
+    }
+}
+
+/// The length of each probe on q strictly after `from` ms, with its
+/// instant.
+fn sizes_on_q_after(log: &Log, from: u64) -> Vec<(u64, usize)> {
+    log.probes
+        .iter()
+        .filter(|(at, to, _)| *to == q() && *at > from)
+        .map(|(at, _, probe)| (*at, probe.len))
+        .collect()
+}
+
+/// Run `n` under [`narrowed`] to 39.999 s and check that q carries the
+/// link then, at a proven size above the smallest; returns that size.
+fn proven_q(
+    n: &mut Node,
+    log: &mut Log,
+    wire: &mut dyn FnMut(u64, &PathRef, usize) -> bool,
+) -> usize {
+    run_sized(n, log, 39_999, wire);
+    assert_eq!(active(n), Some(q()), "precondition: q carries the link");
+    let proven = path(n, &q())
+        .live()
+        .mtu()
+        .expect("precondition: q proved a size");
+    assert!(
+        proven > 27,
+        "precondition: q proved more than the smallest size"
+    );
+    proven
+}
+
+#[test]
+fn the_recheck_probes_of_a_path_that_carried_the_link_on_a_stream_binding_go_at_the_size_it_proved()
+{
+    // q is on a connection-oriented transport, where an oversized probe
+    // closes the connection, so its re-check probes go at the size it
+    // proved, not down the ladder. Its connection stays open throughout.
+    let mut n = Node::capable(74).with(Stub::default().oriented(t(2)));
+    let mut log = Log::default();
+    let found = Input::Candidate {
+        transport: t(2),
+        addr: addr(2),
+        source: Source::Config,
+    };
+    let out = at(&mut n, &mut log, 0, found);
+    assert_eq!(asked(&out), [q()], "precondition: q connected first");
+    let opened = Input::Connected {
+        transport: t(2),
+        addr: addr(2),
+        ok: true,
+    };
+    let out = at(&mut n, &mut log, 0, opened);
+    handle(&mut n, &mut log, out, &mut all);
+    assert_eq!(state(&n, &q()), PathState::Live, "precondition: q Live");
+    let mut wire = narrowed(u64::MAX, 0);
+    let proven = proven_q(&mut n, &mut log, &mut wire);
+    run_sized(&mut n, &mut log, 80_000, &mut wire);
+    assert_eq!(active(&n), Some(p()), "precondition: the link back on p");
+    let dead = deaths(&log, &q())
+        .first()
+        .map(|d| d.0)
+        .expect("precondition: q went Dead");
+    let sizes = sizes_on_q_after(&log, dead);
+    assert!(sizes.len() >= 5, "precondition: q re-checked: {sizes:?}");
+    assert!(
+        sizes.iter().all(|(_, len)| *len == proven),
+        "defect: each re-check probe of q goes at the {proven} bytes it proved: {sizes:?}"
+    );
+}
+
+#[test]
+fn a_path_that_carried_the_link_and_returns_narrower_than_it_proved_steps_down_the_ladder_and_is_found()
+ {
+    // q is on a connectionless transport. Its wire returns at 60 s
+    // carrying only probes of 700 bytes or less, below the size q proved,
+    // so its re-check probes must step down the ladder to find it.
+    let back = 60_000;
+    let narrow = 700;
+    let mut wire = narrowed(back, narrow);
+    let mut n = two(74);
+    let mut log = Log::default();
+    let proven = proven_q(&mut n, &mut log, &mut wire);
+    assert!(
+        proven > narrow,
+        "precondition: q proved more than the narrowed wire carries"
+    );
+    run_sized(&mut n, &mut log, back, &mut wire);
+    assert_eq!(state(&n, &q()), PathState::Dead, "precondition: q Dead");
+    run_sized(&mut n, &mut log, back + 60_000, &mut wire);
+    let found = log
+        .changes(&q())
+        .iter()
+        .find(|c| c.0 >= back && c.2 == Some(PathState::Live))
+        .map(|c| c.0);
+    assert!(
+        found.is_some_and(|ms| ms <= back + RETURN),
+        "defect: q, whose wire returned at {back} ms carrying only {narrow} bytes or less, \
+         Live again at {found:?} ms, not within {RETURN} ms; its probes from then: {:?}",
+        sizes_on_q_after(&log, back)
+    );
+}
+
+/// How soon after its narrowed wire returns q must be Live again, in
+/// milliseconds: room for the ladder's rungs at the re-check's 1 s gaps.
+const RETURN: u64 = 5_000;

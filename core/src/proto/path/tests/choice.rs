@@ -11,7 +11,7 @@ use super::shell::{
     Fact, Net, Node, Out, Stub, Turn, active, addr, down, p, pair, path, q, r, scored, step, t,
     turns,
 };
-use crate::proto::path::{Config, Params, PathRef, PathState, Role, Switch};
+use crate::proto::path::{Config, Medium, Params, PathRef, PathState, Role, Switch};
 use crate::time::Duration;
 
 /// A node whose peer has shown it is capable at instant 0, with the
@@ -21,7 +21,7 @@ pub(super) fn start(seed: u64, net: &mut Net<'_>) -> Node {
 }
 
 /// A node as [`start`] makes it, whose bundle runs with `cfg`.
-fn tuned(seed: u64, cfg: Config, net: &mut Net<'_>) -> Node {
+pub(super) fn tuned(seed: u64, cfg: Config, net: &mut Net<'_>) -> Node {
     built(seed, cfg, Stub::default(), net)
 }
 
@@ -720,4 +720,297 @@ fn a_link_mtu_of_exactly_the_filter_frame_carries_a_filter_announce() {
         };
         assert_eq!(to, want, "p's link MTU {on_p}");
     }
+}
+
+/// The host's facts with transport `k`'s medium set to `medium`.
+fn medium(k: u32, medium: Medium) -> Stub {
+    Stub::default().fact(t(k), Fact::Medium(medium))
+}
+
+/// The host's facts with p on a wireless network and q on a cable.
+fn wifi_and_cable() -> Stub {
+    medium(1, Medium::Wireless).fact(t(2), Fact::Medium(Medium::Wired))
+}
+
+#[test]
+fn a_cable_within_the_margin_of_a_better_scoring_wifi_takes_the_link_one_dwell_after_its_second_sample()
+ {
+    // p, the wireless network the link was made on, answers in 5 ms; q,
+    // the cable, in 6 ms: within the margin, but scoring a little worse.
+    let rtt = |_: u64, to: &PathRef| rtts(to, 5, 6);
+    let mut net = Net::new(&rtt);
+    let mut n = placed(190, wifi_and_cable(), &mut net);
+    offer(&mut n, &mut net, &q());
+    let mut second = None;
+    let seen = net.run(&mut n, 30_000, &mut |n, at| {
+        if second.is_none() && path(n, &q()).live().samples() >= 2 {
+            second = Some(at);
+        }
+    });
+    let second = second.expect("precondition: q has two samples");
+    let (on_p, on_q) = (scored(&n, &p(), 2).unwrap(), scored(&n, &q(), 2).unwrap());
+    assert!(
+        on_p < on_q && on_q <= on_p * 1.3,
+        "precondition: the cable scores worse, within the margin: {on_p} {on_q}"
+    );
+    assert_eq!(
+        seen,
+        vec![(second + 2_000, Some(p()), q(), Switch::Discretionary)],
+        "defect: the cable within the margin did not take the link one dwell after its \
+         second sample at {second} ms"
+    );
+    assert_eq!(active(&n), Some(q()));
+}
+
+#[test]
+fn a_link_made_on_a_cable_stays_there_while_a_wifi_scores_better_within_the_margin() {
+    // p, the cable the link was made on, answers in 6 ms; q, the wireless
+    // network, in 5 ms.
+    let rtt = |_: u64, to: &PathRef| rtts(to, 6, 5);
+    let facts = medium(1, Medium::Wired).fact(t(2), Fact::Medium(Medium::Wireless));
+    let mut net = Net::new(&rtt);
+    let mut n = placed(191, facts, &mut net);
+    offer(&mut n, &mut net, &q());
+    assert_eq!(run(&mut n, &mut net, 60_000), vec![]);
+    assert_eq!(path(&n, &q()).state(), PathState::Live);
+    assert_eq!(active(&n), Some(p()));
+}
+
+#[test]
+fn the_mandatory_change_takes_a_cable_within_the_margin_over_a_better_scoring_wifi() {
+    // p fails; q, a wireless network, answers in 5 ms, and r, a cable, in
+    // 6 ms.
+    let rtt = |_: u64, to: &PathRef| {
+        if *to == r() { Some(6) } else { rtts(to, 1, 5) }
+    };
+    let facts = medium(2, Medium::Wireless).fact(t(3), Fact::Medium(Medium::Wired));
+    let mut net = Net::new(&rtt);
+    let mut n = placed(192, facts, &mut net);
+    offer(&mut n, &mut net, &q());
+    offer(&mut n, &mut net, &r());
+    assert_eq!(run(&mut n, &mut net, 10_000), vec![]);
+    let (on_q, on_r) = (scored(&n, &q(), 2).unwrap(), scored(&n, &r(), 2).unwrap());
+    assert!(
+        on_q < on_r && on_r <= on_q * 1.3,
+        "precondition: the cable scores worse, within the margin: {on_q} {on_r}"
+    );
+    let out = step(&mut n, 10_000, down(1));
+    assert_eq!(
+        turns(10_000, &out),
+        vec![(10_000, Some(p()), r(), Switch::Mandatory)],
+        "defect: the mandatory change took the wireless network over the cable within the margin"
+    );
+}
+
+#[test]
+fn a_cable_outside_the_margin_of_a_wifi_gives_way_to_it_and_does_not_take_the_link_from_it() {
+    let cfg = Config::draft();
+
+    // The link was made on the cable, p, at 50 ms; the wireless network,
+    // q, answers in 5 ms, better than the margin.
+    let rtt = |_: u64, to: &PathRef| rtts(to, 50, 5);
+    let facts = medium(1, Medium::Wired).fact(t(2), Fact::Medium(Medium::Wireless));
+    let mut net = Net::new(&rtt);
+    let mut n = placed(193, facts, &mut net);
+    offer(&mut n, &mut net, &q());
+    let mut first = None;
+    let seen = net.run(&mut n, 30_000, &mut |n, at| {
+        if first.is_none() && leads(n, &cfg) {
+            first = Some(at);
+        }
+    });
+    let first = first.expect("q scores better than the margin");
+    assert_eq!(
+        seen,
+        vec![(first + 2_000, Some(p()), q(), Switch::Discretionary)],
+        "the margin first held at {first} ms"
+    );
+
+    // The link was made on the wireless network, p, at 5 ms; the cable, q,
+    // answers in 50 ms.
+    let rtt = |_: u64, to: &PathRef| rtts(to, 5, 50);
+    let mut net = Net::new(&rtt);
+    let mut n = placed(194, wifi_and_cable(), &mut net);
+    offer(&mut n, &mut net, &q());
+    assert_eq!(run(&mut n, &mut net, 60_000), vec![]);
+    assert_eq!(path(&n, &q()).state(), PathState::Live);
+    assert_eq!(active(&n), Some(p()));
+}
+
+#[test]
+fn an_unknown_medium_on_either_side_keeps_the_rule_of_score_alone() {
+    // p answers in 5 ms and q in 6 ms, within the margin: with either
+    // medium unknown, the link stays where it was made.
+    for (on_p, on_q) in [
+        (Medium::Unknown, Medium::Wired),
+        (Medium::Wireless, Medium::Unknown),
+        (Medium::Unknown, Medium::Unknown),
+    ] {
+        let rtt = |_: u64, to: &PathRef| rtts(to, 5, 6);
+        let facts = medium(1, on_p).fact(t(2), Fact::Medium(on_q));
+        let mut net = Net::new(&rtt);
+        let mut n = placed(195, facts, &mut net);
+        offer(&mut n, &mut net, &q());
+        assert_eq!(run(&mut n, &mut net, 60_000), vec![], "{on_p:?} {on_q:?}");
+        assert_eq!(path(&n, &q()).state(), PathState::Live);
+        assert_eq!(active(&n), Some(p()), "{on_p:?} {on_q:?}");
+    }
+}
+
+#[test]
+fn a_cable_too_small_for_a_filter_announce_does_not_take_the_link_from_a_wifi_that_carries_one() {
+    let rtt = |_: u64, to: &PathRef| rtts(to, 5, 5);
+    let mut net = Net::new(&rtt);
+    let mut n = placed(196, wifi_and_cable().mtu(t(2), SMALL), &mut net);
+    offer(&mut n, &mut net, &q());
+    assert_eq!(run(&mut n, &mut net, 60_000), vec![]);
+    assert_eq!(path(&n, &q()).state(), PathState::Live);
+    assert_eq!(active(&n), Some(p()));
+}
+
+#[test]
+fn a_preferred_wifi_within_the_margin_keeps_the_link_over_a_cable() {
+    let rtt = |_: u64, to: &PathRef| rtts(to, 6, 5);
+    let facts = wifi_and_cable().fact(t(1), Fact::Role(Role::Preferred));
+    let mut net = Net::new(&rtt);
+    let mut n = placed(197, facts, &mut net);
+    offer(&mut n, &mut net, &q());
+    assert_eq!(run(&mut n, &mut net, 60_000), vec![]);
+    assert_eq!(path(&n, &q()).state(), PathState::Live);
+    assert_eq!(active(&n), Some(p()));
+}
+
+#[test]
+fn a_path_outside_the_margin_of_the_best_gives_way_to_a_cable_within_it_whatever_its_medium() {
+    // q is a wireless network that scores best and r a cable within the
+    // margin of it. p, a cable or of unknown medium, is outside the margin
+    // of q and within the margin of r, so only the margin of the best tells
+    // p to give way.
+    for on_p in [Medium::Wired, Medium::Unknown] {
+        let rtt = |_: u64, to: &PathRef| {
+            if *to == r() {
+                Some(25)
+            } else {
+                rtts(to, 40, 1)
+            }
+        };
+        let facts = medium(1, on_p)
+            .fact(t(2), Fact::Medium(Medium::Wireless))
+            .fact(t(3), Fact::Medium(Medium::Wired));
+        let mut net = Net::new(&rtt);
+        let mut n = placed(198, facts, &mut net);
+        offer(&mut n, &mut net, &q());
+        offer(&mut n, &mut net, &r());
+        let seen = run(&mut n, &mut net, 60_000);
+        let on_p_score = scored(&n, &p(), 2).unwrap();
+        let on_q = scored(&n, &q(), 2).unwrap();
+        let on_r = scored(&n, &r(), 2).unwrap();
+        assert!(
+            on_p_score > 1.3 * on_q && on_r <= 1.3 * on_q && on_p_score <= 1.3 * on_r,
+            "precondition: {on_p:?}: {on_p_score} {on_q} {on_r}"
+        );
+        let to: Vec<_> = seen
+            .iter()
+            .map(|(_, from, to, why)| (from.clone(), to.clone(), *why))
+            .collect();
+        assert_eq!(
+            to,
+            vec![(Some(p()), r(), Switch::Discretionary)],
+            "defect: p, {on_p:?}, outside the margin of the best did not give way to the cable \
+             within it"
+        );
+    }
+}
+
+/// The changes of active path from the onset of load at 40 s to 340 s on
+/// a link made on p, a cable that answers in `idle_p` milliseconds while
+/// idle, with q, a wireless network, in `idle_q`: from the onset on, the
+/// active path answers in 200 ms, as load that follows the link would
+/// make it.
+fn under_load(seed: u64, idle_p: u64, idle_q: u64) -> Vec<Turn> {
+    loaded(seed, (Medium::Wired, idle_p), (Medium::Wireless, idle_q))
+}
+
+/// The changes of active path from the onset of load at 40 s to 340 s on
+/// a link made on p, whose medium and idle round trip in milliseconds are
+/// `on_p`, with q as `on_q` says: from the onset on, the active path
+/// answers in 200 ms, as load that follows the link would make it.
+fn loaded(seed: u64, on_p: (Medium, u64), on_q: (Medium, u64)) -> Vec<Turn> {
+    let ((medium_p, idle_p), (medium_q, idle_q)) = (on_p, on_q);
+    let on_p = Cell::new(true);
+    let rtt = |now: u64, to: &PathRef| {
+        let loaded = now >= 40_000 && ((*to == p()) == on_p.get());
+        Some(if loaded {
+            200
+        } else {
+            rtts(to, idle_p, idle_q)?
+        })
+    };
+    let facts = medium(1, medium_p).fact(t(2), Fact::Medium(medium_q));
+    let mut net = Net::new(&rtt);
+    let mut n = placed(seed, facts, &mut net);
+    offer(&mut n, &mut net, &q());
+    let seen = net.run(&mut n, 340_000, &mut |n, _| {
+        on_p.set(active(n) == Some(p()));
+    });
+    seen.into_iter().filter(|s| s.0 >= 40_000).collect()
+}
+
+#[test]
+fn load_that_follows_the_link_does_not_flap_it_between_a_cable_and_a_wifi_slightly_faster_at_its_best()
+ {
+    // The cable, p, answers in 6 ms idle and the wireless network, q, in
+    // 5 ms: within the margin, so the cable holds the link while both are
+    // idle. Load on the cable must not hand the link to q before it has
+    // lasted the horizon, since the medium takes the link back from q one
+    // dwell later.
+    let seen = under_load(199, 6, 5);
+    let at: Vec<_> = seen.iter().map(|s| (s.0, s.2.transport)).collect();
+    let horizon = Config::draft().horizon.as_millis() as u64;
+    assert!(
+        seen.len() <= 2 * (300_000 / horizon) as usize,
+        "defect: {} changes in 300 s of load, at most two a horizon: {at:?}",
+        seen.len()
+    );
+    assert!(
+        seen.first().is_some_and(|s| s.0 >= 40_000 + horizon),
+        "the cable keeps the link until the load has lasted the horizon: {at:?}"
+    );
+}
+
+#[test]
+fn load_that_follows_the_link_moves_it_between_a_cable_faster_at_its_best_and_a_wifi_at_most_twice_a_horizon()
+ {
+    let seen = under_load(200, 4, 5);
+    let at: Vec<_> = seen.iter().map(|s| (s.0, s.2.transport)).collect();
+    let horizon = Config::draft().horizon.as_millis() as u64;
+    assert!(
+        seen.len() <= 2 * (300_000 / horizon) as usize,
+        "{} changes in 300 s of load: {at:?}",
+        seen.len()
+    );
+}
+
+#[test]
+fn load_that_follows_the_link_does_not_flap_it_between_a_wifi_and_a_slower_cable_outside_the_margin()
+ {
+    // The wireless network, p, answers in 5 ms idle and the cable, q, in
+    // 50 ms: outside the margin, so the wireless network holds the link
+    // while both are idle. Load on it raises its score over the window
+    // past the cable's, but not its least round trip over the horizon
+    // until the load has lasted the horizon; the cable's faster medium
+    // must not take the link before then, since the wireless network
+    // takes it back once the load has followed the link to the cable.
+    let seen = loaded(201, (Medium::Wireless, 5), (Medium::Wired, 50));
+    let at: Vec<_> = seen.iter().map(|s| (s.0, s.2.transport)).collect();
+    let horizon = Config::draft().horizon.as_millis() as u64;
+    assert!(
+        seen.len() <= 2 * (300_000 / horizon) as usize,
+        "defect: {} changes in 300 s of load, at most two a horizon: {at:?}",
+        seen.len()
+    );
+    assert!(
+        seen.first().is_some_and(|s| s.0 >= 40_000 + horizon),
+        "the wireless network keeps the link until the load has lasted the horizon: {at:?}"
+    );
 }

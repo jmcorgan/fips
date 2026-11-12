@@ -26,7 +26,7 @@ mod pool;
 pub mod stats;
 
 use super::{
-    ConnectionState, DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr,
+    ConnectionState, DiscoveredPeer, Lane, PacketTx, ReceivedPacket, Transport, TransportAddr,
     TransportError, TransportId, TransportState, TransportType,
 };
 use super::{resolve_socket_addrs, take_finished_connect};
@@ -386,7 +386,7 @@ impl TcpTransport {
             }
         };
 
-        self.enqueue(addr, &send_tx, data)
+        self.enqueue(addr, Lane::Data, &send_tx, data)
     }
 
     /// Send a packet only over a connection that already exists.
@@ -401,33 +401,55 @@ impl TcpTransport {
         addr: &TransportAddr,
         data: &[u8],
     ) -> Result<usize, TransportError> {
+        self.send_lane(Lane::Data, addr, data).await
+    }
+
+    /// [`send_existing`](Self::send_existing) in the connection's queue for
+    /// `lane`: path messages go in their own queue, which the writer drains
+    /// first, so a queue full of data does not refuse them.
+    pub async fn send_lane(
+        &self,
+        lane: Lane,
+        addr: &TransportAddr,
+        data: &[u8],
+    ) -> Result<usize, TransportError> {
         if !self.state.is_operational() {
             return Err(TransportError::NotStarted);
         }
         self.check_mtu(data)?;
+        let lane = if node_fault!(PathLaneShared) {
+            Lane::Data
+        } else {
+            lane
+        };
         let send_tx = self
-            .existing_sender(addr)
+            .existing_sender(addr, lane)
             .await
             .ok_or(TransportError::NotConnected)?;
-        self.enqueue(addr, &send_tx, data)
+        self.enqueue(addr, lane, &send_tx, data)
     }
 
-    /// The writer queue for an established connection to `addr`, promoting
-    /// a background connect that has finished since it was started.
+    /// The writer queue for `lane` of an established connection to `addr`,
+    /// promoting a background connect that has finished since it was
+    /// started.
     ///
     /// Holds the pool lock across the promotion, so the connection cannot be
     /// inserted twice. A finished connect that failed is dropped, so the next
     /// `connect_async` starts a new attempt.
-    async fn existing_sender(&self, addr: &TransportAddr) -> Option<mpsc::Sender<Vec<u8>>> {
+    async fn existing_sender(
+        &self,
+        addr: &TransportAddr,
+        lane: Lane,
+    ) -> Option<mpsc::Sender<Vec<u8>>> {
         let mut pool = self.pool.lock().await;
         if let Some(conn) = key_for_remote(&pool, addr).and_then(|key| pool.get(&key)) {
-            return Some(conn.send_tx.clone());
+            return Some(conn.queue(lane).clone());
         }
         let finished = take_finished_connect(&mut *self.connecting.lock().await, addr)?;
         match finished {
             Ok((stream, mss_mtu)) => {
                 let conn = self.outbound_connection(addr, stream, mss_mtu);
-                let send_tx = conn.send_tx.clone();
+                let send_tx = conn.queue(lane).clone();
                 pool.insert(PoolKey::outbound(addr.clone()), conn);
                 self.record_promoted(addr, mss_mtu);
                 Some(send_tx)
@@ -462,10 +484,12 @@ impl TcpTransport {
         Ok(())
     }
 
-    /// Queue one packet for the writer task of the connection to `addr`.
+    /// Queue one packet for the writer task of the connection to `addr`, in
+    /// `send_tx`, its queue for `lane`.
     fn enqueue(
         &self,
         addr: &TransportAddr,
+        lane: Lane,
         send_tx: &mpsc::Sender<Vec<u8>>,
         data: &[u8],
     ) -> Result<usize, TransportError> {
@@ -491,7 +515,8 @@ impl TcpTransport {
                 debug!(
                     transport_id = %self.transport_id,
                     remote_addr = %addr,
-                    depth = crate::transport::tcp::pool::SEND_QUEUE_DEPTH,
+                    lane = ?lane,
+                    depth = send_tx.max_capacity(),
                     "TCP outbound queue full; peer is not draining"
                 );
                 Err(TransportError::SendFailed(
@@ -577,8 +602,10 @@ impl TcpTransport {
         });
 
         let (send_tx, send_rx) = mpsc::channel(crate::transport::tcp::pool::SEND_QUEUE_DEPTH);
+        let (path_tx, path_rx) = mpsc::channel(crate::transport::tcp::pool::PATH_QUEUE_DEPTH);
         let send_task = tokio::spawn(tcp_send_loop(
             write_half,
+            path_rx,
             send_rx,
             transport_id,
             send_key,
@@ -590,6 +617,7 @@ impl TcpTransport {
 
         let conn = TcpConnection {
             send_tx: send_tx.clone(),
+            path_tx,
             send_task,
             recv_task,
             mtu: mss_mtu,
@@ -631,12 +659,14 @@ impl TcpTransport {
         if let Some(conn) = key.and_then(|key| pool.remove(&key)) {
             let TcpConnection {
                 send_tx,
+                path_tx,
                 send_task,
                 recv_task,
                 direction,
                 ..
             } = conn;
             drop(send_tx);
+            drop(path_tx);
             recv_task.abort();
             self.draining.drain(send_task, WRITER_DRAIN_TIMEOUT);
             match direction {
@@ -870,8 +900,10 @@ impl TcpTransport {
         });
 
         let (send_tx, send_rx) = mpsc::channel(crate::transport::tcp::pool::SEND_QUEUE_DEPTH);
+        let (path_tx, path_rx) = mpsc::channel(crate::transport::tcp::pool::PATH_QUEUE_DEPTH);
         let send_task = tokio::spawn(tcp_send_loop(
             write_half,
+            path_rx,
             send_rx,
             transport_id,
             send_key,
@@ -883,6 +915,7 @@ impl TcpTransport {
 
         TcpConnection {
             send_tx,
+            path_tx,
             send_task,
             recv_task,
             mtu: mss_mtu,
@@ -920,6 +953,7 @@ impl TcpTransport {
             PoolKey::outbound(remote.clone()),
             TcpConnection {
                 send_tx: mpsc::channel(1).0,
+                path_tx: mpsc::channel(1).0,
                 send_task: tokio::spawn(async move {
                     let _guard = guard_tx;
                     std::future::pending::<()>().await
@@ -1232,8 +1266,11 @@ async fn accept_loop(
 
                 let (send_tx, send_rx) =
                     mpsc::channel(crate::transport::tcp::pool::SEND_QUEUE_DEPTH);
+                let (path_tx, path_rx) =
+                    mpsc::channel(crate::transport::tcp::pool::PATH_QUEUE_DEPTH);
                 let send_task = tokio::spawn(tcp_send_loop(
                     write_half,
+                    path_rx,
                     send_rx,
                     transport_id,
                     send_key,
@@ -1245,6 +1282,7 @@ async fn accept_loop(
 
                 let conn = TcpConnection {
                     send_tx,
+                    path_tx,
                     send_task,
                     recv_task,
                     mtu: mss_mtu,
@@ -1402,9 +1440,14 @@ impl Drop for CloseNote {
 ///
 /// `msg2_sent` is set once a msg2 has been written, for the receive loop's
 /// close line.
+///
+/// Path messages (`paths`) are taken before data (`frames`) whenever both
+/// are waiting, so a probe waits behind at most the frame being written. The
+/// loop ends when both queues' senders have gone and both queues are empty.
 #[allow(clippy::too_many_arguments)]
 async fn tcp_send_loop(
     mut writer: tokio::net::tcp::OwnedWriteHalf,
+    mut paths: mpsc::Receiver<Vec<u8>>,
     mut frames: mpsc::Receiver<Vec<u8>>,
     transport_id: TransportId,
     key: PoolKey,
@@ -1414,7 +1457,13 @@ async fn tcp_send_loop(
     msg2_sent: Arc<AtomicBool>,
 ) {
     let remote_addr = &key.remote;
-    while let Some(frame) = frames.recv().await {
+    loop {
+        let frame = tokio::select! {
+            biased;
+            Some(frame) = paths.recv() => frame,
+            Some(frame) = frames.recv() => frame,
+            else => break,
+        };
         match writer.write_all(&frame).await {
             Ok(()) => {
                 if is_msg2(&frame) {
@@ -1453,7 +1502,7 @@ async fn tcp_send_loop(
             }
         }
     }
-    // The sender side is gone: the pool entry was dropped, so the connection
+    // Both senders are gone: the pool entry was dropped, so the connection
     // is already being torn down and there is nothing to clean up here.
     trace!(
         transport_id = %transport_id,
@@ -1778,6 +1827,10 @@ fn read_mss_mtu(stream: &std::net::TcpStream, default_mtu: u16) -> u16 {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "tests/mss.rs"]
 mod mss_tests;
+
+#[cfg(test)]
+#[path = "tests/lane.rs"]
+mod lane_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2946,6 +2999,7 @@ mod tests {
             PoolKey::outbound(remote.clone()),
             TcpConnection {
                 send_tx: mpsc::channel(1).0,
+                path_tx: mpsc::channel(1).0,
                 send_task: tokio::spawn(async {}),
                 recv_task: tokio::spawn(async {}),
                 mtu: 1400,
@@ -3116,6 +3170,7 @@ mod tests {
             PoolKey::outbound(remote.clone()),
             TcpConnection {
                 send_tx: mpsc::channel(1).0,
+                path_tx: mpsc::channel(1).0,
                 send_task: tokio::spawn(async {}),
                 recv_task: tokio::spawn(async {}),
                 mtu: 1234,
@@ -3126,8 +3181,10 @@ mod tests {
         );
 
         let (send_tx, send_rx) = mpsc::channel(pool::SEND_QUEUE_DEPTH);
+        let (_path_tx, path_rx) = mpsc::channel(pool::PATH_QUEUE_DEPTH);
         let writer = tokio::spawn(tcp_send_loop(
             write_half,
+            path_rx,
             send_rx,
             TransportId::new(1),
             PoolKey::outbound(remote.clone()),
@@ -3287,6 +3344,7 @@ mod tests {
             PoolKey::outbound(remote.clone()),
             TcpConnection {
                 send_tx: mpsc::channel(1).0,
+                path_tx: mpsc::channel(1).0,
                 send_task: tokio::spawn(async {}),
                 recv_task: tokio::spawn(async {}),
                 mtu: 1234,
@@ -4338,6 +4396,7 @@ mod tests {
         let local: SocketAddr = "[2001:db8:ffff::1]:443".parse().unwrap();
         let entry = |direction| TcpConnection {
             send_tx: mpsc::channel(1).0,
+            path_tx: mpsc::channel(1).0,
             send_task: tokio::spawn(async {}),
             recv_task: tokio::spawn(async {}),
             mtu: 1400,

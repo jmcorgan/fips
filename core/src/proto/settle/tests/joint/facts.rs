@@ -56,10 +56,10 @@ impl Facts for Transports {
         self.kind(transport).map_or(0, |_| MTU)
     }
 
-    fn medium(&self, transport: TransportId) -> Medium {
+    fn medium(&self, transport: TransportId, _addr: &TransportAddr) -> Medium {
         match self.kind(transport) {
             Some(Kind::Ble) => Medium::Ble,
-            Some(Kind::Datagram | Kind::Stream) | None => Medium::Other,
+            Some(Kind::Datagram | Kind::Stream) | None => Medium::Unknown,
         }
     }
 

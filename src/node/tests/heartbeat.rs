@@ -9,6 +9,7 @@
 
 use super::spanning_tree::*;
 use super::*;
+use fips_core::time::Clock;
 
 /// Set `link_dead_timeout_secs` on an already-constructed node via the
 /// sole-store copy-on-write context swap (immutable state is no longer a
@@ -371,11 +372,12 @@ async fn heartbeat_unaffected_without_rekey() {
 /// Rewind a peer's heartbeat bookkeeping by `age`, as if that long had passed
 /// since its last successful send.
 ///
-/// The sweep reads `std::time::Instant`, which tokio's paused clock does not
-/// move, so elapsed time is staged on the peer rather than waited out. Sets
-/// both timestamps, which is the state a *healthy* peer is in.
+/// The sweep reads the node's monotonic clock (`crate::time::HostClock`),
+/// which tokio's paused clock does not move, so elapsed time is staged on the
+/// peer, on that clock, rather than waited out. Sets both timestamps, which
+/// is the state a *healthy* peer is in.
 fn age_heartbeat(node: &mut crate::node::Node, addr: &NodeAddr, age: Duration) {
-    let then = std::time::Instant::now() - age;
+    let then = std::time::Instant::from(crate::time::HostClock.now()) - age;
     node.peers
         .get_mut(addr)
         .expect("peer present")
@@ -496,7 +498,7 @@ async fn a_failing_peer_is_retried_after_the_gap_and_not_before() {
 
     // Stage the gap as elapsed, keeping the attempt newer than the success so
     // the peer still reads as "last one failed".
-    let past = std::time::Instant::now() - Duration::from_secs(3);
+    let past = std::time::Instant::from(crate::time::HostClock.now()) - Duration::from_secs(3);
     nodes[0]
         .node
         .peers
@@ -517,6 +519,48 @@ async fn a_failing_peer_is_retried_after_the_gap_and_not_before() {
     );
 
     cleanup_nodes(&mut nodes).await;
+}
+
+/// **Heartbeats are paced on the clock the link-dead check reads.**
+///
+/// A peer is reaped when the node's monotonic clock says it has been silent
+/// for the link-dead timeout, so the heartbeat that keeps the far end from
+/// reaping this one must fall due on that clock too. Paced on
+/// `std::time::Instant` instead, a test that moves the node's clock past the
+/// interval sends no heartbeat after the first, and the far end reaps the
+/// link at the timeout. The node's clock is frozen here, so only the
+/// advance moves it.
+#[tokio::test]
+async fn a_linked_peer_is_heartbeated_again_once_the_clock_link_dead_reads_passes_the_interval() {
+    crate::time::freeze();
+    let config = crate::config::Config::new();
+    let interval = Duration::from_secs(config.node.heartbeat_interval_secs);
+    let mut nodes = super::rekey_parity::linked_pair(config.clone(), config).await;
+    let addr_1 = *nodes[1].node.node_addr();
+    let stamp = |nodes: &[TestNode]| {
+        nodes[0]
+            .node
+            .get_peer(&addr_1)
+            .expect("precondition: node 0 holds node 1")
+            .last_heartbeat_sent()
+    };
+
+    nodes[0].node.check_link_heartbeats().await;
+    let first = stamp(&nodes);
+    assert!(first.is_some(), "precondition: node 0 heartbeated node 1");
+    while nodes[1].packet_rx.try_recv().is_ok() {}
+
+    crate::time::advance(interval);
+    nodes[0].node.check_link_heartbeats().await;
+    let again = stamp(&nodes);
+    let queued = nodes[1].packet_rx.try_recv().is_ok();
+    cleanup_nodes(&mut nodes).await;
+
+    assert!(
+        again != first && queued,
+        "defect: {interval:?} on the node's clock did not make node 1 due a heartbeat: \
+         stamp {first:?} then {again:?}, a frame queued at node 1 {queued}"
+    );
 }
 
 // ---------------------------------------------------------------------------

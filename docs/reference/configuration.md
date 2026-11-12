@@ -613,9 +613,9 @@ link stays on its one path. Multipath is off by default: set
 |-----------|------|---------|-------------|
 | `node.path.enabled` | bool | `false` | Send and answer path messages. `false` keeps every link on one path, as a node without multipath does, and path messages are discarded unanswered. |
 | `node.path.min_samples` | u32 | `2` | Round-trip samples a path needs before it is chosen over the active path on its score. A failover does not wait for them. 1 to 255. |
-| `node.path.mix_kinds` | bool | `false` | Let a link hold paths of another kind than its original path's, local beside Internet. |
+| `node.path.mix_kinds` | bool | `true` | Let a link hold paths of another kind than its original path's, local beside Internet, so a link that came up over a local medium can move onto the peer's Internet address. Applied at both ends: `false` at either end keeps the link to its original path's kind. Paths of another anonymity class (Tor, Nym) are refused either way. |
 | `node.path.switch.margin` | f64 | `1.3` | The factor by which another path's score must beat the active path's. A finite number of at least 1.0. |
-| `node.path.switch.dwell_secs` | u64 | `2` | How long the other path must stay better by the margin before the link moves. Not 0. A failed active path is left at once, with no dwell. |
+| `node.path.switch.dwell_secs` | u64 | `2` | How long the other path must stay better by the margin before the link moves. Not 0. A failed active path is left at once, with no dwell; the return to it once it is Live again needs only a better score, not the margin, for the dwell. |
 | `node.path.probe.active_ms` | u64 | `200` | Probe interval of a path either end sends data on. Not 0. |
 | `node.path.probe.standby_ms` | u64 | `1000` | Probe interval of a Live or Suspect standby path. Not 0. |
 
@@ -624,7 +624,7 @@ Two per-transport settings go with these, and are read only with
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `role` | string | `"normal"` | This transport's part in a link's paths, on every transport. `never`: no new path is made on it, and a path held on it from before ranks last. `backup`: carries a link only while no `normal` or `preferred` path is Live. `normal`: ranked by score. `preferred`: carries a link whenever it is Live and scores within the switch margin of the best path. |
+| `role` | string | `"normal"` | This transport's part in a link's paths, on every transport. `never`: no new path is made on it, and a path held on it from before ranks last. `backup`: carries a link only while no `normal` or `preferred` path is Live. `normal`: ranked by score, and within the switch margin of the best score by a known medium. `preferred`: carries a link whenever it is Live and scores within the switch margin of the best path. |
 | `kind` | string | *(none)* | `local` or `internet`, in place of the kind the peer's address implies. UDP and TCP only: every other transport has the kind its medium fixes, and refuses the setting. |
 
 A path's kind decides which paths may share a link. Ethernet, BLE and serial are
@@ -635,11 +635,18 @@ on RFC 1918 space reads as local, and such a transport should set `kind:
 internet`. A link never mixes anonymity classes, whatever these settings say: a
 link reached over Tor gains no path over a clear transport or over Nym.
 
-To put a cable ahead of Wi-Fi, whose scores are usually within the margin of
-each other on a LAN, set `role: preferred` on the cable's transport. The peer
-needs multipath too, and the two transports need addresses for each other,
-which configuration, mDNS or a Nostr advert can supply. An Ethernet or BLE
-beacon carries no key, so it names no peer and supplies no address on its own.
+A cable and Wi-Fi usually score within the margin of each other on a LAN, so
+among the paths within the margin of the best score the node takes one on a
+faster medium: a cable before a wireless network, and a wireless network before
+BLE. It knows the medium of the Ethernet transport, which reads whether its
+interface is wired or wireless when it binds it, and of BLE. UDP and TCP paths
+are not ranked by medium: where a cable and Wi-Fi share a subnet, the paths to
+a peer's two addresses leave by the same interface. To put a cable ahead of
+Wi-Fi there, or wherever the medium is not known, set `role: preferred` on the
+cable's transport. The peer needs multipath too, and the two transports need
+addresses for each other, which configuration, mDNS or a Nostr advert can
+supply. An Ethernet or BLE beacon carries no key, so it names no peer and
+supplies no address on its own.
 
 ### Session / Data Plane (`node.session.*`)
 
@@ -1581,7 +1588,7 @@ node:
   path:
     enabled: false                   # multipath: keep and move between proven paths
     min_samples: 2                   # round trips before a move on its score
-    mix_kinds: false                 # allow local beside Internet paths in one link
+    mix_kinds: true                  # allow local beside Internet paths in one link
     switch:
       margin: 1.3                    # factor another path must beat the active by
       dwell_secs: 2                  # how long it must stay better

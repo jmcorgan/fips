@@ -1480,8 +1480,10 @@ pub struct PathConfig {
     pub min_samples: u32,
 
     /// Whether a link may hold paths of another kind than its original
-    /// path's, local beside Internet (`node.path.mix_kinds`). Off by
-    /// default, as the draft recommends (Section 5.5).
+    /// path's, local beside Internet (`node.path.mix_kinds`). On by
+    /// default, so a link that came up over a local medium can move onto
+    /// the peer's Internet address; the anonymity-class rule holds either
+    /// way, and the draft leaves the choice to the node (Section 5.5).
     pub mix_kinds: bool,
 
     /// When a link moves to a better path (`node.path.switch.*`).
@@ -1496,7 +1498,7 @@ impl Default for PathConfig {
         Self {
             enabled: false,
             min_samples: 2,
-            mix_kinds: false,
+            mix_kinds: true,
             switch: SwitchConfig::default(),
             probe: ProbeConfig::default(),
         }

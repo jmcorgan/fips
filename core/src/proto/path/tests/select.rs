@@ -27,17 +27,25 @@ fn rival(index: usize, score: Option<f64>, rtt: Option<u64>) -> Rival {
 }
 
 /// A rival as [`rival`] makes it, on a transport whose role is `role`,
-/// whose link MTU carries a filter.
+/// whose link MTU carries a filter, over a medium the host does not know.
 fn on(role: Role, index: usize, score: Option<f64>, rtt: Option<u64>) -> Rival {
     Rival {
         index,
         score,
         rtt: rtt.map(ms),
+        steady: score,
+        base: rtt.map(ms),
         tier: tier(role),
         preferred: role == Role::Preferred,
         pinned: false,
         fits: true,
+        medium: Medium::Unknown,
     }
+}
+
+/// `rival` over `medium`.
+fn over(medium: Medium, rival: Rival) -> Rival {
+    Rival { medium, ..rival }
 }
 
 /// `rival` on a link MTU too small to carry a filter.
@@ -63,7 +71,7 @@ fn the_score_is_the_etx_times_one_plus_the_least_round_trip_over_100_ms() {
     assert_eq!(score(&live), None, "no round trip measured, no score");
     let window = Duration::from_secs(30);
     for (at, rtt) in [(1_000, 250), (2_000, 200), (3_000, 300)] {
-        live.sample(TestInstant(at), ms(rtt), window);
+        live.sample(TestInstant(at), ms(rtt), window, window * 2);
     }
     let first = score(&live).expect("a score once measured");
     assert!(close(first, 3.0), "1 x (1 + 200 / 100), not {first}");
@@ -229,6 +237,141 @@ fn choose_prefers_rivals_that_carry_a_filter_announce_within_the_top_tier() {
         },
     ]);
     assert_eq!(choose(&pinned, MARGIN), Some(1));
+}
+
+#[test]
+fn choose_takes_the_fastest_known_medium_within_the_margin_after_the_preferred_precedence() {
+    let best = over(Medium::Wireless, rival(0, Some(1.0), Some(1)));
+    // A cable within the margin of the best wins; at the margin too.
+    let within = field(&[best, over(Medium::Wired, rival(1, Some(1.25), Some(9)))]);
+    assert_eq!(
+        choose(&within, MARGIN),
+        Some(1),
+        "defect: a cable within the margin lost to a better-scoring wireless network"
+    );
+    let edge = field(&[best, over(Medium::Wired, rival(1, Some(1.3), Some(9)))]);
+    assert_eq!(choose(&edge, MARGIN), Some(1), "at most the margin");
+    // Outside the margin the score decides.
+    let outside = field(&[best, over(Medium::Wired, rival(1, Some(1.35), Some(9)))]);
+    assert_eq!(choose(&outside, MARGIN), Some(0));
+    // A wireless network beats BLE, and a cable beats both; between two
+    // rivals of one medium, the lower score, then the lower index.
+    let ble = over(Medium::Ble, rival(0, Some(1.0), Some(1)));
+    let three = field(&[
+        ble,
+        over(Medium::Wireless, rival(1, Some(1.1), Some(9))),
+        over(Medium::Wired, rival(2, Some(1.2), Some(9))),
+        over(Medium::Wired, rival(3, Some(1.15), Some(9))),
+        over(Medium::Wired, rival(4, Some(1.15), Some(9))),
+    ]);
+    assert_eq!(choose(&three, MARGIN), Some(3));
+    let radio = field(&[ble, over(Medium::Wireless, rival(1, Some(1.2), Some(9)))]);
+    assert_eq!(choose(&radio, MARGIN), Some(1));
+    // An unknown medium on either side leaves the score to decide.
+    let unknown = field(&[
+        rival(0, Some(1.0), Some(1)),
+        over(Medium::Wired, rival(1, Some(1.2), Some(9))),
+    ]);
+    assert_eq!(choose(&unknown, MARGIN), Some(0));
+    let unknown = field(&[best, rival(1, Some(1.2), Some(9))]);
+    assert_eq!(choose(&unknown, MARGIN), Some(0));
+    // An unscored cable takes no precedence.
+    let unready = field(&[best, over(Medium::Wired, rival(1, None, Some(1)))]);
+    assert_eq!(choose(&unready, MARGIN), Some(0));
+    // A preferred rival within the margin keeps its precedence over a
+    // cable; among preferred rivals, the faster medium within the margin.
+    let preferred = field(&[
+        over(Medium::Wired, rival(0, Some(1.0), Some(1))),
+        over(Medium::Wireless, on(Role::Preferred, 1, Some(1.1), Some(9))),
+    ]);
+    assert_eq!(choose(&preferred, MARGIN), Some(1));
+    let both = field(&[
+        best,
+        over(Medium::Wireless, on(Role::Preferred, 1, Some(1.1), Some(9))),
+        over(Medium::Wired, on(Role::Preferred, 2, Some(1.2), Some(9))),
+        over(Medium::Wired, rival(3, Some(1.05), Some(9))),
+    ]);
+    assert_eq!(choose(&both, MARGIN), Some(2));
+    // A cable that does not carry a filter loses to a wireless network
+    // that does.
+    let narrow = field(&[
+        best,
+        small(over(Medium::Wired, rival(1, Some(1.0), Some(1)))),
+    ]);
+    assert_eq!(choose(&narrow, MARGIN), Some(0));
+}
+
+/// `rival` loaded: its score over the window raised to `score`, its score
+/// and least round trip over the horizon left as they were.
+fn loaded(score: f64, rival: Rival) -> Rival {
+    Rival {
+        score: Some(score),
+        ..rival
+    }
+}
+
+#[test]
+fn a_move_from_a_loaded_cable_to_a_wifi_faster_at_its_best_is_held_only_within_the_margin() {
+    // The cable answers in 6 ms at its best and the wireless network in
+    // 5 ms, within the margin; load has raised the cable's window score.
+    let cable = loaded(3.0, over(Medium::Wired, rival(0, Some(1.06), Some(6))));
+    let wifi = over(Medium::Wireless, rival(1, Some(1.05), Some(5)));
+    assert!(
+        held(&wifi, &cable, MARGIN),
+        "defect: load on a cable within the margin of a wireless network handed it the link"
+    );
+    // Outside the margin at their best, the faster path is not held.
+    let slow = loaded(3.0, over(Medium::Wired, rival(0, Some(1.5), Some(50))));
+    assert!(!held(&wifi, &slow, MARGIN));
+    // With either medium unknown, or the active path on the slower
+    // medium, the faster path is not held.
+    let unknown = loaded(3.0, rival(0, Some(1.06), Some(6)));
+    assert!(!held(&wifi, &unknown, MARGIN));
+    assert!(!held(&rival(1, Some(1.05), Some(5)), &cable, MARGIN));
+    let ble = loaded(3.0, over(Medium::Ble, rival(0, Some(1.06), Some(6))));
+    assert!(!held(&wifi, &ble, MARGIN));
+    // Held, it still gives way once its score over the horizon is beaten
+    // by the margin, as the load has lasted the horizon.
+    let lasted = Rival {
+        steady: Some(3.0),
+        base: Some(ms(200)),
+        ..cable
+    };
+    assert!(!held(&wifi, &lasted, MARGIN));
+}
+
+#[test]
+fn a_move_to_a_cable_for_its_medium_waits_while_it_is_outside_the_margin_of_the_loaded_wifi_at_its_best()
+ {
+    // The wireless network answers in 5 ms at its best and the cable in
+    // 50 ms, outside the margin; load has raised the wireless network's
+    // window score past the cable's.
+    let wifi = loaded(3.0, over(Medium::Wireless, rival(0, Some(1.05), Some(5))));
+    let cable = over(Medium::Wired, rival(1, Some(1.5), Some(50)));
+    assert!(
+        waits(&cable, &wifi, MARGIN),
+        "defect: load on a wireless network handed the link to a cable outside the margin of \
+         it at its best"
+    );
+    // A cable within the margin of the wireless network at its best does
+    // not wait, idle or under load.
+    let near = over(Medium::Wired, rival(1, Some(1.06), Some(6)));
+    let idle = over(Medium::Wireless, rival(0, Some(1.05), Some(5)));
+    assert!(!waits(&near, &idle, MARGIN));
+    assert!(!waits(&near, &wifi, MARGIN));
+    // Once the load has lasted the horizon, the cable no longer waits.
+    let lasted = Rival {
+        steady: Some(3.0),
+        base: Some(ms(200)),
+        ..wifi
+    };
+    assert!(!waits(&cable, &lasted, MARGIN));
+    // An active path with no score over the horizon holds nothing.
+    let unscored = Rival {
+        steady: None,
+        ..wifi
+    };
+    assert!(!waits(&cable, &unscored, MARGIN));
 }
 
 #[test]

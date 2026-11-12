@@ -4,9 +4,10 @@ Unit tests for the files one level up. `mod.rs` is the module's own
 tests module, `proto::path::tests`, declared from the module root, and
 declares `shell.rs`, `exchange.rs`, `account.rs`, `liveness.rs`,
 `active.rs`, `admit.rs`, `beacon.rs`, `capability.rs`, `close.rs`,
-`charge.rs`, `choice.rs`, `connect.rs`, `disabled.rs`, `floor.rs`,
-`hold.rs`, `intake.rs`, `pin.rs`, `renew.rs`, `sim.rs`, `stub.rs` and
-`view.rs`, which drive
+`charge.rs`, `choice.rs`, `connect.rs`, `damping.rs`, `disabled.rs`,
+`floor.rs`, `hold.rs`, `intake.rs`, `mtu.rs`, `pin.rs`, `renew.rs`,
+`returns.rs`, `sim.rs`, `stub.rs`, `verdict.rs` and `view.rs`,
+which drive
 the machine, `Bundle`,
 through its public interface only. Every other file is attached from
 its source file with
@@ -199,7 +200,23 @@ module of that file, sees its private items and keeps its test names.
   scores better and does not; with no Live path that carries it the
   score decides as before; a normal active path too small for it is
   kept over a backup path that carries it; and a link MTU of exactly
-  the frame's 1,071 bytes carries it, one byte less does not. Its helpers
+  the frame's 1,071 bytes carries it, one byte less does not. By
+  medium: a cable within the margin of a better-scoring wireless
+  network takes the link one dwell after its second sample, and a link
+  made on a cable stays there; a mandatory change takes a cable within
+  the margin over a better-scoring wireless network; outside the margin
+  the score decides, both ways; an unknown medium on either side keeps
+  the rule of score alone; a cable too small for a `FilterAnnounce`
+  does not take the link from a wireless network that carries one; a
+  preferred wireless network within the margin keeps the link over a
+  cable; an active path outside the margin of the best, a cable or
+  of unknown medium, gives way to a cable within it; and under load that
+  follows the link, a cable within the margin of a wireless network
+  faster at its best keeps the link until the load has lasted the
+  horizon and moves at most twice a horizon, as does a cable faster at
+  its best, and a wireless network faster at its best than a cable
+  outside the margin of it keeps the link until the load has lasted
+  the horizon and moves at most twice a horizon. Its helpers
   that build a node, set roles and round trips, offer a candidate and
   run the `Net` are shared with `pin.rs`.
 - `close.rs`: closing a path (`proto::path::tests::close::...`), driven
@@ -226,6 +243,17 @@ module of that file, sees its private items and keeps its test names.
   pending, over minutes of polls and an early probe asked for by the
   peer's `ACTIVE` turning off; and a path a probe created needs no
   connection.
+- `damping.rs`: discretionary changes away from a loaded active path
+  (`proto::path::tests::damping::...`), driven as `choice.rs` drives its
+  tests and with its helpers and `pin.rs`'s `pin`, load being a rise of
+  p's round trip from 5 or 10 ms to 200 ms at 40 s: a standby that
+  scores better than p over the window under the load, but is slower than
+  p at its best, does not take the link before the horizon has passed;
+  once p's score over the horizon has risen past it by the margin it
+  takes the link one dwell later, the dwell set to end between probe
+  wakes; a standby faster at its best than p, within the margin of it
+  idle, takes the link one dwell after it leads p over the window, not
+  held; and a carrier loss and a pin still move the link at once.
 - `disabled.rs`: a bundle with multipath disabled
   (`proto::path::tests::disabled::...`), driven through `Bundle`'s
   inputs in the shell: given the peer's probes, candidates, an ack, a
@@ -259,8 +287,19 @@ module of that file, sees its private items and keeps its test names.
   floor's instant and not at each interval; the floor capped by the
   bound, not `Config::dead_interval`; a connection opened for a counted
   slot, after the revival's own connection took the first, starting the
-  next gap at its probe; and a stopped Probing path
-  keeping its stop when the peer's probe arrives.
+  next gap at its probe; a stopped Probing path
+  keeping its stop when the peer's probe arrives; the active path, silent
+  for 20 s with no carrier change, Live again within 1.5 s of the
+  outage's end; its re-check every second on its own cadence until 30 s
+  after it went silent, at most one probe a second, then gaps that grow
+  again to the cap (checked against the file's own `recheck_breaks`); a
+  silent standby keeping the doubling while the active path answers; the
+  silent active path brought back by the peer's probe within its span
+  probed at once; the re-check probes of a path that carried the link
+  going at the size it proved on a connection-oriented transport, not
+  down the ladder; and such a path on a connectionless transport, whose
+  wire returns narrower than the size it proved, stepping down the ladder
+  and Live again within 5 s.
 - `hold.rs`: the hold on a link's cost across a change of active path
   (`proto::path::tests::hold::...`), driven as `choice.rs` drives its
   tests and with its helpers and `pin.rs`'s `pin`, the link's cost set in
@@ -310,8 +349,9 @@ module of that file, sees its private items and keeps its test names.
   capability probe sent before the peer is capable and that any path
   message makes it capable,
   candidates admitted and probed padded to the link MTU, then, toward a
-  receiver that drops every padded probe, the smallest size after the
-  first padded one times out, proving the path with no MTU, while a
+  receiver that drops every frame over 1000 bytes, three quarters of the
+  padded size after the first padded one times out, proving that size,
+  which the search may then raise within the receiver's, while a
   padded probe sent before a change of state and timing out after it
   leaves the next probe padded, the receiver's
   lookup order (the peer's identifier, then the pair, then a new path,
@@ -350,8 +390,10 @@ module of that file, sees its private items and keeps its test names.
   capable; the early probe on
   the peer's `ACTIVE` turning off, and dropped when the ring is full;
   the ETX in Suspect; `next_wake`; no probe over the link MTU; the
-  sizes of unanswered Probing and Dead probes alternating, padded first
-  and the smallest after each padded one; and a
+  sizes of unanswered Probing and Dead probes stepping down the ladder,
+  padded first, then three quarters and half of it, then the smallest,
+  and padded again; the cadence probes of a path answered back to Live,
+  counted apart from the padded search probe beside one of them; and a
   Probing path held to eight probes while the peer's `ACTIVE` on it is
   set and cleared every 150 ms or every 40 ms, sending all eight when
   the flag never changes, and dropping a probe asked for at once after
@@ -360,25 +402,29 @@ module of that file, sees its private items and keeps its test names.
   probes while Probing, since that probe's timeout counts as no miss;
   an answer to it before its timeout still makes the path Live, and one
   after it is late and leaves the path Probing.
-- `live.rs`: tests for `live.rs` (`proto::path::live::tests::...`): a
-  full ring refuses a probe and spends no `probe_id` on it, an answer
-  takes its probe and leaves the rest in send order, the round-trip
-  window keeps the least sample of its span and gives up its oldest when
-  full, delivered probes bring the ETX toward one at the long
-  average's rate, the receive counts wrap modulo 2^32, a path's count
-  of authentication failures saturates rather than wrapping, a stop
-  keeps its first instant and its gaps double up to the bound, the
-  silence clock starts at the earliest probe since the last matching
-  answer, only an answer in time is a matching one, a connection's
-  slot moves the next free instant to its opening without doubling, a
-  probe sent before the path left Dead times out uncounted while an
-  answer to it in time still matches, and the first counted `probe_id`
-  is dropped once no probe before it is outstanding.
+- `live.rs`: tests for `live.rs` (`proto::path::live::tests::...`): a full
+  ring refuses a probe and spends no `probe_id` on it, an answer takes its
+  probe and leaves the rest in send order, the round-trip window keeps the
+  least sample of its span and gives up its oldest when full, the horizon
+  keeps an idle sample a loaded window has lost until its span and the horizon
+  have passed, and at a 200 ms cadence keeps a later fast sample for the
+  horizon after it, delivered probes bring the ETX toward one at the long
+  average's rate, the receive counts wrap modulo 2^32, a path's count of
+  authentication failures saturates rather than wrapping, a stop keeps its
+  first instant and its gaps double up to the bound, a stop on a path that
+  left Live as the active path keeps a 1 s gap until 30 s after it went silent
+  and then doubles, taking that span once per departure from Live, while a
+  standby's stop takes none and the active path at its stop, with no silence
+  clock, takes it from the stop, the silence clock starts at the earliest
+  probe since the last matching answer, only an answer in time is a matching
+  one, a connection's slot moves the next free instant to its opening without
+  doubling, a probe sent before the path left Dead times out uncounted while
+  an answer to it in time still matches, and the first counted `probe_id` is
+  dropped once no probe before it is outstanding.
 - `mod.rs`: declares `shell`, `exchange`, `account`, `liveness`,
   `active`, `admit`, `beacon`, `capability`, `close`, `charge`, `choice`,
-  `connect`,
-  `disabled`, `floor`, `hold`, `intake`, `pin`, `renew`, `sim`, `stub`
-  and `view`, and
+  `connect`, `damping`, `disabled`, `floor`, `hold`, `intake`, `mtu`, `pin`,
+  `renew`, `returns`, `sim`, `stub`, `verdict` and `view`, and
   checks the module's source (`proto::path::tests::...`): the module
   root still denies
   wildcard match arms; no source file defines a `set_` setter, with a
@@ -388,6 +434,23 @@ module of that file, sees its private items and keeps its test names.
   `learn_peer`, `activate`, `readdress`, `discard`), with a planted call
   found and a count of the test files on disk. The names are built with
   `concat!` there, since that file is one of those scanned.
+- `mtu.rs`: the size a path proves (`proto::path::tests::mtu::...`),
+  driven through `Bundle`'s inputs in the shell, behind a stand-in hop
+  that answers at once each probe up to a given size: a Probing path
+  across a hop narrower than its link MTU proving three quarters of the
+  padded size; a path whose probes all go unanswered stepping down the
+  ladder and starting again; one that carries only the smallest size
+  proven with no MTU; after loss stepped the ladder down, the search
+  proving the link MTU again, with each change reported once in
+  `Output::Proven` in frame bytes; the search climbing to within 32
+  bytes of the hop's size, stopping, and starting again ten minutes
+  after it ended; a lost search probe neither a miss nor an ETX sample,
+  the path staying Live; no search on a connection-oriented
+  transport; and a path proven below the frame of a `FilterAnnounce`
+  across a narrow hop, though its link MTU would carry it, not taking
+  the link from one that cannot carry it either; and a path on a
+  connection-oriented transport proven a rung low by one lost probe
+  still carrying it by its link MTU, and taking the link.
 - `params.rs`: tests for `params.rs` (`proto::path::params::tests::...`):
   the draft's values field by field, the refusal of a zero in each
   interval and count with the name it carries, of a switch margin below
@@ -432,6 +495,14 @@ module of that file, sees its private items and keeps its test names.
   another pair, the link starts on a new path there with a slot of its
   own and no failed frame counted, and the old active path comes back
   released.
+- `returns.rs`: the return to the path a mandatory change left
+  (`proto::path::tests::returns::...`), driven as `choice.rs` drives its
+  tests and with its helpers, p answering in 5 ms and q in 25 ms, within
+  the margin of each other, and p's probes unanswered for 2 s from 40 s:
+  once p is Live again and scores better than q, by less than the margin,
+  the link returns to p one dwell later; and a third path r, offered after
+  the change and scoring better than q within the margin, does not take
+  the link from q, since only the path the change left needs no margin.
 - `rules.rs`: tests for `rules.rs` (`proto::path::rules::tests::...`),
   over a table of facts by transport: the scope of an address, every
   local range and its neighbours outside it, IPv6 with a scope
@@ -456,8 +527,9 @@ module of that file, sees its private items and keeps its test names.
   it and passed in every call's `Env`, and a `Stub` of the host's facts
   (link MTU per transport, 1280 by default; which transports are
   connection-oriented, none by default; and per transport a `Fact` for
-  its class, kind, role and whether the node accepts or dials the peer,
-  by default clear, fixed Local, `Normal`, and both, the latest fact
+  its class, kind, role, medium and whether the node accepts or dials
+  the peer, by default clear, fixed Local, `Normal`, unknown, and both,
+  the latest fact
   given winning, so `Stub::change` can change one between steps; the
   stub counts its changes, so the shell can tell a poll made with the
   facts unchanged since the last step). The
@@ -595,8 +667,11 @@ module of that file, sees its private items and keeps its test names.
   at both ends; that an end whose Live active path's wire is cut in one
   direction or both switches within three active probe intervals, a
   probe timeout and two one-way delays, when another of its paths is
-  Live on a clean wire; that no end is orphaned while a wire delivers
-  both ways; that no frame roams a path and no path message moves one,
+  Live on a clean wire, the verdict cap standing in place of the probe
+  timeout, when larger, for an end whose own sending alone is cut, since
+  the peer's data frames still arrive on the wire; that no end is
+  orphaned while a wire delivers both ways; that no frame roams a path
+  and no path message moves one,
   since no address on a wire changes; and that between two acks of one
   path the difference of their `rx_frames` equals the frames the path's
   wire delivered to that end. Before every step each end is given its
@@ -624,7 +699,9 @@ module of that file, sees its private items and keeps its test names.
   switch at both ends when the active wire is cut both ways and when only
   one direction is, with the peer's frames still arriving (these two run
   with `steady`, a margin no two paths reach, so an end leaves its active
-  wire only when the wire fails), the receive counts of each path, a run
+  wire only when the wire fails, and returns to it only once it is Live
+  again and scores better; the first checks both ends are off the cut wire
+  while the cut lasts), the receive counts of each path, a run
   replayed byte for byte from its seed, a wire marked at one end never
   becoming a path there nor proven at either end, each end settling
   without faults on the wire better by the margin or staying (fewer than
@@ -690,10 +767,23 @@ module of that file, sees its private items and keeps its test names.
   the score decide when none does, and keeps a normal rival too small
   for it over a backup one that carries it, a fitting normal rival over
   a preferred one within the margin that does not fit, and a pinned
-  rival that does not fit over one that does; the frame that carries
+  rival that does not fit over one that does; and among the scored
+  rivals within the margin of the best it takes the one on the fastest
+  known medium, a cable before a wireless network before BLE, the lower
+  score then the lower index between two of one medium, but not one
+  outside the margin, one with no score, or any where either medium is
+  unknown, and only after the preferred precedence and the
+  `FilterAnnounce`; the frame that carries
   the filter is the encoded `FilterAnnounce` plus the frame overhead,
   1,071 bytes; the best score a preferred rival is held to is the least
-  among the scored rivals of the highest tier; and a
+  among the scored rivals of the highest tier; a move from a loaded
+  cable to a wireless network faster at its best is held while the
+  cable is within the margin of it at their best, and not outside it,
+  with either medium unknown, from the slower medium, or once the load
+  has lasted the horizon; a move to a cable for its medium waits while
+  the cable is outside the margin of a loaded wireless network at its
+  best, and not within it, once the load has lasted the horizon, or
+  while the wireless network has no score over the horizon; and a
   hold on a link's cost lasts, at the dwell's end, until the second
   report, and before it whatever the reports.
 - `set.rs`: tests for `set.rs` (`proto::path::set::tests::...`), the set
@@ -715,6 +805,17 @@ module of that file, sees its private items and keeps its test names.
   path, and a pair not held. The other tests
   run on a set over test-clock instants (`testutil::TestInstant`) with no
   driver state (`()`).
+- `verdict.rs`: a probe's verdict under load
+  (`proto::path::tests::verdict::...`), driven through `Bundle`'s inputs
+  in the shell with every probe on the active path lost from 1 s: with a
+  session datagram arriving every 50 ms the probes are counted only at
+  the verdict cap from their sending, Suspect at 4.4 s; with heartbeats,
+  sender reports and the peer's probes arriving instead, or nothing, at
+  the timeout floor, Suspect at 1.8 s; the timeout follows three times the
+  largest round trip in the window, capped, while a latest round trip
+  above the cap keeps three times it and a sample older than the window
+  no longer counts (on `Liveness` directly); and a probe sent after a
+  late answer of 900 ms in the window is counted at 2.7 s, not 400 ms.
 - `view.rs`: the operator's view of a link's paths
   (`proto::path::tests::view::...`) through `Bundle::view`, driven as
   `choice.rs` drives its tests and with its helpers and `pin.rs`'s `pin`

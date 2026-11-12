@@ -173,7 +173,9 @@ class NodeManager:
 
         log.info("Node STARTED: %s (was down %.0fs)", node_id, down_for)
 
-        # Re-create veth pairs (container restart destroys netns)
+        # Re-create veth pairs (container restart destroys netns), then
+        # re-apply netem, and only then tell a node with bound interfaces to
+        # start FIPS, so none of its probes crosses an unshaped link.
         if self.veth_mgr:
             time.sleep(1)
             # Churn's own record, not the shared set: netem's safety net also
@@ -182,15 +184,15 @@ class NodeManager:
             stopped = {nid for nid, ns in self.node_states.items() if ns.is_down}
             try:
                 self.veth_mgr.setup_node(node_id, stopped)
+                if self.netem_mgr:
+                    self.netem_mgr.setup_node(node_id)
             finally:
                 # Whatever came of it, nothing more is coming for this start:
-                # the entrypoint stops waiting for a pair left deferred.
+                # the entrypoint stops waiting, even for a pair left deferred.
                 self.veth_mgr.mark_ready(node_id)
-
-        # Re-apply netem after a brief delay for the container to initialize
-        if self.netem_mgr:
-            if not self.veth_mgr:
-                time.sleep(1)
+        elif self.netem_mgr:
+            # Re-apply netem after a brief delay for the container to initialize
+            time.sleep(1)
             self.netem_mgr.setup_node(node_id)
 
         # Notify callback (e.g., refresh npub for ephemeral identity nodes)

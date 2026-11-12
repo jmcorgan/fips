@@ -52,11 +52,11 @@ pub use capable::Capability;
 pub use live::{Answer, Liveness, Sent};
 pub use machine::{Account, Bundle, Charge, PathView, PinView, View};
 pub use params::{
-    Config, PATH_DEAD_PROBE_INTERVAL_MAX, PATH_DEAD_PROBE_INTERVAL_MIN, PATH_SILENCE_MAX, Params,
-    ParamsError, RING,
+    Config, PATH_DEAD_PROBE_INTERVAL_MAX, PATH_DEAD_PROBE_INTERVAL_MIN, PATH_DEAD_RECHECK_SPAN,
+    PATH_SILENCE_MAX, Params, ParamsError, RING,
 };
 pub use rules::{Rule, Scope};
-pub use select::Pin;
+pub use select::{Pin, carried, heeded};
 pub use set::{
     Admission, Match, Medium, PATH_MAX_PER_PEER, PATH_MAX_PER_TRANSPORT, PathRefused, PathSet,
     PathState, PeerPath, Rebind, Roam,
@@ -84,8 +84,8 @@ pub enum Class {
 }
 
 /// Whether a path runs over a local medium or faces the Internet (multipath
-/// v1 draft, Section 5.5): by default a link's paths are all of its
-/// original path's kind.
+/// v1 draft, Section 5.5): unless `Config::mix_kinds` is set, a link's paths
+/// are all of its original path's kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// A local medium: a cable, a radio, or a local address.
@@ -137,8 +137,10 @@ pub enum Source {
 pub trait Facts {
     /// The link MTU of `transport` toward `addr`, in frame bytes.
     fn mtu(&self, transport: TransportId, addr: &TransportAddr) -> usize;
-    /// The kind of `transport`, for the path limits.
-    fn medium(&self, transport: TransportId) -> Medium;
+    /// The medium of `transport` toward `addr`, for the path limits:
+    /// `Medium::Unknown` where the host cannot tell it. Given the address
+    /// as well, a host may answer for the route to it.
+    fn medium(&self, transport: TransportId, addr: &TransportAddr) -> Medium;
     /// Whether `transport` is connection-oriented, as TCP, Tor, Nym and BLE
     /// are: a path to a candidate on it needs a connection opened before
     /// its first probe can go.
@@ -491,6 +493,18 @@ pub enum Output<D> {
     Connect {
         /// The path.
         to: PathRef,
+    },
+    /// The size path `to` is proven to carry changed, up or down: the
+    /// largest frame, `mtu` bytes in the unit of [`Facts::mtu`], is the
+    /// largest path message proven ([`Liveness::mtu`]) plus the frame
+    /// overhead. The ladder of a Probing or Dead path's probes and the
+    /// upward search on a Live one prove sizes; a path proven only at the
+    /// smallest size proves none and reports nothing.
+    Proven {
+        /// The path.
+        to: PathRef,
+        /// The largest frame it is proven to carry, in bytes.
+        mtu: usize,
     },
 }
 

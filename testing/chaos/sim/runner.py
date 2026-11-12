@@ -37,7 +37,9 @@ from .assertions import (
     evaluate_reverse_heard,
     evaluate_switch_latency,
     evaluate_tree_parents,
+    dropped_senders,
     switch_delays,
+    uncarried_downs,
 )
 from . import paths
 from .compose import generate_compose
@@ -212,6 +214,23 @@ class SimRunner:
             (t, cname(a), cname(b)) for t, kind, a, b in sorted(events) if kind == "down"
         ]
 
+    def _downaddrs(self, downs: list[tuple[float, str, str]]) -> dict[tuple[float, str], set[str]]:
+        """For each down and end, the remote addresses of the down's path at
+        that end: the other end's veth IP and MAC, where the topology has
+        them. Every down is of a veth edge, whose other paths it leaves
+        alone."""
+        node = {self.topology.container_name(n): n for n in self.topology.nodes}
+        out = {}
+        for down_at, a, b in downs:
+            for end, other in ((a, b), (b, a)):
+                if end not in node or other not in node:
+                    continue
+                me, peer = node[end], node[other]
+                got = {self.topology.veth_ip(peer, me)}
+                got.add(self.topology.nodes[peer].ethernet_macs.get(me))
+                out[(down_at, end)] = {x for x in got if x}
+        return out
+
     def _figures(self, result: AnalysisResult) -> str:
         """Write figures.json beside analysis.txt; return its text section."""
         mmp = (self.scenario.fips_overrides.get("node") or {}).get("mmp") or {}
@@ -249,9 +268,14 @@ class SimRunner:
         if a.max_promotions is not None:
             outcomes.append(evaluate_max_promotions(a.max_promotions, result.peers_promoted))
         if a.switch_latency is not None:
-            outcomes.append(
-                evaluate_switch_latency(a.switch_latency, downs, result.path_switches)
+            senders = dropped_senders(
+                self.schedule.records if self.schedule else [],
+                self.topology.container_name,
             )
+            uncarried = uncarried_downs(downs, result.path_lines, self._downaddrs(downs))
+            outcomes.append(evaluate_switch_latency(
+                a.switch_latency, downs, result.path_switches, senders, uncarried,
+            ))
         if a.max_stall is not None:
             restarts = self.traffic_mgr.restarts if self.traffic_mgr else 0
             outcomes.append(
@@ -525,15 +549,13 @@ class SimRunner:
         # 6. Set up veth pairs for Ethernet and udp-veth edges (before
         # netem)
         #
-        # The entrypoint script waits for every interface the config binds
-        # a transport to before starting FIPS, for as long as setup takes,
-        # until each node is told its veths are done (mark_ready).
+        # The entrypoint script of a node whose config binds a transport to
+        # an interface does not start FIPS until it is told the harness is
+        # done with it (mark_ready, below), for as long as setup takes.
         if self.topology.has_veth():
             self.veth_mgr = VethManager(self.topology)
             log.info("Setting up veth pairs...")
             self.veth_mgr.setup_all()
-            for node_id in sorted({n for edge in self.topology.veth_edges() for n in edge}):
-                self.veth_mgr.mark_ready(node_id)
 
         # 7. Initialize managers
         if s.netem.enabled:
@@ -545,6 +567,15 @@ class SimRunner:
             self.netem_mgr.down_nodes = self._down_nodes
             log.info("Applying initial per-link netem...")
             self.netem_mgr.setup_initial()
+
+        # Only now are those nodes told to start, so no probe of theirs
+        # crosses a link before its shaping is in place: a round trip taken
+        # unshaped is far below the path's real one, and the path machine
+        # keeps its least round trip for a minute, long enough to hold the
+        # link off a faster path past a scenario's first down.
+        if self.veth_mgr:
+            for node_id in sorted({n for edge in self.topology.veth_edges() for n in edge}):
+                self.veth_mgr.mark_ready(node_id)
 
         if s.link_flaps.enabled:
             self.link_mgr = LinkManager(

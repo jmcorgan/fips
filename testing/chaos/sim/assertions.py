@@ -830,19 +830,119 @@ def switch_delays(
     return out
 
 
+def dropped_senders(records: list[dict], cname) -> dict[float, str]:
+    """The end whose own sends each ``oneway`` down dropped, by its stamp.
+
+    ``records`` are the schedule's down records, each carrying its
+    ``mode``, its ``src`` (the end whose frames were dropped) and its
+    ``down`` stamp, the same stamp the down's flap event carries.
+    ``cname`` maps a node id to its container, the name the log sources
+    use. A two-way down has no dropped sender and is absent.
+    """
+    return {
+        r["down"]: cname(r["src"])
+        for r in records
+        if r.get("mode") == "oneway" and r.get("src") and r.get("down") is not None
+    }
+
+
+def _active_at(path_lines: list[tuple[str, str]], source: str, t: float) -> set[str]:
+    """The addresses the link to each of ``source``'s peers sent on at ``t``,
+    for each peer whose active address the lines give.
+
+    The latest "Path switched" line at or before ``t`` names it (``to``),
+    followed through any "Path moved to a new address" of that address
+    after it. With no switch by then, the link was on its original path,
+    which the first switch after ``t`` names as ``from``, or failing that
+    the original's own first state line (paths.timelines). A peer whose
+    link logged neither has no address here.
+    """
+    cur: dict[str, str] = {}
+    first_from: dict[str, str] = {}
+    for src, line in path_lines:
+        if src != source:
+            continue
+        at = line_epoch(line)
+        if at is None:
+            continue
+        f = line_fields(line)
+        peer = f.get("peer", "?")
+        if "Path switched" in line:
+            if at <= t:
+                cur[peer] = f.get("to", "?")
+            else:
+                first_from.setdefault(peer, f.get("from", "?"))
+        elif "Path moved to a new address" in line and at <= t:
+            if cur.get(peer) == f.get("from"):
+                cur[peer] = f.get("to", "?")
+    for peer, tl in P.timelines(path_lines).get(source, {}).items():
+        if peer in cur:
+            continue
+        if peer in first_from:
+            cur[peer] = first_from[peer]
+            continue
+        first = next((c for c in tl.changes if c.path_id == tl.original), None)
+        if first is not None:
+            cur[peer] = first.addr
+    return set(cur.values())
+
+
+def _at(addr: str, wanted: set[str]) -> bool:
+    """Whether a path's remote address is one of ``wanted``: a MAC, or an
+    IP whatever the port."""
+    return addr.lower() in wanted or addr.rsplit(":", 1)[0] in wanted
+
+
+def uncarried_downs(
+    downs: list[tuple[float, str, str]],
+    path_lines: list[tuple[str, str]],
+    addrs: dict[tuple[float, str], set[str]],
+) -> dict[tuple[float, str], str]:
+    """The ends at which a down's path did not carry the link when it went
+    down, by ``(stamp, end)``, each with the address the link was on.
+
+    ``addrs`` gives, by ``(stamp, end)``, the remote addresses the down's
+    path has at that end: the other end's veth IP or MAC. An end with none
+    given, or whose active address the lines do not give, is left out, and
+    ``evaluate_switch_latency`` measures it as before.
+    """
+    out = {}
+    for down_at, a, b in downs:
+        for end in (a, b):
+            wanted = {x.lower() for x in addrs.get((down_at, end), set())}
+            if not wanted:
+                continue
+            active = _active_at(path_lines, end, down_at)
+            if active and not any(_at(x, wanted) for x in active):
+                out[(down_at, end)] = ", ".join(sorted(active))
+    return out
+
+
 def evaluate_switch_latency(
     cfg: SwitchLatencyAssertion,
     downs: list[tuple[float, str, str]],
     switches: list[tuple[str, str]],
+    senders: dict[float, str] | None = None,
+    uncarried: dict[tuple[float, str], str] | None = None,
 ) -> AssertionOutcome:
     """Ceiling on the time from each down to the path switch it caused.
 
     ``downs`` are ``(stamp, a, b)``: the epoch each down was stamped inside
     the container immediately before the command that made it, and its
     two ends named as the log sources are. Without ``each_end`` a down
-    passes when either end switched within ``max_ms``; with it, every end
-    must. ``signalled_ms`` bounds each end's first switch on its own. The
-    whole distribution is printed, so a pass shows its margin.
+    passes when either end switched within its ceiling; with it, every end
+    must. The ceiling is ``max_ms``, except that with ``sender_ms`` set the
+    end whose own sends a one-way down dropped (``senders``, by the down's
+    stamp, from ``dropped_senders``) has ``sender_ms`` instead.
+    ``signalled_ms`` bounds each end's first switch on its own. The whole
+    distribution is printed, so a pass shows its margin.
+
+    An end at which the down's path did not carry the link when it went
+    down (``uncarried``, by the down's stamp and the end, from
+    ``uncarried_downs``) has no switch for the down to cause: its first
+    switch after the down is some later move, such as the fail-back after
+    the restore. Such an end is not measured, and the run fails on the
+    unmet precondition, naming the end, the down and where the link was.
     """
     if not downs:
         return AssertionOutcome(
@@ -850,21 +950,53 @@ def evaluate_switch_latency(
             passed=False,
             detail="FAIL switch_latency: no link was taken down, nothing measured",
         )
+    senders = senders or {}
+    uncarried = uncarried or {}
     delays = switch_delays(downs, switches)
-    limit = cfg.max_ms / 1000.0
+
+    def sender(down_at: float, end: str) -> bool:
+        """Whether ``end`` takes the dropped sender's ceiling for this down."""
+        return cfg.sender_ms is not None and senders.get(down_at) == end
+
+    def ceiling(down_at: float, end: str) -> int:
+        """The ceiling in ms for ``end``'s first switch after this down."""
+        return cfg.sender_ms if sender(down_at, end) else cfg.max_ms
+
     failures = []
     for down_at, a, b in downs:
         ends = {end: d for t, end, d in delays if t == down_at and end in (a, b)}
-        within = {end: d for end, d in ends.items() if d is not None and d <= limit}
+        for end in sorted(e for e in ends if (down_at, e) in uncarried):
+            failures.append(
+                f"{end} after {a}--{b} down at {_stamp(down_at)}: precondition not met, "
+                f"the down's path did not carry the link at {end} when it went down "
+                f"(it was on {uncarried[(down_at, end)]}), so no switch latency is measured"
+            )
+            del ends[end]
+        if not ends:
+            continue
+        within = {
+            end: d for end, d in ends.items()
+            if d is not None and d <= ceiling(down_at, end) / 1000.0
+        }
         if cfg.each_end:
             for end, d in sorted(ends.items()):
                 if end not in within:
                     got = "no switch" if d is None else f"{d * 1000:.0f} ms"
-                    failures.append(f"{end} after {a}--{b} down at {_stamp(down_at)}: {got}")
+                    role = (
+                        f" (dropped sender, ceiling {cfg.sender_ms} ms)"
+                        if sender(down_at, end) else ""
+                    )
+                    failures.append(
+                        f"{end}{role} after {a}--{b} down at {_stamp(down_at)}: {got}"
+                    )
         elif not within:
+            bound = (
+                f"{cfg.max_ms} ms" if cfg.sender_ms is None or down_at not in senders
+                else "its ceiling"
+            )
             failures.append(
                 f"{a}--{b} down at {_stamp(down_at)}: no switch at either end "
-                f"within {cfg.max_ms} ms"
+                f"within {bound}"
             )
         if cfg.signalled_ms is not None:
             for end, d in sorted(ends.items()):
@@ -875,26 +1007,32 @@ def evaluate_switch_latency(
                         f"> signalled ceiling {cfg.signalled_ms} ms"
                     )
     shown = ", ".join(
-        f"{end}={'none' if d is None else f'{d * 1000:.0f}'}" for _, end, d in delays
+        f"{end}=not measured" if (t, end) in uncarried else
+        f"{end}={'none' if d is None else f'{d * 1000:.0f}'}"
+        + (" (dropped sender)" if sender(t, end) else "")
+        for t, end, d in delays
     )
     scope = "each end" if cfg.each_end else "either end"
+    limits = (
+        f"ceiling {cfg.max_ms} ms"
+        + (f", dropped sender {cfg.sender_ms} ms" if cfg.sender_ms is not None else "")
+        + (f", signalled {cfg.signalled_ms} ms" if cfg.signalled_ms else "")
+    )
     if failures:
         return AssertionOutcome(
             name="switch_latency",
             passed=False,
             detail=(
-                f"FAIL switch_latency ({scope}, ceiling {cfg.max_ms} ms"
-                + (f", signalled {cfg.signalled_ms} ms" if cfg.signalled_ms else "")
-                + f"): {'; '.join(failures)}. All delays (ms): {shown}"
+                f"FAIL switch_latency ({scope}, {limits}): {'; '.join(failures)}. "
+                f"All delays (ms): {shown}"
             ),
         )
     return AssertionOutcome(
         name="switch_latency",
         passed=True,
         detail=(
-            f"PASS switch_latency ({scope}, ceiling {cfg.max_ms} ms"
-            + (f", signalled {cfg.signalled_ms} ms" if cfg.signalled_ms else "")
-            + f") over {len(downs)} down(s); delays (ms): {shown}"
+            f"PASS switch_latency ({scope}, {limits}) over {len(downs)} down(s); "
+            f"delays (ms): {shown}"
         ),
     )
 
@@ -1315,8 +1453,16 @@ def evaluate_path_floor(
     inside a stop is held to the floor, and a red prints each probe's
     time. A run with fewer than ``min_stops`` stops of two probes or more
     measured nothing and fails.
+
+    A stop of a path that carried the link takes the node's re-check
+    (paths.RECHECK_SPAN): its least gap stays 1 s while a probe goes before
+    30 s after the path's silence clock started, then doubles as the floor
+    does (paths.least_gaps). That holds only for a path that was the active
+    path at its Dead entry, or when it last left Live since its previous
+    stop (paths._carried), and the probes after the span are still held to
+    the doubling, so a re-check that runs past 30 s fails.
     """
-    breaks, refused, checked, margins = [], [], 0, []
+    breaks, refused, checked, margins, rechecked = [], [], 0, [], 0
     for source, peers in sorted(P.timelines(path_lines).items()):
         for peer, tl in sorted(peers.items()):
             for st in P.stops(tl):
@@ -1330,6 +1476,7 @@ def evaluate_path_floor(
                     continue
                 if len(st.probes) >= 2:
                     checked += 1
+                    rechecked += st.until is not None
                 m = P.margin(st)
                 if m is not None:
                     margins.append(m)
@@ -1342,10 +1489,19 @@ def evaluate_path_floor(
                         f"probe {n} {g:.3f} s after the last, least {least:g} s"
                         for n, g, least in bad
                     )
+                    recheck = (
+                        f", re-checked as the path that carried the link until "
+                        f"{_stamp(st.until)}" if st.until is not None else ", not re-checked"
+                    )
                     breaks.append(
-                        f"{where}, stopped {_stamp(st.start)}: {gaps} (probes: {probes})"
+                        f"{where}, stopped {_stamp(st.start)}{recheck}: {gaps} "
+                        f"(probes: {probes})"
                     )
     tight = f"; smallest margin {min(margins) * 1000:.0f} ms" if margins else ""
+    tight += (
+        f"; {rechecked} of them re-checked at 1 s for {P.RECHECK_SPAN:g} s after the "
+        f"path that carried the link went silent" if rechecked else ""
+    )
     if breaks or refused:
         parts = []
         if breaks:

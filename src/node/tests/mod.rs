@@ -11,6 +11,8 @@ mod anon_beacon;
 mod app_tun;
 #[cfg(ble_available)]
 mod ble;
+#[cfg(ble_available)]
+mod ble_queue;
 mod bloom;
 mod bloom_echo;
 mod bloom_hold;
@@ -52,7 +54,11 @@ mod netmon;
 mod path_accept;
 mod path_control;
 mod path_intake;
+mod path_kinds;
+mod path_load;
+mod path_narrow_hop;
 mod path_padding;
+mod path_score;
 mod paths;
 mod peer_restart;
 mod probe;

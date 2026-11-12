@@ -190,6 +190,10 @@ fn path_at(
 #[tokio::test]
 async fn a_path_that_stops_carrying_our_frames_but_still_brings_the_peers_is_left_after_k_unanswered_probes()
  {
+    // The switch is timed in 50 ms ticks. With the clock running, time the
+    // test spends descheduled brings probes due and deadlines past sooner
+    // than the ticks say, and the switch reads as early.
+    crate::time::freeze();
     let (mut nodes, b, _, b2) = two_transports(1280).await;
     let a = *nodes[0].node.node_addr();
     let t1 = nodes[0].transport_id;
@@ -228,8 +232,8 @@ async fn a_path_that_stops_carrying_our_frames_but_still_brings_the_peers_is_lef
         nodes[0].node.path_tick().await;
         swap(&mut nodes).await;
         if active_of(&nodes[0], &b).0 == t2() {
-            // Elapsed time by the ticks run, since the clock also moves
-            // with real time.
+            // Elapsed time by the ticks run: the clock is frozen, so it
+            // has moved by those alone.
             moved = Some(tick * (n + 1));
             break;
         }
@@ -489,6 +493,10 @@ async fn settle_on(cable: TransportId) -> ([(TransportId, usize, Option<u32>); 2
 /// stay.
 #[tokio::test]
 async fn with_equal_round_trips_a_preferred_cable_carries_the_link_at_the_node_in_both_orders() {
+    // The first move is timed in 50 ms ticks against the dwell. With the
+    // clock running, time the test spends descheduled runs the dwell down
+    // sooner than the ticks say, and the move reads as before it.
+    crate::time::freeze();
     let t1 = TransportId::new(1);
     let dwell = PathConfig::draft().switch_dwell;
     let tick = Duration::from_millis(50);

@@ -12,6 +12,8 @@
 
 use super::script::{Kind, Step};
 use super::world::Medium;
+#[cfg(unix)]
+use std::time::Duration;
 
 /// Which node of the world a start's node 0 is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,10 +117,12 @@ pub(super) struct Start {
     /// How many transports each node has: a second is a second loopback
     /// transport (`World::add_transport`).
     pub(super) transports: usize,
-    /// Whether each node runs a decrypt-worker pool, started before the
-    /// start's first step. Only Unix builds have the pool.
+    /// The decrypt-worker pool each node runs, started before the start's
+    /// first step: `None` for no pool, and otherwise one worker that sleeps
+    /// the given time before it handles each job, zero for the production
+    /// worker. Only Unix builds have the pool.
     #[cfg(unix)]
-    pub(super) workers: bool,
+    pub(super) workers: Option<Duration>,
     /// The steps that bring the world to the start's state. Run as written,
     /// never varied.
     pub(super) build: &'static [Step],
@@ -288,7 +292,7 @@ pub(super) fn starts() -> Vec<Start> {
         nodes: 2,
         transports: 1,
         #[cfg(unix)]
-        workers: false,
+        workers: None,
         build,
         script,
         reach,
@@ -393,11 +397,28 @@ pub(super) fn pooled() -> Start {
         medium: Medium::Loopback,
         nodes: 2,
         transports: 1,
-        workers: true,
+        workers: Some(Duration::ZERO),
         build: CROSSED,
         script: CROSSING,
         reach: 9,
         pinned: &[],
+    }
+}
+
+/// How long each worker of [`lagging`] sleeps before it handles a job.
+#[cfg(unix)]
+const WORKER_LAG: Duration = Duration::from_millis(200);
+
+/// [`pooled`] with each node's decrypt worker sleeping [`WORKER_LAG`] before
+/// it handles each job, as a worker thread descheduled on a loaded host is:
+/// a frame the world hands a node is still on the worker for many rounds of
+/// a heal. Its name says the workers lag, so a finding against it does.
+#[cfg(unix)]
+pub(super) fn lagging() -> Start {
+    Start {
+        name: "crossing, decrypt workers lagging",
+        workers: Some(WORKER_LAG),
+        ..pooled()
     }
 }
 

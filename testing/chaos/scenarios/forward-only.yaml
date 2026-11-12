@@ -8,8 +8,19 @@
 # dropped at the other end's veth ingress (`mode: oneway`, a tc ingress
 # filter). The other direction keeps delivering: the dropped sender still
 # hears its peer, and its peer hears nothing from it. Neither end has a
-# signal, so each must switch on its probes timing out, within the
-# K-timeout bound of 1300 ms, while bidirectional load runs.
+# signal, so each must switch on its probes timing out, while
+# bidirectional load runs.
+#
+# The two ends have different ceilings. The end that hears nothing must
+# switch within the K-timeout bound of 1300 ms. The dropped sender has
+# 2600 ms (`sender_ms`): it still receives the peer's session data, and a
+# probe sent before the last such arrival has its verdict held, so its
+# Suspect count starts only as the peer's data stops, when the peer
+# switches away. Measured, it switches 0.4 to 0.9 s after its peer (worst
+# 2001 ms). 2600 is the peer's 1300 ms plus a fresh three-probe Suspect
+# count with the observed probe interval and wake slack (about 2.45 s at
+# worst). This does not detect an uncapped hold here: the peer's data
+# never outlasts the peer's own switch in this scenario.
 #
 # The drop is IPv4 only, so ARP passes and neither end's neighbour entry
 # for the other fails; `reverse_heard` checks that, and that the
@@ -17,11 +28,15 @@
 # the dropped sender: every path message it logged in the step's second
 # half, or from its last one when the half holds none, is in the capture.
 # The end whose sends still arrive stops answering the dropped one's
-# probes from its own side, goes Dead about 11 s in and probes at the
-# floor; the dropped sender hears those probes, which revive
-# its own Dead path. Probes to the stopped address are held to the floor
-# and counted against the capture at the far ingress (taps see a frame
-# before tc ingress drops it).
+# probes from its own side, goes Dead about 11 s in and probes the
+# stopped address; the dropped sender hears those probes, which revive
+# its own Dead path. Where the stopped path carried the link (the veth,
+# active at both downs once the link has moved to it), the node re-checks
+# it every 1 s until 30 s after it went silent, and the draft's floor
+# doubles the gap only after that; elsewhere the floor's 1, 1, 2, 4 s ...
+# holds from the stop. `path_floor` holds the probes to whichever applies,
+# and they are counted against the capture at the far ingress (taps see a
+# frame before tc ingress drops it).
 #
 #   n01 ===udp/veth=== n02      (n02's frames dropped at n01 from 20 s for
 #                                30 s; n01's at n02 from 90 s for 30 s)
@@ -81,10 +96,11 @@ assertions:
     max_roots: 1
     min_nodes_parented: 1
 
-  # The K-timeout bound at both ends: both lose answers; the dropped
-  # sender still hears.
+  # The K-timeout bound at the end that hears nothing; the dropped
+  # sender's own ceiling for the verdict hold (see the header).
   switch_latency:
     max_ms: 1300
+    sender_ms: 2600
     each_end: true
 
   # The positive control, then the draft's bounds.

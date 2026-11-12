@@ -6,11 +6,12 @@ message it sends ("Path message sent": the pair, ``msg_type``, ``len``), a
 path that moves to a new address logs "Path moved to a new address", and
 each change of the link's active path logs "Path switched" (``to``, the
 pair it now sends on). Every path message taken in logs "Path message
-received", with the same fields, and "Task wait" (``worst_ms``) gives how long
-a spawned task waited for the runtime thread, at most once a second. Those two
-are there to be read from a run's logs and beside a timeout (``active_timeouts``
-in ``assertions.py``); the timelines do not use them. From the rest, per node
-and peer, this module rebuilds:
+received", with the same fields; the timelines read only the answers among
+them, to place each stop's silence clock. "Task wait" (``worst_ms``) gives how
+long a spawned task waited for the runtime thread, at most once a second; it is
+there to be read beside a timeout (``active_timeouts`` in ``assertions.py``)
+and the timelines do not use it. From the rest, per node and peer, this module
+rebuilds:
 
 - each path's **stops** (draft Section 5.6): from its entry to Dead until a
   ``next=Some(Live)`` with ``why=Answered``, a ``from=Some(Dead)
@@ -19,6 +20,8 @@ and peer, this module rebuilds:
 - each **Probing episode**: from entering Probing to leaving it.
 - the probes (``msg_type=82``) sent on each path, attributed to the path
   that held their pair when they were sent.
+- whether each stop takes the node's re-check of a path that carried the
+  link (``RECHECK_SPAN``), and until when.
 
 The link's original path is Live from link-up and logs nothing until it
 changes state, so a message sent on it before then is not attributed, and
@@ -83,6 +86,20 @@ SILENCE_MAX = 60.0
 FLOOR_MIN = 1.0
 FLOOR_MAX = 30.0
 
+# The node's re-check of a path that carried the link (PATH_DEAD_RECHECK_SPAN
+# in core/src/proto/path/params.rs): a stop of a path that was the active path
+# at its Dead entry, or when it last left Live since its previous stop, keeps
+# its least gap at FLOOR_MIN while a probe goes before this long after the
+# path's silence clock started (``Stop.silent``), and doubles from there. The
+# node takes the re-check once per time the path leaves Live.
+RECHECK_SPAN = 30.0
+
+# PATH_PROBE_MIN_SIZE (core/src/proto/path/wire.rs), counted as ``len`` is,
+# from the link message type byte. A Live path's own probes and their answers
+# are this size; a longer probe or answer on a Live path is the MTU search's,
+# which neither starts the silence clock nor, answered, restarts it.
+PROBE_MIN = 27
+
 # MAX_DISCOVERY_PROBES (draft Appendix A): probes per Probing episode.
 DISCOVERY_MAX = 8
 
@@ -122,12 +139,27 @@ EXEMPT_WINDOW = 0.005
 STAMP_ALLOWANCE = 0.050
 
 
-def floor_gap(n: int) -> float:
-    """The least gap before probe ``n`` of a stop (probe 0 is the stop)."""
-    gap = FLOOR_MIN
-    for _ in range(3, n + 1):
-        gap = min(2 * gap, FLOOR_MAX)
-    return gap
+def least_gaps(probes: list[float], until: float | None = None) -> list[float]:
+    """The least gap before each of a stop's probes, from probe 1.
+
+    The node's own recurrence (``Liveness::spend`` in
+    core/src/proto/path/live.rs): the stop sets the least gap G0 to
+    FLOOR_MIN, and each probe j sent at t_j then sets Gj to FLOOR_MIN when
+    t_j is before ``until`` (the re-check's end, None for a stop without
+    one), else to twice G(j-1) up to FLOOR_MAX. The probe goes once the gap
+    held before it has passed, and the gap is updated after, so the least gap
+    before probe 1 is FLOOR_MIN from the stop and before probe n >= 2 it is
+    G(n-2): one more FLOOR_MIN gap follows the last probe of the span. With
+    no ``until`` this is 1, 1, 2, 4 ... s, the draft's floor. A probe's stamp
+    is compared with ``until`` with the stamp allowance, since its stamp can
+    read later than the node's clock read by that much.
+    """
+    out, g = [], [FLOOR_MIN]
+    for n, t in enumerate(probes, start=1):
+        out.append(FLOOR_MIN if n == 1 else g[n - 2])
+        within = until is not None and t < until + STAMP_ALLOWANCE
+        g.append(FLOOR_MIN if within else min(2 * g[-1], FLOOR_MAX))
+    return out
 
 
 @dataclass
@@ -179,6 +211,14 @@ class Stop:
     # one is seen; a stop more than SILENCE_MAX after it began before its
     # Dead entry, unlogged, and cannot be placed.
     unanswered: float | None = None
+    # Whether the stop takes the re-check of a path that carried the link,
+    # the path's silence clock at its Dead entry as the node keeps it
+    # (``_silence``), and the instant until which the re-check holds the
+    # least gap at FLOOR_MIN: RECHECK_SPAN after the silence clock, or after
+    # the stop with no clock running. None without the re-check.
+    carried: bool = False
+    silent: float | None = None
+    until: float | None = None
 
 
 @dataclass
@@ -199,6 +239,8 @@ class Timeline:
 
     changes: list[Change] = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
+    # The path messages taken in, each with the path that held its pair.
+    received: list[Message] = field(default_factory=list)
     original: str | None = None
 
 
@@ -255,9 +297,10 @@ def timelines(path_lines: list[tuple[str, str]]) -> dict[str, dict[str, Timeline
                 holder[new] = holder.pop(old)
             if active.get(link) == old[2:]:
                 active[link] = new[2:]
-        elif "Path message sent" in line:
+        elif "Path message sent" in line or "Path message received" in line:
             addr = f.get("remote_addr", "?")
-            tl.messages.append(Message(
+            into = tl.messages if "Path message sent" in line else tl.received
+            into.append(Message(
                 t=t, transport=transport, addr=addr,
                 msg_type=int(f.get("msg_type", "0")), length=int(f.get("len", "0")),
                 path_id=holder.get((source, peer, transport, addr)),
@@ -302,6 +345,75 @@ def _unanswered(tl: Timeline, dead: Change, k: int = 3) -> float | None:
     return None
 
 
+def _silence(tl: Timeline, dead: Change) -> float | None:
+    """The path's silence clock at a Dead entry, as the node keeps it: the
+    send instant of its first probe since its latest matching answer, or
+    None with no probe since.
+
+    The node starts the clock at a probe sent with none running and stops
+    it at a matching answer, at the peer's probe bringing the path back
+    from Dead (``why=Probed``) and, implicitly, at the path's creation. The
+    MTU search's probes and answers (longer than PROBE_MIN while the path
+    is Live) do neither. The lines carry no probe ids, so every other answer
+    taken in on the path counts as matching; the node does not count one to
+    a probe that had already timed out, so after such a late answer this
+    reads the clock later than the node does, by the time from the node's
+    clock start to that answer.
+    """
+    pid = dead.path_id
+    mine = [c for c in tl.changes if c.path_id == pid and c.t <= dead.t]
+    begin = max(
+        (c.t for c in mine[:-1]
+         if c.frm == "None"
+         or (c.frm == "Some(Dead)" and c.nxt == "Some(Probing)" and c.why == "Probed")),
+        default=float("-inf"),
+    )
+
+    def held(m: Message) -> bool:
+        """Whether the message was on this path: attributed to it, or to
+        none at its pair (the original before its first line)."""
+        return m.path_id == pid or (
+            m.path_id is None and (m.transport, m.addr) == (dead.transport, dead.addr)
+        )
+
+    def search(m: Message) -> bool:
+        """Whether the message is the MTU search's: longer than the
+        smallest probe while the path was Live."""
+        if m.length <= PROBE_MIN:
+            return False
+        before = [c.nxt for c in mine if c.t < m.t]
+        return (before[-1] if before else "Some(Live)") == "Some(Live)"
+
+    answers = [
+        m.t for m in tl.received
+        if m.msg_type == ACK and held(m) and begin < m.t <= dead.t and not search(m)
+    ]
+    if answers:
+        begin = answers[-1]
+    sent = [
+        m.t for m in tl.messages
+        if m.msg_type == PROBE and held(m) and begin < m.t <= dead.t and not search(m)
+    ]
+    return sent[0] if sent else None
+
+
+def _carried(tl: Timeline, dead: Change, prior: float | None) -> bool:
+    """Whether a stop beginning at the Dead entry ``dead`` takes the re-check:
+    the path was the active path at the entry, or when it last left Live,
+    if that came after its previous stop (begun at ``prior``). The node
+    gives the re-check once per time the path leaves Live, so a second stop
+    with no Live between takes it only if the path is active at its own
+    Dead entry."""
+    if dead.active:
+        return True
+    left = [
+        c for c in tl.changes
+        if c.path_id == dead.path_id and c.t <= dead.t
+        and c.frm == "Some(Live)" and c.nxt != "Some(Live)"
+    ]
+    return bool(left) and (prior is None or left[-1].t > prior) and left[-1].active
+
+
 def _failures(tl: Timeline) -> list[tuple[float, str]]:
     """Each instant the link's active path left Live or Suspect for a worse
     state leaving no path of the peer Live, by the lines, the original
@@ -326,6 +438,7 @@ def stops(tl: Timeline) -> list[Stop]:
     """Every stop of every path in one timeline, with its probes."""
     out: list[Stop] = []
     open_stop: dict[str, Stop] = {}
+    prior: dict[str, float] = {}
     for c in tl.changes:
         s = open_stop.get(c.path_id)
         if s is not None:
@@ -343,7 +456,12 @@ def stops(tl: Timeline) -> list[Stop]:
                 path_id=c.path_id, transport=c.transport, addr=c.addr,
                 start=c.t, end=None, ended_by="open",
                 unanswered=_unanswered(tl, c),
+                carried=_carried(tl, c, prior.get(c.path_id)),
+                silent=_silence(tl, c),
             )
+            if s.carried:
+                s.until = (s.silent if s.silent is not None else s.start) + RECHECK_SPAN
+            prior[c.path_id] = c.t
             open_stop[c.path_id] = s
             out.append(s)
     failed = _failures(tl)
@@ -393,9 +511,11 @@ def episodes(tl: Timeline) -> list[Episode]:
 
 def gaps(stop: Stop) -> list[tuple[int, float, float]]:
     """Each probe's gap from the one before (probe 0 the stop) against the
-    floor: ``(n, gap, least gap)``."""
+    floor, or against the re-check for a stop that takes it: ``(n, gap,
+    least gap)``."""
     times = [stop.start] + stop.probes
-    return [(n, times[n] - times[n - 1], floor_gap(n)) for n in range(1, len(times))]
+    least = least_gaps(stop.probes, stop.until)
+    return [(n, times[n] - times[n - 1], least[n - 1]) for n in range(1, len(times))]
 
 
 def floor_breaks(stop: Stop, allowance: float = STAMP_ALLOWANCE) -> list[tuple[int, float, float]]:
@@ -535,6 +655,9 @@ def figures(
                     "least_s": [least for _, _, least in g],
                     "min_margin_ms": None if m is None else round(m * 1000, 1),
                     "first_unanswered": st.unanswered,
+                    "carried": st.carried,
+                    "silence_start": st.silent,
+                    "recheck_until": st.until,
                 })
             for ep in episodes(tl):
                 most[_node(source)] = max(most.get(_node(source), 0), ep.probes)
@@ -566,11 +689,15 @@ def summary(fig: dict) -> str:
     lines = ["", "=== Path figures ===", ""]
     lines.append(f"Stops: {len(fig['stops'])} (allowance {fig['stamp_allowance_ms']:.0f} ms)")
     for st in fig["stops"]:
+        recheck = (
+            f", re-checked to {st['recheck_until'] - st['start']:.1f} s after the stop"
+            if st["recheck_until"] is not None else ""
+        )
         lines.append(
             f"  {st['node']} path {st['path_id']} to {st['addr']}: {st['probes']} probes "
             f"({len(st['exempt'])} exempt), "
             f"{st['bytes']} bytes, ended by {st['ended_by']}, gaps {st['gaps_s']}, "
-            f"smallest margin {st['min_margin_ms']} ms"
+            f"smallest margin {st['min_margin_ms']} ms{recheck}"
         )
     for step in fig["steps"]:
         lines.append(f"Step {step['step']}:")

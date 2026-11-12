@@ -167,6 +167,10 @@ faults! {
     /// A BLE writer whose write fails removes every channel pooled at its
     /// address, not only its own.
     BleWriterRemovesByAddress,
+    /// A queueing transport puts path messages in the connection's data
+    /// queue, behind the data and refused when it is full, instead of in
+    /// their own queue, which its writer drains first.
+    PathLaneShared,
     /// A moved path's old pair stays in the link's record, so the index
     /// derived from it keeps an entry there, beside the one at the pair it
     /// moved to.
@@ -236,6 +240,92 @@ faults! {
     /// whatever holds the link there, so a beacon at a proven path of a
     /// held peer silent past its liveness is skipped too.
     BeaconSkipsAnyIndexed,
+    /// A probe's verdict does not wait while the peer's session datagrams
+    /// arrive on its path: a probe queued behind the data is counted
+    /// unanswered at its timeout.
+    VerdictIgnoresData,
+    /// A probe's timeout is the larger of the floor and three times the
+    /// latest round trip only, as before, so the probes sent as a queue
+    /// builds time out before their answers can arrive.
+    TimeoutFromLatest,
+    /// The verdict cap bounds neither the wait nor the timeout's term from
+    /// the largest round trip: a probe is judged only once the peer has
+    /// sent nothing on its path for the cap, so a failure of this node's
+    /// own direction is not found while the peer's traffic arrives.
+    VerdictUncapped,
+    /// Every frame but a path message holds a probe's verdict, heartbeats
+    /// and other link control too, so on an idle link the peer's heartbeats
+    /// delay finding a failure of this node's own direction.
+    VerdictCountsControl,
+    /// A Probing or Dead path whose padded probe went unanswered alternates
+    /// the padded and the smallest size, as before the size ladder, so a
+    /// path across a hop narrower than its link MTU proves no size.
+    DiscoveryAlternates,
+    /// The upward size search runs on a connection-oriented transport too,
+    /// where an oversized probe closes the connection.
+    SeekOnStreams,
+    /// A size search probe goes in the path's ring as an ordinary probe,
+    /// after the probe at its cadence, so its loss is a miss and an ETX loss
+    /// sample.
+    SeekCountsLoss,
+    /// A discretionary change away from the active path on score reads the
+    /// active path's score over the round-trip window only, as before, so
+    /// load on the active path alone hands the link to an idle path slower
+    /// at its best within seconds.
+    MoveOnWindowScore,
+    /// A discretionary change on score to a path faster at its best than
+    /// the active path is held like any other, so after a mandatory move to
+    /// a slower path that the load followed, the return waits until that
+    /// path's idle round trips have left its horizon.
+    MoveToFasterHeld,
+    /// The return to a path a mandatory change left, Live again, needs the
+    /// switch margin like any discretionary change on score, so after a
+    /// real outage of a fast path under load the link stays on the slower
+    /// path it fled to until that path's own loaded round trips fill its
+    /// window.
+    ReturnNeedsMargin,
+    /// Nothing reads the size a path is proven to carry: the node seeds a
+    /// peer's path MTU, folds the next hop's MTU and tightens sessions from
+    /// the link MTU alone, so a path across a hop narrower than its link
+    /// MTU is used at the link MTU and its large frames are lost, and the
+    /// path machine counts such a path as carrying a `FilterAnnounce` by
+    /// its link MTU.
+    ProvenMtuUnused,
+    /// A change of the active path's proven size reseeds the peer's path
+    /// MTU under the never-loosen rule, so it only ever lowers it, and a
+    /// path whose hop widens keeps the narrow size it proved first.
+    ProvenMtuOnlyLowers,
+    /// The size a path on a connection-oriented transport proves bounds the
+    /// frames it carries, as on a connectionless one, though no search
+    /// raises it there: a padded probe lost while the path is probed leaves
+    /// the peer's path MTU entry, and whether the path carries a
+    /// `FilterAnnounce`, at a smaller rung of the ladder for as long as the
+    /// path is Live.
+    ProvenMtuOnStreams,
+    /// A path that carried the link and went silent is re-checked on the
+    /// doubling cadence like any other, so after a silent outage it waits
+    /// for the doubling's next slot, up to 30 s later, before it is found
+    /// again.
+    DeadRecheckDoubles,
+    /// Heartbeat pacing reads `std::time::Instant` instead of the node's
+    /// monotonic clock, which the link-dead check reads.
+    HeartbeatsOnStdClock,
+    /// Choosing the active path ignores the medium a path runs over, as
+    /// before the medium ranked paths, so a cable within the switch margin
+    /// of a better-scoring Wi-Fi path never takes the link from it.
+    MediumIgnored,
+    /// A discretionary change on score to a path faster at its best than
+    /// the active path is never held, even from a cable within the switch
+    /// margin of it at their best, so load that follows the link hands it
+    /// from the cable to a Wi-Fi path and the cable's medium takes it back
+    /// one dwell later, over and over.
+    LoadLeavesCable,
+    /// A discretionary change for a faster known medium is never held, so
+    /// load that follows the link onto a Wi-Fi path faster at its best than
+    /// a cable outside the switch margin of it hands the link to the cable
+    /// as soon as the Wi-Fi path's window score passes the cable's, and the
+    /// Wi-Fi path takes it back once the load has followed, over and over.
+    MediumMoveUnheld,
 }
 
 impl Fault {

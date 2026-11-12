@@ -94,10 +94,14 @@ pub(super) async fn build(mut world: World, start: &Start, order: Order) -> Worl
         world.add_transport();
     }
     #[cfg(unix)]
-    if start.workers {
+    if let Some(lag) = start.workers {
         use crate::node::decrypt_worker::DecryptWorkerPool;
         for tn in world.nodes.iter_mut() {
-            tn.node.supervisor.decrypt_workers = Some(DecryptWorkerPool::spawn(1));
+            tn.node.supervisor.decrypt_workers = Some(if lag.is_zero() {
+                DecryptWorkerPool::spawn(1)
+            } else {
+                DecryptWorkerPool::slowed(1, lag)
+            });
         }
     }
     let build: Vec<Step> = start.build.iter().map(|s| order.step(*s)).collect();

@@ -56,14 +56,14 @@ that file and can reach its private items.
   kept; and that a signal lifetime raised to 120 s is refused by the
   replay-window check when `replay_window_secs` is not above 240 s.
 - `path.rs`: tests for the multipath settings: `node.path` (`PathConfig`,
-  `node.rs`) reads every key and defaults to multipath off with the draft's
-  values, each transport's `role` (`transport.rs`) takes all four values
-  and defaults to `normal`, `kind` is taken by UDP and TCP and refused
-  elsewhere, a configuration that names none of them writes none back,
-  `Config::validate` refuses a zero dwell, probe interval or sample count,
-  more than 255 samples and a margin under 1.0 or not a number with a
-  message naming the key, and the section layers per key across files
-  through `Config::load_from_paths`.
+  `node.rs`) reads every key and defaults to multipath off, kinds mixed
+  and the draft's values, each transport's `role` (`transport.rs`) takes
+  all four values and defaults to `normal`, `kind` is taken by UDP and TCP
+  and refused elsewhere, a configuration that names none of them writes
+  none back, `Config::validate` refuses a zero dwell, probe interval or
+  sample count, more than 255 samples and a margin under 1.0 or not a
+  number with a message naming the key, and the section layers per key
+  across files through `Config::load_from_paths`.
 - `floors.rs`: tests for `Config::apply_floors` (`floors.rs`): a value
   outside its protocol bound runs at the bound with one warning, target
   `fips::config`, naming the key, the configured value and the value used; a

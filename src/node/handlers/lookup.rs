@@ -1033,24 +1033,69 @@ impl Node {
         response: &mut LookupResponse,
         next_hop: &NodeAddr,
     ) {
-        if let Some(peer) = self.peers.get(next_hop)
-            && let Some(tid) = peer.transport_id()
-            && let Some(transport) = self.transports.get(&tid)
-        {
-            let link_mtu = if let Some(addr) = peer.current_addr() {
-                transport.link_mtu(addr)
-            } else {
-                transport.mtu()
-            };
+        if let Some(link_mtu) = self.next_mtu(next_hop) {
             response.path_mtu = response.path_mtu.min(link_mtu);
+        }
+    }
+
+    /// The largest frame `peer`'s path at (`transport_id`, `addr`) carries:
+    /// the link MTU this node applies to it, or the smaller size the link's
+    /// path machine has proven the path carries (multipath draft Section
+    /// 5.1), by the rule the path machine also judges a `FilterAnnounce` by
+    /// (`path::carried`). A path proven at no size above the smallest, a
+    /// path on a connection-oriented transport, and every path of a link
+    /// with multipath off, has the link MTU. `None` when the transport is
+    /// not registered.
+    pub(in crate::node) fn effective_mtu(
+        &self,
+        peer: &NodeAddr,
+        transport_id: TransportId,
+        addr: &TransportAddr,
+    ) -> Option<u16> {
+        let transport = self.transports.get(&transport_id)?;
+        let link_mtu = transport.link_mtu(addr);
+        let oriented = transport.transport_type().connection_oriented;
+        let proven = self.peers.get(peer).and_then(|p| {
+            let paths = p.bundle()?.paths();
+            paths.get(paths.find(transport_id, addr)?)?.live().mtu()
+        });
+        let carried = crate::proto::path::carried(usize::from(link_mtu), proven, oriented);
+        Some(u16::try_from(carried).unwrap_or(link_mtu))
+    }
+
+    /// The largest frame the link to the direct peer `peer` carries where it
+    /// sends now: [`Self::effective_mtu`] of its active path, or the
+    /// transport's MTU while the link has no address. `None` when the peer
+    /// or its transport is unknown.
+    pub(in crate::node) fn next_mtu(&self, peer: &NodeAddr) -> Option<u16> {
+        let p = self.peers.get(peer)?;
+        let tid = p.transport_id()?;
+        match p.current_addr() {
+            Some(addr) => self.effective_mtu(peer, tid, addr),
+            None => self.transports.get(&tid).map(|t| t.mtu()),
+        }
+    }
+
+    /// Lower every session whose next hop is `peer` to `mtu` at once; a
+    /// session's own path MTU rises only on its destination's notifications.
+    pub(in crate::node) fn tighten_via(&mut self, peer: &NodeAddr, mtu: u16) {
+        let dests: Vec<NodeAddr> = self.sessions.keys().copied().collect();
+        for dest in dests {
+            let via_peer = self
+                .find_next_hop(&dest)
+                .is_some_and(|hop| hop.node_addr() == peer);
+            if via_peer && let Some(mmp) = self.sessions.get_mut(&dest).and_then(|s| s.mmp_mut()) {
+                mmp.path_mtu.seed_source_mtu(mtu);
+            }
         }
     }
 
     /// Seed `path_mtu_lookup` for a directly-connected peer.
     ///
     /// Called when an FMP link-layer peer is promoted to active. The seed
-    /// value is the local outgoing-link MTU on the peer's transport, which
-    /// is the actual link constraint for direct-link traffic. Stored only
+    /// value is the local outgoing-link MTU on the peer's transport, or the
+    /// smaller size its path is proven to carry ([`Self::effective_mtu`]),
+    /// which is the actual link constraint for direct-link traffic. Stored only
     /// when no tighter value exists: discovery's reverse-path bottleneck
     /// or MMP `MtuExceeded` reactive learning take precedence when smaller.
     ///
@@ -1086,7 +1131,8 @@ impl Node {
     /// peer's traffic has moved to another path of its link: the value is
     /// then replaced outright, as for a move to another transport, since a
     /// tighter value learned on the old path describes a path the peer's
-    /// traffic no longer takes.
+    /// traffic no longer takes, or when the active path's proven size has
+    /// changed, either way.
     pub(in crate::node) fn seed_mtu(
         &mut self,
         peer_addr: &NodeAddr,
@@ -1095,7 +1141,7 @@ impl Node {
         addr: &TransportAddr,
         relink: bool,
     ) {
-        let Some(transport) = self.transports.get(&transport_id) else {
+        let Some(link_mtu) = self.effective_mtu(peer_addr, transport_id, addr) else {
             debug!(
                 peer = %self.peer_display_name(peer_addr),
                 transport_id = %transport_id,
@@ -1103,7 +1149,6 @@ impl Node {
             );
             return;
         };
-        let link_mtu = transport.link_mtu(addr);
         // A locally derived MTU is deliberately exempt from the actionable
         // floor, so this seeds the value either way, and a narrow link is not
         // by itself worth reporting: BLE negotiates its MTU per connection and

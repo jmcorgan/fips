@@ -1030,7 +1030,8 @@ fn dead_times_are_stamped_on_the_peer_clock_that_moves_the_rekey_timers() {
         next
     };
     let mut set = PathSet::new();
-    let mut add = |set: &mut PathSet, n: u32| match set.admit(t, addr(n), Medium::Other, &mut ids) {
+    let mut add = |set: &mut PathSet, n: u32| match set.admit(t, addr(n), Medium::Unknown, &mut ids)
+    {
         Ok(crate::peer::Admission::Added {
             index,
             evicted: None,
@@ -1063,7 +1064,7 @@ fn dead_times_are_stamped_on_the_peer_clock_that_moves_the_rekey_timers() {
         "the same advance is seen by the peer clock the rekey timers read"
     );
 
-    match set.admit(t, addr(5), Medium::Other, &mut ids) {
+    match set.admit(t, addr(5), Medium::Unknown, &mut ids) {
         Ok(crate::peer::Admission::Added {
             evicted: Some(evicted),
             ..

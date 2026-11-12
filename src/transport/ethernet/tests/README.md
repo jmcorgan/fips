@@ -26,6 +26,11 @@ source file's private items.
   the transport reports its kernel drop total to the node's congestion
   sample, where it used to report nothing, and a sample with no socket to
   read leaves the total as it was. Elsewhere it reports nothing.
+- `medium.rs` tests `../mod.rs` as module `medium_tests`: the medium a
+  transport reports is unknown until a binding has read it from the
+  interface, and teardown forgets it, so a name that comes back on other
+  hardware is read afresh. It needs no root: the transport names an
+  interface no host has.
 - `stats.rs` tests `../stats.rs` as its `tests` module: kernel drop readings
   add up to a running total, and the total appears under `kernel_drops` in
   the stats JSON that `show_transports` serves and the chaos harness reads.

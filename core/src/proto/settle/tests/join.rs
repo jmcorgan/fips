@@ -338,6 +338,13 @@ fn every_bundle_output() -> Vec<(path::Output<()>, Option<In>)> {
         ),
         (path::Output::Orphaned, Some(In::Orphaned { peer: peer() })),
         (path::Output::Connect { to: path(1) }, None),
+        (
+            path::Output::Proven {
+                to: path(1),
+                mtu: 1280,
+            },
+            None,
+        ),
     ]
 }
 
@@ -603,8 +610,8 @@ impl path::Facts for Clear {
         1280
     }
 
-    fn medium(&self, _transport: TransportId) -> path::Medium {
-        path::Medium::Other
+    fn medium(&self, _transport: TransportId, _addr: &TransportAddr) -> path::Medium {
+        path::Medium::Unknown
     }
 
     fn oriented(&self, _transport: TransportId) -> bool {

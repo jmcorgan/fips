@@ -57,11 +57,10 @@ impl Facts for NodeFacts<'_> {
             .map_or(0, |h| usize::from(h.link_mtu(addr)))
     }
 
-    fn medium(&self, transport: TransportId) -> Medium {
-        match self.transports.get(&transport) {
-            Some(handle) if is_ble(handle) => Medium::Ble,
-            Some(_) | None => Medium::Other,
-        }
+    fn medium(&self, transport: TransportId, _addr: &TransportAddr) -> Medium {
+        self.transports
+            .get(&transport)
+            .map_or(Medium::Unknown, TransportHandle::medium)
     }
 
     fn oriented(&self, transport: TransportId) -> bool {
@@ -101,17 +100,6 @@ impl Facts for NodeFacts<'_> {
         // the ACL denies is dialled on no transport.
         !self.denied && self.transports.contains_key(&transport)
     }
-}
-
-/// Whether `handle` is a BLE transport, which holds one path per binding
-/// (draft Section 5.1).
-fn is_ble(handle: &TransportHandle) -> bool {
-    #[cfg(ble_available)]
-    if matches!(handle, TransportHandle::Ble(_)) {
-        return true;
-    }
-    let _ = handle;
-    false
 }
 
 /// The anonymity class of a transport of type `ty` (draft Section 3).
@@ -637,7 +625,7 @@ impl Node {
             };
             match output {
                 Output::Send { to, bytes } => {
-                    match self.send_via(node_addr, &bytes, false, Some(&to)).await {
+                    match self.send_path(node_addr, &bytes, &to).await {
                         // The first byte is the message type (0x52 probe,
                         // 0x53 ack, 0x54 close) and `len` the encoded
                         // message, before the padding added at send.
@@ -710,6 +698,16 @@ impl Node {
                     why = ?why,
                     "Path input refused"
                 ),
+                Output::Proven { to, mtu } => {
+                    debug!(
+                        peer = %self.peer_display_name(node_addr),
+                        transport_id = %to.transport,
+                        remote_addr = %to.addr,
+                        mtu,
+                        "Path proven size changed"
+                    );
+                    self.reseed(node_addr, &to);
+                }
                 Output::Orphaned => {
                     debug!(
                         peer = %self.peer_display_name(node_addr),
@@ -723,6 +721,36 @@ impl Node {
         }
         self.drain_closes().await;
         ran
+    }
+
+    /// Apply a change of the size `node_addr`'s path at `to` is proven to
+    /// carry, up or down, when it is the active path: the peer's path MTU
+    /// is seeded afresh from it, as at a switch, and every session whose
+    /// next hop is the peer is tightened to it if it fell (draft Section
+    /// 5.11). A path not active is read when a switch makes it active. On a
+    /// transport where the proven size does not bound the frames a path
+    /// carries (`path::heeded`), a connection-oriented one, nothing changes.
+    fn reseed(&mut self, node_addr: &NodeAddr, to: &PathRef) {
+        let heeded = self
+            .transports
+            .get(&to.transport)
+            .is_some_and(|t| crate::proto::path::heeded(t.transport_type().connection_oriented));
+        let Some(peer) = self.peers.get(node_addr).filter(|_| heeded) else {
+            return;
+        };
+        let active = peer
+            .active_path()
+            .is_some_and(|p| p.transport_id() == to.transport && *p.addr() == to.addr);
+        if !active {
+            return;
+        }
+        let key = crate::ipv6tun::link::PeerKey::from_xonly(&peer.identity().pubkey());
+        // The mutation lane's break: the seed keeps a tighter value.
+        let relink = !node_fault!(ProvenMtuOnlyLowers);
+        self.seed_mtu(node_addr, key, to.transport, &to.addr, relink);
+        if let Some(mtu) = self.effective_mtu(node_addr, to.transport, &to.addr) {
+            self.tighten_via(node_addr, mtu);
+        }
     }
 
     /// Log a change of state of `node_addr`'s path `path_id` at `to`.

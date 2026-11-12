@@ -99,6 +99,8 @@ BLE_ONLY=(
     "node::tests::ble::"
     "node::tests::ble_lifecycle::"
     "transport::ble::close_tests::"
+    "transport::ble::lane_tests::"
+    "node::tests::ble_queue::"
     "transport::conformance::ble::"
     "node::tests::settle::carry::the_ble_initiators_link_is_verified_before_any_responder_frame"
     "node::tests::settle::table::promote::a_promotion_on_a_ble_link_marks_it_at_the_initiator_and_at_the_responders_first_frame"

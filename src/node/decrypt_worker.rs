@@ -225,6 +225,15 @@ pub(crate) enum WorkerMsg {
     UnregisterSession {
         cache_key: u32,
     },
+    /// Answered on the channel it carries once the worker reaches it. A
+    /// worker's channel is FIFO and the worker handles one message at a
+    /// time, so by then it has handled every message sent before this one,
+    /// and sent each job's result. Test builds only
+    /// ([`DecryptWorkerPool::barrier`]).
+    // Built only with the real-node explorer, its one user, which next
+    // does not build (`src/node/tests/settle/mod.rs`).
+    #[cfg(any())]
+    Barrier(std::sync::mpsc::Sender<()>),
 }
 
 /// Handle to the decrypt worker pool. Shard-style: each worker is one
@@ -415,6 +424,10 @@ fn handle_msg(idx: usize, sessions: &mut HashMap<u32, OwnedSessionState>, msg: W
                 "DecryptWorker: unregister session"
             );
             sessions.remove(&cache_key);
+        }
+        #[cfg(any())]
+        WorkerMsg::Barrier(done) => {
+            let _ = done.send(());
         }
     }
 }
@@ -827,8 +840,42 @@ mod tests {
     }
 }
 
+/// The longest [`DecryptWorkerPool::barrier`] waits for one worker.
+// Built only with the real-node explorer, as `barrier` is.
+#[cfg(any())]
+const BARRIER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[cfg(test)]
 impl DecryptWorkerPool {
+    /// Wait until every worker has handled everything it was sent before
+    /// this call, so the result of every job dispatched before it is in its
+    /// fallback channel. A worker that has exited is passed over, as is one
+    /// that dies before it answers: nothing more will come from either. A
+    /// worker that does not answer within 60 s fails the test.
+    // Built only with the real-node explorer, its one caller, which next
+    // does not build (`src/node/tests/settle/mod.rs`).
+    #[cfg(any())]
+    pub(crate) fn barrier(&self) {
+        use std::sync::mpsc::{RecvTimeoutError, channel};
+        for idx in 0..self.workers.len() {
+            let (done, answer) = channel();
+            if self
+                .workers
+                .sender(idx)
+                .send(WorkerMsg::Barrier(done))
+                .is_err()
+            {
+                continue;
+            }
+            match answer.recv_timeout(BARRIER_WAIT) {
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => {}
+                Err(RecvTimeoutError::Timeout) => panic!(
+                    "precondition: decrypt worker {idx} handled what it was sent within 60 s"
+                ),
+            }
+        }
+    }
+
     /// A pool whose workers behave as `plan` says; `Run` workers are the
     /// production loop.
     pub(crate) fn for_test(plan: Vec<crate::node::worker_set::TestWorker>) -> Self {
@@ -853,6 +900,28 @@ impl DecryptWorkerPool {
                 .spawn(move || {
                     if start.recv().is_ok() {
                         run_worker(idx, rx);
+                    }
+                })
+        })
+    }
+
+    /// A pool of `n` workers that each sleep `lag` before they handle each
+    /// job, then handle it as the production loop does: the shape of a
+    /// worker thread descheduled before it decrypts, on a loaded host.
+    /// Unix only, as are the tests that hand sessions to the workers.
+    // Built only with the real-node explorer, as `barrier` is.
+    #[cfg(any())]
+    pub(crate) fn slowed(n: usize, lag: std::time::Duration) -> Self {
+        Self::start_with(n, move |idx, rx| {
+            std::thread::Builder::new()
+                .name(format!("fips-decrypt-{idx}"))
+                .spawn(move || {
+                    let mut sessions = HashMap::new();
+                    while let Ok(msg) = rx.recv() {
+                        if matches!(msg, WorkerMsg::Job(_)) {
+                            std::thread::sleep(lag);
+                        }
+                        handle_msg(idx, &mut sessions, msg);
                     }
                 })
         })

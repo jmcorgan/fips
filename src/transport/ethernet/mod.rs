@@ -29,6 +29,7 @@ use super::{
     TransportId, TransportPresence, TransportState, TransportType,
 };
 use crate::config::EthernetConfig;
+use crate::transport::medium;
 use crate::transport::presence::{ABSENCE_ERROR_AFTER, ChurnGuard, PresenceState, bind_backoff};
 use crate::transport::watcher::LinkWatcher;
 use io::{
@@ -37,6 +38,7 @@ use io::{
 use neighbor::{FRAME_TYPE_BEACON, FRAME_TYPE_DATA, NeighborBuffer, build_beacon, parse_beacon};
 use stats::EthernetStats;
 
+use fips_core::proto::path::Medium;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
@@ -89,6 +91,9 @@ struct Binding {
     mtu: AtomicU16,
     /// Local MAC of the current binding.
     local_mac: RwLock<Option<[u8; 6]>>,
+    /// The medium of the interface, read when the current binding was made;
+    /// unknown while unbound.
+    medium: RwLock<Medium>,
     /// Kernel index of the device the current binding is attached to. `0` when
     /// unbound. Both backends bind by device, not by name, so this is the
     /// identity that has to keep matching — see [`io::interface_index`].
@@ -103,6 +108,7 @@ impl Binding {
             socket: RwLock::new(None),
             mtu: AtomicU16::new(default_mtu),
             local_mac: RwLock::new(None),
+            medium: RwLock::new(Medium::Unknown),
             bound_index: AtomicU32::new(0),
             tasks: Mutex::new(Vec::new()),
         }
@@ -124,6 +130,11 @@ impl Binding {
             .local_mac
             .read()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The medium read when the current binding was made.
+    fn medium(&self) -> Medium {
+        *self.medium.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether `interface` still names the device this binding is attached to.
@@ -184,6 +195,7 @@ impl Binding {
             .local_mac
             .write()
             .unwrap_or_else(PoisonError::into_inner) = None;
+        *self.medium.write().unwrap_or_else(PoisonError::into_inner) = Medium::Unknown;
         // A stale index left here would make the next binding look replaced
         // the moment it came up.
         self.bound_index.store(0, Ordering::Relaxed);
@@ -309,6 +321,15 @@ impl EthernetTransport {
     /// Get the local MAC address (only valid while bound).
     pub fn local_mac(&self) -> Option<[u8; 6]> {
         self.binding.local_mac()
+    }
+
+    /// The medium of the interface, wired or wireless, as the operating
+    /// system reported it when the transport last bound the interface:
+    /// read at start and again at each rebind after the interface changes,
+    /// never on the send path. Unknown while unbound, or where the
+    /// operating system's facts do not settle it.
+    pub fn medium(&self) -> Medium {
+        self.binding.medium()
     }
 
     /// Current interface presence.
@@ -694,6 +715,10 @@ fn bind_now(ctx: &Arc<BinderContext>) -> Result<(), TransportError> {
     // binding is attached to, and the thing that has to keep matching.
     let bound_index = raw_socket.if_index() as u32;
 
+    // Read once per binding, so a device recreated under the same name, a
+    // USB adapter swapped for a radio say, is read afresh at its rebind.
+    let medium = medium::read(&ctx.interface);
+
     let socket = Arc::new(raw_socket.into_async()?);
 
     let mut tasks = Vec::new();
@@ -738,6 +763,10 @@ fn bind_now(ctx: &Arc<BinderContext>) -> Result<(), TransportError> {
         .local_mac
         .write()
         .unwrap_or_else(PoisonError::into_inner) = Some(local_mac);
+    *ctx.binding
+        .medium
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = medium;
     ctx.binding.mtu.store(effective_mtu, Ordering::Relaxed);
     ctx.binding
         .bound_index
@@ -775,6 +804,7 @@ fn bind_now(ctx: &Arc<BinderContext>) -> Result<(), TransportError> {
             mac = %format_mac(&local_mac),
             mtu = effective_mtu,
             if_mtu = if_mtu,
+            medium = ?medium,
             rebind,
             "Ethernet transport started"
         );
@@ -784,6 +814,7 @@ fn bind_now(ctx: &Arc<BinderContext>) -> Result<(), TransportError> {
             mac = %format_mac(&local_mac),
             mtu = effective_mtu,
             if_mtu = if_mtu,
+            medium = ?medium,
             rebind,
             "Ethernet transport started"
         );
@@ -1526,6 +1557,10 @@ mod detach_tests;
 #[cfg(test)]
 #[path = "tests/congestion.rs"]
 mod congestion_tests;
+
+#[cfg(test)]
+#[path = "tests/medium.rs"]
+mod medium_tests;
 
 #[cfg(test)]
 mod tests {

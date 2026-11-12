@@ -34,10 +34,11 @@ use crate::time::Duration;
 
 /// The path machine's settings a node derives at the default configuration
 /// with multipath `on`: the draft's values, enabled by the setting, with
-/// the 10 s heartbeat.
+/// kinds mixed, as `node.path.mix_kinds` defaults, and the 10 s heartbeat.
 pub fn path(on: bool) -> paths::Params {
     paths::Params::new(paths::Config {
         enabled: on,
+        mix_kinds: true,
         heartbeat: Duration::from_secs(10),
         ..paths::Config::draft()
     })

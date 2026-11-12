@@ -577,7 +577,8 @@ impl World {
                 | Output::Switched { .. }
                 | Output::Released { .. }
                 | Output::Moved { .. }
-                | Output::Orphaned => {
+                | Output::Orphaned
+                | Output::Proven { .. } => {
                     self.fail(format!("never: {o:?} on {input:?}"));
                 }
             }

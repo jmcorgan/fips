@@ -14,17 +14,21 @@ mod charge;
 mod choice;
 mod close;
 mod connect;
+mod damping;
 mod disabled;
 mod exchange;
 mod floor;
 mod hold;
 mod intake;
 mod liveness;
+mod mtu;
 mod pin;
 mod renew;
+mod returns;
 pub(crate) mod shell;
 mod sim;
 mod stub;
+mod verdict;
 mod view;
 
 #[test]
@@ -95,6 +99,7 @@ const TESTS: &[(&str, &str)] = &[
     ("choice.rs", include_str!("choice.rs")),
     ("close.rs", include_str!("close.rs")),
     ("connect.rs", include_str!("connect.rs")),
+    ("damping.rs", include_str!("damping.rs")),
     ("disabled.rs", include_str!("disabled.rs")),
     ("exchange.rs", include_str!("exchange.rs")),
     ("floor.rs", include_str!("floor.rs")),
@@ -103,15 +108,18 @@ const TESTS: &[(&str, &str)] = &[
     ("live.rs", include_str!("live.rs")),
     ("liveness.rs", include_str!("liveness.rs")),
     ("mod.rs", include_str!("mod.rs")),
+    ("mtu.rs", include_str!("mtu.rs")),
     ("params.rs", include_str!("params.rs")),
     ("pin.rs", include_str!("pin.rs")),
     ("renew.rs", include_str!("renew.rs")),
+    ("returns.rs", include_str!("returns.rs")),
     ("rules.rs", include_str!("rules.rs")),
     ("select.rs", include_str!("select.rs")),
     ("set.rs", include_str!("set.rs")),
     ("shell.rs", include_str!("shell.rs")),
     ("sim.rs", include_str!("sim.rs")),
     ("stub.rs", include_str!("stub.rs")),
+    ("verdict.rs", include_str!("verdict.rs")),
     ("view.rs", include_str!("view.rs")),
     ("wire.rs", include_str!("wire.rs")),
 ];

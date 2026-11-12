@@ -42,6 +42,12 @@ use super::addr::BleAddr;
 /// backlog rather than a burst.
 pub const SEND_QUEUE_DEPTH: usize = 16;
 
+/// How many path messages may be queued for one BLE connection, apart from
+/// its data, before sends of them fail: the number of probes a path keeps
+/// outstanding. Bounded, so a connection that has stopped draining still
+/// refuses its probes and the path still fails.
+pub const PATH_QUEUE_DEPTH: usize = 8;
+
 /// Most channels held at one address.
 ///
 /// One side has at most two concurrent dials to an address (the scan
@@ -59,6 +65,10 @@ pub struct BleConnection<S> {
     /// held by a peer that has stopped draining — and, on this transport in
     /// particular, no caller holds the pool lock while it happens.
     pub send_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    /// Path messages queued for the writer task, which sends them before
+    /// anything in [`Self::send_tx`], so a queue full of data neither
+    /// refuses nor holds them back.
+    pub path_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     /// Writer task for this connection.
     pub send_task: Option<JoinHandle<()>>,
     /// Background receive task handle.
@@ -87,12 +97,15 @@ impl<S> BleConnection<S> {
 
     /// Stop the channel taking new frames.
     ///
-    /// Swapping in a sender whose receiver is already gone drops the only
-    /// stored sender of the writer's queue, so the writer task writes every
-    /// frame already queued and then ends. The receive task is untouched.
+    /// Swapping in senders whose receivers are already gone drops the only
+    /// stored sender of each of the writer's queues, so the writer task
+    /// writes every frame already queued and then ends. The receive task is
+    /// untouched.
     fn retire(&mut self) {
         let (closed, _) = tokio::sync::mpsc::channel(1);
         self.send_tx = closed;
+        let (closed, _) = tokio::sync::mpsc::channel(1);
+        self.path_tx = closed;
     }
 }
 
@@ -645,6 +658,7 @@ mod tests {
         BleConnection {
             stream: (),
             send_tx: tokio::sync::mpsc::channel(1).0,
+            path_tx: tokio::sync::mpsc::channel(1).0,
             send_task: None,
             recv_task: None,
             send_mtu: 2048,

@@ -48,7 +48,7 @@ fn add(
     a: TransportAddr,
     ids: &mut impl FnMut() -> u32,
 ) -> usize {
-    match set.admit(transport, a, Medium::Other, &mut *ids) {
+    match set.admit(transport, a, Medium::Unknown, &mut *ids) {
         Ok(Admission::Added {
             index,
             evicted: None,
@@ -64,7 +64,7 @@ fn add_evicting(
     a: TransportAddr,
     ids: &mut impl FnMut() -> u32,
 ) -> PeerPath {
-    match set.admit(transport, a, Medium::Other, &mut *ids) {
+    match set.admit(transport, a, Medium::Unknown, &mut *ids) {
         Ok(Admission::Added {
             evicted: Some(p), ..
         }) => p,
@@ -85,7 +85,7 @@ fn a_known_pair_returns_the_existing_path() {
     let mut set = PathSet::new();
     let i = add(&mut set, ta(), addr(1), &mut ids);
     let id = set.get(i).unwrap().path_id();
-    match set.admit(ta(), addr(1), Medium::Other, &mut ids) {
+    match set.admit(ta(), addr(1), Medium::Unknown, &mut ids) {
         Ok(Admission::Known(j)) => assert_eq!(j, i),
         other => panic!("expected the known path, got {other:?}"),
     }
@@ -129,7 +129,7 @@ fn a_fifth_path_on_one_transport_is_refused_when_nothing_is_evictable() {
         add(&mut set, ta(), addr(n), &mut ids);
     }
     assert_eq!(
-        set.admit(ta(), addr(99), Medium::Other, &mut ids)
+        set.admit(ta(), addr(99), Medium::Unknown, &mut ids)
             .unwrap_err(),
         PathRefused::TransportFull
     );
@@ -149,7 +149,8 @@ fn a_ninth_path_to_the_peer_is_refused_when_nothing_is_evictable() {
     assert_eq!(set.len(), PATH_MAX_PER_PEER);
     let c = TransportId::new(3);
     assert_eq!(
-        set.admit(c, addr(99), Medium::Other, &mut ids).unwrap_err(),
+        set.admit(c, addr(99), Medium::Unknown, &mut ids)
+            .unwrap_err(),
         PathRefused::PeerFull
     );
     assert_eq!(set.len(), PATH_MAX_PER_PEER);
@@ -320,7 +321,7 @@ fn a_per_transport_overflow_is_refused_when_the_only_dead_path_is_on_another_tra
     set.transition(other, PathState::Dead, now);
 
     assert_eq!(
-        set.admit(ta(), addr(99), Medium::Other, &mut ids)
+        set.admit(ta(), addr(99), Medium::Unknown, &mut ids)
             .unwrap_err(),
         PathRefused::TransportFull
     );
@@ -374,7 +375,7 @@ fn the_last_acked_dead_path_is_kept_while_no_path_is_live_and_evictable_once_one
         add(&mut set, ta(), addr(n), &mut ids);
     }
     assert_eq!(
-        set.admit(ta(), addr(99), Medium::Other, &mut ids)
+        set.admit(ta(), addr(99), Medium::Unknown, &mut ids)
             .unwrap_err(),
         PathRefused::TransportFull,
         "the link's last acked Dead path is not discarded while nothing is Live"
@@ -402,7 +403,7 @@ fn with_two_acked_dead_paths_and_none_live_the_longer_dead_one_may_go() {
     assert_eq!(evicted.addr(), &addr(1));
     // Now addr(0) is the last acked Dead path, and nothing is Live.
     assert_eq!(
-        set.admit(ta(), addr(99), Medium::Other, &mut ids)
+        set.admit(ta(), addr(99), Medium::Unknown, &mut ids)
             .unwrap_err(),
         PathRefused::TransportFull
     );
@@ -582,7 +583,7 @@ fn rebind_with_no_path_binds_the_original_and_onto_the_active_pair_is_unchanged(
     let mut ids = counter();
     let mut set = PathSet::new();
     assert_eq!(
-        set.rebind(ta(), addr(1), Medium::Other, &mut ids).0,
+        set.rebind(ta(), addr(1), Medium::Unknown, &mut ids).0,
         Rebind::Switched
     );
     let p = set.active().unwrap();
@@ -590,7 +591,7 @@ fn rebind_with_no_path_binds_the_original_and_onto_the_active_pair_is_unchanged(
     assert_eq!(p.state(), PathState::Live);
     assert!(p.acked());
     assert_eq!(
-        set.rebind(ta(), addr(1), Medium::Other, &mut ids).0,
+        set.rebind(ta(), addr(1), Medium::Unknown, &mut ids).0,
         Rebind::Unchanged,
         "already there"
     );
@@ -605,7 +606,7 @@ fn rebind_onto_a_pair_not_held_admits_it_probing_and_is_refused() {
     let active_id = set.active().unwrap().path_id();
 
     assert_eq!(
-        set.rebind(tb(), addr(2), Medium::Other, &mut ids).0,
+        set.rebind(tb(), addr(2), Medium::Unknown, &mut ids).0,
         Rebind::Refused
     );
     assert_eq!(set.len(), 2, "the new pair is a path of its own");
@@ -626,7 +627,7 @@ fn rebind_to_a_held_pair_makes_that_path_active() {
     let other = add(&mut set, tb(), addr(2), &mut ids);
     set.mark_acked(other);
     assert_eq!(
-        set.rebind(tb(), addr(2), Medium::Other, &mut ids).0,
+        set.rebind(tb(), addr(2), Medium::Unknown, &mut ids).0,
         Rebind::Switched
     );
     assert_eq!(set.active_index(), Some(other));
@@ -644,7 +645,7 @@ fn rebind_to_a_held_unacked_pair_is_refused_until_it_is_acked() {
     let original = set.active_index();
     let other = add(&mut set, tb(), addr(2), &mut ids);
     assert_eq!(
-        set.rebind(tb(), addr(2), Medium::Other, &mut ids).0,
+        set.rebind(tb(), addr(2), Medium::Unknown, &mut ids).0,
         Rebind::Refused
     );
     assert_eq!(set.active_index(), original);
@@ -655,7 +656,7 @@ fn rebind_to_a_held_unacked_pair_is_refused_until_it_is_acked() {
     );
     set.mark_acked(other);
     assert_eq!(
-        set.rebind(tb(), addr(2), Medium::Other, &mut ids).0,
+        set.rebind(tb(), addr(2), Medium::Unknown, &mut ids).0,
         Rebind::Switched
     );
     assert_eq!(set.active_index(), Some(other));
@@ -670,7 +671,7 @@ fn rebind_onto_a_full_transport_is_refused() {
         add(&mut set, tb(), addr(10 + n), &mut ids);
     }
     assert_eq!(
-        set.rebind(tb(), addr(99), Medium::Other, &mut ids).0,
+        set.rebind(tb(), addr(99), Medium::Unknown, &mut ids).0,
         Rebind::Refused
     );
     assert_eq!(set.active().unwrap().transport_id(), ta());
@@ -722,7 +723,7 @@ fn a_rebind_hands_back_the_dead_path_it_evicted_to_admit_a_pair() {
         let i = add(&mut set, tb(), addr(10 + n), &mut ids);
         set.transition(i, PathState::Dead, at(u64::from(n)));
     }
-    let (result, evicted) = set.rebind(tb(), addr(99), Medium::Other, &mut ids);
+    let (result, evicted) = set.rebind(tb(), addr(99), Medium::Unknown, &mut ids);
     assert_eq!(result, Rebind::Refused);
     let evicted = evicted.expect("the Dead path discarded for the pair");
     assert_eq!(evicted.transport_id(), tb());
@@ -740,7 +741,7 @@ fn a_rebind_with_no_active_path_hands_back_the_dead_path_it_evicted_to_bind() {
         let i = add(&mut set, ta(), addr(n), &mut ids);
         set.transition(i, PathState::Dead, at(u64::from(n)));
     }
-    let (result, evicted) = set.rebind(ta(), addr(99), Medium::Other, &mut ids);
+    let (result, evicted) = set.rebind(ta(), addr(99), Medium::Unknown, &mut ids);
     assert_eq!(result, Rebind::Switched);
     assert_eq!(
         evicted
@@ -786,27 +787,30 @@ fn no_rule_drops_a_driver_slot_it_does_not_hand_back() {
     // A rebind with no active path binds the original, evicting a Dead path.
     for n in 0..PATH_MAX_PER_TRANSPORT as u32 {
         let i = set
-            .admit(ta(), addr(n), Medium::Other, &mut ids)
+            .admit(ta(), addr(n), Medium::Unknown, &mut ids)
             .unwrap()
             .index();
         set.transition(i, PathState::Dead, at(u64::from(n)));
     }
-    let (result, evicted) = set.rebind(ta(), addr(90), Medium::Other, &mut ids);
+    let (result, evicted) = set.rebind(ta(), addr(90), Medium::Unknown, &mut ids);
     assert_eq!(result, Rebind::Switched);
     handed.extend(evicted);
     // A rebind's admission onto a full transport evicts another.
-    let (result, evicted) = set.rebind(ta(), addr(91), Medium::Other, &mut ids);
+    let (result, evicted) = set.rebind(ta(), addr(91), Medium::Unknown, &mut ids);
     assert_eq!(result, Rebind::Refused);
     handed.extend(evicted);
     // A plain admission evicts the third and the fourth.
     for n in [92, 93] {
-        match set.admit(ta(), addr(n), Medium::Other, &mut ids) {
+        match set.admit(ta(), addr(n), Medium::Unknown, &mut ids) {
             Ok(Admission::Added { evicted, .. }) => handed.extend(evicted),
             other => panic!("expected an admission, got {other:?}"),
         }
     }
     // A refusal and a roam that moves nothing keep every path.
-    assert!(set.admit(ta(), addr(94), Medium::Other, &mut ids).is_err());
+    assert!(
+        set.admit(ta(), addr(94), Medium::Unknown, &mut ids)
+            .is_err()
+    );
     assert_eq!(set.roam(ta(), addr(95), &mut ids), Roam::Unmoved);
     assert_eq!(slot_drops(), 0, "the set dropped no slot itself");
     assert_eq!(handed.len(), 4, "the four Dead paths came back");
@@ -814,7 +818,7 @@ fn no_rule_drops_a_driver_slot_it_does_not_hand_back() {
     // A single path that is not active roams: its slot stays on the path.
     let mut single = super::PathSet::<TestInstant, CountedSlot>::new();
     single
-        .admit(tb(), addr(1), Medium::Other, &mut ids)
+        .admit(tb(), addr(1), Medium::Unknown, &mut ids)
         .unwrap();
     assert_eq!(
         single.roam(tb(), addr(2), &mut ids),
@@ -904,7 +908,7 @@ fn classify_keeps_an_acked_path_proven_when_dead_and_a_never_acked_one_unproven(
     );
 
     assert_eq!(
-        set.rebind(tb(), addr(2), Medium::Other, &mut ids).0,
+        set.rebind(tb(), addr(2), Medium::Unknown, &mut ids).0,
         Rebind::Switched
     );
     assert_eq!(

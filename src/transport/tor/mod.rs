@@ -25,14 +25,14 @@ pub mod stats;
 mod mock_control;
 
 use super::{
-    ConnectionState, DiscoveredPeer, PacketTx, Transport, TransportAddr, TransportError,
+    ConnectionState, DiscoveredPeer, Lane, PacketTx, Transport, TransportAddr, TransportError,
     TransportId, TransportState, TransportType,
 };
 use crate::config::TorConfig;
 use crate::transport::socks5::{
-    ConnectingEntry, ConnectingPool, DialError, ProxiedConnection, ProxiedPool, SEND_QUEUE_DEPTH,
-    Socks5Auth, Socks5Dialer, SocksTarget, existing_sender, poll_connecting, proxied_receive_loop,
-    proxied_send_loop,
+    ConnectingEntry, ConnectingPool, DialError, PATH_QUEUE_DEPTH, ProxiedConnection, ProxiedPool,
+    SEND_QUEUE_DEPTH, Socks5Auth, Socks5Dialer, SocksTarget, existing_sender, poll_connecting,
+    proxied_receive_loop, proxied_send_loop,
 };
 use crate::transport::stream::{ConnId, DrainingWriters, WRITER_DRAIN_TIMEOUT, next_conn_id};
 use crate::transport::tcp::{INBOUND_FIRST_FRAME_TIMEOUT, INBOUND_IDLE_TIMEOUT, InboundDeadline};
@@ -707,7 +707,7 @@ impl TorTransport {
             }
         };
 
-        self.enqueue(addr, &send_tx, data)
+        self.enqueue(addr, Lane::Data, &send_tx, data)
     }
 
     /// Send a packet only over a connection that already exists.
@@ -722,18 +722,35 @@ impl TorTransport {
         addr: &TransportAddr,
         data: &[u8],
     ) -> Result<usize, TransportError> {
+        self.send_lane(Lane::Data, addr, data).await
+    }
+
+    /// [`send_existing`](Self::send_existing) in the connection's queue for
+    /// `lane`: path messages go in their own queue, which the writer drains
+    /// first, so a queue full of data does not refuse them.
+    pub async fn send_lane(
+        &self,
+        lane: Lane,
+        addr: &TransportAddr,
+        data: &[u8],
+    ) -> Result<usize, TransportError> {
         if !self.state.is_operational() {
             return Err(TransportError::NotStarted);
         }
         self.check_mtu(data)?;
-        let send_tx = existing_sender(&self.pool, &self.connecting, addr, |stream, mtu| {
+        let lane = if node_fault!(PathLaneShared) {
+            Lane::Data
+        } else {
+            lane
+        };
+        let send_tx = existing_sender(&self.pool, &self.connecting, addr, lane, |stream, mtu| {
             let conn = self.outbound_connection(addr, stream, mtu);
             self.record_promoted(addr);
             conn
         })
         .await
         .ok_or(TransportError::NotConnected)?;
-        self.enqueue(addr, &send_tx, data)
+        self.enqueue(addr, lane, &send_tx, data)
     }
 
     /// Reject a packet larger than the transport MTU before queueing it.
@@ -748,10 +765,12 @@ impl TorTransport {
         Ok(())
     }
 
-    /// Queue one packet for the writer task of the connection to `addr`.
+    /// Queue one packet for the writer task of the connection to `addr`, in
+    /// `send_tx`, its queue for `lane`.
     fn enqueue(
         &self,
         addr: &TransportAddr,
+        lane: Lane,
         send_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
         data: &[u8],
     ) -> Result<usize, TransportError> {
@@ -766,7 +785,8 @@ impl TorTransport {
                 debug!(
                     transport_id = %self.transport_id,
                     remote_addr = %addr,
-                    depth = SEND_QUEUE_DEPTH,
+                    lane = ?lane,
+                    depth = send_tx.max_capacity(),
                     "Tor outbound queue full; peer is not draining"
                 );
                 Err(TransportError::SendFailed(
@@ -880,8 +900,10 @@ impl TorTransport {
         });
 
         let (send_tx, send_rx) = tokio::sync::mpsc::channel(SEND_QUEUE_DEPTH);
+        let (path_tx, path_rx) = tokio::sync::mpsc::channel(PATH_QUEUE_DEPTH);
         let send_task = tokio::spawn(proxied_send_loop(
             write_half,
+            path_rx,
             send_rx,
             transport_id,
             addr.clone(),
@@ -897,6 +919,7 @@ impl TorTransport {
 
         let conn = ProxiedConnection {
             send_tx: send_tx.clone(),
+            path_tx,
             send_task,
             recv_task,
             mtu,
@@ -1095,8 +1118,10 @@ impl TorTransport {
         });
 
         let (send_tx, send_rx) = tokio::sync::mpsc::channel(SEND_QUEUE_DEPTH);
+        let (path_tx, path_rx) = tokio::sync::mpsc::channel(PATH_QUEUE_DEPTH);
         let send_task = tokio::spawn(proxied_send_loop(
             write_half,
+            path_rx,
             send_rx,
             transport_id,
             addr.clone(),
@@ -1112,6 +1137,7 @@ impl TorTransport {
 
         ProxiedConnection {
             send_tx,
+            path_tx,
             send_task,
             recv_task,
             mtu,
@@ -1143,12 +1169,14 @@ impl TorTransport {
         if let Some(conn) = pool.remove(addr) {
             let ProxiedConnection {
                 send_tx,
+                path_tx,
                 send_task,
                 recv_task,
                 meta,
                 ..
             } = conn;
             drop(send_tx);
+            drop(path_tx);
             recv_task.abort();
             self.draining.drain(send_task, WRITER_DRAIN_TIMEOUT);
             match meta {
@@ -1179,6 +1207,7 @@ impl TorTransport {
             remote.clone(),
             ProxiedConnection {
                 send_tx: tokio::sync::mpsc::channel(1).0,
+                path_tx: tokio::sync::mpsc::channel(1).0,
                 send_task: tokio::spawn(async move {
                     let _guard = guard_tx;
                     std::future::pending::<()>().await
@@ -1425,8 +1454,10 @@ async fn tor_accept_loop(
         });
 
         let (send_tx, send_rx) = tokio::sync::mpsc::channel(SEND_QUEUE_DEPTH);
+        let (path_tx, path_rx) = tokio::sync::mpsc::channel(PATH_QUEUE_DEPTH);
         let send_task = tokio::spawn(proxied_send_loop(
             write_half,
+            path_rx,
             send_rx,
             transport_id,
             remote_addr.clone(),
@@ -1442,6 +1473,7 @@ async fn tor_accept_loop(
 
         let conn = ProxiedConnection {
             send_tx,
+            path_tx,
             send_task,
             recv_task,
             mtu,
@@ -2340,6 +2372,7 @@ mod tests {
             remote.clone(),
             ProxiedConnection {
                 send_tx: tokio::sync::mpsc::channel(1).0,
+                path_tx: tokio::sync::mpsc::channel(1).0,
                 send_task: tokio::spawn(async {}),
                 recv_task: tokio::spawn(async {}),
                 mtu: 1400,
@@ -2442,6 +2475,7 @@ mod tests {
             remote.clone(),
             ProxiedConnection {
                 send_tx: tokio::sync::mpsc::channel(1).0,
+                path_tx: tokio::sync::mpsc::channel(1).0,
                 send_task: tokio::spawn(async {}),
                 recv_task: tokio::spawn(async {}),
                 mtu: 1400,
@@ -2500,6 +2534,7 @@ mod tests {
             remote.clone(),
             ProxiedConnection {
                 send_tx: tokio::sync::mpsc::channel(1).0,
+                path_tx: tokio::sync::mpsc::channel(1).0,
                 send_task: tokio::spawn(async {}),
                 recv_task: tokio::spawn(std::future::pending::<()>()),
                 mtu: 1400,
@@ -2685,6 +2720,7 @@ mod tests {
             remote.clone(),
             ProxiedConnection {
                 send_tx: tokio::sync::mpsc::channel(1).0,
+                path_tx: tokio::sync::mpsc::channel(1).0,
                 send_task: tokio::spawn(async move {
                     let _guard = guard_tx;
                     std::future::pending::<()>().await

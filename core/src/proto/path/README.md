@@ -58,48 +58,61 @@ its node code steps it and acts on what it decides.
   times out. The count never starts again on a link. Its accessors are
   public and read-only; what changes it is visible only inside this
   module.
-- `live.rs`: `Liveness`, one path's outstanding probes, what their
-  answers measured and the frames received on it: the ring of up to
-  `RING` (8) probes in send order, each with the instant it goes
-  unanswered; the last four probes that timed out, so a late answer still
-  gives a round trip; the path's `probe_id` sequence, from which a
-  capability probe held outside the ring also takes its identifier
-  (`take_id`), to be kept with the timed-out probes once it times out or
-  the peer turns capable (`lapse`); the count of
-  unanswered probes in a row, where a timeout counts only if no later
-  probe was answered in time; when the next probe is due and whether one
-  is asked for at once; whether the peer marks the path `ACTIVE`; the
-  latest round trip and the window of samples its minimum is taken over,
-  the smoothed ETX, the proven MTU, and the frames and bytes received on
-  the path (modulo 2^32, the `rx_frames` and `rx_bytes` its acks report)
-  with when the latest arrived, when the path last left Live, and the
-  count of frames that failed to authenticate on it since the latest
-  authentic one, with the instant of a trip not yet applied, and whether
-  the path has the connection its probes need, needs one, or has one
-  being opened. It also holds the path's silence clock, the send instant
-  of the earliest probe since the latest matching answer (`quiet`), and,
-  once the path has stopped answering, its stop: the instant from which
-  its next probe on its own cadence may go, the least gap after that
-  one, doubling from `PATH_DEAD_PROBE_INTERVAL_MIN` to
-  `PATH_DEAD_PROBE_INTERVAL_MAX` with each probe counted (`halt`,
-  `held`, `spend`), and whether the latest slot counted went to a
-  connection, which its opening settles (`owe`, `rebase`); `resume`
-  ends the stop. `Answer::matching` says whether an answer is a
-  matching one: one in time is; a late one is not, anywhere (draft
-  Section 5.6), so it gives a round trip and does not end a stop. For
-  the size of a Probing or Dead path's probes it keeps the first
-  `probe_id` of the path's current state, whether a padded probe sent in
-  that state has timed out, and the length of the latest probe sent in
-  it, all started again by `fresh` at each change of state; `small`
-  says the next probe goes at the smallest size, which it does once a
-  padded probe of the state has timed out and the probe before was
-  padded. A probe still outstanding from the state before does not
-  count toward that. It also keeps the first `probe_id` sent since the
-  path last left Dead (`thaw`): an earlier probe still outstanding then
-  times out counting toward no unanswered count, and the mark is
-  dropped once no such probe is outstanding. It records whether a
-  beacon has brought a probe forward in the current state (`beaconed`),
-  which `fresh` clears at every change of state. Fixed arrays only, so
+- `live.rs`: `Liveness`, one path's outstanding probes, what their answers
+  measured and the frames received on it: the ring of up to `RING` (8) probes
+  in send order, each with the instant it goes unanswered; the last four
+  probes that timed out, so a late answer still gives a round trip; the path's
+  `probe_id` sequence, from which a capability probe held outside the ring
+  also takes its identifier (`take_id`), to be kept with the timed-out probes
+  once it times out or the peer turns capable (`lapse`); the count of
+  unanswered probes in a row, where a timeout counts only if no later probe
+  was answered in time; when the next probe is due and whether one is asked
+  for at once; whether the peer marks the path `ACTIVE`; the latest round trip
+  and the window of samples its minimum and maximum are taken over, its least
+  round trip over the horizon (`base_rtt`, kept in eight spans, each the
+  horizon over six wide, a span dropped once its latest sample is older than
+  the horizon), the smoothed ETX, the proven MTU, and the frames and bytes
+  received on the path (modulo 2^32, the `rx_frames` and `rx_bytes` its acks
+  report) with when the latest arrived and when the latest session datagram
+  arrived, when the path last left Live, and the count of frames that failed
+  to authenticate on it since the latest authentic one, with the instant of a
+  trip not yet applied, and whether the path has the connection its probes
+  need, needs one, or has one being opened. It also holds the path's silence
+  clock, the send instant of the earliest probe since the latest matching
+  answer (`quiet`), and, once the path has stopped answering, its stop: the
+  instant from which its next probe on its own cadence may go, the least gap
+  after that one, doubling from `PATH_DEAD_PROBE_INTERVAL_MIN` to
+  `PATH_DEAD_PROBE_INTERVAL_MAX` with each probe counted (`halt`, `held`,
+  `spend`), or, for a path that was our active path when it last left Live
+  (`left`) or is at the stop, held at `PATH_DEAD_PROBE_INTERVAL_MIN` until
+  `PATH_DEAD_RECHECK_SPAN` after its silence clock started (`recheck`), and
+  whether the latest slot counted went to a connection, which its opening
+  settles (`owe`, `rebase`); `resume` ends the stop. `Answer::matching` says
+  whether an answer is a matching one: one in time is; a late one is not,
+  anywhere (draft Section 5.6), so it gives a round trip and does not end a
+  stop. For the size of a Probing or Dead path's probes it keeps the first
+  `probe_id` of the path's current state, whether a padded probe sent in that
+  state has timed out, and the length of the latest probe sent in it, all
+  started again by `fresh` at each change of state; `size` gives the next
+  probe's length: padded to the link MTU until a padded probe of the state has
+  timed out, and from then on the next step of a ladder after the probe before
+  (the link MTU, three quarters of it, half of it, the smallest size, and the
+  link MTU again). A probe still outstanding from the state before does not
+  count toward that. It keeps the upward search for the size a Live path
+  carries, in a small record of `u16` sizes: the outstanding search probe,
+  held outside the ring, the smallest size lost and the instant the next may
+  go (`seek_size`, `seek_send`, `seek_answer`, `seek_proved`, `seek_judge`).
+  The search tries the link MTU first, then halfway between the size proven
+  and the smallest lost, ends within `SEEK_STEP` (32 bytes) and starts again
+  `SEEK_RAISE` (ten minutes) later; a search probe is lost only once its
+  timeout has passed and a probe sent after it has been answered in time, and
+  it is no miss and no ETX sample. `fresh` starts the search afresh. `prove`
+  says whether the proven MTU changed. It also keeps the first `probe_id` sent
+  since the path last left Dead (`thaw`): an earlier probe still outstanding
+  then times out counting toward no unanswered count, and the mark is dropped
+  once no such probe is outstanding. It records whether a beacon has brought a
+  probe forward in the current state (`beaconed`), which `fresh` clears at
+  every change of state. Fixed arrays only, so
   nothing in it allocates. Its accessors are public and read-only; what
   changes it is visible only inside this module.
 - `machine.rs`: `Bundle<C, E, D>`, the machine of one link's paths, over
@@ -129,12 +142,20 @@ its node code steps it and acts on what it decides.
   exchange: a candidate admitted becomes a Probing path, probed at once
   and padded to the link MTU. A Probing or Dead path's probes are padded
   until a padded one of its current state goes unanswered, and from then
-  on alternate, the smallest after a padded one, until its state changes
-  (padding is local, draft Section 5.1): a receiver whose buffer is
-  smaller than our link MTU drops every padded probe, and a smallest one
-  answered proves the path though no MTU, which nothing in the node
-  reads, so such a path is no worse off than a link of one path between
-  two nodes of different MTUs. A received probe of at least 27 bytes
+  on step down the ladder, until its state changes (padding is local,
+  draft Section 5.1): a hop narrower than our link MTU, or a receiver
+  whose buffer is smaller, drops every probe over its size, and the
+  first rung answered proves that size; a smallest one answered proves
+  the path though no MTU, so such a path is no worse off than a link of
+  one path between two nodes of different MTUs. On a Live path on a
+  connectionless transport whose proven size lies above the smallest and
+  below the link MTU, a padded search probe goes just ahead of a probe
+  at its cadence, at most once per standby interval and only while no
+  probe of the path is unanswered, and an answer to it raises the size
+  proven; no search runs on a connection-oriented transport, where an
+  oversized probe closes the connection. Each change of the size
+  proven, up or down, is reported in an `Output::Proven`, as the largest
+  frame in bytes, for the shell to apply. A received probe of at least 27 bytes
   finds its path by the peer's `path_id` on its transport, then by its
   pair, and otherwise creates a Probing path within the limits, and is
   answered on its pair with an ack padded to the smaller of the probe and
@@ -172,19 +193,34 @@ its node code steps it and acts on what it decides.
   every path of a link whose peer is not known to be capable: such a
   link keeps every connection, as FMP v1 does (Section 9.2).
   Liveness (Section 5.6): a step runs the expiry of every probe whose
-  timeout passed before the step's instant (the larger of 400 ms and
-  three round trips), the capability probe's among them, then the peer
+  timeout passed before the step's instant, the capability probe's among
+  them, then the peer
   turning capable on a path message, then the input, then the expiry of
   every probe due by the instant, then the choice of the active path,
   then the grace of Dead paths, then the capability probe and the probes
   due, so an answer after its
-  probe's timeout is late whether or not the host polled between. A Live
+  probe's timeout is late whether or not the host polled between. The
+  timeout, a local choice, is the largest of 400 ms, three times the
+  latest round trip, and three times the largest round trip in the window
+  capped at the verdict cap (`verdict_cap`, 3 s). A probe whose timeout
+  passes after a session datagram has arrived on its path since it was
+  sent is not judged yet: it becomes due at the cap from its sending, and
+  is judged then as any other. The peer's traffic arriving shows the path
+  still carries data and the probe may be queued behind it; heartbeats,
+  reports and path messages hold no verdict, so on an idle link a failure
+  of this node's own direction is found as fast as before, and under
+  load at most the cap after the probe went. A Live
   or Suspect path keeps up to eight probes outstanding, a Probing or Dead
   path one. Our active path and a path the peer marks `ACTIVE` are probed
   every 200 ms, a standby every second, a Probing path from 200 ms
   doubling to the heartbeat interval, and an acked Dead path from one
   second doubling to 30 seconds, which at the defaults meets the floor
-  below exactly. Each probe schedules the next at the
+  below exactly, except that a Dead path re-checked after it carried the
+  link is probed at the floor's gap, every second through the span and
+  doubling after it; on a connection-oriented transport it goes at the
+  size it has proven where it has proven one, not on the ladder, and on a
+  connectionless one it keeps the ladder, so a path narrower after its
+  outage is still found. Each probe schedules the next at the
   interval of the moment it went, and the send phase brings a path's next
   probe to no later than one interval of its cadence, so a path answered
   back to Live, made our active path or marked `ACTIVE` by the peer is
@@ -216,7 +252,14 @@ its node code steps it and acts on what it decides.
   probes on its own cadence, in whatever state, wait at least 1 s after
   the stop and after the first, and each later gap at least doubles, up
   to 30 s (`PATH_DEAD_PROBE_INTERVAL_MIN` and `_MAX`, constants, not
-  `Config::dead_interval`). A connection asked for in place of such a
+  `Config::dead_interval`). A path that was our active path when it left
+  Live, or is at the stop, is re-checked first: its gaps stay 1 s until
+  30 s after it went silent (`PATH_DEAD_RECHECK_SPAN`, a constant), and
+  double from there, so a silent outage of the path that carried the
+  link is found within about a second of its end. The draft's floor
+  doubles on every path; this span is a bound of an amendment to Section
+  5.6 not yet in the draft. A stop takes the re-check once each time the
+  path leaves Live. A connection asked for in place of such a
   probe counts as one, and when it opens the next probe waits that
   slot's gap from the opening. The probe at once when the peer's probe
   brings a Dead path back, those Section 5.7 requires at once, the early
@@ -271,11 +314,19 @@ its node code steps it and acts on what it decides.
   names, while it names any, and then those on transports of the
   highest tier present, by the role the facts give each (`Normal` and
   `Preferred` above `Backup`, `Backup` above `Never`), and then those
-  whose link MTU, as the facts give it, carries the 1,071-byte frame of
-  a `FilterAnnounce` (Section 5.11), while any does, the least score
+  whose link MTU, as the facts give it, or on a connectionless
+  transport the smaller size the path is proven to carry, takes the
+  1,071-byte frame of a `FilterAnnounce` (Section 5.11), while any
+  does, the least score
   among those with `min_samples` round-trip samples, unless a `Preferred`
   one scores within `switch_margin` times that least, when the least
-  scoring such path; else, when none has that many samples, the least
+  scoring such path; and then, among the scored paths within
+  `switch_margin` times the least (only the `Preferred` ones when a
+  `Preferred` one was taken), the one on the fastest known medium, a
+  cable before a wireless network before BLE, when its medium is faster
+  than that of the path taken so far and both are known (the facts give
+  each path's medium; an unknown one leaves the choice to the score);
+  else, when none has that many samples, the least
   latest round trip, one with none measured last. The best
   acked Suspect path has the least latest round trip, one with none
   measured last. Every tie goes to the lower index. Each change is an
@@ -296,20 +347,49 @@ its node code steps it and acts on what it decides.
   tier is higher than the active path's, the link moves to it at once,
   whatever its samples. Otherwise, when it has `min_samples` samples and
   either it carries a `FilterAnnounce` and the active path cannot, or it
-  is `Preferred` and the active path is not, or the active path also has
-  them and scores more than `switch_margin` times it, or the active path
-  is `Preferred`, has them, and scores more than `switch_margin` times
-  the best score among the paths `select.rs` ranks, so it has lost its
-  precedence, a switch dwell starts, keyed by the path's identifier, and
+  is `Preferred` and the active path is not, or it runs over a known
+  medium faster than the active path's, also known, or the active path
+  also has them and scores more than `switch_margin` times it, or more
+  than it at all when it is the path the latest change of active path
+  left and that change was mandatory, or the active path has them and
+  scores more than `switch_margin` times the best score among the paths
+  `select.rs` ranks, so it holds the link by no precedence (the path
+  ranked first may hold its place by the preferred precedence or by its
+  medium), a switch dwell starts, keyed by the path's identifier, and
   the link moves to it at the first step at or after `switch_dwell` from
-  then at which all of that still holds.
+  then at which all of that still holds. The return needs no margin
+  because the path the link fled to may score within it of the path left
+  only for a while: under load its window still holds the round trips it
+  measured idle, until its own loaded ones fill it, about 6.4 s at the
+  active cadence. Any of those last three, a
+  change on score, is held (`select::held`) while the active path is the
+  faster of the two at its least round trip over the horizon (`horizon`,
+  60 s), unless the path ranked first also beats the active path's score
+  from that least round trip by the margin: load on the active path
+  raises its least round trip over the window within seconds, but over
+  the horizon only once the load has lasted it, so the load alone does
+  not hand the link to a path slower at its best for a horizon. A change
+  to a path faster at its best is not held, so a return to a path left
+  by a mandatory change keeps its timing, unless the active path runs
+  over a known medium faster than the other's and its score over the
+  horizon is within `switch_margin` times the other's: idle, the active
+  path would take the link back on its medium one dwell later, so load
+  that followed the link would move it back and forth each dwell. A
+  change for a faster medium is held the same way (`select::waits`)
+  while the path ranked first scores more than `switch_margin` times
+  the active path's score over the horizon: idle, the two scores of the
+  active path agree and only the margin of the best decides, but load
+  on a wireless network faster at its best than a cable outside the
+  margin of it ranks the cable first within seconds, and the cable does
+  not take the link until the load has lasted the horizon, since the
+  wireless network would take it back once the load followed.
   The dwell starts again when the path ranked first changes, and ends at
   any step at which that does not hold, at any step at which the
   active path is not Live, and at every change of active path. Its end
   is a wake. A path of the active path's role, which carries a
   `FilterAnnounce` exactly when the active path does, never takes its
-  place by scoring the same as it. While the active path's link MTU is
-  too small for the filter, the node cannot send its filter to the peer
+  place by scoring the same as it. While the active path is too small
+  for the filter, the node cannot send its filter to the peer
   at all, so within a tier carrying it outranks both the preferred
   precedence and the score; a backup path that carries it still waits
   behind a normal one that does not.
@@ -502,11 +582,14 @@ its node code steps it and acts on what it decides.
   carrier, an unreachable send, an interface leaving or returning, a
   removed transport, a connection settling, an operator's pin and its
   lifting, and a receiver report),
-  `Output` (with `Output::NotCapable`), `Outputs`, `Env` (the facts and
+  `Output` (with `Output::NotCapable`, and `Output::Proven`, a change of
+  the size a path is proven to carry), `Outputs`, `Env` (the facts and
   the link's cost the host measures), the `Facts`
-  trait the host answers (link MTU, medium, whether it is
-  connection-oriented, anonymity class, fixed kind if any, role, and
-  whether the node would accept or dial the peer, per transport),
+  trait the host answers (link MTU and medium, per transport and peer
+  address, the medium `Medium::Unknown` where the host cannot tell it;
+  whether it is connection-oriented, anonymity class, fixed kind if
+  any, role, and whether the node would accept or dial the peer, per
+  transport),
   `PathRef`, `Why`, `Switch`, `Refusal` (with
   `Refusal::Rule` and `Refusal::Table`), `Source`, `Class`, the
   anonymity class, `Kind`, local or
@@ -515,7 +598,9 @@ its node code steps it and acts on what it decides.
   re-exports `Rule` and `Scope` from `rules` and `Pin` from `select`,
   and holds the module-wide `deny` of wildcard match arms.
 - `params.rs`: `Config`, the settings of a link's path machine, with
-  `Config::draft` giving the draft's values (Appendix A); `Params`, the
+  `Config::draft` giving the draft's values (Appendix A), and for the
+  verdict cap and the horizon, which the draft leaves to the node, 3 s and
+  60 s; `Params`, the
   validated settings and the round-trip window derived from them; and
   `ParamsError`. `Params::new` is the only way to a `Params`: it refuses
   zero for every interval and count, a switch margin that is not a
@@ -549,8 +634,14 @@ its node code steps it and acts on what it decides.
   `names` says whether it names a pair; `Rival`, a Live, acked path a
   choice may take, with its score once it has `min_samples` round-trip
   samples, its latest round trip, its tier, whether its role is
-  `Preferred`, whether the pin names it and whether its link MTU carries
-  a `FilterAnnounce` (`fits`); `FILTER_FRAME`, the 1,071 bytes of the
+  `Preferred`, whether the pin names it, whether its link MTU carries
+  a `FilterAnnounce` (`fits`) and its medium; `quicker`, whether one
+  known medium is faster than another, a cable before a wireless network
+  before BLE; `held`, whether a change on score waits under load, and
+  `waits`, whether a change for a faster medium does, while the path
+  taken scores outside the margin of the active path's score over the
+  horizon;
+  `FILTER_FRAME`, the 1,071 bytes of the
   frame that carries a `FilterAnnounce`, the frame overhead and the
   encoded message with its filter sized by the shift the bloom encoder
   uses; `Field`, a choice's rivals
@@ -560,8 +651,12 @@ its node code steps it and acts on what it decides.
   the highest tier present, then those that fit while any does, and
   takes the least score among the scored ones, unless a scored
   `Preferred` one scores at most the margin it is given times that
-  least, when the least-scoring such one; else the least latest round
-  trip, one with none measured last; the lower index on every tie. The
+  least, when the least-scoring such one; then, of the scored ones
+  within the margin of the least, only `Preferred` ones when a
+  `Preferred` one was taken, the one on the fastest known medium, when
+  that is faster than the medium of the one taken so far, also known;
+  else the least latest round trip, one with none measured last; the
+  lower index on every tie. The
   preferred precedence has no band: the link moves to a `Preferred` path
   and leaves it on the same ratio, so a preferred path whose score drifts
   across the margin of the best changes the active path once per
@@ -572,7 +667,10 @@ its node code steps it and acts on what it decides.
   covers the shorter of the two: about 6.4 seconds on an active path
   probed every 200 ms, the whole window on a standby probed every second.
   A comparison therefore leans slightly toward leaving the active path;
-  the score is local by the draft's note to Section 5.7. `Hold`, the
+  the score is local by the draft's note to Section 5.7. `steady` is the
+  same score from the least round trip over the horizon, and `held`
+  decides whether a change on score away from the active path waits for
+  it, as above; a `Rival` carries both. `Hold`, the
   hold on the link's cost after a change of active path, holds the cost
   from before the change, counts receiver reports (`report`) and gives
   the cost while it is in force (`held`): before the switch dwell has
@@ -581,7 +679,9 @@ its node code steps it and acts on what it decides.
   instants are the host's.
 - `set.rs`: `PathSet`, the paths to one peer, keyed by the pair (local
   transport, peer address), with `PeerPath`, `Admission`, `PathRefused`,
-  `Rebind`, `Roam`, `Medium`, `PathState` and the limits
+  `Rebind`, `Roam`, `Medium` (BLE, wired, wireless or unknown; a BLE
+  binding holds one path to a peer, every other medium up to
+  `PATH_MAX_PER_TRANSPORT`), `PathState` and the limits
   `PATH_MAX_PER_PEER` and `PATH_MAX_PER_TRANSPORT`. It admits and evicts
   paths, binds the original path, moves a path's address on an authentic
   frame (`roam`) and rebinds deliberately (`rebind`), and holds a renewed
@@ -678,15 +778,43 @@ its node code steps it and acts on what it decides.
   the input phase can neither end the old hold first nor count toward
   the new one. The test shell checks after every step that changes path
   that `cost` at the step's instant is the same after it as before.
-- **Within the highest tier Live, a path whose link MTU carries a
-  `FilterAnnounce` is chosen over one whose link MTU does not.** Each
-  path's link MTU is read from the facts at each step and compared with
-  `FILTER_FRAME`, the frame the filter always travels in; the proven MTU
-  is not used, since the original path never has one. The preference
+- **Within the highest tier Live, a path that carries a
+  `FilterAnnounce` is chosen over one that does not.** Each path's link
+  MTU is read from the facts at each step, lowered to the size the path
+  is proven to carry where it has proven one, and compared with
+  `FILTER_FRAME`, the frame the filter always travels in
+  (`select::carried`, which the node reads for the peer's path MTU
+  too). A path proven at no size above the smallest, as the original
+  path is until a size is proven on it, is judged by its link MTU
+  alone, and so is a path on a connection-oriented transport: the
+  ladder steps down after any lost probe and no search raises the size
+  there, so a smaller size proven on a stream may say only that a probe
+  was lost. The preference
   comes after the pin and the tiers and before the preferred precedence
   and the score, and a change to a path for it alone waits for the
   dwell and the path's samples. With no Live path of that tier that
   carries the filter, the paths are chosen as without it.
+- **A faster known medium wins within the margin, after the preferred
+  precedence.** The facts give each path's medium at each step. Among
+  the scored paths within `switch_margin` times the best, a cable is
+  taken over a wireless network, and a wireless network over BLE; a
+  medium the host does not know never takes or loses the link on this
+  rule, so where every medium is unknown the choice is the score's
+  alone. A change for it waits for the dwell and the path's samples,
+  and an active path that scores more than the margin times the best
+  gives way to the path ranked first, whatever its medium, as a
+  `Preferred` one does. A path too small for a
+  `FilterAnnounce` loses to one that carries it whatever its medium.
+  Load on an active path of the faster medium, within the margin of the
+  other at their best, does not move the link to the other before the
+  load has lasted the horizon, even when the other is faster at its
+  best, since the medium would take it back once the load followed it.
+  The change for the medium is held under load too: while the path of
+  the faster medium scores outside the margin of the active path's
+  score over the horizon, load on the active path does not hand it the
+  link before the load has lasted the horizon, so a loaded wireless
+  network faster at its best does not trade the link with a slower
+  cable as the load follows it.
 - **The preferred precedence has no band.** A `Preferred` path is taken,
   after the dwell, while it scores at most `switch_margin` times the
   best, and given up, after the dwell, once it scores more, so its score
@@ -696,8 +824,9 @@ its node code steps it and acts on what it decides.
   a `FilterAnnounce`.** It runs only
   while the active path is Live, takes only a Live path, and, between
   paths that the pin does not set apart, of which neither alone carries
-  a `FilterAnnounce`, and whose roles neither differ in tier nor make
-  one alone `Preferred`, needs a strict margin, so such
+  a `FilterAnnounce`, whose roles neither differ in tier nor make
+  one alone `Preferred`, and whose media are not both known and
+  different, needs a strict margin, so such
   a path that scores the same as the active one never replaces it. The
   test shell checks every discretionary and pinned change it sees
   against the path active before it and the states after the call.

@@ -1101,7 +1101,7 @@ impl ActivePeer {
     pub(crate) fn admit_path(&mut self, transport_id: TransportId, addr: TransportAddr) {
         let admission = self
             .test_paths()
-            .admit(transport_id, addr, Medium::Other, rand::random)
+            .admit(transport_id, addr, Medium::Unknown, rand::random)
             .expect("the test path is admitted");
         if let super::Admission::Added { evicted, .. } = admission {
             Self::retire(evicted);

@@ -701,12 +701,12 @@ fn fitting(seed: u64, fits: usize) -> (Node, Log) {
 }
 
 #[test]
-fn after_an_unanswered_padded_probe_a_probing_path_alternates_the_smallest_size() {
+fn after_an_unanswered_padded_probe_a_probing_path_steps_down_the_ladder() {
     // Padding is local (Section 5.1). A receiver that drops every frame
     // over 1000 bytes never answers q's first probe, padded to the link
-    // MTU; once it has timed out, q's next probe is of the smallest size,
-    // which is answered and makes q Live, with no MTU proven, since only a
-    // padded probe proves one.
+    // MTU; once it has timed out, q's next probe steps down the ladder to
+    // three quarters of the padded size, which is answered and makes q
+    // Live, with that size proven.
     let padded = 1280 - FRAME_OVERHEAD;
     let q = pair(t(2), addr(2));
     let (n, log) = fitting(70, padded);
@@ -726,7 +726,7 @@ fn after_an_unanswered_padded_probe_a_probing_path_alternates_the_smallest_size(
         .filter(|(at, to, _)| *to == q && *at <= 400)
         .map(|(at, _, probe)| (*at, probe.len))
         .collect();
-    assert_eq!(sent, [(0, padded), (400, PATH_PROBE_MIN_SIZE)]);
+    assert_eq!(sent, [(0, padded), (400, padded * 3 / 4)]);
     assert_eq!(
         log.changes(&q),
         [
@@ -739,8 +739,16 @@ fn after_an_unanswered_padded_probe_a_probing_path_alternates_the_smallest_size(
             ),
         ]
     );
+    // The rung answered is proven, and by 30 s the search has raised it
+    // as far as the receiver's buffer allows.
     let path = n.b.paths().get(1).unwrap();
-    assert_eq!(path.live().mtu(), None, "a smallest probe proves no MTU");
+    assert!(
+        path.live()
+            .mtu()
+            .is_some_and(|m| (padded * 3 / 4..=1000).contains(&m)),
+        "{:?}",
+        path.live().mtu()
+    );
 }
 
 #[test]
@@ -752,8 +760,8 @@ fn a_padded_probe_sent_before_a_change_of_state_does_not_shrink_the_next_one() {
     // new state, but it was sent in the old one, so it is not a padded
     // probe of this state gone unanswered: when the peer clears ACTIVE
     // on q at 1.56 s, the probe that prompts at once is padded too. Only
-    // once a padded probe of this state has timed out does q send one of
-    // the smallest size.
+    // once a padded probe of this state has timed out does q step down the
+    // ladder.
     let mut n = two(71);
     let mut log = Log::default();
     let q = pair(t(2), addr(2));
@@ -810,7 +818,7 @@ fn a_padded_probe_sent_before_a_change_of_state_does_not_shrink_the_next_one() {
     );
     assert_eq!(
         probing.get(2).map(|p| p.1),
-        Some(PATH_PROBE_MIN_SIZE),
+        Some(padded * 3 / 4),
         "the next, after one had: {probing:?}"
     );
 }

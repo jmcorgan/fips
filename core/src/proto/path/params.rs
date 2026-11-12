@@ -8,7 +8,8 @@
 //! values of the multipath v1 draft, Appendix A. The draft's bounds on a
 //! path that has stopped answering, [`PATH_SILENCE_MAX`],
 //! [`PATH_DEAD_PROBE_INTERVAL_MIN`] and [`PATH_DEAD_PROBE_INTERVAL_MAX`],
-//! are constants, not settings: no node chooses a bound.
+//! and the re-check span [`PATH_DEAD_RECHECK_SPAN`], are constants, not
+//! settings: no node chooses a bound.
 
 use thiserror::Error;
 
@@ -31,6 +32,16 @@ pub const PATH_DEAD_PROBE_INTERVAL_MIN: Duration = Duration::from_secs(1);
 /// cadence of a path that has stopped answering (draft Section 5.6;
 /// `PATH_DEAD_PROBE_INTERVAL_MAX`, Appendix A).
 pub const PATH_DEAD_PROBE_INTERVAL_MAX: Duration = Duration::from_secs(30);
+
+/// How long after a path that carried the link went silent it is
+/// re-checked every [`PATH_DEAD_PROBE_INTERVAL_MIN`] before the doubling
+/// toward [`PATH_DEAD_PROBE_INTERVAL_MAX`] starts. The draft (Section 5.6)
+/// doubles every stopped path's gaps from the second on; this span is the
+/// bound of an amendment to it not yet in the draft, so that a silent
+/// outage of the path that carried the link is found within about a
+/// second of its end and not at the next slot of the doubling, up to 30 s
+/// later.
+pub const PATH_DEAD_RECHECK_SPAN: Duration = Duration::from_secs(30);
 
 /// The shortest round-trip window.
 const WINDOW: Duration = Duration::from_secs(30);
@@ -59,11 +70,26 @@ pub struct Config {
     /// (`PATH_PROBE_INTERVAL_STANDBY`), and the first interval of the Dead
     /// cadence.
     pub standby_interval: Duration,
-    /// Whether paths of another kind than the original path's are admitted
-    /// (draft Section 5.5 recommends the same kind by default).
+    /// Whether paths of another kind than the original path's are admitted.
+    /// A local choice the draft gives no value (Section 5.5); the node's
+    /// configuration sets it (`node.path.mix_kinds`, on by default).
     pub mix_kinds: bool,
     /// The floor of the probe timeout (`PATH_PROBE_TIMEOUT_MIN`).
     pub timeout: Duration,
+    /// The verdict cap, a local choice the draft gives no value: the
+    /// longest a probe's verdict waits after the probe is sent while the
+    /// peer's session datagrams arrive on its path, and the cap on the
+    /// probe timeout's term from the largest round trip in the path's
+    /// window (draft Section 5.6 leaves the timeout to the node).
+    pub verdict_cap: Duration,
+    /// The horizon, a local choice the draft gives no value: the least
+    /// span a path's least round trip is also kept over, beside the
+    /// round-trip window. A discretionary change away from the active path
+    /// on score must also beat the active path's score from that least
+    /// round trip, unless the path taken is the faster of the two at its
+    /// best over the horizon, so load on the active path alone does not
+    /// move the link to a path slower at its best for a horizon.
+    pub horizon: Duration,
     /// Consecutive unanswered probes before a Live path becomes Suspect
     /// (`PATH_TIMEOUT_K`).
     pub suspect: u8,
@@ -103,7 +129,9 @@ pub struct Config {
 }
 
 impl Config {
-    /// The values of the multipath v1 draft (Appendix A).
+    /// The values of the multipath v1 draft (Appendix A), and for the
+    /// verdict cap and the horizon, which the draft leaves to the node, 3 s
+    /// and 60 s.
     pub const fn draft() -> Self {
         Self {
             enabled: true,
@@ -114,6 +142,8 @@ impl Config {
             standby_interval: Duration::from_secs(1),
             mix_kinds: false,
             timeout: Duration::from_millis(400),
+            verdict_cap: Duration::from_secs(3),
+            horizon: Duration::from_secs(60),
             suspect: 3,
             retire: 10,
             discovery: 8,
@@ -183,6 +213,8 @@ impl Params {
             (cfg.active_interval, "the active probe interval"),
             (cfg.standby_interval, "the standby probe interval"),
             (cfg.timeout, "the probe timeout floor"),
+            (cfg.verdict_cap, "the verdict cap"),
+            (cfg.horizon, "the horizon"),
             (cfg.heartbeat, "the heartbeat interval"),
             (cfg.dead_interval, "the Dead probe interval cap"),
             (cfg.grace, "the Dead grace"),

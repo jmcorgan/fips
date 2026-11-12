@@ -64,6 +64,13 @@
 //! earliest instant a poll has work, which after every step lies ahead of
 //! the step's instant.
 //!
+//! A Probing or Dead path's probes step down a ladder of sizes once a
+//! padded one goes unanswered, so the first size a narrow hop carries is
+//! proven; a Live path on a connectionless transport proven below its
+//! link MTU searches upward with padded probes held outside its ring,
+//! whose loss counts toward nothing. Each change of the size proven is an
+//! [`Output::Proven`].
+//!
 //! A path that has stopped answering is held to a floor (Section 5.6). A
 //! path that is not Probing stops answering when it becomes Dead, or once
 //! `PATH_SILENCE_MAX` has passed since the earliest probe no matching
@@ -71,8 +78,13 @@
 //! its own cadence, whatever its state, go no sooner than
 //! `PATH_DEAD_PROBE_INTERVAL_MIN` after the stop and after the first, and
 //! each later gap at least doubles, up to `PATH_DEAD_PROBE_INTERVAL_MAX`;
-//! a connection asked for in place of such a probe counts as one, and the
-//! probe sent when it opens starts the next gap. Exempt, neither held nor
+//! a path that was our active path when it left Live, or is at the stop,
+//! is first re-checked every `PATH_DEAD_PROBE_INTERVAL_MIN` until
+//! `PATH_DEAD_RECHECK_SPAN` after it went silent, its gaps doubling only
+//! from there, so a silent outage of the path that carried the link is
+//! found within about a second of its end; a connection asked for in
+//! place of such a probe counts as one, and the probe sent when it opens
+//! starts the next gap. Exempt, neither held nor
 //! counted: the probe at once when the peer's probe brings a Dead path
 //! back, those Section 5.7 requires at once, the early probe when the peer
 //! clears `ACTIVE`, and the probe sent when a connection opens. An answer
@@ -239,6 +251,20 @@ fn signal(msg_type: u8) -> bool {
     )
 }
 
+/// Whether a frame of link message type `msg_type` is the peer's tunnel
+/// traffic, which holds a probe's verdict on its path: a session datagram.
+/// The peer's path messages go on paths it has left, and its heartbeats,
+/// reports and other link control on an idle link, so neither shows that
+/// the path carries data.
+fn carries(msg_type: u8) -> bool {
+    match LinkMessageType::from_byte(msg_type) {
+        Some(LinkMessageType::SessionDatagram) => true,
+        // The defect's shape: every frame but a path message holds it.
+        _ if node_fault!(VerdictCountsControl) => !signal(msg_type),
+        _ => false,
+    }
+}
+
 /// What [`Bundle::account`] did with one authentic frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
@@ -382,6 +408,9 @@ pub struct Bundle<C: Clock, E: EntropySource, D: Default> {
     /// link would move to, and the instant from which it has scored better
     /// than the active path by the switch margin.
     dwell: Option<(u32, C::Instant)>,
+    /// Our `path_id` of the path the latest change of active path left, if
+    /// that change was mandatory: a return to it needs no switch margin.
+    left: Option<u32>,
     /// The operator's pin, until it is lifted, by the operator or by the
     /// host when the peer is replaced and the link kept, or its transport
     /// goes; a new bundle holds none, and [`Self::renew`] keeps it.
@@ -410,6 +439,7 @@ impl<C: Clock, E: EntropySource, D: Default + fmt::Debug> fmt::Debug for Bundle<
             .field("frame", &self.frame)
             .field("orphaned", &self.orphaned)
             .field("dwell", &self.dwell)
+            .field("left", &self.left)
             .field("pin", &self.pin)
             .field("hold", &self.hold)
             .finish()
@@ -451,6 +481,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             frame: None,
             orphaned: false,
             dwell: None,
+            left: None,
             pin: None,
             hold: None,
             source: PhantomData,
@@ -675,6 +706,9 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         let id = path.and_then(|i| self.set.get(i)).map(PeerPath::path_id);
         if let Some(p) = path.and_then(|i| self.set.path_mut(i)) {
             p.live_mut().heard(len, now);
+            if carries(msg_type) {
+                p.live_mut().carried(now);
+            }
         }
         if marks(msg_type) {
             self.peer_active = id;
@@ -847,6 +881,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         self.frame = None;
         self.orphaned = false;
         self.dwell = None;
+        self.left = None;
         out
     }
 
@@ -1315,6 +1350,22 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             });
             return;
         };
+        let gap = self.params.cfg.standby_interval;
+        let seek = self
+            .set
+            .path_mut(i)
+            .and_then(|p| p.live_mut().seek_answer(msg.probe_id, gap));
+        if let Some(len) = seek {
+            self.attribute(i, frame, now);
+            let raised = self
+                .set
+                .path_mut(i)
+                .is_some_and(|p| p.live_mut().seek_proved(len, msg.len, now));
+            if raised {
+                self.proven(i, out);
+            }
+            return;
+        }
         let ring = self
             .set
             .path_mut(i)
@@ -1332,12 +1383,17 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             p.live_mut().resume();
         }
         let window = self.params.window;
+        let horizon = self.params.cfg.horizon;
         let sent = match (ring, held) {
             (Some(Answer::InTime(sent)), _) | (None, Some(sent)) => sent,
             (Some(Answer::Late(sent)), _) => {
                 if let Some(p) = self.set.path_mut(i) {
-                    p.live_mut()
-                        .sample(now, now.saturating_duration_since(sent.at), window);
+                    p.live_mut().sample(
+                        now,
+                        now.saturating_duration_since(sent.at),
+                        window,
+                        horizon,
+                    );
                 }
                 return;
             }
@@ -1355,15 +1411,19 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         };
         let from_state = path.state();
         let live = path.live_mut();
-        live.sample(now, now.saturating_duration_since(sent.at), window);
+        live.sample(now, now.saturating_duration_since(sent.at), window, horizon);
         // A capability probe is held outside the ring: its answer is no
         // loss sample, and at the smallest size it proves no MTU.
+        let mut proved = false;
         if ring.is_some() {
             live.fold(true);
             // Only a probe padded past the smallest size proves an MTU.
             if sent.len > PATH_PROBE_MIN_SIZE {
-                live.prove(sent.len.min(msg.len));
+                proved = live.prove(sent.len.min(msg.len));
             }
+        }
+        if proved {
+            self.proven(i, out);
         }
         self.set.mark_acked(i);
         self.flag(i, msg.flags.active());
@@ -1589,7 +1649,9 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// Every change of active path, and every step at which the active path
     /// is not Live, ends the switch dwell. Every change holds the link's
     /// cost at `held`, the cost at the start of the step, which is the
-    /// cost of a hold still in force if there is one. When the active path
+    /// cost of a hold still in force if there is one, and records the path
+    /// it left if it was mandatory, so a return to that path once it is
+    /// Live again needs no switch margin ([`Self::better`]). When the active path
     /// became Suspect or Dead or was discarded in this step and no path is
     /// Live, every acked Dead path that [`Self::again`] allows, and every
     /// acked path being probed again after Dead, is probed at once
@@ -1647,10 +1709,15 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             {
                 p.live_mut().urge();
             }
-            let from = from.and_then(|a| self.set.get(a)).map(pair);
+            let from = from.and_then(|a| self.set.get(a));
+            let left = from
+                .map(PeerPath::path_id)
+                .filter(|_| why == Switch::Mandatory);
+            let from = from.map(pair);
             if self.set.activate(i)
                 && let Some(p) = self.set.get(i)
             {
+                self.left = left;
                 out.push(Output::Switched {
                     from,
                     to: pair(p),
@@ -1690,8 +1757,10 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
 
     /// The Live, acked paths, each in its slot as a rival of a choice: its
     /// score once it has `min_samples` round-trip samples, its latest round
-    /// trip, the tier of its transport's role, whether its link MTU carries
-    /// a `FilterAnnounce`, both read from the facts, and whether the
+    /// trip, the tier of its transport's role, read from the facts, whether
+    /// it carries a `FilterAnnounce`, by its link MTU from the facts or the
+    /// smaller size it is proven to carry where that counts
+    /// (`select::carried`), its medium, read from the facts, and whether the
     /// operator's pin names it.
     fn rivals(&self, env: &Env<'_>) -> Field {
         let min = usize::from(self.params.cfg.min_samples);
@@ -1702,14 +1771,22 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             }
             let live = p.live();
             let role = env.facts.role(p.transport_id());
+            let carried = select::carried(
+                env.facts.mtu(p.transport_id(), p.addr()),
+                live.mtu(),
+                env.facts.oriented(p.transport_id()),
+            );
             let rival = Rival {
                 index: i,
                 score: select::score(live).filter(|_| live.samples() >= min),
                 rtt: live.rtt(),
+                steady: select::steady(live).filter(|_| live.samples() >= min),
+                base: live.base_rtt(),
                 tier: select::tier(role),
                 preferred: role == Role::Preferred,
                 pinned: self.pin.as_ref().is_some_and(|pin| pin.names(&pair(p))),
-                fits: env.facts.mtu(p.transport_id(), p.addr()) >= select::FILTER_FRAME,
+                fits: carried >= select::FILTER_FRAME,
+                medium: env.facts.medium(p.transport_id(), p.addr()),
             };
             if let Some(slot) = field.get_mut(i) {
                 *slot = Some(rival);
@@ -1741,16 +1818,23 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// its samples, so a backup or never path gives way as soon as a path
     /// of a higher tier is Live. Otherwise the path must have
     /// enough samples to be scored, and either carry a `FilterAnnounce`
-    /// while `a` cannot, be preferred while `a` is not, or score better
-    /// than `a`, also scored, by more than the switch margin, or `a`,
-    /// preferred and scored, must score more than the switch margin times
-    /// the best score [`select::best`] finds, so it has lost its
-    /// precedence; and that must hold at every step for the switch dwell.
+    /// while `a` cannot, be preferred while `a` is not, run over a known
+    /// medium faster than `a`'s, also known ([`select::quicker`]), or score
+    /// better than `a`, also scored, by more than the switch margin, or by
+    /// any amount when the latest change of active path was mandatory and
+    /// left it, or `a`, scored, must score more than the switch margin
+    /// times the best score [`select::best`] finds, so it holds the link by
+    /// no precedence (the path taken may itself hold its place by one); a
+    /// change for any of those last three, on score, waits
+    /// while [`select::held`] holds it, and a change for a faster medium
+    /// while [`select::waits`] holds it, so load on `a` alone does not hand
+    /// the link to a path slower at its best; and that must hold at every
+    /// step for the switch dwell.
     /// The dwell starts at the first step at which it holds, starts again
     /// when the path ranked first changes, and ends at any step at which it
     /// does not hold, so a path that only scores the same as `a` never
-    /// takes its place unless it alone carries a `FilterAnnounce` or is
-    /// preferred.
+    /// takes its place unless it alone carries a `FilterAnnounce`, is
+    /// preferred, or runs over a faster known medium.
     fn better(&mut self, now: C::Instant, a: usize, env: &Env<'_>) -> Option<(usize, Switch)> {
         let margin = self.params.cfg.switch_margin;
         let field = self.rivals(env);
@@ -1768,14 +1852,23 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             }
         }
         let best = select::best(&field);
+        let back = |to: &Rival| {
+            self.left
+                .is_some_and(|id| self.set.get(to.index).map(PeerPath::path_id) == Some(id))
+                && !node_fault!(ReturnNeedsMargin)
+        };
         let target = pick
             .filter(|(to, from)| {
                 to.score.is_some_and(|st| {
+                    let scored = from
+                        .score
+                        .is_some_and(|s| s > st * margin || best.is_some_and(|b| s > b * margin))
+                        || (back(to) && from.score.is_some_and(|s| s > st));
                     (to.fits && !from.fits)
                         || (to.preferred && !from.preferred)
-                        || from.score.is_some_and(|s| s > st * margin)
-                        || (from.preferred
-                            && from.score.zip(best).is_some_and(|(s, b)| s > b * margin))
+                        || (select::quicker(to.medium, from.medium)
+                            && !select::waits(to, from, margin))
+                        || (scored && !select::held(to, from, margin))
                 })
             })
             .and_then(|(to, _)| self.set.get(to.index).map(|p| (to.index, p.path_id())));
@@ -1862,7 +1955,9 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     }
 
     /// Time out every probe due by `now`, or with `overdue` only those due
-    /// before `now`, oldest first on each path, and apply the state changes
+    /// before `now`, oldest first on each path, except one whose verdict
+    /// waits for the verdict cap while the peer's session datagrams arrive
+    /// on its path (`Liveness::expire`), and apply the state changes
     /// the counts cause (draft Section 5.6): a Live path with `suspect` in
     /// a row becomes Suspect, a Suspect one with `retire` becomes Dead, and
     /// a Probing one with `discovery` becomes Dead. A Dead path's count
@@ -1878,7 +1973,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 };
                 let state = path.state();
                 let live = path.live_mut();
-                let Some(counted) = live.expire(now, overdue) else {
+                let Some(counted) = live.expire(now, overdue, cfg.verdict_cap) else {
                     break;
                 };
                 if !counted {
@@ -2001,7 +2096,14 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                     live.owe();
                 }
             } else {
+                let seeks = !urgent && held.is_none();
+                if seeks && !node_fault!(SeekCountsLoss) {
+                    self.seek(i, now, env, out);
+                }
                 self.send(i, now, env, out);
+                if seeks && node_fault!(SeekCountsLoss) {
+                    self.seek(i, now, env, out);
+                }
                 if held.is_some()
                     && let Some(p) = self.set.path_mut(i)
                 {
@@ -2025,13 +2127,14 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// path back from Dead ends it.
     fn stopped(&mut self, i: usize, now: C::Instant) -> Option<C::Instant> {
         let probing = self.state(i) == Some(PathState::Probing);
+        let active = self.set.active_index() == Some(i);
         let live = self.set.path_mut(i)?.live_mut();
         if !probing
             && !live.stopped()
             && let Some(at) = live.quiet().map(|quiet| deadline(quiet, PATH_SILENCE_MAX))
             && at <= now
         {
-            live.halt(at);
+            live.halt(at, active);
         }
         live.held()
     }
@@ -2085,7 +2188,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// discarded to make room, if one was, and holding back its pair;
     /// refuse it when no room can be made.
     fn admit(&mut self, to: PathRef, env: &Env<'_>, out: &mut Outputs<D>) -> Option<usize> {
-        let medium = env.facts.medium(to.transport);
+        let medium = env.facts.medium(to.transport, &to.addr);
         match self
             .set
             .admit(to.transport, to.addr.clone(), medium, draw::<E>)
@@ -2288,7 +2391,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         let to = pair(path);
         let path_id = path.path_id();
         let live = path.live_mut();
-        let timeout = live.timeout(cfg.timeout);
+        let timeout = live.timeout(cfg.timeout, cfg.verdict_cap);
         let probe_id = live.take_id(draw::<E>);
         self.record.send(now, path_id, probe_id, timeout, &cfg);
         let msg = PathProbe::new(probe_id, path_id, flags, caps()).with_len(PATH_PROBE_MIN_SIZE);
@@ -2324,34 +2427,47 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// Send a probe on path `i`, and schedule the next. While the path is
     /// unproven, Probing or Dead it is padded to the link MTU (draft
     /// Section 5.1, step 1, where padding is local), except that once a
-    /// padded probe of its current state has gone unanswered the sizes
-    /// alternate, the smallest first (`Liveness::small`): a receiver
-    /// whose buffer is smaller than our link MTU drops a padded probe, and
-    /// a smallest one answered proves the path, though no MTU. Nothing in
-    /// the node reads the proven MTU, so a path proven so is no worse off
-    /// than a link of one path between two nodes whose MTUs differ.
-    /// Otherwise the probe is of the smallest size. It goes unanswered
+    /// padded probe of its current state has gone unanswered its sizes
+    /// step down a ladder, the smallest last (`Liveness::size`): a hop
+    /// narrower than our link MTU, or a receiver whose buffer is smaller,
+    /// drops a padded probe, and the first size answered is proven; a
+    /// smallest one answered proves the path, though no MTU, so a path
+    /// proven so is no worse off than a link of one path between two nodes
+    /// whose MTUs differ. Each change of the size proven goes to the shell
+    /// in an `Output::Proven`, and a Live path proven below its link MTU
+    /// searches upward beside these probes ([`Self::seek`]). A Dead path
+    /// on a connection-oriented transport, re-checked after it carried the
+    /// link, that has proven a size is probed at that size, not on the
+    /// ladder, so its probes never close the connection with one oversized.
+    /// On a connectionless transport such a path keeps the ladder, so a
+    /// path whose MTU shrank during its outage is still found. Otherwise the probe is of the smallest size. It goes unanswered
     /// after the probe timeout. Nothing goes when the path's ring is full.
     fn send(&mut self, i: usize, now: C::Instant, env: &Env<'_>, out: &mut Outputs<D>) {
         let flags = self.flags(i);
         let interval = self.interval(i);
         let floor = self.params.cfg.timeout;
+        let cap = self.params.cfg.verdict_cap;
         let Some(path) = self.set.path_mut(i) else {
             return;
         };
         let to = pair(path);
-        let len = match path.state() {
-            PathState::Probing | PathState::Dead if path.live().small() => PATH_PROBE_MIN_SIZE,
-            PathState::Probing | PathState::Dead => env
-                .facts
-                .mtu(to.transport, &to.addr)
-                .saturating_sub(FRAME_OVERHEAD)
-                .max(PATH_PROBE_MIN_SIZE),
-            PathState::Live | PathState::Suspect => PATH_PROBE_MIN_SIZE,
+        let full = env
+            .facts
+            .mtu(to.transport, &to.addr)
+            .saturating_sub(FRAME_OVERHEAD)
+            .max(PATH_PROBE_MIN_SIZE);
+        let live = path.live();
+        let proven = live
+            .mtu()
+            .filter(|_| live.recheck().is_some() && env.facts.oriented(to.transport));
+        let len = match (path.state(), proven) {
+            (PathState::Dead, Some(mtu)) => mtu.clamp(PATH_PROBE_MIN_SIZE, full),
+            (PathState::Probing | PathState::Dead, _) => live.size(full),
+            (PathState::Live | PathState::Suspect, _) => PATH_PROBE_MIN_SIZE,
         };
         let path_id = path.path_id();
         let live = path.live_mut();
-        let due = deadline(now, live.timeout(floor));
+        let due = deadline(now, live.timeout(floor, cap));
         let Some(probe_id) = live.send(now, due, len, draw::<E>) else {
             return;
         };
@@ -2361,6 +2477,73 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             to,
             bytes: msg.encode(),
         });
+    }
+
+    /// Send a search probe on path `i` just ahead of its probe at its
+    /// cadence, where one may go (`Liveness::seek_size`): the path is Live,
+    /// on a connectionless transport, since on a stream binding an oversized
+    /// probe closes the connection (draft Section 5.1), with no probe
+    /// unanswered in its current run, so the search never rides a run that
+    /// could reach `PATH_TIMEOUT_K`. A search probe outstanding is judged
+    /// first (`Liveness::seek_judge`). Search probes go at most once per
+    /// standby interval, are held outside the ring, and are judged lost
+    /// after the probe timeout; their loss is neither a miss nor an ETX
+    /// sample.
+    fn seek(&mut self, i: usize, now: C::Instant, env: &Env<'_>, out: &mut Outputs<D>) {
+        let flags = self.flags(i);
+        let gap = self.params.cfg.standby_interval;
+        let floor = self.params.cfg.timeout;
+        let cap = self.params.cfg.verdict_cap;
+        let Some(path) = self.set.path_mut(i) else {
+            return;
+        };
+        let to = pair(path);
+        if path.state() != PathState::Live
+            || (env.facts.oriented(to.transport) && !node_fault!(SeekOnStreams))
+        {
+            return;
+        }
+        let full = env
+            .facts
+            .mtu(to.transport, &to.addr)
+            .saturating_sub(FRAME_OVERHEAD)
+            .max(PATH_PROBE_MIN_SIZE);
+        let path_id = path.path_id();
+        let live = path.live_mut();
+        let timeout = live.timeout(floor, cap);
+        live.seek_judge(now, timeout, gap);
+        if live.misses() > 0 {
+            return;
+        }
+        let Some(len) = live.seek_size(full, now) else {
+            return;
+        };
+        let probe_id = if node_fault!(SeekCountsLoss) {
+            live.seek_ring(now, deadline(now, timeout), gap, len, draw::<E>)
+        } else {
+            Some(live.seek_send(now, len, draw::<E>))
+        };
+        let Some(probe_id) = probe_id else {
+            return;
+        };
+        let msg = PathProbe::new(probe_id, path_id, flags, caps()).with_len(len);
+        out.push(Output::Send {
+            to,
+            bytes: msg.encode(),
+        });
+    }
+
+    /// Report path `i`'s proven MTU, which has just changed, in frame bytes.
+    fn proven(&self, i: usize, out: &mut Outputs<D>) {
+        let Some(path) = self.set.get(i) else {
+            return;
+        };
+        if let Some(mtu) = path.live().mtu() {
+            out.push(Output::Proven {
+                to: pair(path),
+                mtu: mtu.saturating_add(FRAME_OVERHEAD),
+            });
+        }
     }
 
     /// The flags of a path message on path `i`: `ACTIVE` exactly when it is
@@ -2430,8 +2613,10 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// the peer marks `ACTIVE`, else the standby interval. Probing: from
     /// the active interval, doubling with each unanswered probe up to the
     /// heartbeat interval. Dead: from the standby interval, doubling up to
-    /// the Dead cap. On a path that has stopped answering the floor may
-    /// hold a probe later than this.
+    /// the Dead cap, or, while its stop re-checks a path that carried the
+    /// link, the stop's least gap within the same bounds: the standby
+    /// interval through the span, then doubling. On a path that has
+    /// stopped answering the floor may hold a probe later than this.
     fn interval(&self, i: usize) -> Duration {
         let cfg = &self.params.cfg;
         let Some(p) = self.set.get(i) else {
@@ -2440,7 +2625,10 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         let misses = p.live().misses();
         match p.state() {
             PathState::Probing => backoff(misses, cfg.active_interval, cfg.heartbeat),
-            PathState::Dead => backoff(misses, cfg.standby_interval, cfg.dead_interval),
+            PathState::Dead => match p.live().recheck() {
+                Some(gap) => gap.min(cfg.dead_interval).max(cfg.standby_interval),
+                None => backoff(misses, cfg.standby_interval, cfg.dead_interval),
+            },
             PathState::Live | PathState::Suspect => {
                 if self.set.active_index() == Some(i) || p.live().peer() {
                     cfg.active_interval
@@ -2549,10 +2737,11 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// starts the unanswered count again (draft Section 5.6, path
     /// lifetime), and leaving Dead also keeps a probe still outstanding
     /// from before from counting when it times out. Leaving Live records
-    /// the instant. Entering Dead gives up the outstanding probes,
-    /// schedules the Dead cadence's first probe a standby interval on, and
-    /// stops the path answering, unless the silence clock stopped it sooner
-    /// or it already holds a stop.
+    /// the instant, and whether the path was our active path then.
+    /// Entering Dead gives up the outstanding probes, schedules the Dead
+    /// cadence's first probe a standby interval on, and stops the path
+    /// answering, unless the silence clock stopped it sooner or it already
+    /// holds a stop.
     fn shift(
         &mut self,
         i: usize,
@@ -2565,6 +2754,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             return;
         };
         let standby = self.params.cfg.standby_interval;
+        let active = self.set.active_index() == Some(i);
         if next == PathState::Dead {
             // Judged in the state the path is leaving: the sooner of the
             // two ways to stop answering holds.
@@ -2578,12 +2768,12 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 live.thaw();
             }
             if from == PathState::Live && next != PathState::Live {
-                live.left(now);
+                live.left(now, active);
             }
             if next == PathState::Dead {
                 live.clear();
                 live.schedule(Some(deadline(now, standby)));
-                live.halt(now);
+                live.halt(now, active);
             }
         }
         self.note(i, Some(from), why, out);

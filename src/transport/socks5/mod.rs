@@ -11,10 +11,15 @@ mod stats;
 
 pub use dialer::{DialError, Socks5Auth, Socks5Dialer, SocksTarget};
 pub(crate) use pool::{
-    ConnectingEntry, ConnectingPool, ProxiedConnection, ProxiedPool, ProxiedStats,
-    SEND_QUEUE_DEPTH, existing_sender, poll_connecting, proxied_receive_loop, proxied_send_loop,
+    ConnectingEntry, ConnectingPool, PATH_QUEUE_DEPTH, ProxiedConnection, ProxiedPool,
+    ProxiedStats, SEND_QUEUE_DEPTH, existing_sender, poll_connecting, proxied_receive_loop,
+    proxied_send_loop,
 };
 pub(crate) use stats::ProxiedStatsBase;
 
 #[cfg(test)]
 pub(crate) mod mock;
+
+#[cfg(test)]
+#[path = "tests/lane.rs"]
+mod lane_tests;

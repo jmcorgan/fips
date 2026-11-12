@@ -15,11 +15,13 @@
 # The 1 s bound for a switch with a signal is dual-path-carrier's, not
 # this suite's.
 #
-# Recovery: a restored cable path is stopped (Dead), so its next probe
-# waits for the floor's next slot, unless the peer's own floor probe
-# revives it first; then the dwell (2 s) passes before the fail-back. By
-# arithmetic the path is Live again within about 4 s of a restore after an
-# 18 s outage.
+# Recovery: a restored cable path is stopped (Dead). It was the active
+# path when it went silent, so each end re-checks it every second until
+# 30 s after it went silent, and every outage here (12 to 18 s) ends
+# inside that span: the path is Live again within about a second of a
+# restore (one re-check gap and a round trip), or sooner if the peer's
+# re-check revives it first; then the dwell (2 s) passes before the
+# fail-back, about 3 s after the restore in all.
 #
 #   n01 ===eth=== n02      (flapped)
 #   n01 ---udp--- n02      (never touched)

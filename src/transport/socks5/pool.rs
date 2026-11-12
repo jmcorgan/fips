@@ -23,7 +23,7 @@ use crate::transport::framing::{RECV_CEILING, read_fmp_packet};
 use crate::transport::stream::{ConnId, PooledConn, remove_own};
 use crate::transport::tcp::InboundDeadline;
 use crate::transport::{
-    ConnectionState, PacketTx, ReceivedPacket, TransportAddr, TransportError, TransportId,
+    ConnectionState, Lane, PacketTx, ReceivedPacket, TransportAddr, TransportError, TransportId,
     take_finished_connect,
 };
 
@@ -36,6 +36,10 @@ pub(crate) struct ProxiedConnection<M> {
     /// write: the write half belongs to `send_task`, so no caller can block on
     /// the wire. A full queue is a peer that has stopped draining.
     pub send_tx: mpsc::Sender<Vec<u8>>,
+    /// Path messages queued for the writer task, which sends them before
+    /// anything in [`Self::send_tx`], so a queue full of data neither
+    /// refuses nor holds them back.
+    pub path_tx: mpsc::Sender<Vec<u8>>,
     /// Writer task for this connection.
     pub send_task: JoinHandle<()>,
     /// Receive task for this connection.
@@ -53,6 +57,16 @@ pub(crate) struct ProxiedConnection<M> {
     /// carries this id, so a loop that outlives its connection cannot remove
     /// a newer connection at the same address.
     pub id: ConnId,
+}
+
+impl<M> ProxiedConnection<M> {
+    /// The connection's send queue for `lane`.
+    pub fn queue(&self, lane: Lane) -> &mpsc::Sender<Vec<u8>> {
+        match lane {
+            Lane::Data => &self.send_tx,
+            Lane::Path => &self.path_tx,
+        }
+    }
 }
 
 impl<M> PooledConn for ProxiedConnection<M> {
@@ -140,8 +154,8 @@ pub(crate) fn poll_connecting<M>(
     }
 }
 
-/// The writer queue for an established connection to `addr`, promoting a
-/// background connect that has finished since it was started.
+/// The writer queue for `lane` of an established connection to `addr`,
+/// promoting a background connect that has finished since it was started.
 ///
 /// `promote` builds the pool entry for a finished connect and does the
 /// transport's own accounting; it runs with the pool lock held, so the
@@ -151,17 +165,18 @@ pub(crate) async fn existing_sender<M>(
     pool: &ProxiedPool<M>,
     connecting: &ConnectingPool,
     addr: &TransportAddr,
+    lane: Lane,
     promote: impl FnOnce(TcpStream, u16) -> ProxiedConnection<M>,
 ) -> Option<mpsc::Sender<Vec<u8>>> {
     let mut pool = pool.lock().await;
     if let Some(conn) = pool.get(addr) {
-        return Some(conn.send_tx.clone());
+        return Some(conn.queue(lane).clone());
     }
     let finished = take_finished_connect(&mut *connecting.lock().await, addr)?;
     match finished {
         Ok((stream, mtu)) => {
             let conn = promote(stream, mtu);
-            let send_tx = conn.send_tx.clone();
+            let send_tx = conn.queue(lane).clone();
             pool.insert(addr.clone(), conn);
             Some(send_tx)
         }
@@ -196,6 +211,11 @@ pub(crate) trait ProxiedStats: Send + Sync + 'static {
 /// See `crate::transport::tcp::pool::SEND_QUEUE_DEPTH`, which this mirrors.
 pub(crate) const SEND_QUEUE_DEPTH: usize = 64;
 
+/// How many path messages may be queued for one connection, apart from its
+/// data, before sends of them fail. See
+/// `crate::transport::tcp::pool::PATH_QUEUE_DEPTH`, which this mirrors.
+pub(crate) const PATH_QUEUE_DEPTH: usize = 8;
+
 /// Per-connection writer task: the only place a write to a proxied stream is
 /// ever awaited.
 ///
@@ -212,9 +232,14 @@ pub(crate) const SEND_QUEUE_DEPTH: usize = 64;
 /// this connection's `id`. A writer can outlive its entry, and by the time its
 /// write fails a newer connection may hold the address; that one is left
 /// alone.
+///
+/// Path messages (`paths`) are taken before data (`frames`) whenever both
+/// are waiting, so a probe waits behind at most the frame being written. The
+/// loop ends when both queues' senders have gone and both queues are empty.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn proxied_send_loop<S: ProxiedStats, M>(
     mut writer: OwnedWriteHalf,
+    mut paths: mpsc::Receiver<Vec<u8>>,
     mut frames: mpsc::Receiver<Vec<u8>>,
     transport_id: TransportId,
     remote_addr: TransportAddr,
@@ -224,7 +249,13 @@ pub(crate) async fn proxied_send_loop<S: ProxiedStats, M>(
     label: &'static str,
     on_remove: impl Fn(&S, &M) + Send + 'static,
 ) {
-    while let Some(frame) = frames.recv().await {
+    loop {
+        let frame = tokio::select! {
+            biased;
+            Some(frame) = paths.recv() => frame,
+            Some(frame) = frames.recv() => frame,
+            else => break,
+        };
         match writer.write_all(&frame).await {
             Ok(()) => {
                 stats.record_send(frame.len());
@@ -467,6 +498,7 @@ mod tests {
     fn successor() -> ProxiedConnection<()> {
         ProxiedConnection {
             send_tx: mpsc::channel(1).0,
+            path_tx: mpsc::channel(1).0,
             send_task: tokio::spawn(async {}),
             recv_task: tokio::spawn(async {}),
             mtu: 1234,
@@ -496,8 +528,10 @@ mod tests {
         pool.lock().await.insert(remote.clone(), successor());
 
         let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_DEPTH);
+        let (_path_tx, path_rx) = mpsc::channel(PATH_QUEUE_DEPTH);
         let writer = tokio::spawn(proxied_send_loop(
             write_half,
+            path_rx,
             send_rx,
             TransportId::new(1),
             remote.clone(),
@@ -556,9 +590,11 @@ mod tests {
         let pool: ProxiedPool<()> = Arc::new(Mutex::new(HashMap::new()));
         let stats = Arc::new(CountingStats::default());
         let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_DEPTH);
+        let (path_tx, path_rx) = mpsc::channel(PATH_QUEUE_DEPTH);
         let id = next_conn_id();
         let send_task = tokio::spawn(proxied_send_loop(
             write_half,
+            path_rx,
             send_rx,
             TransportId::new(1),
             remote.clone(),
@@ -593,6 +629,7 @@ mod tests {
             remote.clone(),
             ProxiedConnection {
                 send_tx,
+                path_tx,
                 send_task,
                 recv_task,
                 mtu: 1400,

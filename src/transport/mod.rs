@@ -15,6 +15,12 @@ pub mod udp;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod ethernet;
 
+/// The medium of an interface-bound transport's interface, wired or
+/// wireless, as the operating system reports it. Gated with the one
+/// transport that binds an interface today.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod medium;
+
 /// Kernel link-event notifications, shared by any transport or detector that
 /// needs to react to interface state without polling for it.
 ///
@@ -842,6 +848,27 @@ pub enum ConnectionState {
 }
 
 // ============================================================================
+// Send Lanes
+// ============================================================================
+
+/// Which of a connection's send queues a frame joins.
+///
+/// A transport that queues frames for a writer task keeps path messages
+/// (probes, acks and closes) apart from everything else, so a queue full of
+/// the node's own data cannot refuse them, and its writer sends them first.
+/// The node marks the lane where it knows a frame is a path message; a
+/// transport cannot tell from the ciphertext. Transports that send at once,
+/// with no queue of their own, ignore it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lane {
+    /// Data and every other link message.
+    #[default]
+    Data,
+    /// Path messages: probes, acks and closes.
+    Path,
+}
+
+// ============================================================================
 // Transport Congestion
 // ============================================================================
 
@@ -989,15 +1016,26 @@ impl TransportHandle {
         addr: &TransportAddr,
         data: &[u8],
     ) -> Result<usize, TransportError> {
+        self.send_lane(Lane::Data, addr, data).await
+    }
+
+    /// [`send_existing`](Self::send_existing) on the connection's send
+    /// queue for `lane`.
+    pub async fn send_lane(
+        &self,
+        lane: Lane,
+        addr: &TransportAddr,
+        data: &[u8],
+    ) -> Result<usize, TransportError> {
         match self {
             TransportHandle::Udp(t) => t.send_async(addr, data).await,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             TransportHandle::Ethernet(t) => t.send_async(addr, data).await,
-            TransportHandle::Tcp(t) => t.send_existing(addr, data).await,
-            TransportHandle::Tor(t) => t.send_existing(addr, data).await,
-            TransportHandle::Nym(t) => t.send_existing(addr, data).await,
+            TransportHandle::Tcp(t) => t.send_lane(lane, addr, data).await,
+            TransportHandle::Tor(t) => t.send_lane(lane, addr, data).await,
+            TransportHandle::Nym(t) => t.send_lane(lane, addr, data).await,
             #[cfg(ble_available)]
-            TransportHandle::Ble(t) => t.send_async(addr, data).await,
+            TransportHandle::Ble(t) => t.send_lane(lane, addr, data).await,
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.send_async(addr, data).await,
         }
@@ -1066,6 +1104,27 @@ impl TransportHandle {
             TransportHandle::Ble(_) => None,
             #[cfg(test)]
             TransportHandle::Loopback(_) => None,
+        }
+    }
+
+    /// The medium this transport runs over, as a link's path machine ranks
+    /// paths by it: what an interface-bound transport read from its
+    /// interface when it last bound it, `Ble` for a BLE binding, and
+    /// `Unknown` for UDP, TCP, Tor and Nym, whose paths may leave by any
+    /// interface. Read from stored state, never from the operating system.
+    pub fn medium(&self) -> fips_core::proto::path::Medium {
+        use fips_core::proto::path::Medium;
+        match self {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(t) => t.medium(),
+            #[cfg(ble_available)]
+            TransportHandle::Ble(_) => Medium::Ble,
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.medium(),
+            TransportHandle::Udp(_)
+            | TransportHandle::Tcp(_)
+            | TransportHandle::Tor(_)
+            | TransportHandle::Nym(_) => Medium::Unknown,
         }
     }
 

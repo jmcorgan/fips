@@ -737,7 +737,8 @@ impl Machines {
                 | PathOutput::Refused { .. }
                 | PathOutput::Switched { .. }
                 | PathOutput::Orphaned
-                | PathOutput::Connect { .. } => {}
+                | PathOutput::Connect { .. }
+                | PathOutput::Proven { .. } => {}
             }
         }
         out.into_iter().map(Event::Path).collect()

@@ -34,8 +34,10 @@ async fn channel(
     let (near, far) = MockBleStream::pair(near_addr, far_addr.clone(), 2048);
     let stream = Arc::new(near);
     let (send_tx, send_rx) = tokio::sync::mpsc::channel(pool::SEND_QUEUE_DEPTH);
+    let (path_tx, path_rx) = tokio::sync::mpsc::channel(pool::PATH_QUEUE_DEPTH);
     let send_task = tokio::spawn(send_loop(
         Arc::clone(&stream),
+        path_rx,
         send_rx,
         at(),
         id,
@@ -46,6 +48,7 @@ async fn channel(
     let conn = BleConnection {
         stream,
         send_tx: send_tx.clone(),
+        path_tx,
         send_task: Some(send_task),
         recv_task: None,
         send_mtu: 2048,

@@ -182,12 +182,13 @@ def _analyze_lines(result: AnalysisResult, source: str, log_text: str):
         # whose key is not yet known. The line names no peer.
         if "Anonymous discovery connection initiated" in line:
             result.anon_dials.append((source, line))
-        # The path machine's state changes, the path messages it sent, its
-        # moves to a new address and its switches, in log order, for the
-        # per-path timelines.
+        # The path machine's state changes, the path messages it sent and
+        # took in, its moves to a new address and its switches, in log order,
+        # for the per-path timelines.
         if (
             "Path state changed" in line
             or "Path message sent" in line
+            or "Path message received" in line
             or "Path moved to a new address" in line
             or "Path switched" in line
         ):

@@ -497,7 +497,8 @@ fn mirrored<D>(
         | path::Output::NotCapable
         | path::Output::Refused { .. }
         | path::Output::Send { .. }
-        | path::Output::Connect { .. } => None,
+        | path::Output::Connect { .. }
+        | path::Output::Proven { .. } => None,
     }
 }
 

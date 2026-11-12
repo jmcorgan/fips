@@ -143,12 +143,30 @@ Probing entry at most, and that never carries data. Once a link has two
 paths, a path's address moves only on its own authenticated probe or
 matching ack, from a pair no other path holds.
 
-Probes on a Probing or Dead path are padded to the link MTU, so a path that
-carries small frames and drops large ones does not prove itself. Padding is
-a local choice. Since each end's link MTU is its own, a padded probe that
-goes unanswered is followed by the smallest size, and then the two
-alternate, so a path to a peer with a smaller MTU still proves itself. An
-ack is padded to the smaller of the probe and the answerer's own link MTU.
+Probes on a Probing or Dead path start padded to the link MTU, so a path
+that carries small frames and drops large ones does not prove itself at
+that size. Padding is a local choice. A padded probe that goes unanswered
+is followed by a short ladder of sizes, three quarters and half of the
+padded size and then the smallest, and the first size answered is the size
+the path is proven to carry. Since each end's link MTU is its own, a path
+to a peer with a smaller MTU, or across a hop narrower than both, still
+proves itself, at the size it carries; one that carries only the smallest
+size proves no size. On a connectionless transport a Live path proven
+below its link MTU searches upward with padded probes whose loss counts
+neither as a miss nor in its ETX. An ack is padded to the smaller of the
+probe and the answerer's own link MTU.
+
+On a connectionless transport the node takes the smaller of a path's link
+MTU and the size the path is proven to carry in three places: the peer's
+path MTU entry, which the TUN reader and the TCP clamp read, seeded at
+link setup, at a switch and whenever the active path's proven size
+changes, up or down; the MTU folded into session datagrams and lookup
+responses sent through the peer; and whether the path carries a
+`FilterAnnounce`. The top of the ladder and of the search stays the link
+MTU. A path on a connection-oriented transport is judged by its link MTU
+alone, since no search runs there to undo a step down the ladder that a
+lost probe caused, so a smaller size proven on a stream may say only that
+one probe was lost.
 
 On a connection-oriented transport the node opens a connection to a
 candidate before probing it. When a path goes, the node closes that
@@ -165,14 +183,40 @@ answered but do not decide this node's view.
   and every second otherwise.
 - **Suspect:** three probes in a row unanswered. Probed at the same cadence.
 - **Dead:** ten more unanswered, or given up. An acked path is probed from
-  one second, doubling to 30 seconds. A path never acked is not probed.
+  one second, doubling to 30 seconds. The path that carried the link when
+  it went silent is probed every second until 30 seconds after it went
+  silent, and doubles from there, so after a silent outage, one that
+  neither end sees as a carrier change, it is found again within about a
+  second of the outage's end. On a connection-oriented transport those
+  probes go at the size the path proved, so none closes the connection.
+  A path never acked is not probed.
 
-A probe goes unanswered at the larger of 400 ms and three round trips. A
-late answer gives a round-trip sample and nothing else: it does not revive
-a path or end a backoff. The standby interval is fixed; it does not stretch
+A probe goes unanswered at the largest of 400 ms, three times the latest
+round trip, and three times the largest round trip in the path's window,
+that last term capped at 3 s. A probe whose time passes after the peer's
+session datagrams have arrived on the path since it went is judged only 3 s
+after it went: under load the probes wait behind the data in the send queue,
+and the peer's traffic still arriving shows the path carries it. The peer's
+probes, heartbeats and reports do not count, so on an idle link a failure in
+this node's own direction is still found in about a second; under load it
+takes up to the cap, or three times the latest round trip where that is
+longer. A late answer gives a round-trip sample and nothing else: it does
+not revive a path or end a backoff. The standby interval is fixed; it does not stretch
 with a path's round trip. A link whose one path is Live is not probed,
 because the FMP heartbeat already covers it and there is nowhere to move
 to.
+
+A transport that queues frames for a writer task, as BLE, TCP, Tor and Nym
+do, keeps path messages in a queue of their own beside each connection's
+data queue, and its writer sends them first. A data queue full of the
+node's own traffic therefore neither refuses a probe nor holds it behind
+the data, so a loaded path is not read as failing for that reason alone.
+The path queue is bounded, holding eight messages, the probes a path keeps
+outstanding. A connection that has stopped draining still refuses its
+probes, they go unanswered, and the path fails as any other would. A
+refused probe counts as unanswered, as before. The node marks a frame as a
+path message where it builds one; the transport sees only ciphertext.
+Transports that send at once, with no queue of their own, are unaffected.
 
 The other inputs are faster than timeouts where the node has them. On
 interface-bound transports the node reads carrier for the links of more
@@ -222,21 +266,89 @@ it is done. This node ranks them in order:
 2. Then the tier of the transport's `role`. A `backup` path ranks below a
    `normal` or `preferred` one, and a path held on a transport since set to
    `never` ranks below them all.
-3. Within the top tier present, a path whose link MTU carries a
-   `FilterAnnounce` is taken over one whose MTU does not, whatever their
+3. Within the top tier present, a path that carries a `FilterAnnounce`,
+   by its link MTU or, on a connectionless transport, the smaller size it
+   is proven to carry, is taken over one that does not, whatever their
    scores.
 4. Among those, a `preferred` path is taken over a better-scoring one while
    its score is within the switch margin of the best.
-5. Otherwise the best score, where a path is scored only once it has
-   `node.path.min_samples` round trips.
+5. Then, among the scored paths within the switch margin of the best score,
+   preferred ones only when step 4 took one, a path on a faster known
+   medium: a cable before a wireless network, and a wireless network before
+   BLE. A move to a faster medium waits for the dwell like any other
+   discretionary move. A path whose medium the node does not know is
+   ranked by step 6 alone.
+6. Otherwise the best score, where a path is scored only once it has
+   `node.path.min_samples` round trips. A move on score away from the
+   active path is held while the active path is the faster of the two at
+   its best over the last 60 seconds, unless the other path also beats the
+   score the active path had at that best. A return to the path a failure
+   moved the link off needs no margin: once it is Live again, a better
+   score is enough.
 
 A path's score is the quality index the spanning tree costs a link by: ETX
 times one plus the least round trip over 100 ms, lower being better. A
 discretionary move needs another path to beat the active one by the margin
 (1.3) for the dwell (2 seconds), so two similar paths do not swap. Whole
 millisecond round trips on a LAN put a cable and Wi-Fi inside that margin,
-which is what `role: preferred` is for: without it the handshake race, not
-the operator, decides which of the two carries traffic.
+so round trip alone leaves the link on whichever path the handshake race
+gave it, and the medium decides between them instead.
+
+**The medium of a path** is that of its local transport, as the node reads
+it. An interface-bound transport reads its interface's medium when it
+binds the interface, at start and again after the interface changes, never
+on the send path. On Linux an interface with a `wireless` directory, a
+`phy80211` link or `DEVTYPE=wlan` under `/sys/class/net/<interface>` is
+wireless, and an Ethernet-framed interface backed by hardware that names
+no device type is wired. On macOS the node reads the interface's media
+type (`SIOCGIFMEDIA`), 802.11 or Ethernet; that read has not yet run on a
+Mac, and if Apple's Wi-Fi driver reports Ethernet there, Wi-Fi reads as
+wired and the score decides between the two as before. A bridge, a VLAN, a
+veth, a tunnel or anything else these facts do not settle is unknown,
+since what lies under it may be a radio. A BLE binding is BLE. UDP and TCP
+paths are unknown: where a cable and Wi-Fi share a subnet, as on most home
+LANs, the paths to a peer's two addresses leave by the same interface, so
+a route lookup could not tell them apart. For them, and for any transport
+that does not report a medium, `role: preferred` remains the way to put
+one path ahead of another within the margin.
+
+**Load on the active path does not move the link.** The least round trip
+in a score is taken over the last 32 samples, about 6.4 seconds on the
+active path, so a queue that the link's own traffic builds lifts the active
+path's score within seconds while an idle standby keeps its own. Moving on
+that alone hands the link to a path that is slower at its best; the traffic
+follows it, the standby's score rises, the old path's falls, and the link
+moves back, reordering the frames in flight each time. So each path also
+keeps its least round trip over a longer horizon (60 seconds), and a move
+on score away from the active path waits while the active path is the
+faster of the two over that horizon, unless the other path also beats the
+active path's score at its best. A load that lasts the whole horizon can
+still move the link, once per horizon. A move on score to a path that is
+faster at its best is not held, so the return to the fast path after an
+outage under load keeps its timing, except a move off a path on a faster
+known medium that is within the margin of the other at their best, a
+loaded cable beside Wi-Fi: the cable's medium would take the link back one
+dwell later, so that move waits out the horizon too. A move to a faster
+known medium waits the same way while the path it would take scores
+outside the margin of the active path's score over the horizon. Idle, the
+active path's two scores agree and a cable within the margin of Wi-Fi
+takes the link after the dwell; but load on Wi-Fi that is faster at its
+best than a cable outside the margin of it would rank the cable first
+within seconds, and the Wi-Fi would take the link back once the load
+followed. Failure, the pin, the tier, the `FilterAnnounce` size and
+`role: preferred` move the link as before. The cost is that a path whose
+base round trip really rises, after a route change for example, keeps the
+link for up to the horizon unless it fails.
+
+**The return after a failure needs no margin.** When the active path fails
+and the link moves to a slower one, the traffic follows it, but the slower
+path's score still comes from the round trips it measured idle until its
+own loaded ones fill its window, about 6.4 seconds. Held to the margin, the
+return to the recovered path waited out that window, over 7 seconds after a
+2 second outage under load. So once the path the failure left is Live
+again, the link returns to it as soon as it scores better than the path
+taken, by any amount, for the dwell. Only that path is exempt, and only
+until the link changes path again; any other move still needs the margin.
 
 ## The link's cost and the tree
 
@@ -324,10 +436,14 @@ Beyond that, each path has a **kind**, local or Internet. Ethernet, BLE and
 serial are local; Tor and Nym are Internet. UDP and TCP take the kind of the
 peer's address: loopback, link-local, RFC 1918 and ULA addresses are local,
 and everything else is Internet, `100.64.0.0/10` included. By default a link
-keeps to its original path's kind, which stops a LAN peering from quietly
-moving onto the Internet. `node.path.mix_kinds` allows both in one link, and
-a transport's `kind` overrides what the address implies: a VPN on RFC 1918
-space needs `kind: internet`, or it reads as local.
+may hold paths of both kinds (`node.path.mix_kinds: true`), so a link that
+came up over BLE or the LAN can move onto the peer's Internet address, as a
+phone leaving home does, with no new handshake. That peering then becomes
+visible to parties on the Internet path. Setting `mix_kinds: false` at either
+end keeps a link to its original path's kind, so a LAN peering never moves
+onto the Internet: a node with it off neither probes nor admits a path of the
+other kind. A transport's `kind` overrides what the address implies: a VPN on
+RFC 1918 space needs `kind: internet`, or it reads as local.
 
 ## Watching it
 

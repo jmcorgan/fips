@@ -196,8 +196,23 @@ pub struct MockBleStream {
 impl MockBleStream {
     /// Create a linked pair of mock streams simulating an L2CAP connection.
     pub fn pair(addr_a: BleAddr, addr_b: BleAddr, mtu: u16) -> (Self, Self) {
-        let (tx_a, rx_a) = tokio::sync::mpsc::channel(64);
-        let (tx_b, rx_b) = tokio::sync::mpsc::channel(64);
+        Self::pair_with_depths(addr_a, addr_b, mtu, 64, 64)
+    }
+
+    /// [`Self::pair`] with the depth of each direction's channel given:
+    /// `a_to_b` frames from the first stream to the second, `b_to_a` back.
+    /// With a depth of one, a writer's `send` waits until whatever reads
+    /// the far end has taken the frame before, as a radio's send waits for
+    /// the link, so a test can pace the far end at a link's rate.
+    pub fn pair_with_depths(
+        addr_a: BleAddr,
+        addr_b: BleAddr,
+        mtu: u16,
+        a_to_b: usize,
+        b_to_a: usize,
+    ) -> (Self, Self) {
+        let (tx_a, rx_a) = tokio::sync::mpsc::channel(a_to_b);
+        let (tx_b, rx_b) = tokio::sync::mpsc::channel(b_to_a);
         let stream_a = Self {
             addr: addr_b.clone(),
             send_mtu: mtu,
