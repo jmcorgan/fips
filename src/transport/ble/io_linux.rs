@@ -37,6 +37,64 @@ pub const PSM_SERVICE_DATA_UUID: bluer::Uuid = bluer::Uuid::from_u128(
     ((psm::PSM_SERVICE_DATA_UUID16 as u128) << 96) | 0x0000_0000_0000_1000_8000_0080_5F9B_34FB,
 );
 
+/// The state BlueZ holds for a cached device object, as far as the
+/// scan-start clear needs it.
+///
+/// Filled from the device's `Paired`, `Trusted`, `Connected` and `Blocked`
+/// properties. A property that cannot be read is taken as set, so an object
+/// whose state is unknown is treated as one carrying user state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CachedDevice {
+    paired: bool,
+    trusted: bool,
+    connected: bool,
+    blocked: bool,
+}
+
+impl CachedDevice {
+    /// Read the four properties of the device at `addr` from BlueZ.
+    async fn read(adapter: &bluer::Adapter, addr: bluer::Address) -> Self {
+        let Ok(dev) = adapter.device(addr) else {
+            return Self {
+                paired: true,
+                trusted: true,
+                connected: true,
+                blocked: true,
+            };
+        };
+        Self {
+            paired: dev.is_paired().await.unwrap_or(true),
+            trusted: dev.is_trusted().await.unwrap_or(true),
+            connected: dev.is_connected().await.unwrap_or(true),
+            blocked: dev.is_blocked().await.unwrap_or(true),
+        }
+    }
+}
+
+/// Whether scan start removes this cached device object from BlueZ.
+///
+/// `RemoveDevice` deletes the object together with any pairing keys, trust
+/// setting or block it holds, and tears down a live connection. So only an
+/// object with none of those is removed. Such an object holds nothing the
+/// user set, and BlueZ re-creates it from the device's next advert, so
+/// removing it is harmless whether or not it is a FIPS peer.
+fn clear_at_scan_start(dev: &CachedDevice) -> bool {
+    !dev.paired && !dev.trusted && !dev.connected && !dev.blocked
+}
+
+/// The LE address type to dial a peer at, given what BlueZ reports for it.
+///
+/// BlueZ keeps a device object for every scanned advert and every connected
+/// device, carrying the address type it saw. A peer it knows as random is
+/// dialled as random. Anything else, including a peer with no object (a
+/// statically configured address) or a failed read, is dialled as public.
+fn dial_addr_type(reported: Option<AddressType>) -> AddressType {
+    match reported {
+        Some(AddressType::LeRandom) => AddressType::LeRandom,
+        _ => AddressType::LePublic,
+    }
+}
+
 /// Map a bluer error to a TransportError.
 fn map_err(context: &str, e: bluer::Error) -> TransportError {
     TransportError::Io(std::io::Error::other(format!("{}: {}", context, e)))
@@ -292,7 +350,12 @@ impl BleIo for BluerIo {
     }
 
     async fn connect(&self, addr: &BleAddr, psm: u16) -> Result<Self::Stream, TransportError> {
-        let target_sa = addr.to_socket_addr(psm);
+        let reported = match self.adapter.device(addr.to_bluer_address()) {
+            Ok(device) => device.address_type().await.ok(),
+            Err(_) => None,
+        };
+        let kind = dial_addr_type(reported);
+        let target_sa = SocketAddr::new(addr.to_bluer_address(), kind, psm);
 
         let socket =
             Socket::<SeqPacket>::new_seq_packet().map_err(|e| map_io_err("new_seq_packet", e))?;
@@ -377,15 +440,22 @@ impl BleIo for BluerIo {
     }
 
     async fn start_scanning(&self) -> Result<Self::Scanner, TransportError> {
-        // Clear cached devices so BlueZ fires DeviceAdded for every
-        // advertisement. Without this, already-known devices only
-        // produce PropertyChanged events (which bluer doesn't expose
-        // at the device level), causing the scanner to miss peers
-        // after a daemon restart.
+        // Clear cached device objects that hold no user state, so BlueZ
+        // fires DeviceAdded for their next advertisement. Without this, an
+        // already-known device only produces PropertyChanged events (which
+        // bluer doesn't expose at the device level), and the scanner misses
+        // the peer after a daemon restart. A paired, trusted, blocked or
+        // connected device is kept, because RemoveDevice would delete its
+        // pairing keys and settings or drop its connection; discover_devices
+        // still reports it once as DeviceAdded when the stream starts.
         if let Ok(cached) = self.adapter.device_addresses().await {
-            let count = cached.len();
+            let mut count = 0usize;
             for addr in cached {
-                let _ = self.adapter.remove_device(addr).await;
+                let state = CachedDevice::read(&self.adapter, addr).await;
+                if clear_at_scan_start(&state) {
+                    let _ = self.adapter.remove_device(addr).await;
+                    count += 1;
+                }
             }
             if count > 0 {
                 debug!(count, "BLE scanner: cleared cached devices");
@@ -443,6 +513,10 @@ fn _assert_bluer_io_send_sync() {
     fn require<T: Send + Sync>() {}
     require::<BluerIo>();
 }
+
+#[cfg(test)]
+#[path = "tests/bluez.rs"]
+mod bluez_tests;
 
 #[cfg(test)]
 mod tests {
