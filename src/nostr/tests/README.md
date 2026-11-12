@@ -17,6 +17,12 @@ module itself and two kinds of test file beside it.
 
 Child modules of `mod.rs`:
 
+- `fixtures.rs`: the nostr 0.44 events recorded in `src/nostr/fixtures/v044/`
+  open and parse with today's code (each wrap with its recipient's key, the
+  advert through `parse_overlay_advert_event`, the inbox list through
+  `inbox_relays`), and today's event builders, run again at the capture
+  time, still emit what they hold. It also holds the ignored generator that
+  writes those files.
 - `notify_channels.rs`: the notify loop in `runtime.rs` logs a lag on
   either of its two channels and reads on, and ends only when a channel
   closes.

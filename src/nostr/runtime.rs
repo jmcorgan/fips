@@ -1296,18 +1296,13 @@ impl NostrRendezvous {
             PublishPlan::Publish(advert) => advert,
         };
 
-        let expires_at = now_ms() + self.config.advert_ttl_secs * 1000;
-        let tags = vec![
-            Tag::identifier(ADVERT_IDENTIFIER.to_string()),
-            Tag::custom(TagKind::custom("protocol"), [self.config.app.clone()]),
-            Tag::custom(TagKind::custom("version"), [PROTOCOL_VERSION.to_string()]),
-            Tag::expiration(Timestamp::from((expires_at / 1000).max(1))),
-        ];
-
-        let event = EventBuilder::new(Kind::Custom(ADVERT_KIND), serde_json::to_string(&advert)?)
-            .tags(tags)
-            .sign_with_keys(&self.keys)
-            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
+        let event = advert_event(
+            &self.keys,
+            &advert,
+            &self.config.app,
+            self.config.advert_ttl_secs,
+            now_ms(),
+        )?;
         self.client
             .send_event_to(self.config.advert_relays.clone(), &event)
             .await
@@ -1941,7 +1936,7 @@ impl NostrRendezvous {
         Ok(self.config.dm_relays.clone())
     }
 
-    fn parse_overlay_advert_event(
+    pub(super) fn parse_overlay_advert_event(
         event: &Event,
         expected_app: &str,
     ) -> Result<OverlayAdvert, BootstrapError> {
@@ -2114,13 +2109,12 @@ impl NostrRendezvous {
         receiver: PublicKey,
         payload: &T,
     ) -> Result<Event, BootstrapError> {
-        let rumor = EventBuilder::private_msg_rumor(receiver, serde_json::to_string(payload)?)
-            .build(self.pubkey);
-        let signal = build_signal_event(
+        let signal = signal_event(
             &self.keys,
             receiver,
-            rumor,
-            Timestamp::from((now_ms() + self.config.signal_ttl_secs * 1000) / 1000),
+            payload,
+            self.config.signal_ttl_secs,
+            now_ms(),
         )
         .await?;
         self.client
@@ -2134,6 +2128,51 @@ impl NostrRendezvous {
             .push(serde_json::to_string(payload)?);
         Ok(signal)
     }
+}
+
+/// Build our kind 37195 advert carrying `advert`, signed with `keys`: the
+/// identifier, `app` as its protocol, the protocol version, and an
+/// expiration `ttl_secs` after `now_ms`.
+pub(super) fn advert_event(
+    keys: &nostr::Keys,
+    advert: &OverlayAdvert,
+    app: &str,
+    ttl_secs: u64,
+    now_ms: u64,
+) -> Result<Event, BootstrapError> {
+    let expires_at = now_ms + ttl_secs * 1000;
+    let tags = vec![
+        Tag::identifier(ADVERT_IDENTIFIER.to_string()),
+        Tag::custom(TagKind::custom("protocol"), [app.to_string()]),
+        Tag::custom(TagKind::custom("version"), [PROTOCOL_VERSION.to_string()]),
+        Tag::expiration(Timestamp::from((expires_at / 1000).max(1))),
+    ];
+
+    EventBuilder::new(Kind::Custom(ADVERT_KIND), serde_json::to_string(advert)?)
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|e| BootstrapError::Nostr(e.to_string()))
+}
+
+/// Build a traversal signal carrying `payload` from `keys` to `receiver`: a
+/// private message rumor, sealed and gift-wrapped, expiring `ttl_secs` after
+/// `now_ms`.
+pub(super) async fn signal_event<T: Serialize>(
+    keys: &nostr::Keys,
+    receiver: PublicKey,
+    payload: &T,
+    ttl_secs: u64,
+    now_ms: u64,
+) -> Result<Event, BootstrapError> {
+    let rumor = EventBuilder::private_msg_rumor(receiver, serde_json::to_string(payload)?)
+        .build(keys.public_key());
+    build_signal_event(
+        keys,
+        receiver,
+        rumor,
+        Timestamp::from((now_ms + ttl_secs * 1000) / 1000),
+    )
+    .await
 }
 
 /// Build our kind 10050 inbox relay list: one `["r", url]` tag per relay that
@@ -2244,7 +2283,16 @@ impl NostrRendezvous {
 
     /// As [`Self::new_for_test`], with `config` in place of the default.
     pub(crate) fn new_for_test_with_config(config: NostrRendezvousConfig) -> Self {
-        let keys = nostr::Keys::generate();
+        Self::new_for_test_with_secret_key(config, nostr::SecretKey::generate())
+    }
+
+    /// As [`Self::new_for_test_with_config`], signing as `secret_key` rather
+    /// than a fresh key, for tests that need fixed keys.
+    pub(crate) fn new_for_test_with_secret_key(
+        config: NostrRendezvousConfig,
+        secret_key: nostr::SecretKey,
+    ) -> Self {
+        let keys = nostr::Keys::new(secret_key);
         let pubkey = keys.public_key();
         let npub = pubkey.to_bech32().expect("bech32 encode");
         let (client, policy, signals) = relay_client(&keys);

@@ -1,0 +1,4 @@
+{
+  "captureUnixMs": 1794442438864,
+  "event": {"id":"c8e1b4dd4a1d5772a2aa36ab606b58f1bc9248857b375f46aa01a229b9765e63","pubkey":"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9","created_at":1794442438,"kind":37195,"tags":[["d","fips-overlay-v1"],["protocol","fips-overlay-v1"],["version","1"],["expiration","1794446038"]],"content":"{\"identifier\":\"fips-overlay-v1\",\"version\":1,\"endpoints\":[{\"transport\":\"udp\",\"addr\":\"nat\"},{\"transport\":\"tcp\",\"addr\":\"fips.example.com:8443\"}],\"signalRelays\":[\"wss://relay.damus.io\",\"wss://nos.lol\"],\"stunServers\":[\"stun:stun.l.google.com:19302\"]}","sig":"8ad3a585356a5ce073fea18c1c9b396c9a4250f36ff94968ed2b987e1e518bcd96094dc8e639bebc09ba557bdde2d385133992b5afefc8c035b61175063c6ffc"}
+}
