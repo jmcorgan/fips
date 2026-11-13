@@ -80,6 +80,25 @@ fn a_route_get_message_has_no_gateway() {
 }
 
 #[test]
+fn a_reply_to_an_earlier_route_lookup_is_not_taken_for_a_later_one() {
+    let earlier = next_get_seq();
+    let later = next_get_seq();
+    assert_ne!(earlier, later);
+    // SAFETY: getpid(2) cannot fail.
+    let pid = unsafe { libc::getpid() };
+    // SAFETY: `RtMsghdr` is plain data; all-zero is a valid value.
+    let mut reply: RtMsghdr = unsafe { zeroed() };
+    reply.rtm_type = libc::RTM_GET as u8;
+    reply.rtm_pid = pid;
+    reply.rtm_seq = earlier;
+    assert!(is_get_reply(&reply, pid, earlier));
+    assert!(!is_get_reply(&reply, pid, later));
+    assert!(!is_get_reply(&reply, pid + 1, earlier));
+    reply.rtm_type = libc::RTM_ADD as u8;
+    assert!(!is_get_reply(&reply, pid, earlier));
+}
+
+#[test]
 fn an_unknown_sysctl_name_fails_with_enoent() {
     let err = sysctl_int("fips.no.such.name").unwrap_err();
     eprintln!("unknown sysctl: {err}");
@@ -252,6 +271,32 @@ fn a_route_present_through_another_interface_is_refused_and_left_in_place() {
         "{err}"
     );
     assert_eq!(route_interface(dst, len).unwrap(), Some(other));
+}
+
+/// A lookup that finds no route leaves the kernel's reply on its way to
+/// every routing socket, and on FreeBSD it can reach the socket of the next
+/// lookup. That lookup must still read its own reply: while every request
+/// carried the same sequence number, it could read the earlier one's
+/// `ESRCH` instead and report no route, which on FreeBSD this test met
+/// within its first few pairs.
+#[test]
+#[ignore = "needs root: adds and deletes a route"]
+fn a_lookup_right_after_one_that_found_no_route_reads_its_own_reply() {
+    let (dst, len) = TEST_PREFIX;
+    let absent = Ipv6Addr::new(0x2001, 0xdb8, 0xf1b6, 0, 0, 0, 0, 0);
+    let _ = delete_route(dst, len);
+    let _ = delete_route(absent, len);
+    let _guard = RouteGuard;
+    let lo = loopback_index();
+    assert_eq!(add_route(dst, len, lo).unwrap(), RouteAdd::Added);
+    for round in 0..500 {
+        assert_eq!(route_interface(absent, len).unwrap(), None, "round {round}");
+        assert_eq!(
+            route_interface(dst, len).unwrap(),
+            Some(lo),
+            "round {round}"
+        );
+    }
 }
 
 #[test]
