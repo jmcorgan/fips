@@ -11,6 +11,11 @@ source file already has a `mod tests` block, so the names would clash.
 - `recall.rs`: tests for `recall.rs`, the probe loop's bounded memory of
   link addresses: the bound on non-live addresses, eviction order, the age
   limit, and that live addresses are never dropped.
+- `retry.rs`: tests for the scan and probe loop's retry tick in `mod.rs`:
+  that it ages out of the probe memory an address that is neither pooled
+  nor in the retry book once it has gone unseen for the age limit, and
+  keeps the address of a pooled link. Declared from `mod.rs` as
+  `mod retry_tests`.
 - `bluez.rs`: tests for the scan-start and dial-address decisions of the
   BlueZ backend in `io_linux.rs`: which cached device objects scan start
   removes, and which LE address type a dial uses. Declared from

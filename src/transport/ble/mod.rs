@@ -1925,6 +1925,10 @@ async fn scan_probe_loop<I: io::BleIo>(
 // ============================================================================
 
 #[cfg(test)]
+#[path = "tests/retry.rs"]
+mod retry_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::framing::build_established_frame;
