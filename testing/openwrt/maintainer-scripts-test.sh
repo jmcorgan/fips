@@ -124,13 +124,13 @@ if [[ $rc -ne 0 && $rc -ne 1 ]]; then
 fi
 worst=$rc
 
-# FW_SETUP, FW_MESH_SETUP and FW_SNIPPETS pass through from the caller when
-# set, to run the firewall scenarios against another setup script or mesh
-# helper, or without the snippets.
+# FW_SETUP, FW_MESH_SETUP, FW_FIPS_YAML and FW_SNIPPETS pass through from the
+# caller when set, to run the firewall scenarios against another setup script,
+# mesh helper or fips.yaml, or without the snippets.
 for spec in "${FW_IMAGES[@]}"; do
     image="${spec%%|*}"
     cases="${spec#*|}"
-    fw_env=(-e FW_SETUP -e FW_MESH_SETUP -e FW_SNIPPETS)
+    fw_env=(-e FW_SETUP -e FW_MESH_SETUP -e FW_FIPS_YAML -e FW_SNIPPETS)
     if [[ -n "$cases" ]]; then
         fw_env+=(-e "FW_CASES=$cases")
     else
