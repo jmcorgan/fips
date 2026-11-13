@@ -256,6 +256,15 @@ jobs:
       # the Linux test job runs them.
       - name: Clippy the no_std core's slow test suites
         run: cargo clippy -p fips-core --all-targets --features slow-tests -- -D warnings
+      # The core's API documentation, with rustdoc's warnings denied, so a
+      # broken intra-doc link or a malformed doc comment fails the job rather
+      # than leaving `cargo doc` to warn. Mirrored in testing/ci-local.sh;
+      # check-ci-parity.sh compares integration suites only and would not
+      # catch a step added to one runner and not the other.
+      - name: Document the no_std core with rustdoc warnings denied
+        run: cargo doc -p fips-core --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
       - name: Build with the tick-body profiler enabled
         run: cargo build --workspace --features profiling
 
