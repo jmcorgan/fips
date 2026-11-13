@@ -602,6 +602,7 @@ GUARDS=(
     "run_base_pins base-pins"
     "run_comment_refs comment-refs"
     "run_ignored_tests ignored-tests"
+    "run_carried carried"
     "run_portable_atomics portable-atomics"
     "run_mount_tmpdir mount-tmpdir"
     "run_ci_labels ci-labels"
@@ -3292,6 +3293,19 @@ run_ignored_tests() {
     info "[ignored-tests] Checking every ignored test against its inventory"
     python3 "$SCRIPT_DIR/check-ignored-tests.py" || rc=$?
     record "ignored-tests" "$rc"
+    return 0
+}
+
+# Every test, mutation-lane switch and known-defect entry of the master commit
+# last merged into this line must be here or listed in
+# testing/left-off-next.txt with a class, and every entry must still be true. A
+# merge can drop a test without anything going red; this is what notices.
+# Static, a few seconds. Not mirrored in ci.yml: see its header.
+run_carried() {
+    local rc=0
+    info "[carried] Checking that what the merged master has is here or listed as left off"
+    python3 "$SCRIPT_DIR/check-carried.py" || rc=$?
+    record "carried" "$rc"
     return 0
 }
 

@@ -38,6 +38,16 @@
 #                    stage because it builds and tests on real macOS, Windows
 #                    and FreeBSD runners. It is a build stage, not an
 #                    integration suite, so nothing below compares it.
+#   carried        — testing/check-carried.py, a static guard on this line,
+#                    run by ci-local.sh's run_carried and by no ci.yml step.
+#                    It reads the master commit last merged as the second
+#                    parent of the newest merge on HEAD's first-parent line;
+#                    GitHub's shallow checkout holds no merge, and a
+#                    pull_request checkout is a merge with the pull request's
+#                    head as its second parent, so it would read the wrong
+#                    commit. It is not a suite, so the suite comparison
+#                    leaves it out, and the step comparison lists it among
+#                    the local-only stages.
 #
 # What is compared, and at what granularity:
 #   chaos          — per scenario, plus its flags. GitHub fans each scenario
@@ -97,7 +107,8 @@
 #                    GitHub only (testing/root-tests/privileged.sh says why).
 #   Local-only stages — cross-check-*: zig compiles of the macOS, Windows
 #                    and FreeBSD targets, which GitHub builds on their own
-#                    runners.
+#                    runners. carried: the carried-test guard, which needs
+#                    the full history GitHub's checkout lacks (above).
 #
 # ── What each step runs ──
 # A name says nothing about a command, so each mapped step must also contain
@@ -515,6 +526,7 @@ GITHUB_ONLY_STEPS = {
         "ubuntu-latest the .deb build (deb-build) is the release build",
 }
 LOCAL_ONLY = {"cross-check-*": "zig compiles of targets GitHub builds natively"}
+LOCAL_ONLY["carried"] = "reads the merged master from history GitHub's checkout lacks"
 
 # Per job and step, as keyed in STEPS, what the step's command must contain:
 # each fragment is taken from what ci-local.sh runs for the step's result, so

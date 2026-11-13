@@ -50,6 +50,14 @@ env:
 #                    trunk tip (ci-local.sh --tier 3, NIGHTLY_CHAOS), and
 #                    this workflow has no nightly run.
 #
+# Deliberate local-only static guard: testing/check-carried.py, run by
+# ci-local.sh's run_carried on this line. It reads the master commit last merged
+# as the second parent of the newest merge on HEAD's first-parent line. The
+# ci-parity job's checkout is shallow and holds no merge, and on pull_request
+# the checkout is a merge whose second parent is the pull request's head, not
+# master, so a deeper checkout would still read the wrong commit. The internal
+# builder runs ci-local.sh on a full clone. No step here runs it, on purpose.
+#
 # Deliberate GitHub-only: the arm64 install leg (ubuntu22). The local host is
 # x86_64 and has no arm64 execution; the leg is compared by distribution only
 # and does not stand in for the amd64 leg of the same distribution.

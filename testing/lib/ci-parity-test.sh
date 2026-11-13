@@ -127,6 +127,12 @@ expect_red "the cross-check exception removed" \
     "tier 2 stage cross-check-x86_64-apple-darwin has no GitHub step mapped to it"
 
 fresh && plant testing/check-ci-parity.sh \
+    'LOCAL_ONLY["carried"] = "reads the merged master from history GitHub'"'"'s checkout lacks"' \
+    ''
+expect_red "the carried guard's exception removed" \
+    "tier 2 stage carried has no GitHub step mapped to it"
+
+fresh && plant testing/check-ci-parity.sh \
     '    ("test", "Report tests that passed only on retry"):
         "nextest'"'"'s ci profile retries; the internal builder has no nextest yet",' \
     ''

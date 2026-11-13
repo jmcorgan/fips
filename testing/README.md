@@ -546,6 +546,45 @@ lane, as `PINNED` allows an unmarked line. `FIPS_KNOWN_DEFECT_INVENTORY`
 points the lane at another inventory file, for trying it against an edited
 copy.
 
+### What `next` leaves off (`check-carried.py`)
+
+This line takes `master` by merge, and a merge can drop a test, a switch or
+a known-defect entry without anything going red: the suite stays green
+because the test is no longer there. [`check-carried.py`](check-carried.py),
+a static guard that lives on `next` only, reads the test names, the
+`faults!` switches of `core/src/faults.rs` and the `known-defect` entries of
+`ignored-tests.txt` at the `master` commit last merged, and the same in the
+work tree. It reds on any of them that is neither here nor listed in
+[`left-off-next.txt`](left-off-next.txt), and on an entry that has gone
+stale either way: the item is on `next` now, or gone from that `master`
+commit. A name `master` holds in several files is counted: each copy `next`
+lacks needs an entry naming its file, and a copy that moved to another file
+on `next` still counts as carried. Each entry carries a class: `no-site`
+(the code is not on `next`), `next-rule` (the code is, under `next`'s rule),
+`replaced` with the test that stands for it here, or `open`, which passes,
+is printed on every run, and is settled by the next merge. The check cannot
+say that a reason is true; a merge's review does.
+
+The merged commit is the second parent of the newest merge on `HEAD`'s
+first-parent line, never a branch name: the internal builder's checkout and
+a development checkout with unpushed trunks both have a `master` behind the
+merge. The check prints that commit and the merge's subject. Only test
+files a build reaches are read: it starts at the targets of each package's
+`Cargo.toml` and follows `mod` declarations as rustc resolves them,
+`#[path]` included. A file a merge drops from the module tree by losing its
+`mod` line, left in place, reads as absent, and the check also names any
+tracked file that holds a test and that no declaration reaches. A module
+under `#[cfg(any())]`, such as the real-node explorer here, reads as absent,
+since nothing builds it. Copies are counted rather than matched by path, so a
+copy dropped in one file while another of its name is added elsewhere is not
+seen; a test written by a macro is not seen either; and only tracked files
+are read, so a stray untracked copy cannot pass for a carried test. A crash
+exits 2, never a verdict. It runs in `ci-local.sh`'s static guards and not
+in GitHub CI, whose shallow checkout holds no merge and whose pull-request
+checkout is a merge with the pull request's head, not `master`. Before
+reading the tree it runs a self-test over planted repositories, so a green
+run has also shown it can fail; `--self-test` runs that alone.
+
 ### The mutation lane (`mutations/run.sh`)
 
 [`mutations/`](mutations/) holds breaks that each put back the shape a
