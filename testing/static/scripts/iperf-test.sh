@@ -62,8 +62,19 @@ iperf_test() {
         if output=$(docker exec "fips-${client_node}${FIPS_CI_NAME_SUFFIX:-}" timeout "$IPERF_TIMEOUT" iperf3 -c "${dest_npub}.fips" -t "$DURATION" -P "$PARALLEL" 2>&1); then
             # Check if we got valid results
             if echo "$output" | grep -q "sender"; then
-                # Extract and display results (get SUM line for aggregate bandwidth)
-                local bandwidth=$(echo "$output" | grep "\[SUM\].*sender" | tail -1 | awk '{for(i=1;i<=NF;i++) if($i ~ /bits\/sec/) {print $(i-1), $i; exit}}')
+                # Extract and display results: the [SUM] line for the aggregate
+                # bandwidth. iperf3 prints one only for more than one stream,
+                # so a single stream's own sender line stands in for it.
+                local line bandwidth
+                line=$(echo "$output" | grep "\[SUM\].*sender" | tail -1)
+                [ -n "$line" ] || line=$(echo "$output" | grep "sender" | tail -1)
+                bandwidth=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i ~ /bits\/sec/) {print $(i-1), $i; exit}}')
+                if [ -z "$bandwidth" ]; then
+                    echo "FAIL (no bandwidth data)"
+                    echo "Output: $output"
+                    FAILED=$((FAILED + 1))
+                    return 0
+                fi
                 echo "OK"
                 echo "Bandwidth: $bandwidth"
                 PASSED=$((PASSED + 1))

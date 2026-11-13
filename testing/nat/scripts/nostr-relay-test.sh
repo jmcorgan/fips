@@ -23,6 +23,8 @@ GENERATE_SCRIPT="$SCRIPT_DIR/generate-configs.sh"
 WAIT_LIB="$ROOT_DIR/testing/lib/wait-converge.sh"
 RELAY_LIB="$ROOT_DIR/testing/lib/relay-verdict.sh"
 IMAGE_LIB="$ROOT_DIR/testing/lib/image-build.sh"
+# Signs and publishes an event to the relay; fed to a container on stdin.
+PUBLISH_LIB="$ROOT_DIR/testing/lib/nostr-publish.py"
 # Must track generate-configs.sh's OUTPUT_DIR and the compose bind-mounts.
 CONFIG_DIR="$NAT_DIR/generated-configs${FIPS_CI_NAME_SUFFIX:-}"
 
@@ -128,277 +130,23 @@ publish_malformed_advert() {
     local relay_host="$1"
     local relay_port="$2"
 
+    # Both of these must match the consumers' subscription filter, which is
+    # kind + identifier and no author clause (src/nostr/runtime.rs:1041-1043).
+    # The literals are ADVERT_KIND and ADVERT_IDENTIFIER in src/nostr/types.rs
+    # and are duplicated here rather than derived, so changing either there
+    # silently stops this event reaching the daemons while the relay goes on
+    # accepting it. `next` uses `fips-overlay-v1-next`, which is the one line
+    # that differs between the branches' copies of this script.
+    local kind=37195
+    local tags='[["d","fips-overlay-v1-next"],["app","fips.nat.lab.v1"]]'
+    local content='this-is-not-a-valid-overlay-advert-{garbage}'
+
     # `-i` is required: without it docker attaches no stdin, `python3 -` reads an
     # empty program, runs nothing and exits 0, so the stimulus is never injected.
-    docker exec -i "$NODE_A" python3 - "$relay_host" "$relay_port" <<'PY'
-import base64
-import hashlib
-import json
-import os
-import socket
-import struct
-import sys
-import time
-
-# ── Minimal secp256k1 BIP-340 (Schnorr) signer using only stdlib. ──────
-# Reference: BIP-340, secp256k1 group order n / curve params.
-P = 0xFFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_FFFFFC2F
-N = 0xFFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_BAAEDCE6_AF48A03B_BFD25E8C_D0364141
-G = (
-    0x79BE667E_F9DCBBAC_55A06295_CE870B07_029BFCDB_2DCE28D9_59F2815B_16F81798,
-    0x483ADA77_26A3C465_5DA4FBFC_0E1108A8_FD17B448_A6855419_9C47D08F_FB10D4B8,
-)
-
-
-def inv(a, m=P):
-    return pow(a, -1, m)
-
-
-def point_add(a, b):
-    if a is None:
-        return b
-    if b is None:
-        return a
-    if a[0] == b[0] and (a[1] != b[1] or a[1] == 0):
-        return None
-    if a == b:
-        m = (3 * a[0] * a[0]) * inv(2 * a[1]) % P
-    else:
-        m = (b[1] - a[1]) * inv(b[0] - a[0]) % P
-    x = (m * m - a[0] - b[0]) % P
-    y = (m * (a[0] - x) - a[1]) % P
-    return (x, y)
-
-
-def scalar_mul(k, point=G):
-    result = None
-    addend = point
-    while k:
-        if k & 1:
-            result = point_add(result, addend)
-        addend = point_add(addend, addend)
-        k >>= 1
-    return result
-
-
-def lift_x(x):
-    if x >= P:
-        return None
-    y_sq = (pow(x, 3, P) + 7) % P
-    y = pow(y_sq, (P + 1) // 4, P)
-    if pow(y, 2, P) != y_sq:
-        return None
-    return (x, y if y % 2 == 0 else P - y)
-
-
-def tagged_hash(tag, data):
-    th = hashlib.sha256(tag.encode()).digest()
-    return hashlib.sha256(th + th + data).digest()
-
-
-def schnorr_sign(msg32, secret):
-    d0 = int.from_bytes(secret, "big")
-    if not (1 <= d0 < N):
-        raise ValueError("invalid secret key")
-    P_pub = scalar_mul(d0)
-    d = d0 if P_pub[1] % 2 == 0 else N - d0
-    t = (d ^ int.from_bytes(tagged_hash("BIP0340/aux", os.urandom(32)), "big"))
-    t_bytes = t.to_bytes(32, "big")
-    rand = tagged_hash(
-        "BIP0340/nonce",
-        t_bytes + P_pub[0].to_bytes(32, "big") + msg32,
-    )
-    k0 = int.from_bytes(rand, "big") % N
-    if k0 == 0:
-        raise ValueError("nonce gen failed")
-    R = scalar_mul(k0)
-    k = k0 if R[1] % 2 == 0 else N - k0
-    e = int.from_bytes(
-        tagged_hash(
-            "BIP0340/challenge",
-            R[0].to_bytes(32, "big") + P_pub[0].to_bytes(32, "big") + msg32,
-        ),
-        "big",
-    ) % N
-    s = (k + e * d) % N
-    return R[0].to_bytes(32, "big") + s.to_bytes(32, "big")
-
-
-def xonly_pubkey(secret):
-    d0 = int.from_bytes(secret, "big")
-    P_pub = scalar_mul(d0)
-    return P_pub[0].to_bytes(32, "big")
-
-
-# ── Build the malformed Kind-37195 event ───────────────────────────────
-secret = os.urandom(32)
-# Ensure 1 <= d < N
-while int.from_bytes(secret, "big") == 0 or int.from_bytes(secret, "big") >= N:
-    secret = os.urandom(32)
-
-pubkey = xonly_pubkey(secret).hex()
-created_at = int(time.time())
-# Both of these must match the consumers' subscription filter, which is
-# kind + identifier and no author clause (src/nostr/runtime.rs:1041-1043).
-# The literals are ADVERT_KIND and ADVERT_IDENTIFIER in src/nostr/types.rs
-# and are duplicated here rather than derived, so changing either there
-# silently stops this event reaching the daemons while the relay goes on
-# accepting it. `next` uses `fips-overlay-v1-next`, which is the one line
-# that differs between the branches' copies of this script.
-kind = 37195
-tags = [
-    ["d", "fips-overlay-v1-next"],
-    ["app", "fips.nat.lab.v1"],
-]
-content = "this-is-not-a-valid-overlay-advert-{garbage}"
-
-# Nostr event id = sha256(json([0, pubkey, created_at, kind, tags, content]))
-serialized = json.dumps(
-    [0, pubkey, created_at, kind, tags, content],
-    separators=(",", ":"),
-    ensure_ascii=False,
-)
-event_id = hashlib.sha256(serialized.encode("utf-8")).digest()
-sig = schnorr_sign(event_id, secret).hex()
-
-event = {
-    "id": event_id.hex(),
-    "pubkey": pubkey,
-    "created_at": created_at,
-    "kind": kind,
-    "tags": tags,
-    "content": content,
-    "sig": sig,
-}
-
-msg = json.dumps(["EVENT", event])
-print(f"publishing malformed advert id={event['id']} pubkey={pubkey}")
-
-# ── Minimal stdlib WebSocket client (RFC 6455) ────────────────────────
-relay_host = sys.argv[1]
-relay_port = int(sys.argv[2])
-
-sock = socket.create_connection((relay_host, relay_port), timeout=10)
-key_b64 = base64.b64encode(os.urandom(16)).decode()
-handshake = (
-    f"GET / HTTP/1.1\r\n"
-    f"Host: {relay_host}:{relay_port}\r\n"
-    f"Upgrade: websocket\r\n"
-    f"Connection: Upgrade\r\n"
-    f"Sec-WebSocket-Key: {key_b64}\r\n"
-    f"Sec-WebSocket-Version: 13\r\n\r\n"
-)
-sock.sendall(handshake.encode())
-
-resp = b""
-sock.settimeout(5)
-while b"\r\n\r\n" not in resp:
-    chunk = sock.recv(4096)
-    if not chunk:
-        break
-    resp += chunk
-if b" 101 " not in resp.split(b"\r\n", 1)[0]:
-    print("websocket handshake failed:", resp[:200], file=sys.stderr)
-    raise SystemExit(2)
-
-# Build a single masked text frame (FIN=1, opcode=1).
-payload = msg.encode("utf-8")
-mask = os.urandom(4)
-masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-
-frame = bytearray([0x81])  # FIN + text
-plen = len(payload)
-if plen < 126:
-    frame.append(0x80 | plen)
-elif plen < 65536:
-    frame.append(0x80 | 126)
-    frame += struct.pack("!H", plen)
-else:
-    frame.append(0x80 | 127)
-    frame += struct.pack("!Q", plen)
-frame += mask + masked
-sock.sendall(bytes(frame))
-
-# The relay's verdict decides whether the stimulus was delivered at all.
-# strfry verifies the event id and the BIP-340 signature and answers
-# ["OK",<id>,false,"invalid: ..."] on refusal; a refused event is never
-# stored and never broadcast, so the consumers never see it and phase 3
-# proves nothing. Reading the reply and continuing regardless is what let
-# that pass unnoticed.
-#
-# The timeout is 10s rather than 3s: this is a loopback docker network to a
-# local relay, and a missing ack is a failure below, so the margin is there
-# to keep that from becoming a flake.
-sock.settimeout(10)
-
-
-def server_frame_payload(buf):
-    """Return the payload of the first server frame in buf, or None."""
-    # Decoded rather than pattern-matched: a payload of 91 bytes puts a
-    # literal '[' in the length byte, so searching for the JSON would find
-    # the header instead of the body.
-    if len(buf) < 2:
-        return None
-    n = buf[1] & 0x7F
-    off = 2
-    if n == 126:
-        if len(buf) < 4:
-            return None
-        n = struct.unpack("!H", buf[2:4])[0]
-        off = 4
-    elif n == 127:
-        if len(buf) < 10:
-            return None
-        n = struct.unpack("!Q", buf[2:10])[0]
-        off = 10
-    if buf[1] & 0x80:
-        # A server must not mask, but tolerate one that does.
-        mask = buf[off:off + 4]
-        off += 4
-        body = bytes(b ^ mask[i % 4] for i, b in enumerate(buf[off:off + n]))
-    else:
-        body = buf[off:off + n]
-    return body if len(body) == n else None
-
-
-def relay_verdict(reply, want_id):
-    """Classify the relay's answer to our EVENT. Only "accepted" means stored."""
-    payload = server_frame_payload(reply)
-    if payload is None:
-        return "unreadable-frame"
-    try:
-        msg = json.loads(payload.decode("utf-8", "replace"))
-    except ValueError:
-        return "unparsable-frame"
-    # NIP-01: an OK is FOUR elements, ["OK", <id>, <true|false>, <message>],
-    # and the message is mandatory even on success. Matching a substring such
-    # as `,true]` therefore never fires against a conformant relay, which is
-    # why this parses the array instead.
-    if isinstance(msg, list) and len(msg) >= 3 and msg[0] == "OK" and msg[1] == want_id:
-        return "accepted" if msg[2] is True else "rejected"
-    if isinstance(msg, list) and msg and msg[0] == "NOTICE":
-        return "notice"
-    return "unrecognised-frame"
-
-
-verdict = "no-ack"
-try:
-    reply = sock.recv(4096)
-    print("relay reply:", reply[:200])
-    verdict = relay_verdict(reply, event_id.hex())
-except socket.timeout:
-    print("relay reply: <timeout - frame sent but no ack>")
-
-# Polite close (opcode 0x88 = close), then drop.
-try:
-    sock.sendall(bytes([0x88, 0x80]) + os.urandom(4))
-except OSError:
-    pass
-sock.close()
-print("malformed advert published:", verdict)
-if verdict != "accepted":
-    raise SystemExit(3)
-PY
+    # The publisher exits non-zero unless the relay answered OK true, and prints
+    # "malformed advert published: <verdict>" either way.
+    docker exec -i "$NODE_A" python3 - "$relay_host" "$relay_port" \
+        "malformed advert" "$kind" "$tags" "$content" < "$PUBLISH_LIB"
 }
 
 assert_process_alive() {

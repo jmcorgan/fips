@@ -514,10 +514,10 @@ fn jitter_and_the_echo_of_a_mixed_stream_are_those_of_its_sampled_frames_alone()
 /// in microseconds), so J16 runs 20000, 28750, 46954, 74020, and jitter is
 /// 74020 / 16 = 4626 us. The echo is the last sender timestamp, 1400, and
 /// the dwell to a report at 10450 is 50 ms. The trend's samples (receive
-/// offset from the previous frame less the sender timestamp, in us) are
-/// -1000000, -980000, -1110000, -1180000 and -1330000 at sequence 1 to 5:
-/// a least-squares slope of -860000 / 10 = -86000 us per packet, reported
-/// times 1000. Mutation: sample no frame in `record_frame`.
+/// offset less sender offset from the first frame, in us) are 0, 20000,
+/// 10000, 30000 and 0 at receive offsets 0, 120, 210, 330 and 400 ms: a
+/// least-squares slope of 1680000 / 102680 = 16.36 us per ms, reported as
+/// 16361 us per second. Mutation: sample no frame in `record_frame`.
 #[test]
 fn a_stream_sampled_on_every_frame_gives_the_jitter_and_echo_master_gives() {
     let mut r = ReceiverState::new(32);
@@ -532,7 +532,7 @@ fn a_stream_sampled_on_every_frame_gives_the_jitter_and_echo_master_gives() {
     }
     assert_eq!(
         timing(&mut r, 10_450),
-        (4626, Some(10_400), 1400, 50, 4626, -86_000_000)
+        (4626, Some(10_400), 1400, 50, 4626, 16_361)
     );
 }
 
@@ -974,7 +974,7 @@ const RUNTIME: &[&str] = &[
     "receiver.interval_bytes_recv",
     "receiver.jitter",
     "receiver.owd_trend",
-    "receiver.owd_seq",
+    "receiver.owd_ref",
     "receiver.gap_tracker",
     "receiver.ecn_ce_count",
     "receiver.last_sender_timestamp",

@@ -1,9 +1,9 @@
 //! LookupRequest/LookupResponse mesh lookup protocol handlers.
 //!
 //! Handles coordinate lookup via bloom-filter-guided tree routing.
-//! Requests are forwarded only to tree peers (parent + children) whose
-//! bloom filter contains the target. TTL and request_id dedup provide
-//! safety bounds.
+//! Requests are forwarded to tree peers (parent + children) whose bloom
+//! filter contains the target, or to matching non-tree peers when no tree
+//! peer matches. TTL and request_id dedup provide safety bounds.
 
 use crate::ipv6tun::link::PeerKey;
 use crate::node::reject::DiscoveryReject;
@@ -155,7 +155,7 @@ impl Node {
     /// 3. Record request for reverse-path forwarding
     /// 4. Lazy purge expired entries
     /// 5. If we're the target, generate and send response
-    /// 6. If TTL > 0, forward to tree peers whose bloom filter matches
+    /// 6. If TTL > 0, forward to matching tree peers, else matching non-tree peers
     pub(in crate::node) async fn handle_lookup_request(&mut self, from: &NodeAddr, payload: &[u8]) {
         self.metrics().lookup.req_received.inc();
 
@@ -256,7 +256,7 @@ impl Node {
                     origin = %self.peer_display_name(&request.origin),
                     "We are the lookup target, generating response"
                 );
-                self.send_lookup_response(&request).await;
+                self.send_lookup_response(&request, from).await;
             }
             RequestOutcome::Forward => {
                 self.forward_lookup_request(from, request).await;
@@ -602,7 +602,11 @@ impl Node {
     }
 
     /// Generate and send a LookupResponse when we are the target.
-    async fn send_lookup_response(&mut self, request: &LookupRequest) {
+    ///
+    /// The response goes back along the reverse path only: to `from`, the
+    /// peer the request arrived from, which `classify_request` has just
+    /// recorded for this request. There is no tree-route fallback.
+    async fn send_lookup_response(&mut self, request: &LookupRequest, from: &NodeAddr) {
         let our_coords = self.tree_state().my_coords().clone();
 
         // Sign proof: Identity::sign hashes with SHA-256 internally
@@ -613,29 +617,7 @@ impl Node {
         let mut response =
             LookupResponse::new(request.request_id, request.target, our_coords, proof);
 
-        // Route toward origin. The reverse-path decision (the peer the request
-        // arrived from, recorded in recent_requests) is the sans-IO core's; the
-        // greedy tree-route fallback is a &mut coord-cache op kept in the shell.
-        use crate::proto::lookup::ResponseRouteDecision;
-        let next_hop_addr = match crate::proto::lookup::plan_response_route(
-            &self.lookup,
-            request.request_id,
-        ) {
-            ResponseRouteDecision::ReversePath(peer) => peer,
-            ResponseRouteDecision::NeedsTreeRoute => match self.find_next_hop(&request.origin) {
-                Some(peer) => *peer.node_addr(),
-                None => {
-                    debug!(
-                        origin = %self.peer_display_name(&request.origin),
-                        "Cannot route LookupResponse: no reverse path or tree route to origin"
-                    );
-                    self.metrics()
-                        .lookup
-                        .record_reject(DiscoveryReject::RespNoRoute);
-                    return;
-                }
-            },
-        };
+        let next_hop_addr = *from;
 
         // Fold our outgoing-link MTU into path_mtu so the target-edge link
         // appears in the bottleneck calculation. Without this, the response

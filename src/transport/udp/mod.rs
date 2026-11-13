@@ -9,11 +9,13 @@ use super::{
 pub(crate) mod io;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use io::{ConnectedPeerSocket, PeerRecvDrain, open_connected_fd};
+mod classify;
 mod dns;
 mod stats;
 use super::resolve_socket_addr;
 use crate::config::UdpConfig;
-use crate::nostr::is_punch_packet;
+use classify::classify;
+pub use classify::{Classifier, DatagramClass};
 #[cfg(test)]
 pub(crate) use dns::TestResolver;
 use io::{AsyncUdpSocket, UdpRawSocket};
@@ -71,6 +73,9 @@ pub struct UdpTransport {
     /// DNS resolution cache for hostname addresses, and the lookups in
     /// flight. Shared with the lookup tasks, which store their answers.
     dns_cache: Arc<StdMutex<dns::DnsState>>,
+    /// The classifier a subsystem registered for received datagrams; `None`
+    /// uses the default filter.
+    classifier: Option<Classifier>,
 }
 
 impl UdpTransport {
@@ -92,7 +97,19 @@ impl UdpTransport {
             local_addr: None,
             stats: Arc::new(UdpStats::new()),
             dns_cache: Arc::new(StdMutex::new(dns::DnsState::default())),
+            classifier: None,
         }
+    }
+
+    /// Register the classifier the receive paths apply to every datagram
+    /// before FMP sees it. Takes effect at the next start or adopt.
+    pub fn set_classifier(&mut self, classifier: Classifier) {
+        self.classifier = Some(classifier);
+    }
+
+    /// The registered classifier, or `None` when the default filter applies.
+    pub fn classifier(&self) -> Option<Classifier> {
+        self.classifier
     }
 
     /// Get the instance name (if configured as a named instance).
@@ -344,9 +361,18 @@ impl UdpTransport {
         let packet_tx = self.packet_tx.clone();
         let mtu = self.config.mtu();
         let stats = self.stats.clone();
+        let classifier = self.classifier;
 
         let recv_task = tokio::spawn(async move {
-            udp_receive_loop(async_socket, transport_id, packet_tx, mtu, stats).await;
+            udp_receive_loop(
+                async_socket,
+                transport_id,
+                packet_tx,
+                mtu,
+                stats,
+                classifier,
+            )
+            .await;
         });
 
         self.recv_task = Some(recv_task);
@@ -403,9 +429,18 @@ impl UdpTransport {
         let packet_tx = self.packet_tx.clone();
         let mtu = self.config.mtu();
         let stats = self.stats.clone();
+        let classifier = self.classifier;
 
         let recv_task = tokio::spawn(async move {
-            udp_receive_loop(async_socket, transport_id, packet_tx, mtu, stats).await;
+            udp_receive_loop(
+                async_socket,
+                transport_id,
+                packet_tx,
+                mtu,
+                stats,
+                classifier,
+            )
+            .await;
         });
 
         self.recv_task = Some(recv_task);
@@ -618,6 +653,7 @@ async fn udp_receive_loop(
     packet_tx: PacketTx,
     mtu: u16,
     stats: Arc<UdpStats>,
+    classifier: Option<Classifier>,
 ) {
     debug!(transport_id = %transport_id, "UDP receive loop starting");
     let mut error_backoff = ReceiveErrorBackoff::default();
@@ -655,7 +691,7 @@ async fn udp_receive_loop(
 
                         // Peek before swap — punch probes / acks are
                         // discarded without consuming a buffer move.
-                        if is_punch_packet(&backing[i][..len]) {
+                        if classify(classifier, &backing[i][..len]) == DatagramClass::Discard {
                             trace!(
                                 transport_id = %transport_id,
                                 remote_addr = %remote_addr,
@@ -717,7 +753,7 @@ async fn udp_receive_loop(
                     stats.record_recv(len);
                     stats.set_kernel_drops(kernel_drops as u64);
 
-                    if is_punch_packet(&buf[..len]) {
+                    if classify(classifier, &buf[..len]) == DatagramClass::Discard {
                         trace!(
                             transport_id = %transport_id,
                             remote_addr = %remote_addr,
@@ -925,6 +961,7 @@ mod tests {
             tx,
             1280,
             stats.clone(),
+            None,
         ));
 
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -982,6 +1019,7 @@ mod tests {
             tx,
             1280,
             stats.clone(),
+            None,
         ));
         drop(peer);
 

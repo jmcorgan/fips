@@ -21,10 +21,9 @@ mod wire;
 mod tests;
 
 pub use core::{
-    ForwardOutcome, InitiateDecision, LookupAction, RequestOutcome, ResponseRoute,
-    ResponseRouteDecision, RoutingView, classify_request, classify_response, initiate_failed,
-    initiate_gate, on_response_accepted, plan_initiate, plan_response_route, plan_transit_forward,
-    poll_pending,
+    ForwardOutcome, InitiateDecision, LookupAction, RequestOutcome, ResponseRoute, RoutingView,
+    classify_request, classify_response, initiate_failed, initiate_gate, on_response_accepted,
+    plan_initiate, plan_transit_forward, poll_pending,
 };
 // The shell forwards through `plan_transit_forward`; the planner it wraps is
 // named directly only by the tests of its peer selection.

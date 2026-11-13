@@ -1187,6 +1187,7 @@ fn dirty_socket(node: &mut Node, peer: &NodeAddr) {
         target,
         packet_tx,
         std::sync::Arc::new(UdpStats::new()),
+        None,
     )
     .expect("precondition: the socket's recv drain starts");
     p.seat_socket(index, socket, drain);

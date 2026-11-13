@@ -25,8 +25,10 @@
 //! connected socket's drain, and sends through the encrypt workers on
 //! either kind of socket, are counted once in the UDP transport's stats,
 //! and that the encrypt-worker path refuses a frame over the UDP MTU as the
-//! inline path does. The last checks that a won crossed handshake, which
-//! starts the link's path machine again, keeps the active path's socket.
+//! inline path does. One checks that a connected socket's drain applies
+//! the datagram classifier registered with its UDP transport. The last
+//! checks that a won crossed handshake, which starts the link's path
+//! machine again, keeps the active path's socket.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::crossed_dial::{Crossed, Dial, cross_dials, hand};
@@ -507,6 +509,86 @@ async fn datagrams_on_a_peers_connected_socket_are_counted_in_the_udp_transport_
             .expect("packet channel closed");
         assert_eq!(packet.transport_id, transport_id);
     }
+    node.clear_connected_udp_for_peer(&node_addr);
+    for (_, t) in node.transports.iter_mut() {
+        t.stop().await.ok();
+    }
+}
+
+/// A peer's connected socket applies the datagram classifier registered
+/// with its UDP transport, as the transport's own listen socket does: a
+/// datagram the classifier discards is counted as received on the
+/// transport but never reaches the packet channel, and one it passes does.
+///
+/// The test classifier discards only datagrams starting `0xAA`, which the
+/// default filter would pass, so a drain that fell back to the default
+/// filter delivers it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn a_peers_connected_socket_applies_its_udp_transports_classifier() {
+    use crate::config::UdpConfig;
+    use crate::transport::udp::{DatagramClass, UdpTransport};
+
+    fn discard_marked(data: &[u8]) -> DatagramClass {
+        if data.first() == Some(&0xAA) {
+            DatagramClass::Discard
+        } else {
+            DatagramClass::Fmp
+        }
+    }
+    const MARKED: [u8; 8] = [0xAA; 8];
+    const PASSED: [u8; 8] = [0x01; 8];
+
+    let transport_id = TransportId::new(1);
+    let (mut node, node_addr, _, _) = promoted_peer_with_the_far_side_session(transport_id);
+    let (tx, mut rx) = packet_channel(64);
+    let udp_cfg = UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    };
+    let mut udp = UdpTransport::new(transport_id, None, udp_cfg, tx);
+    udp.set_classifier(discard_marked);
+    udp.start_async().await.unwrap();
+    let local = udp.local_addr().unwrap();
+    let stats = udp.stats().clone();
+    node.transports
+        .insert(transport_id, TransportHandle::Udp(udp));
+
+    let remote = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    node.get_peer_mut(&node_addr).unwrap().set_current_addr(
+        transport_id,
+        TransportAddr::from_string(&remote.local_addr().unwrap().to_string()),
+    );
+    node.activate_connected_udp_sessions().await;
+    assert!(
+        node.get_peer(&node_addr).unwrap().connected_udp().is_some(),
+        "precondition: the tick activation installed a connected socket"
+    );
+
+    remote.send_to(&MARKED, local).unwrap();
+    remote.send_to(&PASSED, local).unwrap();
+    // Block the runtime thread until both are counted: the wildcard
+    // receive task cannot run, so the drain thread is what read them.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while stats.snapshot().packets_recv < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        stats.snapshot().packets_recv,
+        2,
+        "precondition: the connected socket's drain read both datagrams"
+    );
+
+    let mut delivered = Vec::new();
+    while let Ok(Some(packet)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+        delivered.push(packet.data);
+    }
+    assert_eq!(
+        delivered,
+        vec![PASSED.to_vec()],
+        "the connected socket's drain did not apply the transport's classifier"
+    );
+
     node.clear_connected_udp_for_peer(&node_addr);
     for (_, t) in node.transports.iter_mut() {
         t.stop().await.ok();

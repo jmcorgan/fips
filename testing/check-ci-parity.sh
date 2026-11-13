@@ -10,6 +10,10 @@
 #   tor-socks5     — requires live Tor network; opt-in via --with-tor,
 #                    unreliable on GitHub-hosted runners.
 #   tor-directory  — same; live Tor dependency.
+#   nostr-open-discovery — opt-in on both runners: the Nostr open-discovery
+#                    startup scenario is run by hand with ci-local.sh --only
+#                    when the Nostr rendezvous code changes, and is not in
+#                    local CI's default run either.
 #
 # Deliberate GitHub-only (NOT in the local run), with reason:
 #   deb-install ubuntu22 on arm64 — the local host is x86_64 and cannot run an
@@ -67,7 +71,7 @@ DEB_TEST="$SCRIPT_DIR/deb-install/test.sh"
 RPM_TEST="$SCRIPT_DIR/rpm-install/test.sh"
 
 # Deliberate local-only allowlist (suites intentionally absent from GitHub).
-ALLOWLIST="tor-socks5 tor-directory"
+ALLOWLIST="tor-socks5 tor-directory nostr-open-discovery"
 
 for f in "$CI_LOCAL" "$CI_YML" "$DEB_TEST" "$RPM_TEST"; do
     if [[ ! -f "$f" ]]; then

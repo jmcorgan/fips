@@ -1,0 +1,4 @@
+{
+  "captureUnixMs": 1794587980861,
+  "event": {"id":"cb996278d026bc700102f590c2eca044d9301fb7c38da8ea737071db958e1c85","pubkey":"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9","created_at":1794587980,"kind":10050,"tags":[["r","wss://relay.damus.io"],["r","wss://nos.lol"]],"content":"","sig":"6767eab73509995484be5ca19c73bf85f86e619f99d364ceb5e62f2b254d7a6f88413b2ca980bac211546a36dd447a0d870f9837fb61f30c5e2b0157a50fa0d3"}
+}

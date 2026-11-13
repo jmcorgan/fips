@@ -36,8 +36,9 @@ changing anything here.
   statistics) that transports and the protocol cores both name. Its own
   README describes it.
 - `utils/`: small shared value types: the session index and its
-  allocator, which draws from the host's entropy source, and the hash
-  map for keys a peer can choose, keyed from that source.
+  allocator, which draws from the host's entropy source, the hash
+  map for keys a peer can choose, keyed from that source, and the set
+  of this node's interface prefixes.
   Its own README describes it.
 - `tests/`: the unit tests of the files at this level, attached from
   each file by `#[path]`. Its own README describes it.

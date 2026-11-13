@@ -66,12 +66,18 @@ that file and can reach its private items.
   across files through `Config::load_from_paths`.
 - `floors.rs`: tests for `Config::apply_floors` (`floors.rs`): a value
   outside its protocol bound runs at the bound with one warning, target
-  `fips::config`, naming the key, the configured value and the value used; a
-  value inside it, and every shipped default, is kept without a warning; a
-  second call changes nothing; and `Node::with_identity` applies the bounds
-  as `Node::new` does. The bloom acceptance cap, a float, has its own tests:
+  `fips::config`, naming the key, the configured value and the value used,
+  among them an MMP one-way delay window (`node.mmp.owd_window_size`,
+  `node.session_mmp.owd_window_size`) below 2, which runs at 2, and above
+  4096, which runs at 4096; a value inside it, and every shipped default, is
+  kept without a warning; a second call changes nothing; and
+  `Node::with_identity` applies the bounds as `Node::new` does. The bloom acceptance cap, a float, has its own tests:
   a cap outside `[0.20, 1.0)` (below 0.20, 1.0 or more, or NaN) runs at
-  0.20 with one warning, and a cap inside it is left alone with none. Also
+  0.20 with one warning, and a cap inside it is left alone with none. So
+  does the lookup retry ladder (`node.lookup.attempt_timeouts_secs`), a
+  list: an empty ladder runs as the default ladder, and a ladder over 255
+  entries runs its first 255, each with one warning; the default ladder and
+  a 255-entry ladder are left alone, and a second call changes neither. Also
   the test-only `node.cache.test_coord_ttl_secs`:
   it is written back only when set, survives layering through
   `load_from_paths` and loads through `load_file`, is used by
@@ -79,11 +85,15 @@ that file and can reach its private items.
   its warning on every `apply_floors` call. `floors.rs` has no inline test
   block, so it declares this file as its `mod tests`, and the tests are
   `floors::tests`.
+- `native_flows.rs`: tests for the native API flow ceiling in
+  `Config::validate` (`mod.rs`). A `node.native_api.max_flows` of 0 is
+  refused at load, naming the key, and 1, the smallest working ceiling, is
+  accepted.
 
 `mod.rs` declares the others as `mod udp_interface_tests`, `mod rekey_switch`,
 `mod tick_setting`, `mod buffers`, `mod grants`, `mod sockets`, `mod merge`,
-`mod signal_ttl_floor`, `mod attempt_timeout_floor`, `mod offer_limit_floors`
-and `mod path_tests`, not as
+`mod signal_ttl_floor`, `mod attempt_timeout_floor`, `mod offer_limit_floors`,
+`mod path_tests` and `mod native_flows`, not as
 `mod tests`, because `mod.rs` still carries an inline `mod tests` block of
 that name. That block, and the inline blocks in the other files here,
 predate the rule that unit tests live in this directory; moving them is a

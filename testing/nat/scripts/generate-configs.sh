@@ -16,7 +16,7 @@ SCENARIO="${1:?usage: generate-configs.sh <cone|symmetric|lan> [mesh-name]}"
 MESH_NAME="${2:-nat-lab-$(date +%s)-$$}"
 
 case "$SCENARIO" in
-    cone|symmetric|lan|nostr-publish-consume|stun-faults) ;;
+    cone|symmetric|lan|nostr-publish-consume|stun-faults|nostr-open-discovery) ;;
     *)
         echo "Unknown scenario: $SCENARIO" >&2
         exit 1
@@ -44,7 +44,8 @@ lan="${NAT_LAN_PREFIX:-172.31.10}"
 relay_addr="ws://${wan}.30:7777"
 stun_addr="stun:${wan}.40:3478"
 if [ "$SCENARIO" = "lan" ] || [ "$SCENARIO" = "nostr-publish-consume" ] \
-        || [ "$SCENARIO" = "stun-faults" ]; then
+        || [ "$SCENARIO" = "stun-faults" ] \
+        || [ "$SCENARIO" = "nostr-open-discovery" ]; then
     relay_addr="ws://${lan}.30:7777"
     stun_addr="stun:${lan}.40:3478"
 fi
@@ -69,6 +70,15 @@ peer_block_b=$(cat <<EOF
 EOF
 )
 
+# The open-discovery scenario's node has no configured peers and takes any
+# advert it sees (policy: open): what it caches came from the relay alone.
+policy_line=""
+if [ "$SCENARIO" = "nostr-open-discovery" ]; then
+    peer_block_a=""
+    peer_block_b=""
+    policy_line="      policy: open"
+fi
+
 if [ "$SCENARIO" = "symmetric" ]; then
     peer_block_a="$peer_block_a"$'\n'"      - transport: tcp
         addr: \"${wan}.11:8443\"
@@ -82,6 +92,13 @@ write_config() {
     local output_file="$1"
     local nsec="$2"
     local peer_block="$3"
+    local peers_section="peers: []"
+    if [ -n "$peer_block" ]; then
+        peers_section="peers:
+$peer_block
+    connect_policy: auto_connect
+    auto_reconnect: true"
+    fi
 
     cat > "$output_file" <<EOF
 node:
@@ -107,6 +124,7 @@ node:
       punch_duration_ms: 2500
       advert_ttl_secs: 60
       advert_refresh_secs: 20
+${policy_line}
 
 tun:
   enabled: true
@@ -126,10 +144,7 @@ transports:
   tcp:
     bind_addr: "0.0.0.0:8443"
 
-peers:
-$peer_block
-    connect_policy: auto_connect
-    auto_reconnect: true
+$peers_section
 EOF
 }
 

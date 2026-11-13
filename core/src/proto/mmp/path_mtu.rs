@@ -20,6 +20,9 @@ pub struct PathMtuState {
     observed_changed: bool,
     /// Last time (injected `u64` ms) a PathMtuNotification was sent.
     last_notification_ms: Option<u64>,
+    /// The value the last PathMtuNotification carried (`u16::MAX` before the
+    /// first). A drop below it is sent at once.
+    last_notified_mtu: u16,
     /// Notification interval in ms: max(10s, 5 * SRTT). Default 10s.
     notification_interval_ms: u64,
     /// For source-side increase tracking: consecutive higher-value notifications.
@@ -44,6 +47,7 @@ impl PathMtuState {
             last_observed_mtu: u16::MAX,
             observed_changed: false,
             last_notification_ms: None,
+            last_notified_mtu: u16::MAX,
             notification_interval_ms: 10_000,
             consecutive_increase_count: 0,
             first_increase_ms: None,
@@ -93,8 +97,10 @@ impl PathMtuState {
     /// Check if a PathMtuNotification should be sent.
     ///
     /// Send on first measurement, on decrease (immediate), or periodic
-    /// confirmation at the notification interval. `now_ms` is the injected
-    /// monotonic time in milliseconds.
+    /// confirmation at the notification interval. A decrease is measured
+    /// against the value last notified, not against `current_mtu`, which is
+    /// the source-side estimate for the other direction. `now_ms` is the
+    /// injected monotonic time in milliseconds.
     pub fn should_send_notification(&self, now_ms: u64) -> bool {
         if self.last_observed_mtu == u16::MAX {
             return false; // No measurement yet
@@ -103,7 +109,7 @@ impl PathMtuState {
             None => true, // First measurement
             Some(last) => {
                 // Immediate on decrease
-                if self.observed_changed && self.last_observed_mtu < self.current_mtu {
+                if self.observed_changed && self.last_observed_mtu < self.last_notified_mtu {
                     return true;
                 }
                 // Periodic confirmation
@@ -120,6 +126,7 @@ impl PathMtuState {
             return None;
         }
         self.last_notification_ms = Some(now_ms);
+        self.last_notified_mtu = self.last_observed_mtu;
         self.observed_changed = false;
         Some(self.last_observed_mtu)
     }
@@ -239,10 +246,10 @@ impl PathMtuState {
     /// being safe.
     ///
     /// Destination-side observation state (`last_observed_mtu`,
-    /// `observed_changed`, `last_notification_ms`) is deliberately left
-    /// alone: it describes the reverse direction, which this event says
-    /// nothing about, and clearing it would suppress our notifications to the
-    /// peer until a fresh observation arrived.
+    /// `observed_changed`, `last_notification_ms`, `last_notified_mtu`) is
+    /// deliberately left alone: it describes the reverse direction, which this
+    /// event says nothing about, and clearing it would suppress our
+    /// notifications to the peer until a fresh observation arrived.
     pub fn reset_source_mtu(&mut self) {
         self.current_mtu = u16::MAX;
         self.consecutive_increase_count = 0;

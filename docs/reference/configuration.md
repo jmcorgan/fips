@@ -395,7 +395,7 @@ the current coordinates of a mesh address the node already knows.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.lookup.ttl` | u8 | `64` | Hop limit for LookupRequest forwarding |
-| `node.lookup.attempt_timeouts_secs` | array&lt;u64&gt; | `[1, 2, 4, 8]` | Per-attempt timeouts. Each entry is the deadline for one `LookupRequest` before sending the next attempt with a fresh `request_id`. Length determines total attempt count; default gives 4 attempts and a 15s total budget |
+| `node.lookup.attempt_timeouts_secs` | array&lt;u64&gt; | `[1, 2, 4, 8]` | Per-attempt timeouts. Each entry is the deadline for one `LookupRequest` before sending the next attempt with a fresh `request_id`. Length determines total attempt count; default gives 4 attempts and a 15s total budget. An empty list runs as the default, and entries beyond the 255th are dropped, each with a warning |
 | `node.lookup.recent_expiry_secs` | u64 | `10` | Dedup cache expiry for recent request IDs |
 | `node.lookup.backoff_base_secs` | u64 | `0` | Optional post-failure suppression base in seconds; doubles per consecutive failure. `0` disables (default); the per-attempt sequence is the only retry pacing |
 | `node.lookup.backoff_max_secs` | u64 | `0` | Cap on optional post-failure backoff |
@@ -673,7 +673,7 @@ Metrics Measurement Protocol for per-peer link measurement. See
 |-----------|------|---------|-------------|
 | `node.mmp.mode` | string | `"full"` | Operating mode: `full` (sender + receiver reports), `lightweight` (receiver reports only), or `minimal` (CE echo only, no reports) |
 | `node.mmp.log_interval_secs` | u64 | `30` | Periodic operator log interval for link metrics |
-| `node.mmp.owd_window_size` | usize | `32` | One-way delay trend ring buffer size |
+| `node.mmp.owd_window_size` | usize | `32` | One-way delay trend window, in samples, from 2 to 4096; a value outside runs at the nearer bound with a warning |
 
 ### Session-Layer MMP (`node.session_mmp.*`)
 
@@ -685,7 +685,7 @@ every transit link, consuming bandwidth proportional to path length.
 |-----------|------|---------|-------------|
 | `node.session_mmp.mode` | string | `"full"` | Operating mode: `full`, `lightweight`, or `minimal` |
 | `node.session_mmp.log_interval_secs` | u64 | `30` | Periodic operator log interval for session metrics |
-| `node.session_mmp.owd_window_size` | usize | `32` | One-way delay trend ring buffer size |
+| `node.session_mmp.owd_window_size` | usize | `32` | One-way delay trend window, in samples, from 2 to 4096; a value outside runs at the nearer bound with a warning |
 
 ### Internal Buffers (`node.buffers.*`)
 
@@ -724,7 +724,7 @@ way to hand a file descriptor to another process at all, while macOS has
 | `node.native_api.socket_path` | string | *(auto)* | Socket file path. Resolved the same way as the control socket, with the filename `api.sock`: `/run/fips/api.sock` when `/run/fips` exists; then `/var/run/fips/api.sock` on FreeBSD when its private directory exists; then `$XDG_RUNTIME_DIR/fips/api.sock`; finally `/tmp/fips-api.sock` |
 | `node.native_api.pending_per_flow` | usize | `16` | Datagrams held for one flow while it waits to be accepted, or while an established flow's client is slow to read. Refused above 64 at startup: the whole batch is written onto a socket pair the client cannot read yet. Refused below 1: a flow that can hold nothing loses its peer's opening datagram between the arrival being announced and the client taking the flow |
 | `node.native_api.backlog` | usize | `16` | Flows announced on one listener and not yet taken by its task. Refused below 1 at startup: a listener with no backlog admits no flow, so every arrival would be dropped |
-| `node.native_api.max_flows` | usize | `256` | Flows this node holds at once |
+| `node.native_api.max_flows` | usize | `256` | Flows this node holds at once. Refused below 1 at startup: a node that can hold no flow refuses every client connect and drops every arrival |
 | `node.native_api.debug_commands` | bool | `false` | Answer the `inject`, `stats` and `arrive` debug commands. Not a supported interface |
 | `node.native_api.grants` | list | `[]` | Who may use ports 256 to 1023, the identity feed (`keys`) and the learn request (`learn`); see [Grants](#grants) below |
 

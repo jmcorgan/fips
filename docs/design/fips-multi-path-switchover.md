@@ -19,6 +19,17 @@
 > - A rekey's msg3 on another transport than its msg1's is dropped, a
 >   known defect (see [Rekey across a switch](#rekey-across-a-switch)).
 >
+> It also departs from the version 1 draft in one rule. The path that
+> carried the link when it went silent is probed every second for 30
+> seconds before its gaps double (Liveness, below), where Section 5.6 has
+> every path that has stopped answering double its gaps from one second up
+> to 30 seconds. Holding a probe's verdict while the peer's session
+> datagrams still arrive on its path conforms as written, since the draft
+> leaves the probe timeout to the node. Taking a path's MTU from a smaller
+> size the path has proven it carries (Proving a path, below) is not yet
+> described in the draft's Section 5.11, and whether FRC-1201's path-MTU
+> rules (Section 3.6) admit it is still open.
+>
 > The draft is the reference for what a peer can observe. This document
 > explains why the design is what it is and records the choices the draft
 > leaves to a node. The constants the draft marks "value proposed" are not
@@ -330,15 +341,22 @@ known medium that is within the margin of the other at their best, a
 loaded cable beside Wi-Fi: the cable's medium would take the link back one
 dwell later, so that move waits out the horizon too. A move to a faster
 known medium waits the same way while the path it would take scores
-outside the margin of the active path's score over the horizon. Idle, the
-active path's two scores agree and a cable within the margin of Wi-Fi
-takes the link after the dwell; but load on Wi-Fi that is faster at its
-best than a cable outside the margin of it would rank the cable first
-within seconds, and the Wi-Fi would take the link back once the load
-followed. Failure, the pin, the tier, the `FilterAnnounce` size and
-`role: preferred` move the link as before. The cost is that a path whose
-base round trip really rises, after a route change for example, keeps the
-link for up to the horizon unless it fails.
+outside the margin of the active path's score over the horizon. A
+horizon at least as long as the round-trip window, as at the draft's
+values, holds every sample the window does, so that score is never above
+the one over the window. Idle on a steady round trip the two are equal,
+and a cable within the margin of Wi-Fi takes the link after the dwell. On
+a Wi-Fi path whose round trip jitters they differ even idle: the least
+round trip over the horizon is the lower, so a cable within the margin of
+Wi-Fi's score over the window still waits while it is outside the margin
+of Wi-Fi's score over the horizon, which can last as long as the jitter
+does. Load on Wi-Fi that is faster at its best than a cable outside the
+margin of it would rank the cable first within seconds, and the Wi-Fi
+would take the link back once the load followed. Failure, the pin, the
+tier, the `FilterAnnounce` size and `role: preferred` move the link as
+before. The cost is that a path whose base round trip really rises, after
+a route change for example, keeps the link for up to the horizon unless it
+fails.
 
 **The return after a failure needs no margin.** When the active path fails
 and the link moves to a slower one, the traffic follows it, but the slower

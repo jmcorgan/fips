@@ -165,9 +165,10 @@ the canonical treatment.
 ## Discovery Protocol
 
 Discovery resolves a destination's tree coordinates so that multi-hop routing
-can proceed. Requests are forwarded using **bloom-guided tree routing** —
-only to tree peers (parent + children) whose bloom filter contains the
-target — producing single-path forwarding through the spanning tree.
+can proceed. Requests are forwarded using **bloom-guided tree routing** — to
+tree peers (parent + children) whose bloom filter contains the target, falling
+back to matching non-tree peers — producing single-path forwarding through the
+spanning tree.
 
 ### When Discovery Is Needed
 
@@ -281,8 +282,7 @@ recorded.
 
 ### LookupResponse
 
-When the request reaches the target (or a node that has the target as a
-direct peer), a LookupResponse is created containing:
+When the request reaches the target, a LookupResponse is created containing:
 
 - **request_id**: Echoed from the request
 - **target**: The target's node_addr
@@ -297,9 +297,8 @@ The response routes back to the requester using **reverse-path routing** as
 the primary mechanism: each transit node looks up the `request_id` in its
 `recent_requests` table to find the peer that forwarded the original request,
 and sends the response back through that peer. This ensures the response
-follows the same path as the request. Greedy tree routing toward the
-greedy tree routing toward the origin's coordinates is used only as a
-fallback if the reverse-path entry has expired.
+follows the same path as the request. A transit node whose reverse-path entry
+has expired drops the response.
 
 **Originator check**: on the response path, a node tests its own outstanding
 lookups before consulting `recent_requests`. A request is flooded to every

@@ -794,6 +794,11 @@ impl Node {
                         }
                     }
                     _ => {
+                        // Counted as it arrives, as on the IPv6 port, so a
+                        // datagram the registry then drops is counted too.
+                        if ce_flag {
+                            self.metrics().congestion.ce_received.inc();
+                        }
                         // Every other port belongs to the native datagram API,
                         // which decides between an established flow, a listener
                         // and a drop. The same decision serves the debug
@@ -1172,7 +1177,7 @@ impl Node {
         if self.insert_stated(*peer, coords, Self::now_ms()).is_none() {
             debug!(
                 src = %self.peer_display_name(peer),
-                reason = "foreign root",
+                reason = "foreign-root",
                 "Session peer's coordinate hint refused"
             );
         }

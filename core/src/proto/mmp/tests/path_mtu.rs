@@ -1,6 +1,8 @@
-//! Source-side `PathMtuState` tests: the actionable floor on a remote-supplied
-//! value, the increase-sequence counter, the one-way reactive decrease, and
-//! the pending increase value that either decrease must clear.
+//! `PathMtuState` tests. Source side: the actionable floor on a
+//! remote-supplied value, the increase-sequence counter, the one-way reactive
+//! decrease, and the pending increase value that either decrease must clear.
+//! Destination side: an immediate notification on a drop below the value last
+//! notified, and none on a rise.
 
 use crate::proto::mmp::MIN_ACTIONABLE_PATH_MTU;
 use crate::proto::mmp::path_mtu::PathMtuState;
@@ -269,4 +271,45 @@ fn seed_decrease_during_a_pending_increase_keeps_the_ladder() {
     state.apply_notification(1400, t0 + 10_000);
     assert!(state.apply_notification(1400, t0 + 21_000));
     assert_eq!(state.current_mtu(), 1400);
+}
+
+#[test]
+fn a_forward_decrease_below_the_value_last_notified_is_due_at_once_even_above_the_reverse_estimate()
+{
+    // Destination side. The reverse estimate (seeded 1200) describes the
+    // other direction and must not decide whether a forward drop is urgent.
+    let mut s = PathMtuState::new();
+    s.seed_source_mtu(1200);
+    s.observe_incoming_mtu(1500);
+    assert!(
+        s.should_send_notification(0),
+        "precondition: first measurement is due"
+    );
+    assert_eq!(s.build_notification(0), Some(1500));
+    s.observe_incoming_mtu(1300);
+    assert!(
+        s.should_send_notification(1),
+        "defect: a drop below the last notified value must be sent at once"
+    );
+}
+
+#[test]
+fn a_forward_increase_below_the_reverse_estimate_waits_for_the_period() {
+    let mut s = PathMtuState::new();
+    s.seed_source_mtu(1400);
+    s.observe_incoming_mtu(1000);
+    assert!(
+        s.should_send_notification(0),
+        "precondition: first measurement is due"
+    );
+    assert_eq!(s.build_notification(0), Some(1000));
+    s.observe_incoming_mtu(1100);
+    assert!(
+        !s.should_send_notification(1),
+        "defect: a rise above the last notified value is not an immediate notification"
+    );
+    assert!(
+        s.should_send_notification(10_000),
+        "precondition: the periodic confirmation still falls due"
+    );
 }

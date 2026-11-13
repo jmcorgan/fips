@@ -165,6 +165,13 @@ two identities with `testing/lib/derive_keys.py`, brings both up on their own
 docker network peered by npub, and sends a datagram from a client on one to a
 client on the other.
 
+Both nodes, like every node `start_node` brings up, start through
+`run_container` (`testing/lib/docker-run.sh`). The Docker daemon has refused a
+container create under side load (`failed to create task for container:
+Unavailable`); a start it refuses is retried, and if every attempt fails the
+check fails with an `INFRASTRUCTURE:` line naming Docker's error, not as a node
+that did not start.
+
 Three orderings are waited on explicitly rather than assumed, each because
 assuming it produced an intermittent failure:
 

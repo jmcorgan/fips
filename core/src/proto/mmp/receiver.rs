@@ -20,6 +20,15 @@ use super::{
 /// window + 5s margin.
 const REKEY_JITTER_GRACE_SECS: u64 = 15;
 
+/// Receive time after which the one-way delay reference restarts, in ms
+/// (about 12.4 days, reached only with rekey off).
+///
+/// A sample measures sender time from the reference as a wrapping `u32`
+/// difference read as `i32`, which changes sign at 2^31 ms. Restarting at
+/// 2^30 leaves a wide margin for any delay, and keeps the receive offset
+/// within the detector's `u32`.
+const OWD_REF_SPAN_MS: u64 = 1 << 30;
+
 // ============================================================================
 // Gap Tracker (burst loss detection)
 // ============================================================================
@@ -156,8 +165,10 @@ pub struct ReceiverState {
 
     // --- OWD trend ---
     owd_trend: OwdTrendDetector,
-    /// Monotonic sequence counter for OWD samples.
-    owd_seq: u32,
+    /// Receive instant (injected ms) and sender timestamp of the frame every
+    /// OWD sample is measured from: the first sampled since creation, a rekey
+    /// reset or a reference restart.
+    owd_ref: Option<(u64, u32)>,
 
     // --- Loss tracking ---
     gap_tracker: GapTracker,
@@ -173,8 +184,9 @@ pub struct ReceiverState {
     last_recv_ms: Option<u64>,
 
     // --- Rekey grace ---
-    /// When set, jitter updates are suppressed until this injected-ms instant
-    /// passes. Prevents drain-window frames from spiking the jitter estimator.
+    /// When set, jitter and OWD updates are suppressed until this injected-ms
+    /// instant passes. Prevents drain-window frames from the old session from
+    /// spiking the jitter estimator or becoming the OWD reference.
     rekey_jitter_grace_until_ms: Option<u64>,
 
     // --- Report timing (injected `u64` ms) ---
@@ -207,7 +219,7 @@ impl ReceiverState {
             interval_bytes_recv: 0,
             jitter: JitterEstimator::new(),
             owd_trend: OwdTrendDetector::new(owd_window_size),
-            owd_seq: 0,
+            owd_ref: None,
             gap_tracker: GapTracker::new(),
             ecn_ce_count: 0,
             last_sender_timestamp: 0,
@@ -234,7 +246,7 @@ impl ReceiverState {
         self.interval_bytes_recv = 0;
         self.jitter = JitterEstimator::new();
         self.owd_trend.clear();
-        self.owd_seq = 0;
+        self.owd_ref = None;
         self.last_sender_timestamp = 0;
         self.last_recv_ms = None;
         self.rekey_jitter_grace_until_ms = Some(now_ms + REKEY_JITTER_GRACE_SECS * 1000);
@@ -329,7 +341,8 @@ impl ReceiverState {
         let sender_us = (sender_timestamp_ms as i64) * 1000;
         // We compute the delta between consecutive transits using relative
         // millisecond differences (scaled to µs to match the estimator input).
-        // Skip during post-rekey grace period to avoid drain-window spikes.
+        // Skip during post-rekey grace period to avoid drain-window spikes;
+        // OWD sampling below skips it for the same reason.
         let in_grace = self
             .rekey_jitter_grace_until_ms
             .is_some_and(|deadline| now_ms < deadline);
@@ -341,21 +354,32 @@ impl ReceiverState {
                 let transit_delta = (recv_delta_us - send_delta_us) as i32;
                 self.jitter.update(transit_delta);
             }
-        }
-
-        // OWD trend: use sender timestamp as a proxy for send time
-        // and the injected ms delta from a fixed reference as receive time.
-        // Since we only need the *trend* (slope), absolute offsets cancel out.
-        if let Some(first_recv) = self.last_recv_ms.or(Some(now_ms)) {
-            let recv_offset_us = (now_ms.saturating_sub(first_recv) as i64) * 1000;
-            let owd_us = recv_offset_us - sender_us;
-            self.owd_seq = self.owd_seq.wrapping_add(1);
-            self.owd_trend.push(self.owd_seq, owd_us);
+            self.sample_owd(sender_timestamp_ms, now_ms);
         }
 
         // Timestamp echo state
         self.last_sender_timestamp = sender_timestamp_ms;
         self.last_recv_ms = Some(now_ms);
+    }
+
+    /// Push one one-way delay sample, measured from the reference frame.
+    ///
+    /// The sample is receive time minus sender time, both taken from the
+    /// reference, so the clocks' offset cancels and only the change in delay
+    /// remains. It is pushed at its receive offset in ms, so the detector's
+    /// slope is against receive time. The reference restarts, with the window
+    /// cleared, once it is `OWD_REF_SPAN_MS` old.
+    fn sample_owd(&mut self, sender_timestamp_ms: u32, now_ms: u64) {
+        let (mut ref_recv, mut ref_ts) = *self.owd_ref.get_or_insert((now_ms, sender_timestamp_ms));
+        if now_ms.saturating_sub(ref_recv) >= OWD_REF_SPAN_MS {
+            self.owd_trend.clear();
+            (ref_recv, ref_ts) = (now_ms, sender_timestamp_ms);
+            self.owd_ref = Some((ref_recv, ref_ts));
+        }
+        let recv_ms = now_ms.saturating_sub(ref_recv);
+        let sent_ms = i64::from(sender_timestamp_ms.wrapping_sub(ref_ts) as i32);
+        let owd_us = (recv_ms as i64 - sent_ms) * 1000;
+        self.owd_trend.push(recv_ms as u32, owd_us);
     }
 
     /// Build a ReceiverReport from current state and reset the interval.
@@ -394,7 +418,9 @@ impl ReceiverState {
             ecn_ce_count: self.ecn_ce_count,
             owd_trend: self.owd_trend.trend_us_per_sec(),
             burst_loss_count: burst_count,
-            cumulative_reorder_count: self.cumulative_reorder_count as u32,
+            // Saturates rather than wraps, so the peer never sees it fall.
+            cumulative_reorder_count: u32::try_from(self.cumulative_reorder_count)
+                .unwrap_or(u32::MAX),
         };
 
         // Reset interval
@@ -477,6 +503,13 @@ impl ReceiverState {
     pub fn ecn_ce_count(&self) -> u32 {
         self.ecn_ce_count
     }
+
+    /// Set the cumulative reorder count, to reach counts past `u32::MAX`
+    /// without that many frames.
+    #[cfg(test)]
+    pub(super) fn set_reorder_count(&mut self, n: u64) {
+        self.cumulative_reorder_count = n;
+    }
 }
 
 impl Default for ReceiverState {
@@ -554,7 +587,7 @@ impl ReceiverState {
             interval_bytes_recv,
             jitter,
             owd_trend,
-            owd_seq,
+            owd_ref,
             gap_tracker,
             ecn_ce_count,
             last_sender_timestamp,
@@ -606,7 +639,7 @@ impl ReceiverState {
             "receiver.owd_trend",
             owd_trend.fresh_diff(&fresh.owd_trend).is_empty(),
         );
-        note(&mut out, "receiver.owd_seq", *owd_seq == fresh.owd_seq);
+        note(&mut out, "receiver.owd_ref", *owd_ref == fresh.owd_ref);
         note(
             &mut out,
             "receiver.gap_tracker",
@@ -667,7 +700,7 @@ impl ReceiverState {
             interval_bytes_recv: 8_000,
             jitter: JitterEstimator::dirtied(),
             owd_trend: OwdTrendDetector::dirtied(owd_window_size),
-            owd_seq: 9,
+            owd_ref: Some((6_000, 5_800)),
             gap_tracker: GapTracker::dirtied(),
             ecn_ce_count: 1,
             last_sender_timestamp: 5_900,

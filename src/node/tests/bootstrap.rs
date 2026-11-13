@@ -1123,3 +1123,66 @@ async fn an_unknown_version_datagram_on_a_real_adopted_socket_sets_the_cooldown(
     );
     stop_transports(&mut node).await;
 }
+
+/// Whether `handle` is a UDP transport with a registered datagram classifier.
+fn has_classifier(handle: &TransportHandle) -> Option<bool> {
+    match handle {
+        TransportHandle::Udp(t) => Some(t.classifier().is_some()),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn every_configured_udp_instance_carries_the_nostr_classifier_only_while_rendezvous_is_enabled()
+ {
+    for enabled in [true, false] {
+        let mut named = HashMap::new();
+        for name in ["primary", "secondary"] {
+            named.insert(
+                name.to_string(),
+                UdpConfig {
+                    bind_addr: Some("127.0.0.1:0".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut config = Config::new();
+        config.transports.udp = TransportInstances::Named(named);
+        config.node.rendezvous.nostr.enabled = enabled;
+        let mut node = make_node_with(config);
+        let (packet_tx, _packet_rx) = packet_channel(8);
+        let handles = node.create_transports(&packet_tx).await;
+        let registered: Vec<_> = handles.iter().filter_map(has_classifier).collect();
+        assert_eq!(
+            registered,
+            vec![enabled; 2],
+            "rendezvous enabled: {enabled}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_punched_udp_instance_carries_the_nostr_classifier() {
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+    node.supervisor.state = NodeState::Running;
+
+    let peer = make_node();
+    let adopted_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let handoff = EstablishedTraversal::new(
+        "sess-classifier",
+        peer.npub(),
+        "127.0.0.1:9".parse().unwrap(),
+        adopted_socket,
+    );
+    let result = node.adopt_established_traversal(handoff).await.unwrap();
+    let adopted = node
+        .get_transport(&result.transport_id)
+        .expect("adopted transport present");
+    assert_eq!(has_classifier(adopted), Some(true));
+    for (_, transport) in node.transports.iter_mut() {
+        transport.stop().await.ok();
+    }
+}

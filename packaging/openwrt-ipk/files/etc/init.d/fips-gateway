@@ -119,8 +119,9 @@ start_service() {
 	# pool there.
 	ra_force
 
-	# Advertise the virtual IP pool via Router Advertisement so LAN clients
-	# learn a route to the pool automatically.
+	# Add the pool's kernel route on the LAN device and restart odhcpd,
+	# which applies ra_default. No RA carries a route for the pool itself;
+	# see gateway_add_ra_route.
 	gateway_add_ra_route
 
 	# dnsmasq's .fips forwarding moves to the gateway only once the gateway
@@ -140,7 +141,7 @@ stop_service() {
 	# Restore dnsmasq .fips forwarding back to the daemon.
 	dns_locked dnsmasq_swap_fips_upstream "$DAEMON_DNS_PORT"
 
-	# Remove the RA route for the virtual IP pool.
+	# Remove the pool's kernel route and its route6 section.
 	gateway_remove_ra_route
 
 	# The LAN prefix stays; see GLOBAL_PREFIX. ra_default goes back to the
@@ -455,18 +456,21 @@ lan_match() {
 	return 0
 }
 
-# Add an RA-advertised route for the virtual IP pool so LAN clients
-# automatically learn how to reach virtual IPs.
+# Add a kernel route for the virtual IP pool on the LAN device, write a uci
+# route6 section for it, and restart odhcpd. LAN clients reach the pool by
+# the default route odhcpd advertises because the gateway sets ra_default=2
+# (ra_force). odhcpd has no route6 option, so the section
+# advertises nothing; the restart is what applies ra_default at a start.
 gateway_add_ra_route() {
 	local pool
 	pool="$(gateway_pool_cidr)"
 	[ -z "$pool" ] && return 0
 
-	# Add a kernel route on the LAN device (needed for RA to advertise it).
+	# Add a kernel route for the pool on the LAN device.
 	ip -6 route replace "$pool" dev "$(lan_device)" proto static 2>/dev/null || true
 
-	# Add a UCI route6 entry for odhcpd to include in Router Advertisements.
-	# Remove any stale entry first.
+	# Write a uci route6 entry for the pool, removing any stale one first.
+	# odhcpd does not read route6, so no Router Advertisement carries it.
 	gateway_remove_ra_route_uci
 	uci add dhcp route6 >/dev/null
 	uci set dhcp.@route6[-1].interface="$(lan_iface)"
@@ -475,7 +479,7 @@ gateway_add_ra_route() {
 	/etc/init.d/odhcpd restart 2>/dev/null || true
 }
 
-# Remove the RA route.
+# Remove the pool's kernel route and its route6 section, and restart odhcpd.
 gateway_remove_ra_route() {
 	local pool
 	pool="$(gateway_pool_cidr)"

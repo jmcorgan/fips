@@ -245,25 +245,39 @@ with v0.5.x or earlier peers.
   daemon logs one more line at start, `IPv6 adapter status socket listening`.
 
 - Multipath: a link can now hold several paths to a peer, across transports
-  and addresses of one anonymity class and, unless `node.path.mix_kinds` is
-  set, of one kind, and move between them with no new handshake and one Noise
-  session throughout. Each node proves each path with an authenticated probe
-  and its answer, watches every path, and sends on one active path, leaving a
-  failed one at once and changing to a better one only past a margin and a
-  dwell. This follows the FIPS multipath version 1 draft
-  at its switchover level: Sections 4, 5, 7 and 8 and Appendix A, with every
-  `PathAck` field filled as Section 6.5 requires, with three differences on
-  the XX handshake that the design document lists. Aggregation is not
-  implemented. The path messages are three new link message types, `0x52` to
-  `0x54`, inside the existing encrypted link. A peer without multipath
-  discards them, and the pair behaves as before. After a crossed handshake
-  moves a link, the address the link left names no link, so the first
-  anonymous beacon there from a peer not known to implement multipath, which
-  is every peer with multipath off, is dialled, and settles as another
-  crossing on the one peering. `node.path.*` sets the
-  behaviour, each transport's `role` (`never`, `backup`, `normal`, `preferred`)
-  ranks its paths, and UDP's and TCP's `kind` (`local`, `internet`) overrides
-  the kind the peer's address implies, which a VPN on RFC 1918 space needs.
+  and addresses of one anonymity class, and move between them with no new
+  handshake and one Noise session throughout. Each node proves each path with
+  an authenticated probe and its answer, watches every path, and sends on one
+  active path, leaving a failed one at once and changing to a better one only
+  past a margin and a dwell. A link may mix local and Internet paths: one that
+  came up on a local medium (BLE, the LAN) may gain a path to the peer's
+  Internet address and move onto it, so a peering that began on the LAN can
+  become visible to parties on that Internet path. Either end setting
+  `node.path.mix_kinds: false` keeps a link to its first path's kind. The
+  anonymity-class rule still holds: a link gains no path over Tor or Nym from
+  a clear transport, or the other way round. This follows the FIPS multipath
+  version 1 draft at its switchover level (Sections 4, 5, 7 and 8 and
+  Appendix A, with every `PathAck` field filled as Section 6.5 requires),
+  with three differences on the XX handshake that the design document lists,
+  and departs from it in one rule: the path that carried the link when it
+  went silent is probed every second for 30 s before the gaps between its
+  probes double, where Section 5.6 has every path that has stopped answering
+  double its gaps from 1 s up to 30 s. Holding a probe's verdict while the
+  peer's session datagrams still arrive on its path is within the probe
+  timeout the draft leaves to the node. Taking a path's MTU from a smaller
+  size the path has proven it carries is not yet described in the draft
+  (Section 5.11), and whether FRC-1201's path-MTU rules (Section 3.6) admit
+  it is still open. Aggregation is not implemented. The path messages are
+  three new link message types, `0x52` to `0x54`, inside the existing
+  encrypted link. A peer without multipath discards them, and the pair
+  behaves as before. After a crossed handshake moves a link, the address the
+  link left names no link, so the first anonymous beacon there from a peer
+  not known to implement multipath, which is every peer with multipath off,
+  is dialled, and settles as another crossing on the one peering.
+  `node.path.*` sets the behaviour, each transport's `role` (`never`,
+  `backup`, `normal`, `preferred`) ranks its paths, and UDP's and TCP's `kind`
+  (`local`, `internet`) overrides the kind the peer's address implies, which a
+  VPN on RFC 1918 space needs.
   `fipsctl path show`, `pin` and `unpin` (control commands `path_show`,
   `path_pin` and `path_unpin`) show a link's paths and pin it to a transport or
   to one path, `show_peers` lists each peer's `paths`, and fipstop shows them.
@@ -933,6 +947,13 @@ with v0.5.x or earlier peers.
   fields, or `with_ack()` and `bidirectional()`. The SessionSetup flags byte is
   reserved with no named bits, and nothing used them. The type now carries the
   byte as it arrived.
+- **Source-breaking for consumers of the library crate**:
+  `fips::utils::onlink::OnLinkPrefixes::read_system()` is now the free
+  function `fips::utils::onlink::read_system()`. The prefix set moved to
+  `fips-core` (`fips_core::utils::onlink`), where nothing may read the
+  system, and is re-exported at its old path with `read_suspect`; the read
+  stays in `fips`, and Rust allows no inherent method on another crate's
+  type. The read, its result and its log lines are unchanged.
 
 #### Packaging
 
@@ -944,6 +965,18 @@ with v0.5.x or earlier peers.
   reaching it means a second build image and a second floor. `FIPS_BUILD_IMAGE`
   is still the oldest Debian-family distribution, which is no longer the oldest
   distribution outright.
+- The macOS, FreeBSD and tarball package scripts take the binaries from
+  cargo's target directory, honouring `CARGO_TARGET_DIR` and
+  `build.target-dir`. Before, they copied from `target/release`, so a moved
+  target directory packaged stale binaries or failed.
+
+#### Peer and link state
+
+- The `owd_trend` a node reports in its MMP receiver reports, and shows in
+  its link and session metrics, is now the one-way delay trend in µs per
+  second: zero for a steady path at any send rate. Before, it followed the
+  sender's frame spacing rather than the delay, and saturated when frames
+  were about two seconds apart. No node acts on the value.
 
 #### Identity and config
 
@@ -982,6 +1015,18 @@ with v0.5.x or earlier peers.
   filter-poisoning check off. A config that still pins the cap at `0.05` or
   `0.10`, as earlier release notes suggested for rolling upgrades, now runs
   at `0.20`.
+- An empty `node.lookup.attempt_timeouts_secs` now runs as the default
+  `[1, 2, 4, 8]`, and a list longer than 255 entries runs its first 255,
+  each with a warning at startup. Before, an empty list made nearly every
+  lookup time out at once, and a list over 255 entries ran only its length
+  modulo 256 attempts.
+- `node.mmp.owd_window_size` and `node.session_mmp.owd_window_size` below 2
+  now run as 2, and above 4096 as 4096, each with a warning at startup.
+  Before, 0 let the one-way delay window grow with every frame received,
+  and a very large value made the node panic at its first link or session.
+- `node.native_api.max_flows: 0` is now refused at startup. Before, the node
+  started with a native API that refused every client connect and dropped
+  every arrival.
 
 #### Routing and discovery
 
@@ -993,6 +1038,9 @@ with v0.5.x or earlier peers.
   above 0.20 stopped receiving their reachability changes; that hold is
   removed, with the `held_over_cap` key they added under `stats` in
   `fipsctl show bloom` and the control socket's `show_bloom` response.
+- The coordinate hint refusal reasons in the debug log are now
+  `foreign-root` and `over-hint-budget`, like every other log reason, in
+  place of `foreign root` and `over link peer's hint budget`.
 
 #### Transports
 
@@ -1770,6 +1818,101 @@ with v0.5.x or earlier peers.
   a restart: the LAN path stayed missing until the desktop left the LAN and
   came back. A dial a transport neighbour's key claim started is left out.
   Nothing on the wire changes.
+
+- With multipath on, path probes and acks no longer wait in a full transport
+  send queue. BLE, TCP, Tor and Nym connections queue frames for a writer and
+  refuse a frame once the queue is full (16 frames on BLE, 64 on TCP and
+  through the Tor and Nym proxy), and a probe refused behind the node's own
+  traffic counted as unanswered, so a loaded path read as failing while it
+  still carried data: a link pinned to BLE under load changed path about once
+  a second. Each such connection now has a second queue of 8 frames for path
+  messages, which its writer sends first. That queue is bounded, so a
+  connection that has stopped draining still refuses its probes and its path
+  still fails over.
+
+- With multipath on, a working path under bulk load is no longer declared
+  failing as the load starts. Its probes waited behind the data, three
+  answers arriving after the probe timeout made it Suspect, and the link
+  moved to a slower path for a few seconds at every onset, although the
+  peer's traffic was arriving on the path the whole time. The probe timeout
+  now also covers three times the largest round trip in the path's recent
+  window, that term capped at 3 s, and a probe is not judged missed while the
+  peer's session datagrams have arrived on its path since it was sent, up to
+  the same 3 s. On an idle link a failure in the node's own direction is
+  still found in about a second, and under load within the 3 s cap. Nothing
+  on the wire changes.
+
+- With multipath on, load on the active path no longer moves the link to a
+  path that is slower at its best. A path's score comes from its least round
+  trip over about the last 6.4 s, so load raised the active path's score past
+  an idle standby's, the link moved, the load followed it, and the link moved
+  back: in a test a loaded fast path handed the link to a BLE-rate standby for
+  26 of 60 s, and every change reorders the frames in flight. Each path now
+  also keeps its least round trip over the last 60 s, and a change on score
+  away from the active path waits while the active path is the faster of the
+  two over that minute, unless the other path also beats the active path's
+  score at its best by the switch margin. A move to a path faster at its
+  best is not held, nor is one made because the active path failed, for a
+  pin, for the transports' roles or for the FilterAnnounce frame size.
+
+- With multipath on, a path across a hop narrower than its link MTU no longer
+  shows Live while every large frame on it is lost. A padded probe that went
+  unanswered was followed by the smallest probe, which proves no size, and
+  the peer's path MTU came from the link MTU, so large frames were admitted
+  and then dropped at the hop while small traffic passed. Discovery probes
+  now step down from the link MTU to three quarters of it, half of it and the
+  smallest size, and the first size answered is the size the path is proven
+  to carry. A Live path proven below its link MTU searches upward again, to
+  recover a size that ordinary loss stepped it down from. The peer's path MTU
+  is now the smaller of the link MTU and the proven size, and follows the
+  active path's proven size up or down; sessions through the peer are lowered
+  to it when it falls. The path MTU folded into forwarded and originated
+  datagrams and into lookup responses, and whether a path carries the
+  1,071-byte FilterAnnounce frame, use the same value. On TCP, Tor, Nym and
+  BLE, where an oversized probe would close the connection, nothing searches
+  upward and the link MTU is kept.
+
+- With multipath on, the path that was carrying the link when it went silent
+  is probed every second for 30 s after it went silent, and only then do the
+  gaps between its probes double. Before, its gaps doubled from 1 s toward
+  30 s at once, so after an outage of about 20 s the path came back only at
+  the next doubled slot, seconds after it was reachable again, and the link
+  stayed on the worse path meanwhile; in a test a path silent for 20 s is now
+  Live again 400 ms after the outage ends, against 5.4 s before. Other silent
+  paths keep the doubling. On TCP, Tor, Nym and BLE these probes go at the
+  size the path has proven, so none of them can close the connection by its
+  size. This departs from the multipath draft, which has every path that has
+  stopped answering keep the doubling.
+
+- With multipath on, a link moved off a failed path returns to it once it is
+  Live again and has scored better than the path the link moved to, by any
+  amount, for the switch dwell. Before, the return needed the switch margin,
+  and the slower path's score still came from round trips it measured while
+  idle, so the return waited for its window of about 6.4 s to fill with
+  loaded samples: in a test a 2 s outage of a loaded fast path left the link
+  on a BLE-rate standby for 7.45 s after the outage ended, where it now
+  returns in 2.24 s, and a path within the margin of the one taken was never
+  returned to at all. Every other change on score still needs the margin.
+
+- With multipath on, a link prefers a cable to Wi-Fi, and Wi-Fi to BLE, among
+  the paths whose scores are within the switch margin of the best. A cable
+  and Wi-Fi on one LAN score within the margin of each other, so the link
+  stayed on whichever path it was made on unless the cable's transport had
+  `role: preferred`. The Ethernet transport now reads its interface's medium
+  each time it binds the interface: on Linux from `/sys/class/net/<interface>`,
+  and on macOS from the interface's media word, a read that has not yet been
+  run on a Mac. A bridge, a VLAN, a veth, a tunnel, the loopback interface and
+  anything else those facts do not settle stays unknown, as do UDP, TCP, Tor
+  and Nym paths, which may leave by any interface; there the score decides as
+  before, and `role: preferred` still puts a cable first. The medium ranks
+  after a pin, the transports' role tiers, the FilterAnnounce fit and
+  `role: preferred`, a move to a faster medium waits for the switch dwell,
+  and a path outside the margin of the best never keeps the link for its
+  medium. Under sustained
+  load the link no longer swaps between a cable and Wi-Fi every few seconds:
+  either move waits until the load has lasted 60 s, so the link changes path
+  at most twice a minute.
+
 - When crossed dials move a link onto the other session, the link's MMP
   receive state starts again with the new session, as at a rekey. Before,
   until the new session's frame counter passed the old one, receiver
@@ -1777,6 +1920,12 @@ with v0.5.x or earlier peers.
   and counted every new frame as reordered, and the peer's receiver reports
   on the new session were dropped as stale, so the link's round-trip, loss
   and ETX estimates stopped updating.
+- The MMP receiver reports' cumulative reorder count now stops at its
+  32-bit maximum. Before, it wrapped to a small number, and the peer
+  dropped that report and every later one as stale.
+- The smoothed ETX and its trend move once per receiver report, as their
+  smoothing factors intend. Before, each report moved them twice. Routing
+  uses the unsmoothed ETX and is unaffected.
 - When two nodes dial each other at once and the crossing settles where the
   node with the smaller address reads the msg2 answering its own dial, that
   node now holds the peer on the link it dialed and closes the inbound one.
@@ -1814,6 +1963,14 @@ with v0.5.x or earlier peers.
   accepted increase rises again when the destination reports the higher
   value. Before, it stayed at the lowered value until the session was
   rebuilt.
+- A destination whose observed path MTU falls below the value it last
+  reported now notifies the source at once. Before, it compared against its
+  own estimate for the reverse direction, so on an asymmetric path a real
+  decrease could wait a full notification interval, and an increase could
+  be sent as urgent.
+- On the pending-session path, a decrypted frame too short for its inner
+  header is dropped, as it already was on the main path. Before, it was
+  counted in the link statistics and could move the peer's address.
 - A session endpoint now makes the checks FRC-2501 requires of a receiver
   (Sections 5.1, 5.2, 5.4 and 5.9), and discards what fails them without an
   answer. A handshake message or routing signal is dropped before dispatch if
@@ -1847,6 +2004,14 @@ with v0.5.x or earlier peers.
   entries that no longer resolved read as an attack or a network fault.
   Anything in `fips.pub` that is not an npub is logged as "unreadable", so
   an nsec put there by mistake does not reach the log.
+- A node now takes a peer's npub in any letter case, and only in its NIP-19
+  form. A `.fips` name whose npub is in mixed case, as a resolver that
+  randomizes query-name case sends it, now resolves instead of getting
+  NXDOMAIN. A peer configured by its npub in upper case is now reached
+  through Nostr rendezvous, and open discovery recognises it as configured
+  instead of queueing it as an unknown peer. An npub with a bech32m checksum
+  or non-zero padding bits used to name the same key; it is now refused
+  everywhere a node or `fipsctl` reads an npub.
 - The hosts file (`/etc/fips/hosts` on Linux) no longer drops its names when
   it cannot be read, for example after an edit saved a byte that is not UTF-8
   or the file was written with a mode the daemon cannot read. The DNS
@@ -1894,6 +2059,30 @@ with v0.5.x or earlier peers.
   to 4096, more than the inbound signal rate limit admits in a 300 s replay
   window, so the refusal is not reached at the defaults. A configured value
   is kept as it is.
+- A stale or reordered tree announce no longer changes the tree position
+  shown for its sender. A parent update that changes only its sequence no
+  longer drops the cached coordinates of this node's descendants or clears
+  lookup backoff. The parent switch hold-down now runs from the last change
+  of parent, so upstream churn no longer keeps a node from moving to a
+  better parent.
+- A very large `node.lookup.attempt_timeouts_secs` entry no longer
+  overflows the lookup retries, the probe's discovery budget or `fipsctl`'s
+  probe wait, and a very large `fipsctl probe --timeout` no longer
+  overflows either. Before, a debug build panicked and a release build
+  gave up at once.
+- A FilterAnnounce the link refuses as too large for its MTU is now
+  reported once per peering as a warning naming the link MTU and the frame
+  size. Before, it was reported only at debug level on every retry.
+- With Nostr rendezvous enabled, out-of-range timestamps from a responder no
+  longer overflow the clock-skew estimate, which panicked the traversal
+  task in a debug build. An advert endpoint of a transport kind the node
+  does not know is ignored and the rest of the advert used; before, the
+  whole advert was rejected.
+- The STUN client retransmits a binding request within its deadline, so one
+  lost request no longer loses that server for the observation. It offers
+  local candidates only in its socket's address family, and reaches a STUN
+  server at an address of that family; before, an IPv4 socket offered IPv6
+  interface addresses and could try an IPv6 server address first.
 
 #### Transports
 
@@ -1952,6 +2141,10 @@ with v0.5.x or earlier peers.
   now accepts frames up to 65535 bytes whatever its own `mtu`, as a TCP
   receiver already does, so the largest frame a peer can make it allocate
   for rises from the local `mtu` (1400 bytes by default) to 64 KiB.
+- An Ethernet transport now drops frames whose source MAC is a multicast
+  or broadcast address, counting them in a new `group_drops` counter, and
+  refuses to send to such an address. Before, a forged beacon from one could
+  make a node with `auto_connect` send its handshake to the group address.
 - On Linux, starting the BLE transport no longer unpairs the host's
   Bluetooth devices. Scan start removed every device BlueZ had cached on
   the adapter, which deletes pairing keys, trust and block settings and
@@ -2083,6 +2276,14 @@ with v0.5.x or earlier peers.
   packets to the second were lost until it retried. Back-to-back oversized
   packets are now each answered, and a flood from one source is still held to
   the rate.
+
+#### Native datagram API
+
+- `ce_received` now counts congestion-marked datagrams delivered to native
+  API ports, not only those for the IPv6 port.
+- A native API refusal now echoes at most 512 bytes of the client's text,
+  so a long bad command no longer draws a reply so large that a macOS
+  local socket splits it and the daemon drops the connection.
 
 #### Documentation
 

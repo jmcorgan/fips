@@ -412,7 +412,9 @@ fn check_advert(
         }
     }
     let npub = npub.ok_or(AdvertSkip::NoNpub)?;
-    if npub == own_npub {
+    // An npub names its key in any letter case, so ours in another case is
+    // still our own advert.
+    if npub.eq_ignore_ascii_case(own_npub) {
         return Err(AdvertSkip::Own);
     }
     if scope_filter.is_some() && scope_filter != scope.as_deref() {

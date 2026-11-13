@@ -903,7 +903,8 @@ impl ActivePeer {
 
     /// Every path this peer is reachable over. The active one is
     /// [`active_path`](Self::active_path).
-    // Read by tests until the path switch reads it.
+    // Only the node tests read it; the node itself reads the paths through
+    // the bundle.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn paths(&self) -> &[PeerPath] {
         self.send.bundle.as_ref().map_or(&[], |b| b.paths().paths())

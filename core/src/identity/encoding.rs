@@ -20,8 +20,17 @@ pub fn encode_npub(pubkey: &XOnlyPublicKey) -> String {
 }
 
 /// Decode an npub string to an x-only public key.
+///
+/// The npub may be in any letter case: it is folded to lower case first, so
+/// an npub typed in upper case or sent as a DNS name by a case-randomizing
+/// resolver names the same key. Only the NIP-19 form is accepted, a bech32
+/// checksum with zero padding bits: `bech32::decode` also accepts a bech32m
+/// checksum and ignores the padding, so text whose canonical encoding differs
+/// from it is refused with [`IdentityError::NonCanonicalNpub`]. Each key
+/// therefore has one npub, up to case.
 pub fn decode_npub(npub: &str) -> Result<XOnlyPublicKey, IdentityError> {
-    let (hrp, data) = bech32::decode(npub)?;
+    let folded = npub.to_ascii_lowercase();
+    let (hrp, data) = bech32::decode(&folded)?;
 
     if hrp != NPUB_HRP {
         return Err(IdentityError::InvalidNpubPrefix(hrp.to_string()));
@@ -32,6 +41,9 @@ pub fn decode_npub(npub: &str) -> Result<XOnlyPublicKey, IdentityError> {
     }
 
     let pubkey = XOnlyPublicKey::from_slice(&data)?;
+    if encode_npub(&pubkey) != folded {
+        return Err(IdentityError::NonCanonicalNpub);
+    }
     Ok(pubkey)
 }
 

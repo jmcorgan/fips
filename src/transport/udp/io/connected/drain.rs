@@ -22,7 +22,8 @@
 //! useful in either shape; only the wakeup mechanism differs.
 
 use super::socket::ConnectedPeerSocket;
-use crate::transport::udp::UdpStats;
+use crate::transport::udp::classify::classify;
+use crate::transport::udp::{Classifier, DatagramClass, UdpStats};
 use crate::transport::{PacketTx, ReceivedPacket, TransportAddr, TransportId};
 use std::io;
 use std::net::SocketAddr;
@@ -64,6 +65,7 @@ impl PeerRecvDrain {
         peer_addr: SocketAddr,
         packet_tx: PacketTx,
         stats: Arc<UdpStats>,
+        classifier: Option<Classifier>,
     ) -> io::Result<Self> {
         // Self-pipe for shutdown signaling. The drain thread polls
         // (socket_fd | pipe_rx) so a write to pipe_tx wakes it.
@@ -82,8 +84,11 @@ impl PeerRecvDrain {
                     peer_addr,
                     packet_tx,
                     stats,
-                    pipe_rx,
-                    stop_clone,
+                    classifier,
+                    StopSignal {
+                        pipe_rx,
+                        flag: stop_clone,
+                    },
                 );
                 // Drain thread cleans up the read end of the pipe on exit.
                 unsafe { libc::close(pipe_rx) };
@@ -136,6 +141,13 @@ impl Drop for PeerRecvDrain {
     }
 }
 
+/// How the owning handle tells the drain thread to exit: the read end of the
+/// self-pipe its `poll(2)` watches, and the flag it checks on waking.
+struct StopSignal {
+    pipe_rx: RawFd,
+    flag: Arc<AtomicBool>,
+}
+
 /// The drain thread's main loop. Runs until `stop` is set + the
 /// stop-pipe is written to (Drop does both in order).
 fn drain_loop(
@@ -144,9 +156,13 @@ fn drain_loop(
     peer_addr: SocketAddr,
     packet_tx: PacketTx,
     stats: Arc<UdpStats>,
-    stop_pipe_rx: RawFd,
-    stop: Arc<AtomicBool>,
+    classifier: Option<Classifier>,
+    stop: StopSignal,
 ) {
+    let StopSignal {
+        pipe_rx: stop_pipe_rx,
+        flag: stop,
+    } = stop;
     let socket_fd = socket.as_raw_fd();
     trace!(
         transport_id = %transport_id,
@@ -241,7 +257,7 @@ fn drain_loop(
             stats.record_recv(len);
             // Punch probes and acks are discarded here as on the shared
             // socket: they are traversal traffic, never FMP.
-            if crate::nostr::is_punch_packet(&backing[i][..len]) {
+            if classify(classifier, &backing[i][..len]) == DatagramClass::Discard {
                 trace!(
                     transport_id = %transport_id,
                     peer_addr = %peer_addr,
@@ -523,9 +539,15 @@ mod tests {
 
         // Spawn the drain.
         let stats = Arc::new(UdpStats::new());
-        let _drain =
-            PeerRecvDrain::spawn(socket.clone(), transport_id, peer_addr, tx, stats.clone())
-                .expect("PeerRecvDrain::spawn");
+        let _drain = PeerRecvDrain::spawn(
+            socket.clone(),
+            transport_id,
+            peer_addr,
+            tx,
+            stats.clone(),
+            None,
+        )
+        .expect("PeerRecvDrain::spawn");
 
         // Send a couple of packets from the peer to our socket.
         for i in 0u8..5 {
@@ -571,6 +593,7 @@ mod tests {
             peer_addr,
             tx,
             stats.clone(),
+            None,
         )
         .expect("PeerRecvDrain::spawn");
 

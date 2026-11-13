@@ -24,6 +24,7 @@
           "frames_sent": 0,
           "frames_too_long": 0,
           "frames_too_short": 0,
+          "group_drops": 0,
           "kernel_drops": 0,
           "recv_errors": 0,
           "send_errors": 0

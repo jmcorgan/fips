@@ -2,11 +2,12 @@
 # instead of letting compose create them from the base file's fixed pins.
 #
 # Applied only by ci-local.sh's run_nat / run_nostr_publish_consume /
-# run_stun_faults, which claim a free /24 per network per suite invocation
-# (ci_claim_nat_networks) and export FIPS_NAT_WAN_NET / FIPS_NAT_LAN_NET and
-# NAT_WAN_PREFIX / NAT_LAN_PREFIX before `up`. That is what makes two
-# concurrent local NAT runs collision-safe: each claims distinct ranges, so
-# neither requests address space the other holds.
+# run_stun_faults / run_nostr_open_discovery, which claim a free /24 per
+# network per suite invocation (ci_claim_nat_networks) and export
+# FIPS_NAT_WAN_NET / FIPS_NAT_LAN_NET and NAT_WAN_PREFIX / NAT_LAN_PREFIX
+# before `up`. That is what makes two concurrent local NAT runs
+# collision-safe: each claims distinct ranges, so neither requests address
+# space the other holds.
 #
 # The GitHub matrix, testing/mesh-lab/run-loop.sh, the README invocation and
 # any standalone `docker compose up` do NOT apply this overlay; they use the

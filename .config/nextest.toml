@@ -85,7 +85,7 @@ filter = 'package(fips-mesh) & test(/^node::tests::(bloom::test_bloom_filter_con
 test-group = 'node-large'
 
 [[profile.default.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|ble_queue|bootstrap|claim_dials|claim_slots|connected_udp|control|crossed_dial|decrypt_forged|decrypt_replay|dial_origin|discovery_msg1_cap|establish_chartests|handshake|handshake_lines|host_link|lan_label|link_setup_diag|netmon|path_intake|path_load|path_padding|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|stored_msg2_install|task_wait|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|ble_queue|bootstrap|claim_dials|claim_slots|connected_udp|control|crossed_dial|decrypt_forged|decrypt_replay|dial_origin|discovery_msg1_cap|establish_chartests|handshake|handshake_lines|host_link|instr_capture|lan_label|link_setup_diag|netmon|path_intake|path_load|path_padding|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|stored_msg2_install|task_wait|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
 
 [[profile.default.overrides]]
@@ -97,7 +97,7 @@ filter = 'package(fips-mesh) & test(/^node::tests::(bloom::test_bloom_filter_con
 test-group = 'node-large'
 
 [[profile.ci.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|ble_queue|bootstrap|claim_dials|claim_slots|connected_udp|control|crossed_dial|decrypt_forged|decrypt_replay|dial_origin|discovery_msg1_cap|establish_chartests|handshake|handshake_lines|host_link|lan_label|link_setup_diag|netmon|path_intake|path_load|path_padding|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|stored_msg2_install|task_wait|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|ble_queue|bootstrap|claim_dials|claim_slots|connected_udp|control|crossed_dial|decrypt_forged|decrypt_replay|dial_origin|discovery_msg1_cap|establish_chartests|handshake|handshake_lines|host_link|instr_capture|lan_label|link_setup_diag|netmon|path_intake|path_load|path_padding|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|stored_msg2_install|task_wait|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
 
 [[profile.ci.overrides]]
@@ -122,7 +122,7 @@ test-group = 'node-synthetic'
 # only on master and next, and package() naming a package the workspace lacks
 # is a hard error, while a test() name a branch lacks matches nothing. One
 # filter therefore serves every branch. testing/check-node-test-groups.py reads
-# only overrides that set a test-group, so it does not check this one.
+# this override's slow-timeout, to keep terminate-after, and not its filter.
 [[profile.default.overrides]]
 filter = 'test(/^(node::tests::(bloom::test_bloom_filter_convergence_100_nodes|discovery::test_discovery_100_nodes|restart_dial::both_ends_dialling_after_a_peer_restart_settle_on_one_session_in_either_message_order|routing::test_routing_reachability_100_nodes|routing::test_routing_source_only_coords_100_nodes|session::test_session_100_nodes|spanning_tree::test_spanning_tree_convergence_100_nodes)|proto::routing::tests::limits::the_map_stays_bounded_when_a_sender_mints_distinct_destination_keys|proto::rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals|proto::settle::tests::explore::every_named_start_reaches_its_target_depth_over_the_model|proto::settle::tests::joint::explore::every_explored_interleaving_of_the_joint_party_keeps_the_properties_off|proto::settle::tests::joint::explore::every_explored_interleaving_of_the_joint_party_keeps_the_properties_on|proto::settle::tests::joint::explore::every_named_start_reaches_its_target_depth_with_the_machines_off|proto::settle::tests::joint::explore::every_named_start_reaches_its_target_depth_with_the_machines_on|proto::settle::tests::joint::explore::every_named_start_reaches_its_target_depth_with_the_machines_on_against_off|proto::settle::tests::joint::explore::every_named_start_reaches_its_target_depth_with_the_machines_off_against_on|proto::settle::tests::joint::explore::the_cold_start_reaches_its_stated_depth_off_with_off|proto::settle::tests::joint::explore::the_cold_start_reaches_its_stated_depth_on_with_on|proto::settle::tests::legacy::findings::the_model_of_master_against_itself_on_every_start_shows_the_two_defects_and_no_wrong_link)$/)'
 slow-timeout = { period = "60s", terminate-after = 8 }

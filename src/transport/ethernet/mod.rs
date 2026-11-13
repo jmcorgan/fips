@@ -1317,79 +1317,22 @@ async fn ethernet_receive_loop(
         match socket.recv_from(&mut buf).await {
             Ok((len, src_mac)) => {
                 consecutive_errors = 0;
-                if len == 0 {
-                    continue;
-                }
-
-                stats.record_recv(len);
-
-                let frame_type = buf[0];
-                match frame_type {
-                    FRAME_TYPE_DATA => {
-                        let data = match data_payload(&buf[..len]) {
-                            Ok(payload) => payload.to_vec(),
-                            Err(DataFrameError::TooShort { len }) => {
-                                trace!("Data frame too short ({len} bytes), ignoring");
-                                continue;
-                            }
-                            Err(DataFrameError::LengthExceeds {
-                                payload_len,
-                                available,
-                            }) => {
-                                trace!(
-                                    "Data frame length field ({payload_len}) exceeds \
-                                     available bytes ({available}), ignoring"
-                                );
-                                continue;
-                            }
-                        };
-                        let bytes = data.len();
-                        let addr = TransportAddr::from_mac(src_mac);
-                        let packet = ReceivedPacket::new(transport_id, addr, data);
-
-                        trace!(
-                            transport_id = %transport_id,
-                            remote_mac = %format_mac(&src_mac),
-                            bytes,
-                            "Ethernet data frame received"
-                        );
-
-                        if packet_tx.send(packet).await.is_err() {
-                            debug!(
-                                transport_id = %transport_id,
-                                "Packet channel closed, stopping receive loop"
-                            );
-                            break;
-                        }
-                    }
-                    FRAME_TYPE_BEACON => {
-                        stats.record_beacon_recv();
-
-                        if listen_enabled && parse_beacon(&buf[..len]) {
-                            // `add_peer` reports whether the buffer took the
-                            // beacon. It refuses once the distinct-MAC cap is
-                            // reached, which is the bound on an unauthenticated
-                            // broadcast frame naming a fresh MAC every time.
-                            // This line's beacon carries no pubkey, so there is
-                            // no hint to pass through.
-                            if !neighbor_buffer.add_peer(src_mac) {
-                                stats.record_beacon_dropped();
-                            }
-                            trace!(
-                                transport_id = %transport_id,
-                                remote_mac = %format_mac(&src_mac),
-                                "Neighbor beacon received"
-                            );
-                        }
-                    }
-                    _ => {
-                        // Unknown frame type, ignore
-                        trace!(
-                            transport_id = %transport_id,
-                            frame_type = frame_type,
-                            "Unknown frame type, dropping"
-                        );
-                    }
+                let packet = dispatch_frame(
+                    &buf[..len],
+                    src_mac,
+                    listen_enabled,
+                    &neighbor_buffer,
+                    &stats,
+                    transport_id,
+                );
+                if let Some(packet) = packet
+                    && packet_tx.send(packet).await.is_err()
+                {
+                    debug!(
+                        transport_id = %transport_id,
+                        "Packet channel closed, stopping receive loop"
+                    );
+                    break;
                 }
             }
             Err(e) => {
@@ -1421,6 +1364,103 @@ async fn ethernet_receive_loop(
     }
 
     debug!(transport_id = %transport_id, "Ethernet receive loop stopped");
+}
+
+/// Decide what one received frame is: a data packet for the node, a beacon for
+/// the discovery buffer, or nothing.
+///
+/// Kept apart from the socket so the per-frame rules can be tested without
+/// one: the receive loop reads, calls this, and sends what it returns.
+fn dispatch_frame(
+    frame: &[u8],
+    src_mac: [u8; 6],
+    listen_enabled: bool,
+    neighbor_buffer: &NeighborBuffer,
+    stats: &EthernetStats,
+    transport_id: TransportId,
+) -> Option<ReceivedPacket> {
+    if frame.is_empty() {
+        return None;
+    }
+
+    stats.record_recv(frame.len());
+
+    // A group address is never a unicast sender. Taking one as a peer's
+    // address would buffer it for dialing, or send link traffic back to it,
+    // which reaches every host on the segment.
+    if is_group(&src_mac) {
+        stats.record_group();
+        trace!(
+            transport_id = %transport_id,
+            remote_mac = %format_mac(&src_mac),
+            "Frame from a group source address, dropping"
+        );
+        return None;
+    }
+
+    let frame_type = frame[0];
+    match frame_type {
+        FRAME_TYPE_DATA => {
+            let data = match data_payload(frame) {
+                Ok(payload) => payload.to_vec(),
+                Err(DataFrameError::TooShort { len }) => {
+                    trace!("Data frame too short ({len} bytes), ignoring");
+                    return None;
+                }
+                Err(DataFrameError::LengthExceeds {
+                    payload_len,
+                    available,
+                }) => {
+                    trace!(
+                        "Data frame length field ({payload_len}) exceeds \
+                         available bytes ({available}), ignoring"
+                    );
+                    return None;
+                }
+            };
+            let bytes = data.len();
+            let addr = TransportAddr::from_mac(src_mac);
+            let packet = ReceivedPacket::new(transport_id, addr, data);
+
+            trace!(
+                transport_id = %transport_id,
+                remote_mac = %format_mac(&src_mac),
+                bytes,
+                "Ethernet data frame received"
+            );
+            Some(packet)
+        }
+        FRAME_TYPE_BEACON => {
+            stats.record_beacon_recv();
+
+            if listen_enabled && parse_beacon(frame) {
+                // `add_peer` reports whether the buffer took the
+                // beacon. It refuses once the distinct-MAC cap is
+                // reached, which is the bound on an unauthenticated
+                // broadcast frame naming a fresh MAC every time.
+                // This line's beacon carries no pubkey, so there is
+                // no hint to pass through.
+                if !neighbor_buffer.add_peer(src_mac) {
+                    stats.record_beacon_dropped();
+                }
+                trace!(
+                    transport_id = %transport_id,
+                    remote_mac = %format_mac(&src_mac),
+                    "Neighbor beacon received"
+                );
+            }
+            None
+        }
+        _ => {
+            // Unknown frame type, ignore
+            trace!(
+                transport_id = %transport_id,
+                frame_type = frame_type,
+                "Unknown frame type, dropping"
+            );
+            None
+        }
+    }
 }
 
 // ============================================================================
@@ -1531,7 +1571,21 @@ fn parse_mac_addr(addr: &TransportAddr) -> Result<[u8; 6], TransportError> {
     }
     let mut mac = [0u8; 6];
     mac.copy_from_slice(bytes);
+    // The beacon is the only frame sent to a group address, and it goes to
+    // the broadcast address directly rather than through here.
+    if is_group(&mac) {
+        return Err(TransportError::InvalidAddress(format!(
+            "destination MAC {} is a group address",
+            format_mac(&mac)
+        )));
+    }
     Ok(mac)
+}
+
+/// Whether `mac` is a group (multicast or broadcast) address: the low bit of
+/// its first octet is set.
+fn is_group(mac: &[u8; 6]) -> bool {
+    mac[0] & 0x01 != 0
 }
 
 /// Format a MAC address as colon-separated hex for display.
@@ -1561,6 +1615,10 @@ mod congestion_tests;
 #[cfg(test)]
 #[path = "tests/medium.rs"]
 mod medium_tests;
+
+#[cfg(test)]
+#[path = "tests/frames.rs"]
+mod frame_tests;
 
 #[cfg(test)]
 mod tests {

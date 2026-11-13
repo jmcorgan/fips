@@ -399,8 +399,9 @@ full retransmit from the sender.
 ### LookupRequest (0x30)
 
 Coordinate discovery request, routed through the spanning tree via
-bloom-filter-guided forwarding. Each transit node forwards only to tree
-peers (parent + children) whose bloom filter contains the target.
+bloom-filter-guided forwarding. Each transit node forwards to tree peers
+(parent + children) whose bloom filter contains the target, or to matching
+non-tree peers when no tree peer matches.
 Request_id dedup in recent_requests handles edge cases from tree
 restructuring.
 
@@ -516,7 +517,7 @@ Sent by the frame sender to provide interval-based transmission statistics.
 | 1 | format_version | 1 | 0 (current) |
 | 2 | total_length | 2 | u16 LE — 16 (v0 payload size) |
 | 4 | interval_packets_sent | 4 | u32 LE — packets sent in interval |
-| 8 | interval_bytes_sent | 4 | u32 LE — payload bytes sent in interval |
+| 8 | interval_bytes_sent | 4 | u32 LE — bytes sent in interval: whole frames at the link layer, ciphertext at the session layer |
 | 12 | cumulative_packets_sent | 8 | u64 LE — total packets sent on this link |
 
 **Total: 20 bytes.**
@@ -541,10 +542,10 @@ Sent by the frame receiver to provide loss, jitter, and timing feedback.
 | 18 | cumulative_packets_recv | 8 | u64 LE — total packets received |
 | 26 | cumulative_bytes_recv | 8 | u64 LE — total bytes received |
 | 34 | jitter | 4 | u32 LE — interarrival jitter (microseconds) |
-| 38 | ecn_ce_count | 4 | u32 LE — cumulative ECN-CE marked packets |
-| 42 | owd_trend | 4 | i32 LE — one-way delay trend (µs/s, signed) |
+| 38 | ecn_ce_count | 4 | u32 LE — ECN-CE marked packets since the last rekey |
+| 42 | owd_trend | 4 | i32 LE — one-way delay trend (µs/s, signed); informational, no receiver reads it |
 | 46 | burst_loss_count | 4 | u32 LE — number of loss bursts in interval |
-| 50 | cumulative_reorder_count | 4 | u32 LE — total reordered packets |
+| 50 | cumulative_reorder_count | 4 | u32 LE — reordered packets since the last rekey |
 
 **Total: 54 bytes.**
 

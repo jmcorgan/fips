@@ -23,6 +23,10 @@ not compiled pending FreeBSD-specific `SO_REUSEPORT` validation.
 ./packaging/freebsd/build-pkg.sh --no-build # package existing release binaries
 ```
 
+The binaries are taken from cargo's target directory: after a build, the one
+`cargo metadata` reports; with `--no-build`, `$CARGO_TARGET_DIR/release`, or
+`target/release` when that is unset (`packaging/common/target-dir.sh`).
+
 Output: `deploy/fips-<version>-freebsd-<arch>.pkg`. pkg versions cannot
 contain `-` or `+`, so both are mapped to `.`: a Cargo version of
 `<x.y.z>-dev` becomes `fips-<x.y.z>.dev-freebsd-amd64.pkg`.

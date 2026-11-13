@@ -19,6 +19,6 @@ pub(in crate::node) mod wait;
 
 #[cfg(test)]
 pub(in crate::node) use encrypted::DECRYPT_FAILURE_THRESHOLD;
-#[cfg(all(test, any(ble_available, target_os = "linux", target_os = "macos")))]
+#[cfg(test)]
 pub(in crate::node) use encrypted::LinkSlot;
 pub(in crate::node) use peer_actions::PeerActionCtx;

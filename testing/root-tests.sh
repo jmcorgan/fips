@@ -67,7 +67,7 @@ probe_made=false
 tmp=""
 
 # Remove the output file and the probe namespace, whichever exist.
-# shellcheck disable=SC2317  # run by the EXIT trap
+# shellcheck disable=SC2317,SC2329  # run by the EXIT trap
 cleanup() {
     [[ -n "$tmp" ]] && rm -f "$tmp"
     if [[ "$probe_made" == true ]]; then

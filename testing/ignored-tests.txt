@@ -98,6 +98,7 @@ helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_a_plain
 helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_its_defect_assertion  src/node/tests/settle/lane.rs
 helper        fips-mesh  node::tests::settle::lane::a_planted_test_that_passes  src/node/tests/settle/lane.rs
 helper        fips-mesh  node::tests::settle::lane::a_planted_switch_reds_at_its_defect_assertion  src/node/tests/settle/lane.rs
+helper        fips-mesh  nostr::tests::fixtures::capture_the_v044_fixtures  src/nostr/tests/fixtures.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
 known-defect  fips-mesh  node::tests::restart_dial::a_larger_node_still_hearing_a_restarted_peer_settles_on_one_session_when_both_dial_and_the_peer_reads_its_own_answer_first  src/node/tests/restart_dial.rs
 # The next six are known differences on next, each pin once with multipath

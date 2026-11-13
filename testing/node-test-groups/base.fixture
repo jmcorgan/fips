@@ -23,6 +23,12 @@ nextest-version = { required = "0.9.149" }
 node-large = { max-threads = 1 }
 node-synthetic = { max-threads = 1 }
 
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[profile.ci]
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 [[profile.default.overrides]]
 filter = 'package(fips-mesh) & test(/^node::tests::(big::test_big_100_nodes|big::test_big_via_helper|sock_direct::test_sock_100_nodes)$/)'
 test-group = 'node-large'
@@ -41,7 +47,7 @@ test-group = 'node-synthetic'
 
 [[profile.ci.overrides]]
 filter = 'test(slow)'
-slow-timeout = "120s"
+slow-timeout = { period = "60s", terminate-after = 8 }
 === .github/workflows/ci.yml
 # Fixture workflow: the check reads only the nextest install step's pin.
 jobs:

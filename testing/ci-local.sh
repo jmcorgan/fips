@@ -80,6 +80,10 @@
 # Opt-in (require --with-tor; depend on live Tor network):
 #   tor-socks5, tor-directory
 #
+# Opt-in (run only when named with --only or --rerun):
+#   nostr-open-discovery  the Nostr open-discovery startup scenario; run by
+#                         hand when the Nostr rendezvous code changes
+#
 # Deliberately not run by either runner, with the reason for each. Recorded
 # here so that "not in the suite list" stops being indistinguishable from
 # "forgotten", which is what it was until 2026-07-23:
@@ -185,6 +189,9 @@
 #   tor-socks5     — requires live Tor network; opt-in via --with-tor,
 #                    unreliable on GitHub-hosted runners.
 #   tor-directory  — same; live Tor dependency.
+#   nostr-open-discovery — not run by default by either runner: it is the
+#                    acceptance check for changes to the Nostr rendezvous
+#                    code, run by hand with --only when that code changes.
 #
 # Deliberate GitHub-only (NOT in this local run), with reason:
 #   deb-install ubuntu22 on arm64 — this host is x86_64 and cannot run an
@@ -295,6 +302,8 @@ FIREWALL_SUITES=(firewall)
 IFACE_BINDING_SUITES=(iface-binding)
 NAT_SUITES=(cone symmetric lan)
 NOSTR_RELAY_SUITES=(nostr-publish-consume)
+# Opt-in: known to --only and --rerun, left out of the default run.
+NOSTR_OPEN_DISCOVERY_SUITES=(nostr-open-discovery)
 STUN_FAULTS_SUITES=(stun-faults)
 DNS_RESOLVER_SUITES=(dns-resolver)
 NATIVE_API_SUITES=(native-api)
@@ -348,6 +357,9 @@ list_suites() {
     echo ""
     echo "  Nostr publish/consume:"
     for s in "${NOSTR_RELAY_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  Nostr open-discovery (opt-in via --only):"
+    for s in "${NOSTR_OPEN_DISCOVERY_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  STUN fault-injection:"
     for s in "${STUN_FAULTS_SUITES[@]}"; do echo "    $s"; done
@@ -1123,19 +1135,23 @@ print(exe)
 
 # ── Stage 3: Integration Tests ─────────────────────────────────────────────
 
-# Copy the integration binaries (run_testbuild) into a testing subdirectory
+# Copy the integration binaries (run_testbuild) into a testing subdirectory.
+# They come from the directory run_testbuild built into: cargo writes under
+# $CARGO_TARGET_DIR when it is set, which parallel worktree runs use, and under
+# target/ otherwise. No cargo config in the tree sets build.target-dir.
 install_binaries() {
     local dest="$1"
-    cp target/integration/fips "$dest/fips"
-    cp target/integration/fipsctl "$dest/fipsctl"
-    [[ -f target/integration/fipstop ]] && cp target/integration/fipstop "$dest/fipstop" || true
-    [[ -f target/integration/fips-gateway ]] && cp target/integration/fips-gateway "$dest/fips-gateway" || true
+    local out="${CARGO_TARGET_DIR:-target}/integration"
+    cp "$out/fips" "$dest/fips"
+    cp "$out/fipsctl" "$dest/fipsctl"
+    [[ -f "$out/fipstop" ]] && cp "$out/fipstop" "$dest/fipstop" || true
+    [[ -f "$out/fips-gateway" ]] && cp "$out/fips-gateway" "$dest/fips-gateway" || true
     # Not optional: the native-api harness runs native-echo as one end of its
     # echo check and native-surface as its surface walk, so a missing one must
     # fail the image build rather than fail a check later with the container
     # exiting on a missing entrypoint.
-    cp target/integration/examples/native-echo "$dest/native-echo"
-    cp target/integration/examples/native-surface "$dest/native-surface"
+    cp "$out/examples/native-echo" "$dest/native-echo"
+    cp "$out/examples/native-surface" "$dest/native-surface"
     chmod +x "$dest/fips" "$dest/fipsctl" "$dest/native-echo" "$dest/native-surface"
     [[ -f "$dest/fipstop" ]] && chmod +x "$dest/fipstop" || true
     [[ -f "$dest/fips-gateway" ]] && chmod +x "$dest/fips-gateway" || true
@@ -1493,6 +1509,7 @@ ci_release_nat_networks() {
         -f testing/nat/docker-compose.external-net.yml \
         --profile cone --profile symmetric --profile lan \
         --profile nostr-publish-consume --profile stun-faults \
+        --profile nostr-open-discovery --profile nostr-seed \
         down --volumes --remove-orphans >/dev/null 2>&1 || true
     [[ -n "${FIPS_NAT_WAN_NET:-}" ]] && \
         { docker network rm "$FIPS_NAT_WAN_NET" >/dev/null 2>&1 || true; }
@@ -1618,6 +1635,31 @@ run_nostr_publish_consume() {
 
     ci_release_nat_networks
     record "nostr-publish-consume" $rc
+}
+
+# Run the Nostr open-discovery startup scenario (opt-in, --only).
+# The relay is seeded with adverts from fresh keys, then one FIPS daemon with
+# `policy: open` and no configured peers starts and must cache every one of
+# them from the relay's replay within a bounded window.
+run_nostr_open_discovery() {
+    local rc=0
+    export COMPOSE_PROJECT_NAME="$(ci_project nat)"
+
+    info "[nostr-open-discovery] Claiming lab networks"
+    if ! ci_claim_nat_networks; then
+        record "nostr-open-discovery" 1
+        return
+    fi
+
+    local _extra
+    _extra="$(ci_nat_extra_compose)"
+    local -x FIPS_NAT_EXTRA_COMPOSE="$_extra"
+
+    info "[nostr-open-discovery] Running Nostr open-discovery startup scenario"
+    bash testing/nat/scripts/nostr-open-discovery-test.sh 2>&1 || rc=1
+
+    ci_release_nat_networks
+    record "nostr-open-discovery" $rc
 }
 
 # Run the STUN fault-injection integration test.
@@ -2078,6 +2120,8 @@ run_suite() {
             run_nat "${suite#nat-}" ;;
         nostr-publish-consume)
             run_nostr_publish_consume ;;
+        nostr-open-discovery)
+            run_nostr_open_discovery ;;
         stun-faults)
             run_stun_faults ;;
         chaos-*)
@@ -2277,10 +2321,22 @@ run_ci_labels() {
 # OpenWrt Package workflow lints them on GitHub, but only for trunk pushes,
 # tags and pull requests, so this is where a branch first sees a finding.
 # Mirrored in ci.yml's ci-parity job by hand. Static, about a second.
+#
+# It runs the shellcheck version install-shellcheck.sh pins, as the GitHub jobs
+# do, not the host's package: versions report the same finding under different
+# codes. The verified tarball is kept in the user's cache directory, so only the
+# first run on a host downloads it. If the pinned binary cannot be installed the
+# stage is red; falling back to the host's shellcheck would lint with a version
+# GitHub does not use.
 run_shellcheck() {
-    local rc=0
+    local rc=0 dir="${XDG_CACHE_HOME:-$HOME/.cache}/fips-ci/shellcheck"
     info "[shellcheck] Linting the OpenWrt package's shell scripts"
-    bash "$SCRIPT_DIR/check-shellcheck.sh" || rc=$?
+    if bash "$SCRIPT_DIR/install-shellcheck.sh" "$dir"; then
+        SHELLCHECK="$dir/shellcheck" bash "$SCRIPT_DIR/check-shellcheck.sh" || rc=$?
+    else
+        rc=2
+        fail "[shellcheck] the pinned shellcheck could not be installed; nothing was linted"
+    fi
     record "shellcheck" $rc
 }
 
@@ -2373,6 +2429,19 @@ run_rpm_budget_test() {
     info "[rpm-budget] Running the RPM install network budget unit tests"
     bash "$SCRIPT_DIR/rpm-install/budget-test.sh" || rc=$?
     record "rpm-budget" $rc
+    return 0
+}
+
+# Unit tests for run_container, the container start the native API suite uses.
+# Hermetic: docker and sleep are stubbed, no containers, well under a second.
+# It decides whether a daemon refusal is retried and then reported as
+# infrastructure, or reds the suite as a FIPS start failure, so it is gated
+# here, before anything is built. Mirrored in ci.yml's ci-parity job by hand.
+run_dockerrun() {
+    local rc=0
+    info "[docker-run] Running the container start retry unit tests"
+    bash "$SCRIPT_DIR/lib/docker-run-test.sh" || rc=$?
+    record "docker-run" $rc
     return 0
 }
 
@@ -2487,6 +2556,7 @@ run_guards() {
     run_wait_converge
     run_relay_verdict_test
     run_rpm_budget_test
+    run_dockerrun
     run_package_versions
     run_nextest_flaky
     run_node_test_groups

@@ -56,7 +56,7 @@ from .docker_exec import docker_compose, existing_containers, force_remove
 from .link_swap import LinkSwapManager
 from .links import LinkManager
 from .logs import AnalysisResult, analyze_logs, collect_logs, write_sim_metadata
-from .naming import name_suffix
+from .naming import name_suffix, run_labels
 from .schedule import Schedule, StepError
 from .netclaim import claim_network, remove_network
 from .netem import NetemManager
@@ -443,12 +443,7 @@ class SimRunner:
         self.network_name = f"fips-sim{name_suffix()}-net"
         s.topology.subnet = claim_network(
             self.network_name,
-            labels={
-                "com.corganlabs.fips-ci": "1",
-                "com.corganlabs.fips-ci.run": os.environ.get(
-                    "FIPS_CI_RUN_ID", "manual"
-                ),
-            },
+            labels=run_labels(),
             candidates=(
                 [s.topology.pinned_subnet] if s.topology.pinned_subnet else None
             ),

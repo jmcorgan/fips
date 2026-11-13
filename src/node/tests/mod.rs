@@ -16,6 +16,7 @@ mod ble_queue;
 mod bloom;
 mod bloom_echo;
 mod bloom_hold;
+mod bloom_mtu;
 mod bloom_pacing;
 mod bloom_poison;
 mod bloom_send;
@@ -40,6 +41,8 @@ mod handshake;
 mod handshake_lines;
 mod heartbeat;
 mod host_link;
+#[cfg(feature = "profiling")]
+mod instr_capture;
 mod lan_label;
 mod link_dead_floor;
 mod link_index_audit;
@@ -51,6 +54,7 @@ mod msg2_refused_reads;
 mod multi_path;
 mod multi_path_handshake;
 mod netmon;
+mod npub_spelling;
 mod path_accept;
 mod path_control;
 mod path_intake;
@@ -76,6 +80,7 @@ mod send_report;
 mod session;
 mod session_peer_coords;
 mod settle;
+mod short_plaintext;
 mod silent_backoff;
 mod silent_replay;
 mod spanning_tree;
@@ -85,6 +90,7 @@ pub(in crate::node) mod survivors;
 mod task_wait;
 mod tcp;
 mod traffic_diag;
+mod tree_gate;
 mod tree_send_failure;
 #[cfg(target_os = "linux")]
 mod tun_warning;
@@ -148,6 +154,7 @@ pub(super) fn install_connected_udp(
         peer_sa,
         packet_tx,
         std::sync::Arc::new(crate::transport::udp::UdpStats::new()),
+        None,
     )
     .expect("spawn the peer recv drain");
 

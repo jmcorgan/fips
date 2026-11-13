@@ -14,3 +14,10 @@ Unit tests for the files one level up.
   reserving, clearing and uniqueness, under `TestEntropy`, and that it
   draws its indices from its entropy source (under `FixedEntropy<1>`
   every draw is the same value, so the second allocation is exhausted).
+- `onlink.rs`: tests for `onlink.rs`, attached from there with
+  `#[cfg(test)] #[path = "tests/onlink.rs"] mod tests;` (names
+  `utils::onlink::tests::...`). They check which addresses a set of
+  prefixes holds (each family's ranges, IPv4-mapped addresses, a
+  zero-length prefix discarded, the families kept apart, `share_link`
+  and `contains_on`), and that a suspect read is reported. The test of
+  the system read stays in the root crate, in `src/utils/tests/onlink.rs`.

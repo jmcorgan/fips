@@ -56,7 +56,11 @@ The others:
   resolved. It also covers which names the responder answers, judged by wire
   label (a single label holding a dot is not under `fips`), and how a hosts
   file that cannot be read keeps the names last read, is read again on the
-  next query, and is logged once per run of failures.
+  next query, and is logged once per run of failures. And it covers which
+  `.fips` names an npub resolves under through `handle_dns_packet`: the
+  canonical npub in lower, upper or mixed case resolves to the node's address
+  with the name echoed as sent, and a bech32m checksum or non-zero padding
+  bits gets NXDOMAIN.
 - `core.rs` tests `../core.rs`: that the payload limits the node publishes
   give the same TCP MSS ceiling as the transport MTU they come from, for
   every MTU, and the same IPv6 MTU from 110 bytes up (below 110 no IPv6

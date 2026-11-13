@@ -294,6 +294,39 @@ services:
       shared-lan:
         ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.21
 
+  # ── Nostr open-discovery startup profile (opt-in) ──────────────────────
+  # One FIPS daemon with `policy: open` and no configured peers, started
+  # after the relay already holds adverts from keys it has never heard of;
+  # it must cache them from the relay's replay of its advert subscription.
+  # Driven by scripts/nostr-open-discovery-test.sh, which starts the relay,
+  # seeds it through nostr-seed, and only then starts this node.
+  nostr-open-node:
+    <<: *fips-common
+    profiles: ["nostr-open-discovery"]
+    container_name: fips-nat-nostr-open-node${FIPS_CI_NAME_SUFFIX:-}
+    hostname: fips-nat-nostr-open-node
+    depends_on:
+      - relay
+      - stun
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/nostr-open-discovery/node-a.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      shared-lan:
+        ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.22
+
+  # One-shot publisher for the open-discovery scenario: the test image with
+  # python3 as its entrypoint, fed testing/lib/nostr-publish.py on stdin by
+  # `docker compose run --rm -T nostr-seed - <args>`. Under a profile of its
+  # own so `up` of the scenario does not start it, and with no fixed address.
+  nostr-seed:
+    image: ${FIPS_TEST_IMAGE:-fips-test:latest}
+    profiles: ["nostr-seed"]
+    entrypoint: ["python3"]
+    restart: "no"
+    networks:
+      - shared-lan
+
   # ── STUN fault-injection profile ───────────────────────────────────────
   # One FIPS daemon + a netns-sharing shim that injects tc/iptables faults
   # against UDP egress to the STUN service. The runner script drives the

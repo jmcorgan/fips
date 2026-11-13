@@ -4,10 +4,11 @@
 //! logs one warning naming the key, the configured value and the value used,
 //! so a deployed config that sets it keeps starting.
 
-use super::Config;
+use super::{Config, LookupConfig};
 use crate::node::REKEY_HANDSHAKE;
 use crate::peer::machine::DISCOVERY_RESENDS;
 use crate::proto::bloom::ACCEPT_FPR_CAP;
+use crate::proto::mmp::{MAX_OWD_WINDOW_SIZE, MIN_OWD_WINDOW_SIZE};
 use std::fmt::Display;
 
 /// Least time in seconds a link must stay silent before it is declared dead
@@ -35,6 +36,10 @@ const OFFERS_FLOOR: usize = 16;
 /// Least number of traversal offers a node handles at once from one sender.
 const SENDER_FLOOR: usize = 4;
 
+/// Most entries of the lookup retry ladder that are run. A lookup counts its
+/// attempts in a `u8`.
+const LADDER_CAP: usize = u8::MAX as usize;
+
 impl Config {
     /// Bring every value a protocol bound covers inside its bound, warning
     /// once for each one changed. A value bounded only for some uses is
@@ -53,6 +58,8 @@ impl Config {
         self.floor_signal();
         self.floor_attempt();
         self.floor_offers();
+        self.floor_ladder();
+        self.floor_owd();
     }
 
     /// Raise `node.link_dead_timeout_secs` to 30 s.
@@ -200,6 +207,72 @@ impl Config {
             SENDER_FLOOR,
             "configured value is below the 4 traversal offers a node must handle at once from one sender; running at 4",
         );
+    }
+
+    /// Bound `node.lookup.attempt_timeouts_secs` to between one and 255
+    /// entries.
+    ///
+    /// An empty ladder would fail nearly every lookup at the next tick, so it
+    /// runs as the default ladder. A lookup counts its attempts in a `u8`, so
+    /// a ladder over 255 entries runs its first 255. Every reader of the
+    /// ladder (the lookup retries, the hold time for queued packets and the
+    /// probe's discovery budget) sees the bounded value. Entry sizes are not
+    /// bounded here; those readers saturate.
+    fn floor_ladder(&mut self) {
+        let ladder = &mut self.node.lookup.attempt_timeouts_secs;
+        if ladder.is_empty() {
+            *ladder = LookupConfig::default().attempt_timeouts_secs;
+            clamped(
+                "node.lookup.attempt_timeouts_secs",
+                "[]",
+                format!("{ladder:?}"),
+                "configured lookup ladder is empty; running the default ladder",
+            );
+        } else if ladder.len() > LADDER_CAP {
+            clamped(
+                "node.lookup.attempt_timeouts_secs",
+                ladder.len(),
+                LADDER_CAP,
+                "configured lookup ladder has more than 255 entries (configured and used are lengths); running its first 255",
+            );
+            ladder.truncate(LADDER_CAP);
+        }
+    }
+
+    /// Bring both MMP one-way delay windows into 2 to 4096 samples.
+    ///
+    /// Below 2 no slope forms, and 0 turns off the ring's eviction so it grows
+    /// with every frame. The ring is allocated up front per peer and per
+    /// session, so above 4096 only the memory grows; nothing reads the trend
+    /// beyond display (FRC-1202 Section 4.3.6).
+    fn floor_owd(&mut self) {
+        let keys = [
+            (
+                "node.mmp.owd_window_size",
+                &mut self.node.mmp.owd_window_size,
+            ),
+            (
+                "node.session_mmp.owd_window_size",
+                &mut self.node.session_mmp.owd_window_size,
+            ),
+        ];
+        for (key, size) in keys {
+            raise(
+                key,
+                size,
+                MIN_OWD_WINDOW_SIZE,
+                "configured value is below the 2 samples a slope needs; running at 2",
+            );
+            if *size > MAX_OWD_WINDOW_SIZE {
+                clamped(
+                    key,
+                    *size,
+                    MAX_OWD_WINDOW_SIZE,
+                    "configured value is above the 4096-sample cap; running at 4096",
+                );
+                *size = MAX_OWD_WINDOW_SIZE;
+            }
+        }
     }
 }
 

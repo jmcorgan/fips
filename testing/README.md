@@ -40,6 +40,10 @@ and a local STUN responder.
 | symmetric | UDP traversal fails under symmetric NAT, TCP fallback wins   |
 | lan       | Peers on the same LAN prefer local addresses over reflexive  |
 
+The same lab runs the Nostr suites: `nostr-publish-consume` and
+`stun-faults` in every run, and `nostr-open-discovery`, the open-discovery
+startup scenario, only when named (`ci-local.sh --only nostr-open-discovery`).
+
 ### [chaos/](chaos/) -- Stochastic Simulation
 
 Automated network testing with configurable node counts, topology
@@ -229,6 +233,17 @@ Builds two marked trees in the package build container, in turn and
 together, sharing a target volume, and checks that each package holds
 its own tree's code and revision. Run by hand when changing the package
 build; not part of `ci-local.sh` or GitHub CI.
+
+## Shared helpers (`lib/`)
+
+The suites source shell helpers from [`lib/`](lib/). Among them,
+[`lib/docker-run.sh`](lib/docker-run.sh) provides `run_container`, a detached
+container start that passes the run labels itself, retries a start the Docker
+daemon refuses (three attempts, 2 s apart), and reports a start that never
+succeeds as an `INFRASTRUCTURE:` line naming Docker's error, so a daemon
+refusal under side load is not read as FIPS failing to start. Its hermetic
+test, [`lib/docker-run-test.sh`](lib/docker-run-test.sh), runs in local CI's
+guards and in GitHub CI's ci-parity job.
 
 ## Running CI locally (`ci-local.sh`)
 
@@ -445,6 +460,21 @@ runs.
 
 The check is deliberately local-only: GitHub CI builds and tests on real
 macOS, Windows and FreeBSD runners instead.
+
+### Shell-script lint (`check-shellcheck.sh`)
+
+[`check-shellcheck.sh`](check-shellcheck.sh) lints the shell scripts the
+OpenWrt packages ship and the CI scripts it lists, recorded as `shellcheck`.
+`ci-local.sh`, `ci.yml` and the OpenWrt package workflow all run it with the
+shellcheck version that [`install-shellcheck.sh`](install-shellcheck.sh) pins,
+not the host's or the runner image's, because versions report the same finding
+under different codes. `install-shellcheck.sh <dir>` downloads the release
+tarball, checks it against a pinned SHA-256 and leaves the binary at
+`<dir>/shellcheck`; `check-shellcheck.sh` runs the binary named by
+`SHELLCHECK`, or the `shellcheck` on `PATH` when it is unset. `ci-local.sh`
+keeps the tarball in `${XDG_CACHE_HOME:-~/.cache}/fips-ci/shellcheck/`, so a
+host needs the network only for its first run. If the pinned binary cannot be
+installed the stage fails rather than falling back to the host's shellcheck.
 
 ### Per-run isolation and the `FIPS_CI_RUN_ID` override
 

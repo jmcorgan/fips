@@ -3,7 +3,8 @@
 //! and the value used; a value bounded only for some uses is kept, with the
 //! same warning naming the value used there; a value inside its bound, and
 //! the shipped defaults, are kept without a warning. The bloom filter cap,
-//! a float, has its own tests at the end.
+//! a float, and the lookup retry ladder, a list, have their own tests at the
+//! end.
 
 use super::*;
 use crate::testutil::{capture_logs, log_field};
@@ -91,6 +92,42 @@ const CASES: &[Case] = &[
         inside: &[4, 5],
         set: |c, v| c.node.rendezvous.nostr.max_concurrent_offers_per_npub = v as usize,
         get: |c| c.node.rendezvous.nostr.max_concurrent_offers_per_npub as u64,
+    },
+    Case {
+        key: "node.mmp.owd_window_size",
+        message: "configured value is below the 2 samples a slope needs; running at 2",
+        used: 2,
+        outside: &[0, 1],
+        inside: &[2, 32, 4_096],
+        set: |c, v| c.node.mmp.owd_window_size = v as usize,
+        get: |c| c.node.mmp.owd_window_size as u64,
+    },
+    Case {
+        key: "node.mmp.owd_window_size",
+        message: "configured value is above the 4096-sample cap; running at 4096",
+        used: 4_096,
+        outside: &[4_097, 1_000_000],
+        inside: &[2, 32, 4_096],
+        set: |c, v| c.node.mmp.owd_window_size = v as usize,
+        get: |c| c.node.mmp.owd_window_size as u64,
+    },
+    Case {
+        key: "node.session_mmp.owd_window_size",
+        message: "configured value is below the 2 samples a slope needs; running at 2",
+        used: 2,
+        outside: &[0, 1],
+        inside: &[2, 32, 4_096],
+        set: |c, v| c.node.session_mmp.owd_window_size = v as usize,
+        get: |c| c.node.session_mmp.owd_window_size as u64,
+    },
+    Case {
+        key: "node.session_mmp.owd_window_size",
+        message: "configured value is above the 4096-sample cap; running at 4096",
+        used: 4_096,
+        outside: &[4_097, 1_000_000],
+        inside: &[2, 32, 4_096],
+        set: |c, v| c.node.session_mmp.owd_window_size = v as usize,
+        get: |c| c.node.session_mmp.owd_window_size as u64,
     },
 ];
 
@@ -232,13 +269,13 @@ fn applying_the_floors_a_second_time_changes_and_logs_nothing() {
 
 #[test]
 fn a_node_built_with_a_given_identity_runs_with_the_floors_applied() {
-    let mut config = Config::default();
+    // One node per case: a key bounded on both sides has a case for each
+    // bound, and a configuration holds only one value for it.
     for case in CASES {
+        let mut config = Config::default();
         (case.set)(&mut config, case.outside[0]);
-    }
-    let node = crate::node::Node::with_identity(crate::Identity::generate(), config)
-        .expect("the node is built");
-    for case in CASES {
+        let node = crate::node::Node::with_identity(crate::Identity::generate(), config)
+            .expect("the node is built");
         assert_eq!((case.get)(node.config()), case.used, "{}", case.key);
     }
 }
@@ -409,4 +446,65 @@ fn both_bloom_settings_below_their_floors_give_one_warning_each() {
             logs.lines()
         );
     }
+}
+
+/// The lookup ladder key, as its warning's `key` field logs it.
+const LADDER_KEY: &str = "\"node.lookup.attempt_timeouts_secs\"";
+
+/// The default configuration with `ladder` as its lookup retry ladder, after
+/// `apply_floors`, and the warnings it logged.
+fn laddered(ladder: Vec<u64>) -> (Config, Vec<String>) {
+    let mut config = Config::default();
+    config.node.lookup.attempt_timeouts_secs = ladder;
+    let (config, logs) = capture_logs(|| {
+        config.apply_floors();
+        config
+    });
+    (config, logs.warnings())
+}
+
+#[test]
+fn an_empty_lookup_ladder_runs_as_the_default_with_one_warning_naming_the_key() {
+    let (config, warnings) = laddered(Vec::new());
+    assert_eq!(config.node.lookup.attempt_timeouts_secs, vec![1, 2, 4, 8]);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(
+        log_field(&warnings[0], "key"),
+        Some(LADDER_KEY),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn a_lookup_ladder_over_255_entries_runs_its_first_255_with_one_warning_naming_the_lengths() {
+    let ladder: Vec<u64> = (1..=300).collect();
+    let (config, warnings) = laddered(ladder.clone());
+    assert_eq!(config.node.lookup.attempt_timeouts_secs, ladder[..255]);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let line = &warnings[0];
+    assert_eq!(log_field(line, "key"), Some(LADDER_KEY), "{line}");
+    assert_eq!(log_field(line, "configured"), Some("300"), "{line}");
+    assert_eq!(log_field(line, "used"), Some("255"), "{line}");
+}
+
+#[test]
+fn the_default_lookup_ladder_and_one_of_255_entries_are_left_alone_without_a_warning() {
+    let full: Vec<u64> = (1..=255).collect();
+    for ladder in [Config::default().node.lookup.attempt_timeouts_secs, full] {
+        let (config, warnings) = laddered(ladder.clone());
+        assert_eq!(config.node.lookup.attempt_timeouts_secs, ladder);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+}
+
+#[test]
+fn applying_the_floors_twice_leaves_the_bounded_ladder_and_warns_nothing_the_second_time() {
+    let (mut config, _) = laddered(Vec::new());
+    let ladder = config.node.lookup.attempt_timeouts_secs.clone();
+    let (config, logs) = capture_logs(|| {
+        config.apply_floors();
+        config
+    });
+    assert_eq!(config.node.lookup.attempt_timeouts_secs, ladder);
+    assert!(logs.warnings().is_empty(), "{:?}", logs.lines());
 }

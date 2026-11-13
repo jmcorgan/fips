@@ -98,6 +98,12 @@ impl SenderState {
     ///
     /// When consecutive send failures have occurred, the effective interval
     /// is multiplied by an exponential backoff factor (2^failures, capped at 32×).
+    ///
+    /// A report is due only once [`Self::record_sent`] has set
+    /// `interval_has_data`, and the session layer calls that only for a frame
+    /// that left for a next hop. So when a destination is unreachable the
+    /// report stops being due without the multiplier; it delays a report only
+    /// while data sends get out and report sends fail.
     pub fn should_send_report(&self, now_ms: u64) -> bool {
         if !self.interval_has_data {
             return false;

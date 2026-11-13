@@ -465,12 +465,20 @@ fn validate_connect_address(address: &str, transport: &str) -> Result<(), String
     Ok(())
 }
 
+/// Whether `text` begins as an npub does, `npub1` in any letter case. An
+/// npub may be written in any case, and a host name cannot begin this way
+/// (see `validate_hostname`).
+fn begins_as_npub(text: &str) -> bool {
+    text.get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("npub1"))
+}
+
 /// Resolve a peer identifier to an npub.
 ///
-/// If the identifier starts with "npub1", it's returned as-is.
+/// If the identifier begins as an npub does, it's returned as-is.
 /// Otherwise, it's looked up as a hostname in the hosts file.
 fn resolve_peer(peer: &str) -> String {
-    if peer.starts_with("npub1") {
+    if begins_as_npub(peer) {
         return peer.to_string();
     }
 
@@ -554,7 +562,7 @@ fn address_from_file(path: &Path) -> Result<Ipv6Addr, String> {
         other => other.to_string(),
     })?);
 
-    if contents.starts_with("npub1") {
+    if begins_as_npub(contents.as_str()) {
         return address_from_npub(contents.as_str());
     }
 
@@ -920,6 +928,14 @@ fn sparkline(values: &[f64], min: f64, max: f64) -> String {
         .collect()
 }
 
+/// How long the client waits for a probe before giving up, in milliseconds.
+///
+/// An explicit `--timeout` wins. Otherwise the client allows the daemon's
+/// reported budget plus a margin for the last poll round-trips.
+fn probe_ceiling_ms(budget_ms: u64, timeout_secs: Option<u64>) -> u64 {
+    timeout_secs.map_or(budget_ms.saturating_add(5_000), |s| s.saturating_mul(1000))
+}
+
 /// Run a probe: start it, poll while the daemon works, render as it goes.
 ///
 /// Every control round-trip returns immediately; the stages run daemon-side on
@@ -945,7 +961,7 @@ fn run_probe(socket_path: &Path, npub: &str, json: bool, timeout_secs: Option<u6
         .get("budget_ms")
         .and_then(|v| v.as_u64())
         .unwrap_or(30_000);
-    let ceiling_ms = timeout_secs.map_or(budget_ms + 5_000, |s| s * 1000);
+    let ceiling_ms = probe_ceiling_ms(budget_ms, timeout_secs);
 
     let poll = build_command("probe_poll", serde_json::json!({"probe_id": probe_id}));
     let mut progress = (!json).then(ProbeProgress::new);
@@ -1786,6 +1802,14 @@ mod query_tests;
 #[cfg(test)]
 #[path = "tests/fipsctl_path.rs"]
 mod path_tests;
+
+#[cfg(test)]
+#[path = "tests/fipsctl_probe.rs"]
+mod probe_tests;
+
+#[cfg(test)]
+#[path = "tests/fipsctl_npub.rs"]
+mod npub_tests;
 
 #[cfg(test)]
 mod tests {

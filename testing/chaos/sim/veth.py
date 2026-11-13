@@ -39,7 +39,7 @@ import time
 import uuid
 
 from .docker_exec import DockerExecError, docker_exec, docker_exec_quiet
-from .naming import name_suffix
+from .naming import name_suffix, run_labels
 from .topology import UDP_VETH, SimTopology, veth_interface_name
 
 log = logging.getLogger(__name__)
@@ -591,6 +591,9 @@ def _run_host(
     removed: the timeout kills only the docker client, and the container
     goes on running the command. ``timeout`` defaults to
     `HOST_CMD_TIMEOUT_SECS`.
+
+    The helper carries the run labels itself, so the run's teardown can reap
+    it even when the image it starts has no run label of its own.
     """
     if timeout is None:
         timeout = HOST_CMD_TIMEOUT_SECS
@@ -598,6 +601,7 @@ def _run_host(
     docker_cmd = [
         "docker", "run", "--rm",
         "--name", helper,
+        *[f"--label={k}={v}" for k, v in run_labels().items()],
         "--privileged",
         "--net=host",
         "--pid=host",

@@ -665,3 +665,16 @@ most of it a 31 s stall at the real bound.
 1. Copy an existing scenario from `scenarios/`.
 2. Adjust topology size, algorithm, and stressor parameters.
 3. Run with `./testing/chaos/scripts/chaos.sh path/to/custom.yaml`.
+
+## Docker labels
+
+Every docker object the simulation creates for itself carries the CI labels
+from `run_labels()` in `sim/naming.py`: the generic
+`com.corganlabs.fips-ci=1` and the run label
+`com.corganlabs.fips-ci.run=<FIPS_CI_RUN_ID>` (`manual` for a hand run). The
+runner's network claim and the privileged `ip` helper that `sim/veth.py`
+starts for Ethernet edges both take them from there, so a run's teardown can
+reap the helper even when the image it starts has no run label.
+`testing/check-ci-labels.py` reads the docker commands these files build as
+Python lists and fails one that creates a container, network or volume
+without the run label (its rule 5).
