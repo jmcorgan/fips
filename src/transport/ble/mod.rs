@@ -2439,6 +2439,10 @@ mod close_tests;
 mod lane_tests;
 
 #[cfg(test)]
+#[path = "tests/retry.rs"]
+mod retry_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::framing::build_established_frame;
