@@ -59,6 +59,7 @@ impl From<super::machine::error::Error> for BootstrapError {
         match e {
             Error::Protocol(reason) => BootstrapError::Protocol(reason),
             Error::Stun(reason) => BootstrapError::Stun(reason),
+            Error::InvalidAdvert(reason) => BootstrapError::InvalidAdvert(reason),
         }
     }
 }
@@ -74,6 +75,9 @@ impl From<&crate::config::NostrRendezvousConfig> for super::machine::params::Par
             failure_state_max_entries: c.failure_state_max_entries,
             replay_window_secs: c.replay_window_secs,
             seen_sessions_max_entries: c.seen_sessions_max_entries,
+            advertise: c.advertise,
+            advert_cache_max_entries: c.advert_cache_max_entries,
+            advert_refresh_secs: c.advert_refresh_secs,
         }
     }
 }

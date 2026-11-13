@@ -12,6 +12,7 @@
 //! Its pieces arrive from the shell one at a time, each with its tests; the
 //! shell keeps the paths its callers already use by re-exporting them.
 
+pub mod adverts;
 pub mod error;
 pub mod params;
 pub mod punch;

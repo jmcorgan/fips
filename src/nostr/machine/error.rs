@@ -11,6 +11,8 @@ pub enum Error {
     Protocol(String),
     /// A STUN server URL or exchange was unusable; the text says how.
     Stun(String),
+    /// An overlay advert broke the content rules; the text says which.
+    InvalidAdvert(String),
 }
 
 impl core::fmt::Display for Error {
@@ -19,6 +21,7 @@ impl core::fmt::Display for Error {
         match self {
             Error::Protocol(reason) => write!(f, "protocol error: {reason}"),
             Error::Stun(reason) => write!(f, "stun failed: {reason}"),
+            Error::InvalidAdvert(reason) => write!(f, "invalid overlay advert: {reason}"),
         }
     }
 }

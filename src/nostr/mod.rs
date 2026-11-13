@@ -1,4 +1,3 @@
-mod advert;
 mod driver;
 mod handoff;
 pub(crate) mod machine;

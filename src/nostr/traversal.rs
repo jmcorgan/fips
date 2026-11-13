@@ -6,8 +6,7 @@ use tokio::net::UdpSocket;
 use tracing::debug;
 
 pub(super) use super::machine::punch::plan::{
-    PunchTargetTally, SourceRank, is_doc_ip, is_never_punchable_ip, is_private_ip,
-    planned_remote_endpoints, rank_punch_source,
+    PunchTargetTally, SourceRank, planned_remote_endpoints, rank_punch_source,
 };
 pub(super) use super::machine::punch::refusal::RefusalWarnGate;
 pub(super) use super::machine::punch::{

@@ -17,6 +17,10 @@ fn every_machine_error_maps_to_the_same_bootstrap_variant_and_text() {
             Error::Stun("invalid STUN URL: x".into()),
             "stun failed: invalid STUN URL: x",
         ),
+        (
+            Error::InvalidAdvert("missing required endpoints".into()),
+            "invalid overlay advert: missing required endpoints",
+        ),
     ];
     for (error, text) in cases {
         assert_eq!(error.to_string(), text);
@@ -25,6 +29,7 @@ fn every_machine_error_maps_to_the_same_bootstrap_variant_and_text() {
         match (&error, &mapped) {
             (Error::Protocol(a), BootstrapError::Protocol(b)) => assert_eq!(a, b),
             (Error::Stun(a), BootstrapError::Stun(b)) => assert_eq!(a, b),
+            (Error::InvalidAdvert(a), BootstrapError::InvalidAdvert(b)) => assert_eq!(a, b),
             _ => panic!("{error:?} mapped to {mapped:?}"),
         }
     }

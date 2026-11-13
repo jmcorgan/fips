@@ -4,8 +4,8 @@ use nostr::prelude::{
 };
 
 pub(super) use super::machine::signal::{
-    FRESHNESS_SKEW_TOLERANCE_MS, FreshnessOutcome, create_traversal_answer, create_traversal_offer,
-    estimate_clock_skew, validate_offer_freshness, validate_traversal_answer_for_offer,
+    FreshnessOutcome, create_traversal_answer, create_traversal_offer, estimate_clock_skew,
+    validate_offer_freshness, validate_traversal_answer_for_offer,
 };
 use super::types::{BootstrapError, SIGNAL_KIND};
 

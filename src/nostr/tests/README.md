@@ -56,10 +56,6 @@ Child modules of `mod.rs`:
 
 Tests of one file, each named `nostr::<file>::tests::...`:
 
-- `advert.rs`, of `advert.rs`: `AdvertMachine`'s advert cache (admission,
-  replacement, pruning, the size cap and the protection of configured and
-  linked authors against a flood of new keys, the open-discovery candidates
-  and the cache-full warning) and its publish planning.
 - `offer_admission.rs`, of `offer_admission.rs`: the per-npub allowance of
   concurrent inbound offers, and that idle senders are reclaimed.
 - `signal_route.rs`, of `signal_route.rs`: the admission policy takes a

@@ -17,4 +17,11 @@ pub struct Params {
     pub replay_window_secs: u64,
     /// The bound on the seen-sessions memory.
     pub seen_sessions_max_entries: usize,
+    /// Whether this node publishes an advert at all.
+    pub advertise: bool,
+    /// The bound on the peer advert cache, protected authors aside.
+    pub advert_cache_max_entries: usize,
+    /// This node's advert republish interval, in seconds; a cached entry
+    /// keeps its slot for one such interval past its horizon.
+    pub advert_refresh_secs: u64,
 }
