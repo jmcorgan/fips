@@ -174,9 +174,9 @@ and the first is the one that wastes an afternoon:
   the ports Rust (`pkg install rust`), with the pin consequences below.
 
 `build-pkg.sh --target <triple>` exists for a builder that is already
-the right architecture (it reads binaries from `target/<triple>/release`
-and cross-checks the triple against `--abi`). It does not conjure a
-toolchain that Rust does not distribute.
+the right architecture (it reads binaries from `<triple>/release` under
+cargo's target directory and cross-checks the triple against `--abi`).
+It does not conjure a toolchain that Rust does not distribute.
 
 ### ARM builds are build-it-yourself, and are not released
 
@@ -259,6 +259,11 @@ gmake -C packaging pfsense        # or:
 ./packaging/pfsense/build-pkg.sh --no-build --abi FreeBSD:16:amd64  # the same binaries, labelled for FreeBSD 16
 ./packaging/pfsense/build-pkg.sh --dynamic  # link against libc.so.7 (see below)
 ```
+
+The binaries are taken from cargo's target directory, under the target
+triple's directory for a static or `--target` build: after a build, the one
+`cargo metadata` reports; with `--no-build`, `$CARGO_TARGET_DIR`, or `target/`
+when that is unset (`packaging/common/target-dir.sh`).
 
 Output: `deploy/fips-<version>-pfsense-<products>-<arch>.pkg`. Validate it before
 shipping it anywhere:

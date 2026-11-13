@@ -14,7 +14,9 @@
 #   documented_restart_after_upgrade_moves_the_daemon_onto_the_new_binary
 #
 # Run as root on a FreeBSD host where the package built from this tree by
-# build-pkg.sh is installed and target/release still holds its binaries. The
+# build-pkg.sh is installed and cargo's target directory still holds its
+# binaries: CARGO_TARGET_DIR, or target/ when that is unset, as
+# build-pkg.sh --no-build reads it (packaging/common/target-dir.sh). The
 # test builds a second package from the same binaries at version 99.0.0 with
 # `build-pkg.sh --no-build`, so both packages carry this tree's scripts and
 # the installed package's pre-deinstall is the one under test.
@@ -42,7 +44,10 @@ cannot() { echo "test-upgrade: $*; cannot run" >&2; exit 2; }
 
 [ "$(id -u)" -eq 0 ] || cannot "must run as root"
 pkg info -e fips || cannot "the fips package is not installed"
-[ -x "${PROJECT_ROOT}/target/release/fips" ] || cannot "target/release/fips is missing"
+# shellcheck source=SCRIPTDIR/../common/target-dir.sh disable=SC1091
+. "${PROJECT_ROOT}/packaging/common/target-dir.sh"
+BINARY_DIR="$(target_dir "$PROJECT_ROOT" 0)/release"
+[ -x "${BINARY_DIR}/fips" ] || cannot "${BINARY_DIR}/fips is missing"
 
 enable_was="$(sysrc -n fips_enable 2>/dev/null || true)"
 

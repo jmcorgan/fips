@@ -32,7 +32,8 @@ Options:
   --target <triple>   Rust target triple to build/package
   --version <version> Override the RPM Version-Release. Accepts either
                       "<version>" or "<version>-<release>".
-  --no-build          Package existing binaries without running cargo build
+  --no-build          Package existing binaries without running cargo build,
+                      from CARGO_TARGET_DIR, or target/ when that is unset
   --features <list>   Cargo features to build with (comma-separated). Marks the
                       auto-derived Release so the package is distinguishable
                       from a default build of the same commit.
@@ -45,9 +46,10 @@ Environment:
                       on the mounted tree that its owner cannot remove.
   --name-file <path>  Also write the finished package's file name (basename
                       only) to <path>.
-  --bin-dir <dir>     Package the binaries in <dir> rather than the ones under
-                      target/. Implies --no-build. This is how the container
-                      build packages binaries compiled somewhere else.
+  --bin-dir <dir>     Package the binaries in <dir> rather than the ones in
+                      cargo's target directory. Implies --no-build. This is
+                      how the container build packages binaries compiled
+                      somewhere else.
   -h, --help          Show this help
 EOF
 }
@@ -172,11 +174,20 @@ if [[ "${NO_BUILD}" -eq 0 ]]; then
     cargo "${cargo_args[@]}"
 fi
 
+# Without --bin-dir, take the binaries from the directory cargo built into,
+# not a literal target/. --bin-dir skips the lookup, so a container build that
+# is handed its binaries needs no cargo.
+if [[ -z "${BIN_DIR_OVERRIDE}" ]]; then
+    # shellcheck source=SCRIPTDIR/../common/target-dir.sh
+    . "${PROJECT_ROOT}/packaging/common/target-dir.sh"
+    TARGET_DIR="$(target_dir "${PROJECT_ROOT}" "$((1 - NO_BUILD))")" || exit 1
+fi
+
 if [[ -n "${BIN_DIR_OVERRIDE}" ]]; then
     BIN_DIR="$(cd "${BIN_DIR_OVERRIDE}" && pwd)"
     RPM_ARCH="$(rpm --eval '%{_target_cpu}')"
 elif [[ -n "${TARGET_TRIPLE}" ]]; then
-    BIN_DIR="${PROJECT_ROOT}/target/${TARGET_TRIPLE}/release"
+    BIN_DIR="${TARGET_DIR}/${TARGET_TRIPLE}/release"
     # rpm names architectures its own way; map the ones we cross-build for.
     case "${TARGET_TRIPLE}" in
         x86_64-*) RPM_ARCH="x86_64" ;;
@@ -190,7 +201,7 @@ elif [[ -n "${TARGET_TRIPLE}" ]]; then
             ;;
     esac
 else
-    BIN_DIR="${PROJECT_ROOT}/target/release"
+    BIN_DIR="${TARGET_DIR}/release"
     RPM_ARCH="$(rpm --eval '%{_target_cpu}')"
 fi
 

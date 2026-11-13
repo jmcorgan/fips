@@ -75,9 +75,9 @@ runtime dependency and is not needed to build.
 packaging/
   aur/            Arch Linux AUR packaging (PKGBUILD, supporting files)
   common/         Shared assets (default config, hosts file), target-dir.sh,
-                  the target-directory helper the macOS, FreeBSD and tarball
-                  builders share, and pkg-lib.sh, the helpers the FreeBSD and
-                  pfSense builders share
+                  the target-directory helper the macOS, FreeBSD, pfSense,
+                  RPM and tarball builders share, and pkg-lib.sh, the helpers
+                  the FreeBSD and pfSense builders share
   debian/         Debian/Ubuntu .deb packaging via cargo-deb
   rpm/            Fedora/RHEL .rpm packaging via rpmbuild, over the binaries
                   the Debian container build produces
@@ -517,13 +517,14 @@ reference (`services.fips.enable`, `.package`, `.configFile`,
 
 - `fips.yaml` — default configuration (ephemeral identity, UDP/TCP/TUN/DNS)
 - `hosts` — static hostname-to-npub mappings for `.fips` DNS resolution
-- `target-dir.sh` — sourced by the macOS, FreeBSD and tarball build scripts
-  to find cargo's target directory; not installed by any package
+- `target-dir.sh` — sourced by the macOS, FreeBSD, pfSense, RPM and tarball
+  build scripts to find cargo's target directory; not installed by any
+  package
 
 ## Where the binaries come from
 
-The macOS, FreeBSD and tarball scripts stage the binaries from cargo's
-target directory, not from a literal `target/release`, so a build with
+The macOS, FreeBSD, pfSense, RPM and tarball scripts stage the binaries from
+cargo's target directory, not from a literal `target/release`, so a build with
 `CARGO_TARGET_DIR` or `build.target-dir` set packages the binaries that build
 produced. After building, a script reads the directory from `cargo metadata`
 and fails if it cannot. Both the build and that lookup run from the project
@@ -532,4 +533,6 @@ root, because cargo reads config files from the directory it runs in: a
 working directory, and config in the caller's directory is not seen. With
 `--no-build` it runs no cargo and reads
 `CARGO_TARGET_DIR`, or `target/` when that is unset, so place the binaries
-there first. The OpenWrt scripts read `cargo metadata` themselves.
+there first. `rpm/build-rpm.sh --bin-dir <dir>` takes the binaries from
+`<dir>` and does no lookup at all, which is how the container build packages
+binaries it was handed. The OpenWrt scripts read `cargo metadata` themselves.
