@@ -46,8 +46,12 @@ const RECV_FLAGS: libc::c_int = 0;
 /// Send `line` on `stream`, with `fd` in the ancillary data when given.
 ///
 /// The whole reply goes in one datagram-shaped `sendmsg`. A short write is
-/// treated as an error rather than retried: the replies are a few hundred bytes
-/// into an empty socket buffer, so a partial one means something is wrong that a
+/// treated as an error rather than retried, because every reply is bounded
+/// below 2048 bytes, the send low-water mark under which macOS never splits a
+/// non-blocking send on a local stream socket: the largest success reply,
+/// `connect`'s, is about 260 bytes at most (two npubs and four numbers), and a
+/// refusal is under 600, because `deny` clips the client text it echoes to
+/// `MAX_MESSAGE`. A partial write therefore means something is wrong that a
 /// retry loop would hide.
 pub async fn reply(stream: &UnixStream, line: &[u8], fd: Option<BorrowedFd<'_>>) -> io::Result<()> {
     loop {

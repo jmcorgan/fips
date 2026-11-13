@@ -7,7 +7,7 @@
 
 use alloc::collections::VecDeque;
 
-use super::{EWMA_LONG_ALPHA, EWMA_SHORT_ALPHA};
+use super::{EWMA_LONG_ALPHA, EWMA_SHORT_ALPHA, MAX_OWD_WINDOW_SIZE, MIN_OWD_WINDOW_SIZE};
 
 // ============================================================================
 // Jitter Estimator (RFC 3550 §6.4.1)
@@ -104,12 +104,6 @@ impl SrttEstimator {
     pub fn initialized(&self) -> bool {
         self.initialized
     }
-
-    /// Retransmission timeout = SRTT + max(4 * RTTVAR, 1s), floored at 1s.
-    pub fn rto_us(&self) -> i64 {
-        let rto = self.srtt_us + (self.rttvar_us << 2).max(1_000_000);
-        rto.max(1_000_000)
-    }
 }
 
 impl Default for SrttEstimator {
@@ -177,16 +171,24 @@ impl Default for DualEwma {
 
 /// OWD trend detector using linear regression over a ring buffer.
 ///
-/// Stores (sequence, owd_us) samples and computes the slope via
-/// least-squares regression. The slope (µs/s) indicates whether
-/// queuing delay is increasing (congestion) or stable.
+/// Stores (receive ms, owd_us) samples and computes the slope via
+/// least-squares regression. The slope (µs/s) says whether one-way delay is
+/// rising, as a queue that builds up makes it, or steady. It is reported for
+/// information: no node reads it.
 pub struct OwdTrendDetector {
     samples: VecDeque<(u32, i64)>,
     capacity: usize,
 }
 
 impl OwdTrendDetector {
+    /// Create a detector keeping the last `capacity` samples.
+    ///
+    /// The capacity is brought into `MIN_OWD_WINDOW_SIZE..=MAX_OWD_WINDOW_SIZE`
+    /// here as well as in the config floors, for callers that do not load a
+    /// config: below two samples no slope forms and zero would turn eviction
+    /// off, and the ring is allocated up front.
     pub fn new(capacity: usize) -> Self {
+        let capacity = capacity.clamp(MIN_OWD_WINDOW_SIZE, MAX_OWD_WINDOW_SIZE);
         Self {
             samples: VecDeque::with_capacity(capacity),
             capacity,
@@ -200,21 +202,24 @@ impl OwdTrendDetector {
 
     /// Add an OWD sample.
     ///
-    /// `seq` is a monotonic sequence number (e.g., truncated frame counter).
-    /// `owd_us` is the relative one-way delay in microseconds (R_i - S_i).
-    pub fn push(&mut self, seq: u32, owd_us: i64) {
+    /// `at_ms` is the sample's receive time in ms from a fixed reference.
+    /// `owd_us` is the one-way delay in microseconds relative to that
+    /// reference's delay (receive offset minus sender-time offset).
+    pub fn push(&mut self, at_ms: u32, owd_us: i64) {
         if self.samples.len() == self.capacity {
             self.samples.pop_front();
         }
-        self.samples.push_back((seq, owd_us));
+        self.samples.push_back((at_ms, owd_us));
     }
 
     /// Compute the OWD trend as a slope in µs/second.
     ///
     /// Uses simple linear regression: slope = Σ((x-x̄)(y-ȳ)) / Σ((x-x̄)²)
-    /// where x = sequence number and y = owd_us.
+    /// where x = receive time in ms and y = owd_us, so the slope is in µs
+    /// per ms, scaled by 1000 to µs/s and clamped to the `i32` range.
     ///
-    /// Returns 0 if fewer than 2 samples.
+    /// Returns 0 if fewer than 2 samples, or if every sample has the same
+    /// receive time.
     pub fn trend_us_per_sec(&self) -> i32 {
         let n = self.samples.len();
         if n < 2 {
@@ -243,12 +248,8 @@ impl OwdTrendDetector {
             return 0;
         }
 
-        // slope is in µs/packet. Convert to µs/second assuming ~1ms inter-packet
-        // spacing as a rough estimate. The raw slope per packet is more useful
-        // for trend detection than an absolute rate, but the wire format specifies
-        // µs/s. We report the raw per-packet slope scaled by 1000.
-        let slope_per_packet = num / den;
-        (slope_per_packet * 1000.0) as i32
+        let slope_us_per_ms = num / den;
+        (slope_us_per_ms * 1000.0).clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
     }
 }
 

@@ -38,6 +38,13 @@ pub const COLD_START_SAMPLES: u32 = 5;
 /// Default OWD ring buffer capacity.
 pub const DEFAULT_OWD_WINDOW_SIZE: usize = 32;
 
+/// Least OWD ring buffer capacity: a slope needs two samples.
+pub const MIN_OWD_WINDOW_SIZE: usize = 2;
+
+/// Greatest OWD ring buffer capacity. The ring is allocated up front, once
+/// per peer and per session, and nothing reads the trend beyond display.
+pub const MAX_OWD_WINDOW_SIZE: usize = 4096;
+
 /// Default operator log interval in seconds.
 pub const DEFAULT_LOG_INTERVAL_SECS: u64 = 30;
 

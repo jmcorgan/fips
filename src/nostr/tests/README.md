@@ -17,6 +17,10 @@ module itself and two kinds of test file beside it.
 
 Child modules of `mod.rs`:
 
+- `clock_skew.rs`: the clock-skew estimate (`estimate_clock_skew` in
+  `signal.rs`) yields no estimate, rather than a panic or a wrapped figure,
+  when the responder's timestamps are outside the `i64` range or overflow
+  the offset arithmetic, and still estimates an ordinary round trip.
 - `fixtures.rs`: the nostr 0.44 events recorded in `src/nostr/fixtures/v044/`
   open and parse with today's code (each wrap with its recipient's key, the
   advert through `parse_overlay_advert_event`, the inbox list through
@@ -26,6 +30,14 @@ Child modules of `mod.rs`:
 - `notify_channels.rs`: the notify loop in `runtime.rs` logs a lag on
   either of its two channels and reads on, and ends only when a channel
   closes.
+- `npub_spelling.rs`: a peer named by its npub in any letter case is
+  handled by its key. `request_connect` addresses the offer to the canonical
+  npub and registers the initiator under it, so an upper-case configured
+  peer still wins the dual-init election; the stale-advert check evicts the
+  canonical cache entry; `advert_endpoints_for_peer` finds the cached advert
+  from an upper- or mixed-case npub; and a cooldown recorded under one
+  spelling holds for the canonical npub. A spelling that is not a NIP-19 npub
+  (a bech32m checksum, non-zero padding bits) finds no advert.
 - `punch_recv_error.rs`: a punch attempt (`run_punch_attempt` in
   `traversal.rs`) is not ended early by a receive error on its socket. An
   attempt whose only target is a closed port runs to its timeout, on the
@@ -52,6 +64,12 @@ Child modules of `mod.rs`:
   advertisements twice the relay pool's notification channel size still
   reaches the traversal waiting for it, through the relay client's
   admission policy and the notify loop in `runtime.rs`.
+- `unknown_transport.rs`: an overlay advert with an endpoint of a transport
+  kind this node does not know keeps its known endpoints
+  (`OverlayTransportKind::Unknown` in `types.rs`, dropped by
+  `validate_overlay_advert` in `runtime.rs`); one whose only endpoint is of
+  an unknown kind is still refused; and an unknown endpoint cannot be
+  serialized, so it is never published.
 
 Tests of one file, each named `nostr::<file>::tests::...`:
 
@@ -69,8 +87,14 @@ Tests of one file, each named `nostr::<file>::tests::...`:
 - `signal_route.rs`, of `signal_route.rs`: the admission policy takes a
   traversal signal off the pool's channel and queues it on its own, once
   however many relays deliver it, and leaves every other event to the pool.
-- `stun.rs`, of `stun.rs`: the STUN binding-success parser against malformed
-  responses, and the private overlay candidate filter.
+- `stun.rs`, of `stun.rs`: the binding-success parser refuses truncated,
+  malformed and mismatched replies and skips unknown attributes; the
+  local-candidate filter keeps RFC 1918 and ULA addresses only;
+  `perform_stun` believes a reply only from the server it asked; an
+  observation survives one lost binding request, because the request is
+  retransmitted within the deadline; and only local candidates and server
+  addresses of the socket's address family are used (`offerable`,
+  `pick_family`).
 - `traversal.rs`, of `traversal.rs`: punch packet classification by session
   hash, and the once-a-minute warning for a stranger's refused offers.
 - `traversal_machine.rs`, of `traversal_machine.rs`: initiator election,

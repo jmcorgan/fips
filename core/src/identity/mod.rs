@@ -114,6 +114,9 @@ pub enum IdentityError {
     #[error("invalid npub: expected 32 bytes, got {0}")]
     InvalidNpubLength(usize),
 
+    #[error("invalid npub: not the NIP-19 form (bech32 checksum, zero padding bits)")]
+    NonCanonicalNpub,
+
     #[error("invalid nsec: expected 'nsec' prefix, got '{0}'")]
     InvalidNsecPrefix(String),
 

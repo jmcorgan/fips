@@ -1125,6 +1125,10 @@ pub struct NativeApiConfig {
     ///
     /// One peer's inbound flows, pending and accepted, may hold no more than a
     /// quarter of these (`native::registry::PEER_SHARE`).
+    ///
+    /// Bounded below by 1 at config load. Zero would admit no flow at all:
+    /// every client connect would be refused with `EMFILE` and every arrival
+    /// dropped.
     #[serde(default = "NativeApiConfig::default_max_flows")]
     pub max_flows: usize,
 

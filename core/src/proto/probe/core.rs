@@ -41,10 +41,13 @@ impl Budgets {
     /// attempt ladder. Each stage is `max(floor, N * tick_ms)` so a node with a
     /// long tick does not expire a stage between two observations.
     pub fn derive(tick_ms: u64, attempt_timeouts_secs: &[u64]) -> Self {
-        let ladder_ms: u64 = attempt_timeouts_secs.iter().sum::<u64>() * 1000;
+        let ladder_ms = attempt_timeouts_secs
+            .iter()
+            .fold(0u64, |sum, &secs| sum.saturating_add(secs))
+            .saturating_mul(1000);
         Self {
             bloom_ms: BLOOM_MIN_TICKS * tick_ms,
-            discovery_ms: ladder_ms + RESOLVE_SLACK_TICKS * tick_ms,
+            discovery_ms: ladder_ms.saturating_add(RESOLVE_SLACK_TICKS * tick_ms),
             session_ms: SESSION_FLOOR_MS.max(SESSION_MIN_TICKS * tick_ms),
             rtt_ms: RTT_FLOOR_MS.max(RTT_MIN_TICKS * tick_ms),
             tick_ms,
@@ -54,7 +57,10 @@ impl Budgets {
     /// Total worst-case budget, which is what the client sizes its own ceiling
     /// from.
     pub fn total_ms(&self) -> u64 {
-        self.bloom_ms + self.discovery_ms + self.session_ms + self.rtt_ms
+        self.bloom_ms
+            .saturating_add(self.discovery_ms)
+            .saturating_add(self.session_ms)
+            .saturating_add(self.rtt_ms)
     }
 }
 
@@ -156,7 +162,7 @@ impl Probe {
         Self {
             started_ms: now_ms,
             ended_ms: None,
-            deadline_ms: now_ms + budgets.total_ms(),
+            deadline_ms: now_ms.saturating_add(budgets.total_ms()),
             budgets,
             preflight,
             stage: Stage::Bloom,

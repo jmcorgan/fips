@@ -1,3 +1,7 @@
+//! Tests of `stun.rs`: the STUN binding-success parser, the private-address
+//! filter for local candidates, and `perform_stun`'s source check against a
+//! loopback server.
+
 use super::{is_private_overlay_candidate_ip, parse_stun_binding_success};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -242,4 +246,107 @@ async fn stun_binding_response_from_the_server_is_accepted() {
     .unwrap();
     responder.join().unwrap();
     assert_eq!(mapped.to_string(), "198.51.100.9:4242");
+}
+
+#[test]
+fn only_local_candidates_of_the_sockets_family_are_offered() {
+    let candidates = || {
+        ["192.168.1.2", "fd00::1", "10.0.0.3", "2001:db8::1"]
+            .map(String::from)
+            .to_vec()
+    };
+    assert_eq!(
+        super::offerable(candidates(), true),
+        ["192.168.1.2", "10.0.0.3"],
+        "IPv6 candidates offered with an IPv4 socket's port, which no peer can reach"
+    );
+    assert_eq!(
+        super::offerable(candidates(), false),
+        ["fd00::1", "2001:db8::1"]
+    );
+}
+
+#[test]
+fn a_stun_server_is_reached_at_a_resolved_address_of_the_sockets_family() {
+    let v6: std::net::SocketAddr = "[::1]:3478".parse().unwrap();
+    let v4: std::net::SocketAddr = "127.0.0.1:3478".parse().unwrap();
+    assert_eq!(
+        super::pick_family([v6, v4], true),
+        Some(v4),
+        "an IPv4 socket was sent to an IPv6 server address"
+    );
+    assert_eq!(super::pick_family([v4, v6], false), Some(v6));
+    assert_eq!(super::pick_family([v6], true), None);
+}
+
+/// Serve STUN binding requests on loopback, answering with the requester's
+/// address; when `drop_first`, the first request is ignored, as a lossy path
+/// would lose it.
+async fn spawn_stun_server(drop_first: bool) -> std::net::SocketAddr {
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind stun");
+    let local = server.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+        let mut dropped = !drop_first;
+        loop {
+            let Ok((len, from)) = server.recv_from(&mut buf).await else {
+                return;
+            };
+            if len < 20 {
+                continue;
+            }
+            if !dropped {
+                dropped = true;
+                continue;
+            }
+            let txn_id: [u8; 12] = buf[8..20].try_into().unwrap();
+            let std::net::SocketAddr::V4(from_v4) = from else {
+                return;
+            };
+            let reply = build_binding_success(from_v4, &txn_id);
+            let _ = server.send_to(&reply, from).await;
+        }
+    });
+    local
+}
+
+/// An IPv4 traversal socket like the one the runtime binds.
+fn ipv4_traversal_socket() -> std::net::UdpSocket {
+    let socket = std::net::UdpSocket::bind(("0.0.0.0", 0)).unwrap();
+    socket.set_nonblocking(true).unwrap();
+    socket
+}
+
+#[tokio::test]
+async fn stun_observation_survives_one_lost_binding_request() {
+    let timeout = std::time::Duration::from_secs(2);
+
+    let healthy = spawn_stun_server(false).await;
+    let (reflexive, _, _) = super::observe_traversal_addresses(
+        &ipv4_traversal_socket(),
+        &[healthy.to_string()],
+        false,
+        timeout,
+    )
+    .await
+    .unwrap();
+    assert!(reflexive.is_some(), "control: a lossless exchange succeeds");
+
+    let lossy = spawn_stun_server(true).await;
+    let started = std::time::Instant::now();
+    let (reflexive, _, _) = super::observe_traversal_addresses(
+        &ipv4_traversal_socket(),
+        &[lossy.to_string()],
+        false,
+        timeout,
+    )
+    .await
+    .unwrap();
+    assert!(
+        reflexive.is_some(),
+        "one lost binding request lost the server: no reflexive address after {} ms",
+        started.elapsed().as_millis()
+    );
 }

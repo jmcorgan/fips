@@ -111,6 +111,21 @@ impl Node {
         // Send
         if let Err(e) = self.send_encrypted_link_message(peer_addr, &encoded).await {
             self.metrics().bloom.send_failed.inc();
+            // The send is retried every tick (FRC-1402 Section 4.5.4), and on
+            // this link every retry is refused too, so say so once.
+            if let NodeError::MtuExceeded {
+                packet_size, mtu, ..
+            } = &e
+                && self.bloom_state.warn_mtu(peer_addr)
+            {
+                warn!(
+                    peer = %self.peer_display_name(peer_addr),
+                    mtu = *mtu,
+                    packet_size = *packet_size,
+                    "FilterAnnounce refused by the link as too large; the peer will not \
+                     hold this node's filter while the link MTU stays below the frame size"
+                );
+            }
             return Err(e);
         }
 

@@ -71,3 +71,9 @@ A refusal is counted every time, but logged at WARN only for the first
 from a peer in each `ECHO_WARN_MS` (five minutes); the rest go to DEBUG.
 `BloomState::warn_echo` decides, from a per-peer stamp the caller reads
 on its monotonic clock; `remove_peer_state` clears the stamp.
+
+A FilterAnnounce the link refuses as larger than its MTU is retried every
+tick and refused every time, so it is logged at WARN once per peering:
+`BloomState::warn_mtu` is true the first time for a peer, and
+`remove_peer_state` clears it. `forget_sent`, which handles a peer
+restart, leaves it, because the link and its MTU outlive the restart.

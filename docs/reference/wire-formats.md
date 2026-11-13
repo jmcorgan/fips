@@ -307,8 +307,9 @@ With link overhead: 1,071 bytes (16 header + 4 timestamp + 16 tag).
 ### LookupRequest (0x30)
 
 Coordinate discovery request, routed through the spanning tree via
-bloom-filter-guided forwarding. Each transit node forwards only to tree
-peers (parent + children) whose bloom filter contains the target.
+bloom-filter-guided forwarding. Each transit node forwards to tree peers
+(parent + children) whose bloom filter contains the target, or to matching
+non-tree peers when no tree peer matches.
 Request_id dedup in recent_requests handles edge cases from tree
 restructuring.
 
@@ -431,7 +432,7 @@ Sent by the frame sender to provide interval-based transmission statistics.
 | 12 | interval_end_counter | 8 | u64 LE — last counter in this interval |
 | 20 | interval_start_timestamp | 4 | u32 LE — timestamp at interval start |
 | 24 | interval_end_timestamp | 4 | u32 LE — timestamp at interval end |
-| 28 | interval_bytes_sent | 4 | u32 LE — payload bytes sent in interval |
+| 28 | interval_bytes_sent | 4 | u32 LE — bytes sent in interval: whole frames at the link layer, ciphertext at the session layer |
 | 32 | cumulative_packets_sent | 8 | u64 LE — total packets sent on this link |
 | 40 | cumulative_bytes_sent | 8 | u64 LE — total bytes sent on this link |
 
@@ -456,10 +457,10 @@ Sent by the frame receiver to provide loss, jitter, and timing feedback.
 | 36 | mean_burst_loss | 2 | u16 LE — mean burst length (u8.8 fixed-point) |
 | 38 | reserved | 2 | Zero |
 | 40 | jitter | 4 | u32 LE — interarrival jitter (microseconds) |
-| 44 | ecn_ce_count | 4 | u32 LE — cumulative ECN-CE marked packets |
-| 48 | owd_trend | 4 | i32 LE — one-way delay trend (µs/s, signed) |
+| 44 | ecn_ce_count | 4 | u32 LE — ECN-CE marked packets since the last rekey |
+| 48 | owd_trend | 4 | i32 LE — one-way delay trend (µs/s, signed); informational, no receiver reads it |
 | 52 | burst_loss_count | 4 | u32 LE — number of loss bursts in interval |
-| 56 | cumulative_reorder_count | 4 | u32 LE — total reordered packets |
+| 56 | cumulative_reorder_count | 4 | u32 LE — reordered packets since the last rekey |
 | 60 | interval_packets_recv | 4 | u32 LE — packets received in interval |
 | 64 | interval_bytes_recv | 4 | u32 LE — bytes received in interval |
 

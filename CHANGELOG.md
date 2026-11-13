@@ -824,6 +824,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reaching it means a second build image and a second floor. `FIPS_BUILD_IMAGE`
   is still the oldest Debian-family distribution, which is no longer the oldest
   distribution outright.
+- The macOS, FreeBSD and tarball package scripts take the binaries from
+  cargo's target directory, honouring `CARGO_TARGET_DIR` and
+  `build.target-dir`. Before, they copied from `target/release`, so a moved
+  target directory packaged stale binaries or failed.
+
+#### Peer and link state
+
+- The `owd_trend` a node reports in its MMP receiver reports, and shows in
+  its link and session metrics, is now the one-way delay trend in µs per
+  second: zero for a steady path at any send rate. Before, it followed the
+  sender's frame spacing rather than the delay, and saturated when frames
+  were about two seconds apart. No node acts on the value.
 
 #### Identity and config
 
@@ -862,6 +874,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filter-poisoning check off. A config that still pins the cap at `0.05` or
   `0.10`, as earlier release notes suggested for rolling upgrades, now runs
   at `0.20`.
+- An empty `node.lookup.attempt_timeouts_secs` now runs as the default
+  `[1, 2, 4, 8]`, and a list longer than 255 entries runs its first 255,
+  each with a warning at startup. Before, an empty list made nearly every
+  lookup time out at once, and a list over 255 entries ran only its length
+  modulo 256 attempts.
+- `node.mmp.owd_window_size` and `node.session_mmp.owd_window_size` below 2
+  now run as 2, and above 4096 as 4096, each with a warning at startup.
+  Before, 0 let the one-way delay window grow with every frame received,
+  and a very large value made the node panic at its first link or session.
+- `node.native_api.max_flows: 0` is now refused at startup. Before, the node
+  started with a native API that refused every client connect and dropped
+  every arrival.
 
 #### Routing and discovery
 
@@ -873,6 +897,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   above 0.20 stopped receiving their reachability changes; that hold is
   removed, with the `held_over_cap` key they added under `stats` in
   `fipsctl show bloom` and the control socket's `show_bloom` response.
+- The coordinate hint refusal reasons in the debug log are now
+  `foreign-root` and `over-hint-budget`, like every other log reason, in
+  place of `foreign root` and `over link peer's hint budget`.
 
 #### Transports
 
@@ -1657,6 +1684,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and counted every new frame as reordered, and the peer's receiver reports
   on the new session were dropped as stale, so the link's round-trip, loss
   and ETX estimates stopped updating.
+- The MMP receiver reports' cumulative reorder count now stops at its
+  32-bit maximum. Before, it wrapped to a small number, and the peer
+  dropped that report and every later one as stale.
+- The smoothed ETX and its trend move once per receiver report, as their
+  smoothing factors intend. Before, each report moved them twice. Routing
+  uses the unsmoothed ETX and is unaffected.
 - When two nodes dial each other at once, the node with the smaller address
   now holds the peer on the link it dialed and closes the inbound one. Before,
   it ran on its own dial's session and connection but kept the inbound link's
@@ -1694,6 +1727,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted increase rises again when the destination reports the higher
   value. Before, it stayed at the lowered value until the session was
   rebuilt.
+- A destination whose observed path MTU falls below the value it last
+  reported now notifies the source at once. Before, it compared against its
+  own estimate for the reverse direction, so on an asymmetric path a real
+  decrease could wait a full notification interval, and an increase could
+  be sent as urgent.
+- On the pending-session path, a decrypted frame too short for its inner
+  header is dropped, as it already was on the main path. Before, it was
+  counted in the link statistics and could move the peer's address.
 - A session endpoint now makes the checks FRC-1501 Section 5.1 requires, and
   discards what fails them without an answer. A handshake message or routing
   signal is dropped before dispatch if its `payload_len` is not the bytes after
@@ -1725,6 +1766,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries that no longer resolved read as an attack or a network fault.
   Anything in `fips.pub` that is not an npub is logged as "unreadable", so
   an nsec put there by mistake does not reach the log.
+- A node now takes a peer's npub in any letter case, and only in its NIP-19
+  form. A `.fips` name whose npub is in mixed case, as a resolver that
+  randomizes query-name case sends it, now resolves instead of getting
+  NXDOMAIN. A peer configured by its npub in upper case is now reached
+  through Nostr rendezvous, and open discovery recognises it as configured
+  instead of queueing it as an unknown peer. An npub with a bech32m checksum
+  or non-zero padding bits used to name the same key; it is now refused
+  everywhere a node or `fipsctl` reads an npub.
 - The hosts file (`/etc/fips/hosts` on Linux) no longer drops its names when
   it cannot be read, for example after an edit saved a byte that is not UTF-8
   or the file was written with a mode the daemon cannot read. The DNS
@@ -1765,6 +1814,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to 4096, more than the inbound signal rate limit admits in a 300 s replay
   window, so the refusal is not reached at the defaults. A configured value
   is kept as it is.
+- A stale or reordered tree announce no longer changes the tree position
+  shown for its sender. A parent update that changes only its sequence no
+  longer drops the cached coordinates of this node's descendants or clears
+  lookup backoff. The parent switch hold-down now runs from the last change
+  of parent, so upstream churn no longer keeps a node from moving to a
+  better parent.
+- A very large `node.lookup.attempt_timeouts_secs` entry no longer
+  overflows the lookup retries, the probe's discovery budget or `fipsctl`'s
+  probe wait, and a very large `fipsctl probe --timeout` no longer
+  overflows either. Before, a debug build panicked and a release build
+  gave up at once.
+- A FilterAnnounce the link refuses as too large for its MTU is now
+  reported once per peering as a warning naming the link MTU and the frame
+  size. Before, it was reported only at debug level on every retry.
+- With Nostr rendezvous enabled, out-of-range timestamps from a responder no
+  longer overflow the clock-skew estimate, which panicked the traversal
+  task in a debug build. An advert endpoint of a transport kind the node
+  does not know is ignored and the rest of the advert used; before, the
+  whole advert was rejected.
+- The STUN client retransmits a binding request within its deadline, so one
+  lost request no longer loses that server for the observation. It offers
+  local candidates only in its socket's address family, and reaches a STUN
+  server at an address of that family; before, an IPv4 socket offered IPv6
+  interface addresses and could try an IPv6 server address first.
 
 #### Transports
 
@@ -1823,6 +1896,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now accepts frames up to 65535 bytes whatever its own `mtu`, as a TCP
   receiver already does, so the largest frame a peer can make it allocate
   for rises from the local `mtu` (1400 bytes by default) to 64 KiB.
+- An Ethernet transport now drops frames whose source MAC is a multicast
+  or broadcast address, counting them in a new `group_drops` counter, and
+  refuses to send to such an address. Before, a forged beacon from one could
+  make a node with `auto_connect` send its handshake to the group address.
 - Closing a BLE link no longer discards what was queued on it. A Disconnect
   sent just before a deliberate close was never written, so the peer kept
   its session until link-dead detection. A closed BLE link's writer now
@@ -1968,6 +2045,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packets to the second were lost until it retried. Back-to-back oversized
   packets are now each answered, and a flood from one source is still held to
   the rate.
+
+#### Native datagram API
+
+- `ce_received` now counts congestion-marked datagrams delivered to native
+  API ports, not only those for the IPv6 port.
+- A native API refusal now echoes at most 512 bytes of the client's text,
+  so a long bad command no longer draws a reply so large that a macOS
+  local socket splits it and the daemon drops the connection.
 
 #### Documentation
 

@@ -908,3 +908,88 @@ fn a_node_address_from_a_prefix_is_the_prefix_followed_by_a_zero_byte() {
         "ffffffffffffffffffffffffffffff00"
     );
 }
+
+/// The npub of the FRC-1703 Appendix C.1 key in its canonical NIP-19 form:
+/// bech32, zero padding bits, lower case.
+const CANONICAL_NPUB: &str = "npub1lycg5qvjtrp3qjf5f7zl382j9x6nrjz9sdhenvyxq8c3808qxmus6gq266";
+
+/// The same key under a bech32m checksum, with zero padding bits.
+const BECH32M_NPUB: &str = "npub1lycg5qvjtrp3qjf5f7zl382j9x6nrjz9sdhenvyxq8c3808qxmus05sxlc";
+
+/// The same key under a bech32 checksum, with padding bits `0001`.
+const PADDED_NPUB: &str = "npub1lycg5qvjtrp3qjf5f7zl382j9x6nrjz9sdhenvyxq8c3808qxmu3875l8g";
+
+/// The same key under a bech32m checksum, with padding bits `1111`.
+const BECH32M_PADDED_NPUB: &str = "npub1lycg5qvjtrp3qjf5f7zl382j9x6nrjz9sdhenvyxq8c3808qxmulser6qq";
+
+/// `text` with every other letter upper-cased, as a DNS 0x20 resolver might
+/// send it.
+fn alternating_case(text: &str) -> String {
+    text.chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if i % 2 == 0 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn decode_npub_refuses_a_bech32m_checksum() {
+    let decoded = decode_npub(BECH32M_NPUB);
+    assert!(
+        matches!(decoded, Err(IdentityError::NonCanonicalNpub)),
+        "a bech32m checksum is not a NIP-19 npub, but decoded to {decoded:?}"
+    );
+}
+
+#[test]
+fn decode_npub_refuses_non_zero_padding_bits() {
+    for text in [PADDED_NPUB, BECH32M_PADDED_NPUB] {
+        let decoded = decode_npub(text);
+        assert!(
+            matches!(decoded, Err(IdentityError::NonCanonicalNpub)),
+            "{text} has non-zero padding bits, so is not a NIP-19 npub, but decoded to {decoded:?}"
+        );
+    }
+}
+
+#[test]
+fn decode_npub_refuses_a_non_canonical_npub_in_any_case() {
+    for text in [BECH32M_NPUB, PADDED_NPUB, BECH32M_PADDED_NPUB] {
+        for spelling in [text.to_ascii_uppercase(), alternating_case(text)] {
+            let decoded = decode_npub(&spelling);
+            assert!(
+                matches!(decoded, Err(IdentityError::NonCanonicalNpub)),
+                "{spelling} decoded to {decoded:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn decode_npub_accepts_the_canonical_npub_in_lower_upper_and_mixed_case() {
+    let key = decode_npub(CANONICAL_NPUB).expect("the canonical npub decodes");
+    assert_eq!(encode_npub(&key), CANONICAL_NPUB);
+    for spelling in [
+        CANONICAL_NPUB.to_ascii_uppercase(),
+        alternating_case(CANONICAL_NPUB),
+        format!("N{}", &CANONICAL_NPUB[1..]),
+    ] {
+        assert_eq!(
+            decode_npub(&spelling).ok(),
+            Some(key),
+            "{spelling} is the canonical npub with its case changed"
+        );
+    }
+}
+
+#[test]
+fn peer_identity_from_a_mixed_case_npub_reports_the_canonical_npub() {
+    let peer = PeerIdentity::from_npub(&alternating_case(CANONICAL_NPUB))
+        .expect("a mixed-case npub decodes");
+    assert_eq!(peer.npub(), CANONICAL_NPUB);
+}

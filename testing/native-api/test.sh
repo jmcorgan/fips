@@ -57,6 +57,8 @@ GATED_NAME="fips-native-api-gated-$$"
 SURFACE="fips-native-surface-$$"
 # shellcheck source=SCRIPTDIR/../lib/image-build.sh
 . "$SCRIPT_DIR/../lib/image-build.sh"
+# shellcheck source=SCRIPTDIR/../lib/docker-run.sh
+. "$SCRIPT_DIR/../lib/docker-run.sh"
 
 # Root for every temporary directory this harness bind-mounts into a
 # container, made with shared_tmpdir (testing/lib/image-build.sh), whose doc
@@ -213,15 +215,17 @@ DOCKERFILE
 # Daemon
 # ─────────────────────────────────────────────────────────────────────
 
-# Start a node with the given config, into the given container name.
+# Start a node with the given config, into the given container name. Returns
+# non-zero, having printed an INFRASTRUCTURE line, when Docker refused every
+# attempt to create the container (run_container in testing/lib/docker-run.sh).
 start_node() {
     local name="$1" config="$2" sockdir="$3"
     docker rm -f "$name" >/dev/null 2>&1
-    docker run -d --name "$name" "${CI_LABELS[@]}" \
+    run_container "$name" \
         -v "$sockdir:/run/fips" \
         -v "$SCRIPT_DIR/$config:/etc/fips/fips.yaml:ro" \
         --entrypoint /usr/local/bin/fips \
-        "$IMAGE" --config /etc/fips/fips.yaml >/dev/null
+        "$IMAGE" --config /etc/fips/fips.yaml
 }
 
 # Wait up to `timeout` seconds for the socket file to appear.
@@ -271,7 +275,10 @@ run_client() {
 
 check_socket_appears() {
     log "The socket appears when the API is enabled"
-    start_node "$NODE_NAME" node.yaml "$SOCK_DIR"
+    if ! start_node "$NODE_NAME" node.yaml "$SOCK_DIR"; then
+        fail "Docker did not create the node container (infrastructure; see above)"
+        return 1
+    fi
     if wait_for_socket "$SOCK_DIR/api.sock"; then
         pass "socket bound at /run/fips/api.sock"
     else
@@ -766,7 +773,11 @@ check_debug_commands_gated() {
     log "The debug commands are refused where the gate is closed"
     local gated_dir
     gated_dir="$(shared_tmpdir "$TMP_ROOT" gated)"
-    start_node "$GATED_NAME" node-debug-off.yaml "$gated_dir"
+    if ! start_node "$GATED_NAME" node-debug-off.yaml "$gated_dir"; then
+        fail "Docker did not create the gated node container (infrastructure; see above)"
+        rm -rf "$gated_dir"
+        return 1
+    fi
     if ! wait_for_socket "$gated_dir/api.sock"; then
         fail "the gated node never bound its socket, so nothing here proves anything"
         docker logs "$GATED_NAME" 2>&1 | tail -20
@@ -1139,17 +1150,25 @@ check_end_to_end() {
     write_node_config "$cfg_b" "$nsec_b" "$npub_a" "$NODE_A"
 
     docker network create "${CI_LABELS[@]}" "$NET" >/dev/null 2>&1
-    local name
+    local name refused=""
     for name in "$NODE_A:$cfg_a:$DIR_A" "$NODE_B:$cfg_b:$DIR_B"; do
         local container="${name%%:*}" rest="${name#*:}"
-        docker run -d --name "$container" --hostname "$container" \
-            "${CI_LABELS[@]}" --network "$NET" \
+        if ! run_container "$container" --hostname "$container" \
+            --network "$NET" \
             -v "${rest%%:*}/fips.yaml:/etc/fips/fips.yaml:ro" \
             -v "${rest#*:}:/run/fips" \
             --entrypoint /usr/local/bin/fips \
-            "$IMAGE" --config /etc/fips/fips.yaml >/dev/null
+            "$IMAGE" --config /etc/fips/fips.yaml; then
+            refused="$container"
+            break
+        fi
     done
     rm -rf "$cfg_a" "$cfg_b"
+    if [[ -n "$refused" ]]; then
+        fail "Docker did not create $refused (infrastructure; see above)"
+        teardown_two_nodes
+        return 1
+    fi
 
     if ! wait_for_running "$NODE_A" 20 || ! wait_for_running "$NODE_B" 20; then
         fail "the two nodes did not both start"
@@ -1435,7 +1454,11 @@ check_disabled_by_default() {
     log "No socket appears when the API is not enabled"
     local off_dir
     off_dir="$(shared_tmpdir "$TMP_ROOT" off)"
-    start_node "${NODE_NAME}-off" node-api-off.yaml "$off_dir"
+    if ! start_node "${NODE_NAME}-off" node-api-off.yaml "$off_dir"; then
+        fail "Docker did not create the node container (infrastructure; see above)"
+        rm -rf "$off_dir"
+        return 1
+    fi
 
     # The daemon must be proved alive before the absence of a socket means
     # anything. Without this, a daemon that fails to start at all satisfies

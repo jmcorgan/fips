@@ -23,7 +23,7 @@ compiled into `src/config/node.rs`.
 | `socket_path` | resolved | See [Socket path](#socket-path). |
 | `pending_per_flow` | `16` | Datagrams held for one flow, whether it awaits hand-off or its program is slow to read. Ceiling 64, floor 1, both applied when the configuration loads. |
 | `backlog` | `16` | Flows announced on one listener and not yet taken. Floor 1. |
-| `max_flows` | `256` | Flows this node holds at once, across every program. Established and pending flows both count. |
+| `max_flows` | `256` | Flows this node holds at once, across every program. Established and pending flows both count. Floor 1. |
 | `debug_commands` | `false` | Whether the three debug commands are answered. |
 
 There is no cap on flows per program, and no notion of a program to hang one

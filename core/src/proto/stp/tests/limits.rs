@@ -516,3 +516,60 @@ fn test_flap_dampening_counter_resets_when_the_episode_lapses_not_when_it_engage
     state.recompute_coords();
     assert!(state.is_flap_dampened(8000));
 }
+
+#[test]
+fn test_hold_down_runs_from_the_last_parent_change_not_from_each_ancestry_update() {
+    // The hold-down is documented to run from the last parent change
+    // (docs/design/fips-spanning-tree.md, "Stability Mechanisms"). An
+    // ancestry update re-declares the same parent through `set_parent`, as
+    // the AncestryUpdate arm of the announce handler does; it must not restart
+    // the hold-down, or a parent whose ancestry changes more often than the
+    // hold-down keeps every discretionary improvement vetoed.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node, 1000);
+    state.set_hold_down(30);
+
+    let parent = make_node_addr(4);
+    let better = make_node_addr(2);
+    state.update_peer(
+        ParentDeclaration::new(parent, make_node_addr(6), 1, 1000),
+        make_coords(&[4, 6, 7, 1]),
+    );
+    state.update_peer(
+        ParentDeclaration::new(better, make_node_addr(1), 1, 1000),
+        make_coords(&[2, 1]),
+    );
+
+    // The one real parent change, at t = 1 s.
+    state.set_parent(parent, 2, 1000, 1_000);
+    state.recompute_coords();
+
+    // The parent's ancestry changes every 29 s; each change is an ancestry
+    // update that keeps the same parent.
+    let mut seq = 2;
+    for i in 1..=10u64 {
+        let now = 1_000 + i * 29_000;
+        state.update_peer(
+            ParentDeclaration::new(parent, make_node_addr(6), 1 + i, 1000 + i),
+            make_coords(&[4, 6, 7, 1]),
+        );
+        seq += 1;
+        state.set_parent(parent, seq, 1000 + i, now);
+        state.recompute_coords();
+    }
+
+    // Q is a same-root improvement that clears the 20% margin (depth 1 + 1.0
+    // against depth 3 + 1.0), so it is discretionary.
+    state.set_parent_hysteresis(0.2);
+    assert!(matches!(
+        state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new()),
+        ParentEval::Discretionary(p) if p == better
+    ));
+
+    // 291 s after the last parent change the hold-down has long expired.
+    let now = 1_000 + 10 * 29_000 + 1_000;
+    assert!(
+        !state.is_switch_suppressed(now),
+        "hold-down must lapse 30 s after the last parent change, not after each ancestry update"
+    );
+}

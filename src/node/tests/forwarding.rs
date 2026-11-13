@@ -1296,6 +1296,83 @@ async fn test_ce_relay_through_forwarding() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// A datagram that a transit node marked Congestion Experienced, arriving on a
+/// native API port, is counted in `congestion.ce_received` as one on the IPv6
+/// port is. The count is taken on arrival, so it holds whether or not a native
+/// program is bound to the port: here none is, and the registry drops it.
+#[tokio::test]
+async fn a_congestion_marked_datagram_to_a_native_port_is_counted() {
+    // 3-node chain: 0 -- 1 -- 2, with 0's session to 2 through 1.
+    let edges = vec![(0, 1), (1, 2)];
+    let mut nodes = run_tree_test(3, &edges, false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+
+    let node2_addr = *nodes[2].node.node_addr();
+    let node2_pubkey = nodes[2].node.identity().pubkey_full();
+    nodes[0]
+        .node
+        .initiate_session(node2_addr, node2_pubkey)
+        .await
+        .unwrap();
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node2_addr)
+            .is_some_and(|s| s.is_established()),
+        "precondition: node 0's session to node 2 is established"
+    );
+
+    // Unmarked first: a datagram nobody marked is not counted.
+    let unmarked = nodes[2].node.metrics().congestion.ce_received.get();
+    nodes[0]
+        .node
+        .send_session_data(&node2_addr, 4000, 4000, b"unmarked datagram")
+        .await
+        .expect("send_session_data failed");
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    assert_eq!(
+        nodes[2].node.metrics().congestion.ce_received.get(),
+        unmarked,
+        "a datagram no transit node marked was counted as CE"
+    );
+
+    // Node 1 marks everything it forwards, as a transport that drops does.
+    nodes[1].node.transport_drops.insert(
+        TransportId::new(1),
+        TransportDropState {
+            prev_drops: 100,
+            dropping: true,
+        },
+    );
+    let before = nodes[2].node.metrics().congestion.ce_received.get();
+
+    nodes[0]
+        .node
+        .send_session_data(&node2_addr, 4000, 4000, b"native datagram")
+        .await
+        .expect("send_session_data failed");
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+
+    assert_eq!(
+        nodes[2].node.metrics().congestion.ce_received.get(),
+        before + 1,
+        "a CE-marked datagram to a native port was not counted"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
 #[test]
 fn test_detect_congestion_with_transport_drops() {
     let mut node = make_node();

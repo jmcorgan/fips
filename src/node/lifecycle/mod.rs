@@ -123,12 +123,13 @@ impl Node {
     ) -> Result<crate::node::UpdatePeersOutcome, NodeError> {
         let mut new_by_addr: HashMap<NodeAddr, PeerConfig> =
             HashMap::with_capacity(new_peers.len());
-        for peer in new_peers {
+        for mut peer in new_peers {
             let identity =
                 PeerIdentity::from_npub(&peer.npub).map_err(|e| NodeError::InvalidPeerNpub {
                     npub: peer.npub.clone(),
                     reason: e.to_string(),
                 })?;
+            peer.npub = identity.npub();
             new_by_addr.insert(*identity.node_addr(), peer);
         }
 
@@ -811,8 +812,11 @@ impl Node {
             "Connection initiated"
         );
 
-        // Schedule the first msg1 resend; the wire itself is stored on the
-        // surviving carrier once the machine is in hand below.
+        // The peer machine arms the first msg1 resend when it starts the
+        // handshake, after this preparation, at its own fixed interval; the
+        // wire is stored on the surviving carrier below, where the retransmit
+        // driver reads it. The deadline computed here is handed to the
+        // carrier, which does not use it.
         let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
         let first_resend_at_ms = at.interval_ms + resend_interval;
 
@@ -3556,7 +3560,7 @@ impl Node {
         address: &str,
         transport: &str,
     ) -> Result<serde_json::Value, String> {
-        let peer_config = PeerConfig {
+        let mut peer_config = PeerConfig {
             npub: npub.to_string(),
             alias: None,
             addresses: vec![PeerAddress::new(transport, address)],
@@ -3564,6 +3568,7 @@ impl Node {
             auto_reconnect: false,
             via_nostr: false,
         };
+        peer_config.canonicalize_npub();
 
         // Pre-seed identity cache (same as initiate_peer_connections does).
         // An unparseable npub is left to `initiate_peer_connection` below,

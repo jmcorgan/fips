@@ -5,7 +5,8 @@ Unit tests for mesh lookups, declared from `lookup/mod.rs` as
 
 - `mod.rs`: declares the test files.
 - `util.rs`: shared fixtures.
-- `core.rs`: the planners and the classification of transit responses.
+- `core.rs`: the planners, the classification of transit responses and the
+  retry ladder in `poll_pending`.
 - `forward_sender.rs`: a transit forward never goes back to the peer
   the request came from.
 - `limits.rs`: the forward rate limiter and its bound.

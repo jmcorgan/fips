@@ -424,8 +424,9 @@ address and withdraws the gateway's RA settings.
 
 While it runs, the gateway sets the LAN's `ra_default` to 2, with or
 without `gateway.global_prefix`, so that odhcpd advertises a default
-route even without upstream IPv6, and advertises a route to its address
-pool. It keeps the `ra_default` it replaced in
+route even without upstream IPv6; that default route is how LAN clients
+reach its address pool. It also adds a kernel route for the pool on the
+LAN device. It keeps the `ra_default` it replaced in
 `/etc/fips/gateway-ra-default.saved`, and a stop puts that value back,
 also after a power loss while the gateway ran. A stop with nothing
 saved, such as the one every package upgrade and removal makes whether

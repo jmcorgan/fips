@@ -5,5 +5,5 @@ Unit tests for the probe, declared from `probe/mod.rs` as
 timestamps and hand-built observations.
 
 - `mod.rs`: declares the test files.
-- `core.rs`: the stage machine.
+- `core.rs`: the stage machine and the budget derivation.
 - `path.rs`: `describe_path`.

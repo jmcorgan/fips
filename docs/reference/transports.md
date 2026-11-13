@@ -47,6 +47,7 @@ module.
 | `send_errors` / `recv_errors` | Send/receive failures |
 | `beacons_sent` / `beacons_recv` | Peer-discovery beacon traffic |
 | `beacons_dropped` | Received beacons the discovery buffer had no room for |
+| `group_drops` | Received frames dropped because their source MAC was a group (multicast or broadcast) address |
 | `frames_too_short` | Frames below minimum length, dropped |
 | `frames_too_long` | Frames above transport MTU, dropped |
 | `kernel_drops` | Kernel `PACKET_STATISTICS` drop count, summed over every binding (Linux only; feeds ECN congestion detection) |

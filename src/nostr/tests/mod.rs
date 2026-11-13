@@ -2957,9 +2957,12 @@ fn an_event_of_another_kind_is_not_read_as_an_inbox_relay_list() {
     assert!(inbox_relays(&event).is_empty());
 }
 
+mod clock_skew;
 mod fixtures;
 mod notify_channels;
+mod npub_spelling;
 mod punch_recv_error;
 mod seen_session_cap;
 mod seen_session_floor;
 mod signal_lag;
+mod unknown_transport;

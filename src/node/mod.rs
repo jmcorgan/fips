@@ -1035,9 +1035,11 @@ impl Node {
     ///
     /// Values outside their protocol bounds are brought to them first, with
     /// a warning, so validation sees the values the node runs with; see
-    /// `Config::apply_floors`.
+    /// `Config::apply_floors`. Each configured peer's npub is then held in
+    /// canonical form; see `PeerConfig::canonicalize_npub`.
     pub fn new(mut config: Config) -> Result<Self, NodeError> {
         config.apply_floors();
+        config.canonicalize_peer_npubs();
         config.validate()?;
         let identity = config.create_identity()?;
         let node_addr = *identity.node_addr();
@@ -1225,11 +1227,12 @@ impl Node {
     /// Create a node with a specific identity.
     ///
     /// This constructor brings values to their protocol bounds, with a
-    /// warning, and then validates cross-field config invariants before
-    /// constructing the node, same as [`Node::new`]; see
-    /// `Config::apply_floors`.
+    /// warning, holds configured peer npubs in canonical form, and then
+    /// validates cross-field config invariants before constructing the node,
+    /// same as [`Node::new`]; see `Config::apply_floors`.
     pub fn with_identity(identity: Identity, mut config: Config) -> Result<Self, NodeError> {
         config.apply_floors();
+        config.canonicalize_peer_npubs();
         config.validate()?;
         let node_addr = *identity.node_addr();
 
@@ -3709,9 +3712,9 @@ impl Node {
         // The session's own source-side estimate described the same dead path,
         // and the increase ladder is the only thing that would ever raise it
         // again. Reset it here so the two halves of "this path is gone" stay
-        // together. The two timeout callers remove the session before calling
-        // this, so this arm is reached only from the PathBroken route, where
-        // the session survives the event.
+        // together. Every caller but the PathBroken route removes the session
+        // before calling this, so this arm is reached only from that route,
+        // where the session survives the event.
         //
         // It runs first so the `&mut self.sessions` borrow ends before the
         // shared `self.peers` borrow the reseed below takes.

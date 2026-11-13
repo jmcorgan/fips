@@ -23,6 +23,12 @@ pub(super) const TRAVERSAL_STUN_TIMEOUT: Duration = Duration::from_secs(2);
 /// over a slow first response. Returns immediately on success.
 pub(super) const ADVERT_STUN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// First retransmission interval for a binding request, doubled after each
+/// retransmission (RFC 8489 Section 6.2.1). Within the 2 s traversal
+/// deadline the request goes out at 0, 0.5 and 1.5 s; within the 5 s advert
+/// deadline also at 3.5 s.
+const STUN_INITIAL_RTO: Duration = Duration::from_millis(500);
+
 pub(super) async fn observe_traversal_addresses(
     socket: &std::net::UdpSocket,
     stun_servers: &[String],
@@ -36,9 +42,10 @@ pub(super) async fn observe_traversal_addresses(
     ),
     BootstrapError,
 > {
-    let local_port = socket.local_addr()?.port();
+    let local_addr = socket.local_addr()?;
+    let local_port = local_addr.port();
     let local_addresses = if share_local_candidates {
-        local_addresses_from_port(local_port)
+        offerable(local_addresses_from_port(local_port), local_addr.is_ipv4())
             .into_iter()
             .map(|ip| TraversalAddress {
                 protocol: "udp".to_string(),
@@ -91,6 +98,11 @@ pub(super) async fn observe_traversal_addresses(
 /// in v4-mapped IPv6 form. A dual-stack bind would require normalising both
 /// sides with `IpAddr::to_canonical()` before comparing.
 ///
+/// The request is retransmitted, with the same transaction id, from 500 ms
+/// and doubling until the deadline, so one lost datagram does not lose the
+/// server (RFC 8489 Section 6.2.1). It goes to the first resolved address of
+/// the socket's family; a server with none is skipped.
+///
 /// Caller requirement: this drains and discards every datagram arriving on
 /// `socket` until the deadline, so it must not be entered on a socket that
 /// may concurrently carry other traffic the caller cares about.
@@ -102,19 +114,31 @@ async fn perform_stun(
     let endpoint = parse_stun_url(stun_server)?;
     let txn_id = random_txn_id();
     let request = create_stun_binding_request(txn_id);
-    let addr = resolve_udp_target(&endpoint.host, endpoint.port)
+    let want_v4 = socket.local_addr()?.is_ipv4();
+    let addr = resolve_udp_target(&endpoint.host, endpoint.port, want_v4)
         .await?
         .ok_or_else(|| BootstrapError::Stun(format!("no address for {}", stun_server)))?;
     let udp = UdpSocket::from_std(socket.try_clone()?)?;
     udp.send_to(&request, addr).await?;
     let mut buf = [0u8; 2048];
     let deadline = tokio::time::Instant::now() + response_timeout;
+    let mut rto = STUN_INITIAL_RTO;
+    let mut resend_at = tokio::time::Instant::now() + rto;
     let mut rejected = 0u64;
     let mut last_unexpected = None;
     loop {
-        let result = tokio::time::timeout_at(deadline, udp.recv_from(&mut buf)).await;
-        let Ok(Ok((len, remote))) = result else {
-            break;
+        let wake = resend_at.min(deadline);
+        let (len, remote) = match tokio::time::timeout_at(wake, udp.recv_from(&mut buf)).await {
+            Ok(Ok(received)) => received,
+            Ok(Err(_)) => break,
+            Err(_) if wake < deadline => {
+                // A failed retransmission leaves the earlier sends in flight.
+                let _ = udp.send_to(&request, addr).await;
+                rto *= 2;
+                resend_at = tokio::time::Instant::now() + rto;
+                continue;
+            }
+            Err(_) => break,
         };
         if remote != addr {
             rejected += 1;
@@ -267,17 +291,44 @@ fn parse_xor_mapped_address(value: &[u8], txn_id: &[u8; 12]) -> Option<SocketAdd
     }
 }
 
-async fn resolve_udp_target(host: &str, port: u16) -> Result<Option<SocketAddr>, BootstrapError> {
+async fn resolve_udp_target(
+    host: &str,
+    port: u16,
+    want_v4: bool,
+) -> Result<Option<SocketAddr>, BootstrapError> {
     let normalized_host = host
         .strip_prefix('[')
         .and_then(|trimmed| trimmed.strip_suffix(']'))
         .unwrap_or(host);
 
     if let Ok(ip) = normalized_host.parse::<IpAddr>() {
-        return Ok(Some(SocketAddr::new(ip, port)));
+        return Ok(pick_family(
+            std::iter::once(SocketAddr::new(ip, port)),
+            want_v4,
+        ));
     }
-    let mut results = lookup_host((normalized_host, port)).await?;
-    Ok(results.next())
+    let results = lookup_host((normalized_host, port)).await?;
+    Ok(pick_family(results, want_v4))
+}
+
+/// The server address to send a binding request to, from those resolved:
+/// the first of the socket's family. A socket cannot send to the other
+/// family, so a server with no address of this one is skipped.
+fn pick_family(addrs: impl IntoIterator<Item = SocketAddr>, want_v4: bool) -> Option<SocketAddr> {
+    addrs.into_iter().find(|addr| addr.is_ipv4() == want_v4)
+}
+
+/// The local candidate addresses to offer for a socket: those of its family.
+/// The socket's port is offered on each, and no peer can reach an address of
+/// the other family on it.
+fn offerable(addresses: Vec<String>, socket_v4: bool) -> Vec<String> {
+    addresses
+        .into_iter()
+        .filter(|ip| {
+            ip.parse::<IpAddr>()
+                .is_ok_and(|ip| ip.is_ipv4() == socket_v4)
+        })
+        .collect()
 }
 
 fn local_addresses_from_port(port: u16) -> Vec<String> {

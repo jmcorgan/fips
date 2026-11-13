@@ -402,11 +402,66 @@ mod unix_impl {
     /// nearest one for the argument that was wrong; the alternative is a bare
     /// message, which reaches the client as `ECONNREFUSED` and says the node
     /// declined rather than that the flow does not exist.
+    ///
+    /// The message is clipped to [`MAX_MESSAGE`] here, because some refusals
+    /// echo client text: an unknown command's name, or serde's reason for a
+    /// parameter, which quotes the value. Without the clip a refusal of a
+    /// [`MAX_COMMAND`]-byte line is over 8 KB, which a macOS local stream
+    /// socket splits, and `fdpass::reply` ends the connection on a short write.
     fn deny(errno: &'static str, message: String) -> Response {
         Response {
             status: "error".to_string(),
             data: Some(serde_json::json!({ "errno": errno })),
-            message: Some(message),
+            message: Some(clip(message)),
+        }
+    }
+
+    /// Most bytes a refusal's message may take once written as a JSON string,
+    /// quotes excluded.
+    ///
+    /// With the envelope (`status`, `data.errno` and the keys, under 80
+    /// bytes) every refusal stays under 600 bytes, well below the 2048-byte
+    /// send low-water mark under which macOS never splits a non-blocking send
+    /// on a local stream socket.
+    pub(super) const MAX_MESSAGE: usize = 512;
+
+    /// Cut `message` so it serialises to at most [`MAX_MESSAGE`] bytes,
+    /// marking the cut with an ellipsis. A message that fits is returned as
+    /// it is.
+    ///
+    /// The bound is on serialised width rather than on characters, because
+    /// serde_json writes a control character as a six-byte `\u00XX`: 512
+    /// characters of `\x01` would serialise to about 3 KB.
+    pub(super) fn clip(message: String) -> String {
+        const MARK: &str = "\u{2026}";
+        if message.chars().map(json_width).sum::<usize>() <= MAX_MESSAGE {
+            return message;
+        }
+        let budget = MAX_MESSAGE - MARK.len();
+        let mut used = 0;
+        let mut end = 0;
+        for (at, ch) in message.char_indices() {
+            used += json_width(ch);
+            if used > budget {
+                break;
+            }
+            end = at + ch.len_utf8();
+        }
+        let mut clipped = message;
+        clipped.truncate(end);
+        clipped.push_str(MARK);
+        clipped
+    }
+
+    /// The bytes serde_json writes for `ch` inside a string, following its
+    /// escape table: a two-byte escape for `"`, `\\` and the five control
+    /// characters with a short form, a six-byte `\u00XX` for every other
+    /// control character, and the UTF-8 encoding otherwise.
+    fn json_width(ch: char) -> usize {
+        match ch {
+            '"' | '\\' | '\u{8}' | '\t' | '\n' | '\u{c}' | '\r' => 2,
+            ch if (ch as u32) < 0x20 => 6,
+            ch => ch.len_utf8(),
         }
     }
 
@@ -1491,9 +1546,16 @@ mod tests {
     /// is how a FreeBSD portability bug turned into six cancelled CI runs.
     const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
-    /// Put [`DEADLINE`] on a descriptor a test reads with blocking calls.
+    /// Put [`DEADLINE`] on a descriptor a test reads or writes with blocking
+    /// calls.
+    ///
+    /// The write bound matters for the same reason as the read bound: a
+    /// blocking write that fills the socket waits for a reader, and when that
+    /// reader is a task on this runtime it never runs.
     fn bounded(sock: StdUnixStream) -> StdUnixStream {
         sock.set_read_timeout(Some(DEADLINE))
+            .expect("the descriptor is open");
+        sock.set_write_timeout(Some(DEADLINE))
             .expect("the descriptor is open");
         sock
     }
@@ -2080,27 +2142,91 @@ mod tests {
         forgotten(&mut connection, flow).await;
     }
 
+    /// The buffer size [`serve_socket`] gives the client's sends, in bytes.
+    ///
+    /// Small enough that a client socket holds less unread than one
+    /// `MAX_COMMAND` line on every platform these tests run on. macOS gives a
+    /// local stream socket 8192 bytes by default and Linux about 200 KB, so a
+    /// test that wrote a long line with a blocking call passed on Linux and
+    /// wedged on macOS. Linux doubles the value and charges per-buffer
+    /// overhead, so 4096 leaves 8064 bytes of room there (measured on Linux
+    /// 6.8); macOS charges the receiver's buffer and leaves 4096.
+    const CLIENT_ROOM: usize = 4096;
+
     /// Serve a sibling of `connection` over a real socket, the way the daemon
     /// serves a client, returning the client's end and the serving task.
     ///
     /// Through `run` rather than `answer`, because what these tests observe is
     /// what the serving loop does with the descriptor in a reply it has sent.
-    fn serve_socket(
+    /// The client's sends are held to [`CLIENT_ROOM`] on both kernels' terms
+    /// (Linux charges the sender, BSD the receiver), so a test that would
+    /// block writing a long command fails here as it would on macOS; write
+    /// commands with [`send_line`].
+    pub(super) fn serve_socket(
         connection: &Connection,
     ) -> (StdUnixStream, tokio::task::JoinHandle<std::io::Result<()>>) {
         let (ours, theirs) = StdUnixStream::pair().expect("AF_UNIX socketpair");
+        let (ours, theirs) = (OwnedFd::from(ours), OwnedFd::from(theirs));
+        super::seqpacket::set_sndbuf(&theirs, CLIENT_ROOM).expect("the socket is open");
+        super::seqpacket::set_rcvbuf(&ours, CLIENT_ROOM).expect("the socket is open");
+        let (ours, theirs) = (StdUnixStream::from(ours), StdUnixStream::from(theirs));
         ours.set_nonblocking(true).expect("the socket is open");
         let ours = tokio::net::UnixStream::from_std(ours).expect("inside a runtime");
         let task = tokio::spawn(connection.sibling().run(ours));
         (bounded(theirs), task)
     }
 
+    /// Write one command line and its newline on a client socket, yielding to
+    /// the runtime whenever the socket is full.
+    ///
+    /// The daemon half is served by a task on this same current-thread
+    /// runtime, so a blocking write of more than the socket holds waits for a
+    /// reader that cannot run until the write returns. Each write here is
+    /// non-blocking, takes what the socket has room for, and lets the serving
+    /// task drain it before the next. A daemon that stops reading fails the
+    /// test after [`DEADLINE`] rather than wedging it.
+    ///
+    /// **The socket itself is made non-blocking for the write**, not each send
+    /// given `MSG_DONTWAIT`. Darwin's `send` applies that flag only to waiting
+    /// for the socket buffer's lock: a send that finds the buffer full still
+    /// sleeps unless the socket is non-blocking (xnu's `sosendcheck`). There a
+    /// flagged send blocked until the [`bounded`] write timeout with the
+    /// serving task unable to run, so one buffer's worth of the line went and
+    /// the next send timed out with nothing sent. The socket goes back to
+    /// blocking afterwards, because the reads that follow rely on
+    /// [`DEADLINE`] to bound their wait.
+    pub(super) async fn send_line(client: &StdUnixStream, line: &[u8]) {
+        let bytes = [line, b"\n"].concat();
+        let mut rest = bytes.as_slice();
+        let deadline = std::time::Instant::now() + DEADLINE;
+        let mut writer = client;
+        writer.set_nonblocking(true).expect("the socket is open");
+        while !rest.is_empty() {
+            match writer.write(rest) {
+                Ok(sent) => rest = &rest[sent..],
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the daemon stopped reading with {} of {} bytes unsent",
+                        rest.len(),
+                        bytes.len()
+                    );
+                    tokio::task::yield_now().await;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => panic!("the command could not be written: {error}"),
+            }
+        }
+        writer.set_nonblocking(false).expect("the socket is open");
+    }
+
     /// Write one command on a client socket and read its reply line, with the
     /// descriptor it carried.
-    async fn call(client: &StdUnixStream, line: &str) -> (serde_json::Value, Option<OwnedFd>) {
-        let mut writer = client;
-        writer.write_all(line.as_bytes()).unwrap();
-        writer.write_all(b"\n").unwrap();
+    pub(super) async fn call(
+        client: &StdUnixStream,
+        line: &str,
+    ) -> (serde_json::Value, Option<OwnedFd>) {
+        send_line(client, line.as_bytes()).await;
         readable(client).await;
         let mut buf = [0u8; 4096];
         let chunk = super::fdpass::recv(client.as_raw_fd(), &mut buf)
@@ -2778,3 +2904,10 @@ mod tests {
 ))]
 #[path = "tests/flows.rs"]
 mod flow_tests;
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "freebsd", target_os = "macos")
+))]
+#[path = "tests/replies.rs"]
+mod reply_tests;

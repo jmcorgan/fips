@@ -18,6 +18,11 @@ docstring states what counts as a socket use, how calls are resolved, the two
 filter shapes it accepts, and its exit codes (0 pass, 1 finding, 2 cannot
 check).
 
+The guard also reads the per-test limits in the same file. Each profile's
+`slow-timeout`, and every override's that sets one, must carry
+`terminate-after`; without it a hung test runs until the job's timeout cancels
+the job, and no result names the test. `limit-lost.case` shows this firing.
+
 ## Files
 
 - `exemptions.toml`: primitive uses that open no socket, one entry per

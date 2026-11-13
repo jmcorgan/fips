@@ -79,6 +79,11 @@ pub enum OverlayTransportKind {
     Udp,
     Tcp,
     Tor,
+    /// A transport kind this node does not know, read from another node's
+    /// advert. Such an endpoint is dropped and the rest of the advert used.
+    /// It cannot be serialized, so it can never be published.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

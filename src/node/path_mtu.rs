@@ -22,7 +22,8 @@ pub struct PathMtuEntry {
     ///
     /// The discovery carrier is the one with no release path: it writes an
     /// entry for a destination this node may never open a session with, and
-    /// all three callers of `path_mtu_lookup_release` fire on session state.
+    /// every caller of `path_mtu_lookup_release` fires on session or peer
+    /// state.
     /// A link MTU this node derived from its own transport, and a value
     /// learned inside a session, are both released by an event that says the
     /// thing they describe is gone, so they carry no deadline.

@@ -279,15 +279,6 @@ impl Node {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        // Update peer's tree state in ActivePeer
-        if let Some(peer) = self.peers.get_mut(from) {
-            peer.update_tree_position(
-                announce.declaration.clone(),
-                announce.ancestry.clone(),
-                now_ms,
-            );
-        }
-
         // Sample before the TreeState write below: is_tree_peer reads the
         // declaration that write stores, so sampling after it would always
         // see the new value and never detect a flip.
@@ -302,6 +293,16 @@ impl Node {
             self.metrics().tree.stale.inc();
             debug!(from = %self.peer_display_name(from), "TreeAnnounce not fresher than existing, ignored");
             return;
+        }
+
+        // The ActivePeer copy, which the operator views read, changes only
+        // when TreeState accepts the announce, so the two never disagree.
+        if let Some(peer) = self.peers.get_mut(from) {
+            peer.update_tree_position(
+                announce.declaration.clone(),
+                announce.ancestry.clone(),
+                now_ms,
+            );
         }
 
         self.metrics().tree.accepted.inc();
@@ -572,15 +573,16 @@ impl Node {
                         .record_reject(TreeReject::OutboundSignFailed);
                     return;
                 }
-                // Surgical invalidation — see CoordCache::invalidate_via_node doc.
-                self.coord_cache
-                    .invalidate_via_node(our_identity.node_addr());
-                self.reset_lookup_backoff();
-
                 let new_addrs: Vec<NodeAddr> =
                     self.tree_state.my_coords().node_addrs().copied().collect();
 
+                // A parent update that changes only its sequence leaves our
+                // path, and so every cached descendant entry, still correct.
                 if old_addrs != new_addrs {
+                    // Surgical invalidation — see CoordCache::invalidate_via_node doc.
+                    self.coord_cache
+                        .invalidate_via_node(our_identity.node_addr());
+                    self.reset_lookup_backoff();
                     self.metrics().tree.ancestry_changed.inc();
                     info!(
                         parent = %self.peer_display_name(from),

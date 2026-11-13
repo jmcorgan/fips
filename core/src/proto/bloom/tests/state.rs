@@ -1139,3 +1139,18 @@ fn removing_a_peer_clears_its_echo_warning_stamp() {
         "a returning peer warns at once"
     );
 }
+
+#[test]
+fn the_mtu_warning_is_given_once_per_peering_and_again_after_the_peer_is_removed() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let peer = make_node_addr(1);
+    let other = make_node_addr(2);
+
+    assert!(state.warn_mtu(&peer), "first refusal for a peering warns");
+    assert!(!state.warn_mtu(&peer), "a retry does not warn again");
+    assert!(state.warn_mtu(&other), "another peer warns on its own");
+
+    state.remove_peer_state(&peer);
+    assert!(state.warn_mtu(&peer), "a new peering warns again");
+    assert!(!state.warn_mtu(&other));
+}

@@ -252,7 +252,7 @@ impl Node {
             debug!(
                 peer = %self.peer_display_name(from),
                 addr = %key,
-                reason = "foreign root",
+                reason = "foreign-root",
                 "Coordinate hint refused"
             );
             return;
@@ -267,7 +267,7 @@ impl Node {
             debug!(
                 peer = %self.peer_display_name(from),
                 addr = %key,
-                reason = "over link peer's hint budget",
+                reason = "over-hint-budget",
                 segment = ?placed.segment,
                 "Coordinate hint not paid for"
             );

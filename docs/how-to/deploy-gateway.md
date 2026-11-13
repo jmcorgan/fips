@@ -12,7 +12,7 @@ on a server or non-OpenWrt router by hand.
 > **Running OpenWrt?** Use the
 > [tutorial](../tutorials/deploy-fips-gateway.md) instead. The OpenWrt
 > ipk ships with the `gateway:` block pre-populated and the init
-> script automates dnsmasq forwarding, RA route distribution, and,
+> script automates dnsmasq forwarding, the advertised default route, and,
 > with `gateway.global_prefix` set, the global IPv6 prefix on
 > `br-lan`. The OpenWrt path is the canonical
 > deployment of this feature; this how-to is the secondary path for

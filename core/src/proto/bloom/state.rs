@@ -47,6 +47,9 @@ pub struct BloomState {
     /// Number of `mark_changed` passes run, each a full outgoing-filter
     /// recompute. Read by tests to check recompute pacing.
     inbound_recomputes: u64,
+    /// Peers already warned that their link refused a FilterAnnounce as too
+    /// large. Dropped with the peer, so the warning is once per peering.
+    mtu_warned: BTreeSet<NodeAddr>,
 }
 
 impl BloomState {
@@ -66,6 +69,7 @@ impl BloomState {
             acks: Acks::new(),
             inbound_dirty: false,
             inbound_recomputes: 0,
+            mtu_warned: BTreeSet::new(),
         }
     }
 
@@ -293,6 +297,15 @@ impl BloomState {
         self.pending_updates.remove(peer_id);
         self.peer_sequences.remove(peer_id);
         self.acks.remove(peer_id);
+        self.mtu_warned.remove(peer_id);
+    }
+
+    /// Whether a refused-as-too-large FilterAnnounce to `peer` should be
+    /// warned about: true the first time for a peering, false after that
+    /// until `remove_peer_state` drops the peer. The send is retried every
+    /// tick, so without this the warning would repeat every tick.
+    pub fn warn_mtu(&mut self, peer: &NodeAddr) -> bool {
+        self.mtu_warned.insert(*peer)
     }
 
     /// Record an announce the transport accepted for `peer`, sent with link

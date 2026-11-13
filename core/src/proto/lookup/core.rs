@@ -499,28 +499,6 @@ pub fn classify_response(
     }
 }
 
-/// Where a LookupResponse we originate as the target should be sent first.
-pub enum ResponseRouteDecision {
-    /// Send toward the peer the matching request arrived from — the reverse path
-    /// recorded in `recent_requests` by [`classify_request`].
-    ReversePath(NodeAddr),
-    /// No recorded reverse path: the shell must route greedily toward the origin.
-    NeedsTreeRoute,
-}
-
-/// Decide the first hop for a LookupResponse we originate as the target, from
-/// the recent-request reverse-path record. Pure over `Lookup` state.
-///
-/// Only the reverse-path decision is pure. The `NeedsTreeRoute` fallback (greedy
-/// tree routing toward the origin) is a `&mut Node` coord-cache operation with a
-/// TTL-touch side effect, so it stays in the shell rather than moving here.
-pub fn plan_response_route(lookup: &Lookup, request_id: u64) -> ResponseRouteDecision {
-    match lookup.recent_requests.get(&request_id) {
-        Some(recent) => ResponseRouteDecision::ReversePath(recent.from_peer),
-        None => ResponseRouteDecision::NeedsTreeRoute,
-    }
-}
-
 /// Apply the accept-side effects of a verified LookupResponse we originated.
 ///
 /// Mutates the Lookup success state (clears backoff, drops the pending
@@ -579,7 +557,9 @@ pub fn poll_pending(
     attempt_timeouts_secs: &[u64],
 ) -> PollOutcome {
     lookup.backoff.prune(now_ms);
-    let max_attempts = attempt_timeouts_secs.len() as u8;
+    // The config floor keeps a node's ladder within 255 entries; saturating
+    // keeps this function correct for any slice it is handed.
+    let max_attempts = u8::try_from(attempt_timeouts_secs.len()).unwrap_or(u8::MAX);
 
     // Collect targets needing action (can't mutate while iterating).
     let mut retry_targets: Vec<NodeAddr> = Vec::new();
@@ -587,7 +567,11 @@ pub fn poll_pending(
 
     for (&target, entry) in &lookup.pending_lookups {
         let idx = (entry.attempt as usize).saturating_sub(1);
-        let to_ms = attempt_timeouts_secs.get(idx).copied().unwrap_or(0) * 1000;
+        let to_ms = attempt_timeouts_secs
+            .get(idx)
+            .copied()
+            .unwrap_or(0)
+            .saturating_mul(1000);
         if now_ms.saturating_sub(entry.last_sent_ms) >= to_ms {
             if entry.attempt >= max_attempts {
                 timeout_targets.push(target);

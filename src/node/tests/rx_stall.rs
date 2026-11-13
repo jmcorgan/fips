@@ -50,9 +50,16 @@ const EPOCH: [u8; 8] = [7u8; 8];
 /// a send that dials shows up at the size it has in the field.
 const CONNECT_TIMEOUT_MS: u64 = 5000;
 
-/// How long a handler answering a dead link may take. Far below any connect
-/// timeout, far above the microseconds a failed pool lookup costs.
-const BOUND: Duration = Duration::from_millis(250);
+/// How long a handler answering a dead link may take.
+///
+/// A fifth of the 5 s connect timeout (`CONNECT_TIMEOUT_MS`), so a send that
+/// waits on one connect still overruns it fivefold, and far above a loaded
+/// host's scheduling delay: at 250 ms one handler overran by 6 ms on a host at
+/// load 180. It bounds the dead-link handlers in `dial_findings`, a tick in the
+/// background-connect test, and the UDP msg2 latency behind dead replies. The
+/// connect counters `dial_findings` also reads are the primary check, and load
+/// cannot move them.
+const BOUND: Duration = Duration::from_millis(1000);
 
 /// A genuine wire msg1 from `sender` to `node`.
 fn craft_msg1(node: &Node, sender: &Identity, sender_index: u32) -> Vec<u8> {

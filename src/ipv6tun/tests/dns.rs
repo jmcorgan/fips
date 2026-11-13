@@ -1,8 +1,9 @@
 //! Tests of where the DNS responder sends a reply to a mesh source address
-//! when no strict pin to the arrival interface is known to hold, and of the
+//! when no strict pin to the arrival interface is known to hold, of the
 //! order in which its receive loop reports an identity, sends the reply and
-//! refreshes the host map, and of the two synchronous steps that loop takes
-//! for each datagram.
+//! refreshes the host map, of the two synchronous steps that loop takes for
+//! each datagram, and of which spellings of an npub name it resolves: the
+//! NIP-19 npub in any letter case, and no other.
 
 #[cfg(target_os = "linux")]
 use super::tests::{ForgedSourceNetns, bind_pktinfo, expect_answer, send_unanswered};
@@ -1182,4 +1183,81 @@ fn a_failed_read_run_is_not_ended_by_the_mtime_returning_to_the_last_good_read()
     assert!(!reloader.check_reload());
     let warned = logs.lines_with("Failed to read hosts file; keeping the names last read");
     assert_eq!(warned.len(), 1, "the run warned again: {warned:?}");
+}
+
+/// The response code, answer name and AAAA address `handle_dns_packet` gives
+/// an AAAA query for `name`, with an empty host map.
+fn aaaa_answer(name: &str) -> (simple_dns::RCODE, Option<(String, Ipv6Addr)>) {
+    use simple_dns::rdata::RData;
+    let query = super::tests::build_test_query(name, simple_dns::TYPE::AAAA);
+    let (bytes, _) = handle_dns_packet(&query, 53000, 300, &HostMap::new()).expect("a reply");
+    let response = simple_dns::Packet::parse(&bytes).expect("a well-formed reply");
+    let answer = response.answers.first().map(|record| match &record.rdata {
+        RData::AAAA(aaaa) => (record.name.to_string(), Ipv6Addr::from(aaaa.address)),
+        other => panic!("expected an AAAA record, got {other:?}"),
+    });
+    (response.rcode(), answer)
+}
+
+/// `text` with every other letter upper-cased, as a DNS 0x20 resolver sends
+/// a query name.
+fn alternating_case(text: &str) -> String {
+    text.chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if i % 2 == 0 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn an_npub_fips_name_resolves_in_lower_upper_and_mixed_case() {
+    let identity = crate::Identity::generate();
+    let npub = identity.npub();
+    let address = identity.address().to_ipv6();
+    for label in [
+        npub.clone(),
+        npub.to_ascii_uppercase(),
+        alternating_case(&npub),
+        format!("N{}", &npub[1..]),
+    ] {
+        let name = format!("{label}.fips");
+        let (rcode, answer) = aaaa_answer(&name);
+        assert_eq!(
+            rcode,
+            simple_dns::RCODE::NoError,
+            "{name} is the node's npub with its case changed"
+        );
+        assert_eq!(
+            answer,
+            Some((name.clone(), address)),
+            "{name} should resolve to the node's address, echoing the name as sent"
+        );
+    }
+}
+
+#[test]
+fn a_bech32m_or_padded_npub_fips_name_gets_nxdomain() {
+    // The FRC-1703 Appendix C.1 key under a bech32m checksum, under non-zero
+    // padding bits (`0001`), and under both (`1111`); its canonical npub ends
+    // `mus6gq266`.
+    for label in [
+        "npub1lycg5qvjtrp3qjf5f7zl382j9x6nrjz9sdhenvyxq8c3808qxmus05sxlc",
+        "npub1lycg5qvjtrp3qjf5f7zl382j9x6nrjz9sdhenvyxq8c3808qxmu3875l8g",
+        "npub1lycg5qvjtrp3qjf5f7zl382j9x6nrjz9sdhenvyxq8c3808qxmulser6qq",
+    ] {
+        let name = format!("{label}.fips");
+        let (rcode, answer) = aaaa_answer(&name);
+        assert_eq!(
+            (rcode, answer),
+            (simple_dns::RCODE::NameError, None),
+            "{name} is not a NIP-19 npub"
+        );
+    }
+    let canonical = "npub1lycg5qvjtrp3qjf5f7zl382j9x6nrjz9sdhenvyxq8c3808qxmus6gq266.fips";
+    assert_eq!(aaaa_answer(canonical).0, simple_dns::RCODE::NoError);
 }

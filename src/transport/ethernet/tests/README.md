@@ -40,16 +40,26 @@ source file's private items.
   opens a packet socket on `lo`, so it needs `CAP_NET_RAW`; unprivileged it
   returns early, and fails instead when `FIPS_TEST_PRIVILEGED` is set. Run
   it by hand under `sudo` with that variable set.
+- `frames.rs` tests `../mod.rs` as module `frame_tests`: the per-frame
+  receive rules in `dispatch_frame` and the destination check in
+  `parse_mac_addr`, with no socket. A beacon or data frame from a group
+  (multicast or broadcast) source address is dropped and counted in
+  `group_drops`, and a send to a group destination is refused; the same
+  frames from a unicast source are buffered or delivered. It is the only
+  unprivileged test of the receive path, and runs in the normal test run.
 
 ## Rules
 
 - Older tests in `src/transport/ethernet/` stay in their source files' inline
   `mod tests` blocks; new tests go here. `mod.rs` already has an inline
-  `tests` module, so its file here is declared under a different name.
-- The network-namespace tests need root. They are `#[ignore]`d, so the normal
-  test run skips them, and no CI job runs them: build with
-  `cargo test --lib --no-run` and run the test binary under `sudo` with
-  `--ignored rebind_tests`. That hand run is the only coverage of the rebind.
+  `tests` module, so its files here are declared under different names.
+- The receive loop's per-frame decision lives in `dispatch_frame`, apart
+  from the socket, so a new receive rule gets its test in `frames.rs`.
+- The network-namespace tests in `rebind.rs` need root. They are
+  `#[ignore]`d, so the normal test run skips them, and no CI job runs them:
+  build with `cargo test --lib --no-run` and run the test binary under
+  `sudo` with `--ignored rebind_tests`. That hand run is the only coverage of
+  the rebind.
 - `rebind_tests` is declared `#[cfg(all(test, target_os = "linux"))]`, not
   per test, because its harness calls the Linux-only `testutil::run_ok` and
   `testutil::in_netns`, and the macOS cross-check type-checks test modules.
