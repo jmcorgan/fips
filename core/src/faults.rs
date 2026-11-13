@@ -227,6 +227,16 @@ faults! {
     /// The BLE transport does not restart the timeout of a channel the
     /// node holds.
     BleUnprovenIgnoresHeld,
+    /// The BLE transport starts a link's receive loop before offering the
+    /// link to the pool, so a link the pool refuses still delivers frames
+    /// under the address another link holds.
+    BleReceiveBeforeAdmission,
+    /// The BLE scan loop's retry tick never prunes its memory of what link
+    /// addresses resolved to.
+    BleRetryTickSkipsPrune,
+    /// The BLE scan loop's retry tick prunes that memory as though no
+    /// address were pooled or in the retry book.
+    BleRetryTickPrunesLive,
     /// A queueing transport puts path messages in the connection's data
     /// queue, behind the data and refused when it is full, instead of in
     /// their own queue, which its writer drains first.

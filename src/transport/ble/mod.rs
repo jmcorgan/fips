@@ -1544,6 +1544,16 @@ fn pool_link<S, F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    if node_fault!(BleReceiveBeforeAdmission) {
+        let handle = tokio::spawn(receive);
+        let outcome = pool.insert(ta.clone(), conn, now);
+        if matches!(outcome, Insert::Admitted { .. })
+            && let Some(conn) = pool.get_mut(ta)
+        {
+            conn.recv_task = Some(handle);
+        }
+        return outcome;
+    }
     let outcome = pool.insert(ta.clone(), conn, now);
     if matches!(outcome, Insert::Admitted { .. })
         && let Some(conn) = pool.get_mut(ta)
@@ -2176,9 +2186,13 @@ async fn scan_probe_loop<I: io::BleIo>(
                 pending.drop_connected(|a| pool_guard.contains(&a.to_transport_addr()));
                 {
                     let now = tokio::time::Instant::now();
-                    let live = |a: &BleAddr| is_live(&pool_guard, &pending, a);
-                    recall(&known_node_of).prune(now, live);
-                    recall(&learned_psm).prune(now, live);
+                    let live = |a: &BleAddr| {
+                        is_live(&pool_guard, &pending, a) && !node_fault!(BleRetryTickPrunesLive)
+                    };
+                    if !node_fault!(BleRetryTickSkipsPrune) {
+                        recall(&known_node_of).prune(now, live);
+                        recall(&learned_psm).prune(now, live);
+                    }
                 }
                 drop(pool_guard);
                 // Rotating rather than always taking the head is what stops one
@@ -2437,6 +2451,10 @@ mod close_tests;
 #[cfg(test)]
 #[path = "tests/lane.rs"]
 mod lane_tests;
+
+#[cfg(test)]
+#[path = "tests/admission.rs"]
+mod admission_tests;
 
 #[cfg(test)]
 #[path = "tests/retry.rs"]

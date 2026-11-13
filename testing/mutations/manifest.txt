@@ -208,6 +208,9 @@ BleUnprovenTwoSecondsEarly	red	fips-mesh	transport::conformance::ble::a_channel_
 BleUnprovenIgnoresHandshake	red	fips-mesh	transport::conformance::ble::a_channel_that_completed_a_handshake_and_was_left_unverified_is_kept
 BleUnprovenIgnoresHeld	red	fips-mesh	transport::conformance::ble::a_channel_the_node_holds_is_kept_a_full_timeout_after_it_lets_go	defect: a channel was closed less than a timeout after the node last held it
 BleUnprovenIgnoresHeld	red	fips-mesh	node::tests::ble_lifecycle::a_channel_whose_first_msg1_comes_late_is_kept_a_full_timeout_after_it	defect: a channel was closed 15 s after its first msg1
+BleReceiveBeforeAdmission	red	fips-mesh	transport::ble::admission_tests::a_link_refused_at_an_occupied_address_delivers_nothing_and_leaves_the_incumbent	defect: the refused link's frame was delivered as the incumbent's
+BleRetryTickSkipsPrune	red	fips-mesh	transport::ble::retry_tests::the_retry_tick_ages_out_addresses_that_are_not_live_and_keeps_pooled_ones	defect: the retry tick kept an address that is not live past the age limit
+BleRetryTickPrunesLive	red	fips-mesh	transport::ble::retry_tests::the_retry_tick_ages_out_addresses_that_are_not_live_and_keeps_pooled_ones	defect: the retry tick aged out the address of a pooled link
 PathLaneShared	red	fips-mesh	transport::ble::lane_tests::a_path_message_is_queued_while_the_connections_data_queue_is_full
 PathLaneShared	red	fips-mesh	transport::ble::lane_tests::the_writer_sends_a_waiting_path_message_before_the_data_queued_ahead_of_it
 PathLaneShared	red	fips-mesh	node::tests::ble_queue::a_pinned_ble_path_loaded_past_its_rate_keeps_the_pin_and_stays_live

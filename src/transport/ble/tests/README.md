@@ -27,6 +27,13 @@ can reach that file's private items.
   connection with the real writer behind it, over a mock stream pair that
   holds one frame each way, so a far end the test does not read is a
   stalled link.
+- `admission.rs`, declared from `mod.rs` as `mod admission_tests`: a link
+  the pool refuses because its address already holds one never starts its
+  receive loop, so the refused link's frames are not delivered as the
+  incumbent's and its stream ending does not take the incumbent out of the
+  pool. The file pools the incumbent with the real writer behind it, as
+  `close.rs` does, and offers the second link through
+  `promote_connection` with no local key, so no arbitration runs.
 - `retry.rs`: tests for the scan and probe loop's retry tick in `mod.rs`:
   that it ages out of the probe memory an address that is neither pooled
   nor in the retry book once it has gone unseen for the age limit, and
