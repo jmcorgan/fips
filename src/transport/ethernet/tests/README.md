@@ -14,8 +14,10 @@ source file's private items.
   a node transport and a peer transport on them, and recreate the node's
   veth, which gives it a new index and MAC. A third test moves the node's
   veth to another namespace and back, which keeps its index, and checks
-  that the node is rebound all the same; on this branch the binder does not
-  rebind in that case, so that test fails when run by hand until it does.
+  that the node is rebound all the same. A fourth checks what that rebind
+  reads: a packet socket reports the index it was bound to until its
+  interface is unregistered, and -1 after, even once the interface returns
+  with the same index.
 - `detach.rs` tests `../mod.rs` as module `detach_tests`: a beacon buffered
   before the interface detaches is dropped with the binding, not left for
   the next discovery tick to drain. It needs no root and runs in the normal
@@ -56,10 +58,12 @@ source file's private items.
 - The receive loop's per-frame decision lives in `dispatch_frame`, apart
   from the socket, so a new receive rule gets its test in `frames.rs`.
 - The network-namespace tests in `rebind.rs` need root. They are
-  `#[ignore]`d, so the normal test run skips them, and no CI job runs them:
-  build with `cargo test --lib --no-run` and run the test binary under
-  `sudo` with `--ignored rebind_tests`. That hand run is the only coverage of
-  the rebind.
+  `#[ignore]`d, so the normal test run skips them, and
+  `testing/root-tests.sh` runs them as one group, with their count; GitHub
+  CI's Linux job and `testing/ci-local.sh --root-tests` run that script under
+  `sudo`. Adding or removing a test there changes the group's count. By hand,
+  build with `cargo test --lib --no-run` and run the test binary under `sudo`
+  with `--ignored rebind_tests`.
 - `rebind_tests` is declared `#[cfg(all(test, target_os = "linux"))]`, not
   per test, because its harness calls the Linux-only `testutil::run_ok` and
   `testutil::in_netns`, and the macOS cross-check type-checks test modules.

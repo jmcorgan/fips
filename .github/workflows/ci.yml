@@ -567,7 +567,10 @@ jobs:
       # takes over or deletes an interface that has the configured name, the
       # fd00::/8 policy rule is added and removed as it should be, and create
       # reports IPv6 disabled exactly when the kernel would refuse an address
-      # on the TUN). testing/root-tests.sh holds the filters and the number of
+      # on the TUN); and the Ethernet transport's rebind after its interface is
+      # recreated, or moved to another namespace and back, in
+      # src/transport/ethernet/tests/rebind.rs, over a bridge and veth pairs.
+      # testing/root-tests.sh holds the filters and the number of
       # tests each must pass, and fails unless every one ran and passed. Built
       # as the runner user and only the script runs under sudo, so that cargo
       # does not run as root with root's CARGO_HOME.

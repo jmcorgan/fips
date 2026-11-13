@@ -95,9 +95,12 @@ struct Binding {
     /// The medium of the interface, read when the current binding was made;
     /// unknown while unbound.
     medium: RwLock<Medium>,
-    /// Kernel index of the device the current binding is attached to. `0` when
-    /// unbound. Both backends bind by device, not by name, so this is the
-    /// identity that has to keep matching — see [`io::interface_index`].
+    /// Kernel index of the device the current binding was attached to at
+    /// bind. `0` when unbound. Both backends bind by device, not by name, so
+    /// this is the identity that has to keep matching — see
+    /// [`io::interface_index`]. It is not proof the socket is still attached:
+    /// a device that leaves the namespace and returns keeps its index, so
+    /// [`Binding::device_replaced`] asks the socket.
     bound_index: AtomicU32,
     /// Receive and beacon tasks belonging to the current binding.
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -141,19 +144,31 @@ impl Binding {
     /// Whether `interface` still names the device this binding is attached to.
     ///
     /// A recreated netdev takes a new kernel index, so the old socket is bound
-    /// to nothing while the name resolves fine. Nothing else notices: the
-    /// receive loop on a stale `AF_PACKET` socket never becomes readable, so
-    /// it never errors and never exits, and send failures are reported to the
-    /// caller rather than to the binder. Without this check a listen-only node
-    /// — one with `announce: false`, and so no beacon sender to fail — sits
-    /// `present` and deaf indefinitely after a `wifi reload`.
+    /// to nothing while the name resolves fine. An interface moved to another
+    /// network namespace and back keeps its index, but the kernel unhooked the
+    /// socket when it left. Nothing else notices either: the receive loop on
+    /// a stale `AF_PACKET` socket never becomes readable, so it never errors
+    /// and never exits, and send failures are reported to the caller rather
+    /// than to the binder. Without this check a listen-only node — one with
+    /// `announce: false`, and so no beacon sender to fail — sits `present`
+    /// and deaf indefinitely after a `wifi reload`.
+    ///
+    /// The current index is therefore compared with the one the socket
+    /// reports now ([`PacketSocket::bound_index`]), which is -1 once the
+    /// interface was unregistered, whether it came back or not. With no
+    /// socket held, the index stored at bind stands in.
     fn device_replaced(&self, interface: &str) -> bool {
-        let bound = self.bound_index.load(Ordering::Relaxed);
-        if bound == 0 {
+        let stored = self.bound_index.load(Ordering::Relaxed);
+        if stored == 0 {
             return false;
         }
         match io::interface_index(interface) {
-            Some(current) => current != bound,
+            Some(current) => {
+                let bound = self
+                    .socket()
+                    .map_or(i64::from(stored), |s| i64::from(s.get_ref().bound_index()));
+                i64::from(current) != bound
+            }
             // The name is gone; the caller's presence probe reports that more
             // precisely, so this is not the check that should claim it.
             None => false,
