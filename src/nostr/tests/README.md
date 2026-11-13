@@ -20,6 +20,14 @@ Child modules of `tests.rs`:
 - `notify_channels.rs`: the notify loop in `runtime.rs` logs a lag on
   either of its two channels and reads on, and ends only when a channel
   closes.
+- `npub_spelling.rs`: a peer named by its npub in any letter case is
+  handled by its key. `request_connect` addresses the offer to the canonical
+  npub and registers the initiator under it, so an upper-case configured
+  peer still wins the dual-init election; the stale-advert check evicts the
+  canonical cache entry; `advert_endpoints_for_peer` finds the cached advert
+  from an upper- or mixed-case npub; and a cooldown recorded under one
+  spelling holds for the canonical npub. A spelling that is not a NIP-19 npub
+  (a bech32m checksum, non-zero padding bits) finds no advert.
 - `punch_recv_error.rs`: a punch attempt (`run_punch_attempt` in
   `traversal.rs`) is not ended early by a receive error on its socket. An
   attempt whose only target is a closed port runs to its timeout, on the

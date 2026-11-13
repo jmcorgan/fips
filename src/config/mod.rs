@@ -1909,6 +1909,14 @@ impl Config {
         &self.peers
     }
 
+    /// Rewrite every configured peer's npub in canonical form; see
+    /// [`PeerConfig::canonicalize_npub`].
+    pub fn canonicalize_peer_npubs(&mut self) {
+        for peer in &mut self.peers {
+            peer.canonicalize_npub();
+        }
+    }
+
     /// Get peers that should auto-connect on startup.
     pub fn auto_connect_peers(&self) -> impl Iterator<Item = &PeerConfig> {
         self.peers.iter().filter(|p| p.is_auto_connect())

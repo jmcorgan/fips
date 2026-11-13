@@ -39,6 +39,7 @@ mod lan_label;
 mod lookup_echo;
 mod mmp_chartests;
 mod msg2_refused_reads;
+mod npub_spelling;
 mod probe;
 mod rekey_parity;
 mod routing;

@@ -148,12 +148,13 @@ impl Node {
     ) -> Result<crate::node::UpdatePeersOutcome, NodeError> {
         let mut new_by_addr: HashMap<NodeAddr, PeerConfig> =
             HashMap::with_capacity(new_peers.len());
-        for peer in new_peers {
+        for mut peer in new_peers {
             let identity =
                 PeerIdentity::from_npub(&peer.npub).map_err(|e| NodeError::InvalidPeerNpub {
                     npub: peer.npub.clone(),
                     reason: e.to_string(),
                 })?;
+            peer.npub = identity.npub();
             new_by_addr.insert(*identity.node_addr(), peer);
         }
 
@@ -3646,7 +3647,7 @@ impl Node {
         address: &str,
         transport: &str,
     ) -> Result<serde_json::Value, String> {
-        let peer_config = PeerConfig {
+        let mut peer_config = PeerConfig {
             npub: npub.to_string(),
             alias: None,
             addresses: vec![PeerAddress::new(transport, address)],
@@ -3654,6 +3655,7 @@ impl Node {
             auto_reconnect: false,
             via_nostr: false,
         };
+        peer_config.canonicalize_npub();
 
         // Pre-seed identity cache (same as initiate_peer_connections does).
         // An unparseable npub is left to `initiate_peer_connection` below,

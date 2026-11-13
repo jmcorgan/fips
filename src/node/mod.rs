@@ -890,9 +890,11 @@ impl Node {
     /// Create a new node from configuration.
     ///
     /// Values outside their bounds are replaced first, with a warning; see
-    /// `Config::apply_floors`.
+    /// `Config::apply_floors`. Each configured peer's npub is then held in
+    /// canonical form; see `PeerConfig::canonicalize_npub`.
     pub fn new(mut config: Config) -> Result<Self, NodeError> {
         config.apply_floors();
+        config.canonicalize_peer_npubs();
         config.validate()?;
         let identity = config.create_identity()?;
         let node_addr = *identity.node_addr();
@@ -1068,11 +1070,12 @@ impl Node {
     /// Create a node with a specific identity.
     ///
     /// This constructor replaces values outside their bounds, with a
-    /// warning, and validates cross-field config invariants before
-    /// constructing the node, same as [`Node::new`]; see
-    /// `Config::apply_floors`.
+    /// warning, holds configured peer npubs in canonical form, and validates
+    /// cross-field config invariants before constructing the node, same as
+    /// [`Node::new`]; see `Config::apply_floors`.
     pub fn with_identity(identity: Identity, mut config: Config) -> Result<Self, NodeError> {
         config.apply_floors();
+        config.canonicalize_peer_npubs();
         config.validate()?;
         let node_addr = *identity.node_addr();
 

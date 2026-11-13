@@ -14,7 +14,11 @@ can reach the source file's private items.
   destination address the receive path reports, and, in root
   network-namespace tests, the replies themselves, including with a mesh
   interface that carries no address (`ForgedSourceNetns::with_addressless_mesh`)
-  and one known residual case pinned as a test.
+  and one known residual case pinned as a test. It also covers which `.fips`
+  names an npub resolves under through `handle_dns_packet`: the canonical
+  npub in lower, upper or mixed case resolves to the node's address with the
+  name echoed as sent, and a bech32m checksum or non-zero padding bits gets
+  NXDOMAIN.
 - `ipv6_frag.rs` tests `../ipv6_frag.rs` as module `tests`: which packets
   the ingress node splits into IPv6 fragments for a path under 1280 and
   which it leaves to a Packet Too Big (one that fits, one over 1280, a

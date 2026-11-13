@@ -13,3 +13,8 @@ of its own.
   a lookup retry ladder with a huge entry, and a huge `--timeout` both give a
   ceiling of `u64::MAX` rather than overflowing. `fipsctl`'s older tests are
   still in its inline `tests` module.
+- `fipsctl_npub.rs`: a second test module of `fipsctl`, declared as
+  `mod npub_tests`, for an npub given in any letter case. An argument in upper
+  or mixed case is read as an npub rather than looked up as a host name
+  (`resolve_peer`), its mesh address is its owner's (`mesh_address`), and a
+  public key file holding it gives the same address (`address_from_file`).

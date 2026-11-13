@@ -410,3 +410,30 @@ fn an_advert_under_another_npub_sharing_a_fips_hosts_label_passes_the_host_check
     let fields = super::check_advert(&forged, &own, None).expect("passes the host check");
     assert_eq!(fields.npub, twin);
 }
+
+/// An advert carrying this node's own npub is our own whatever the case of
+/// its letters: a node accepts an npub in any case, so an upper- or
+/// mixed-case copy of ours names this node, not a peer to dial.
+#[test]
+fn an_advert_carrying_our_npub_in_another_case_is_skipped_as_our_own() {
+    let own = Identity::generate().npub();
+    let mixed: String = own
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if i % 2 == 0 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
+        .collect();
+    for spelling in [own.clone(), own.to_ascii_uppercase(), mixed] {
+        let echo = resolved_advert(&fips_host(&own), "10.2.0.5", 2121, &[("npub", &spelling)]);
+        let checked = super::check_advert(&echo, &own, None);
+        assert!(
+            matches!(checked, Err(super::AdvertSkip::Own)),
+            "an advert carrying {spelling} passed as a peer's: {checked:?}"
+        );
+    }
+}

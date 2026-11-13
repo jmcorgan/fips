@@ -190,7 +190,8 @@ impl PeerAddress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerConfig {
-    /// The peer's Nostr public key in npub (bech32) or hex format.
+    /// The peer's Nostr public key as an npub (NIP-19 bech32), in any letter
+    /// case.
     pub npub: String,
 
     /// Human-readable alias for the peer (optional).
@@ -275,6 +276,19 @@ impl PeerConfig {
     /// Check if this peer should auto-connect on startup.
     pub fn is_auto_connect(&self) -> bool {
         matches!(self.connect_policy, ConnectPolicy::AutoConnect)
+    }
+
+    /// Rewrite `npub` as the canonical npub of the key it names.
+    ///
+    /// An npub may be written in any letter case, but the node compares
+    /// configured npubs as text with the npubs it derives from keys (the
+    /// Nostr advert cache, the open-discovery sweep), so it holds each in
+    /// the one form those take. Text that names no key is left as written,
+    /// to be refused where the peer is used.
+    pub fn canonicalize_npub(&mut self) {
+        if let Ok(key) = crate::decode_npub(&self.npub) {
+            self.npub = crate::encode_npub(&key);
+        }
     }
 }
 

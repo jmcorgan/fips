@@ -400,12 +400,20 @@ fn validate_connect_address(address: &str, transport: &str) -> Result<(), String
     Ok(())
 }
 
+/// Whether `text` begins as an npub does, `npub1` in any letter case. An
+/// npub may be written in any case, and a host name cannot begin this way
+/// (see `validate_hostname`).
+fn begins_as_npub(text: &str) -> bool {
+    text.get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("npub1"))
+}
+
 /// Resolve a peer identifier to an npub.
 ///
-/// If the identifier starts with "npub1", it's returned as-is.
+/// If the identifier begins as an npub does, it's returned as-is.
 /// Otherwise, it's looked up as a hostname in the hosts file.
 fn resolve_peer(peer: &str) -> String {
-    if peer.starts_with("npub1") {
+    if begins_as_npub(peer) {
         return peer.to_string();
     }
 
@@ -489,7 +497,7 @@ fn address_from_file(path: &Path) -> Result<Ipv6Addr, String> {
         other => other.to_string(),
     })?);
 
-    if contents.starts_with("npub1") {
+    if begins_as_npub(contents.as_str()) {
         return address_from_npub(contents.as_str());
     }
 
@@ -1689,6 +1697,10 @@ fn probe_close(report: &serde_json::Value) {
 #[cfg(test)]
 #[path = "tests/fipsctl.rs"]
 mod probe_tests;
+
+#[cfg(test)]
+#[path = "tests/fipsctl_npub.rs"]
+mod npub_tests;
 
 #[cfg(test)]
 mod tests {

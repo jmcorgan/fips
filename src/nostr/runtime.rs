@@ -66,6 +66,27 @@ pub(super) fn advert_machine(npub: String, config: &NostrRendezvousConfig) -> Ad
     .with_lapse_grace(config.advert_refresh_secs.saturating_mul(1000))
 }
 
+/// The key `npub` names, and its canonical npub: the text the advert cache,
+/// the failure state, the active-initiator set and traversal signals use for
+/// that key. `npub` may be in any letter case; text that is not a NIP-19 npub
+/// is refused, as `crate::decode_npub` refuses it.
+fn peer_key(npub: &str) -> Result<(PublicKey, String), BootstrapError> {
+    let invalid = |reason: String| BootstrapError::InvalidPeerNpub {
+        npub: npub.to_string(),
+        reason,
+    };
+    let key = crate::decode_npub(npub).map_err(|e| invalid(e.to_string()))?;
+    let pubkey = PublicKey::from_slice(&key.serialize()).map_err(|e| invalid(e.to_string()))?;
+    Ok((pubkey, crate::encode_npub(&key)))
+}
+
+/// The canonical npub for `npub`, or `npub` as written when it names no key.
+/// State keyed by npub is keyed by this, so every spelling of one key shares
+/// one entry.
+fn canonical_npub(npub: &str) -> String {
+    peer_key(npub).map_or_else(|_| npub.to_string(), |(_, canonical)| canonical)
+}
+
 fn short_npub(npub: &str) -> String {
     npub.strip_prefix("npub1")
         .filter(|s| s.len() >= 8)
@@ -544,14 +565,22 @@ impl NostrRendezvous {
     }
 
     pub async fn request_connect(self: &Arc<Self>, peer_config: PeerConfig) {
-        let peer_npub = peer_config.npub.clone();
+        // The configuration may name the peer by any spelling of its key. The
+        // traversal runs under the canonical npub, so the initiator set dedupes
+        // spellings and the offer names the recipient as it names itself; the
+        // failure event hands back the configuration as it was given.
+        let peer_npub = canonical_npub(&peer_config.npub);
         if !self.traversal.begin_initiator(&peer_npub) {
             return;
         }
+        let target = PeerConfig {
+            npub: peer_npub.clone(),
+            ..peer_config.clone()
+        };
 
         let runtime = Arc::clone(self);
         tokio::spawn(async move {
-            let event = match runtime.connect_peer(peer_config.clone()).await {
+            let event = match runtime.connect_peer(target).await {
                 Ok(traversal) => BootstrapEvent::Established { traversal },
                 Err(err) => BootstrapEvent::Failed {
                     peer_config,
@@ -567,7 +596,9 @@ impl NostrRendezvous {
     /// resulting decision (WARN suppression + extended cooldown +
     /// threshold-crossing flag for the B6 re-fetch).
     pub fn record_traversal_failure(&self, npub: &str, now_ms: u64) -> NostrFailureDecision {
-        let d = self.failure_state.record_failure(npub, now_ms);
+        let d = self
+            .failure_state
+            .record_failure(&canonical_npub(npub), now_ms);
         NostrFailureDecision {
             consecutive_failures: d.consecutive_failures,
             should_warn: d.should_warn,
@@ -578,13 +609,15 @@ impl NostrRendezvous {
 
     /// Record a successful traversal — clears the streak/cooldown.
     pub fn record_traversal_success(&self, npub: &str, now_ms: u64) {
-        self.failure_state.record_success(npub, now_ms);
+        self.failure_state
+            .record_success(&canonical_npub(npub), now_ms);
     }
 
     /// Cooldown wall-clock ms if the peer is currently suppressed,
     /// else None. Used by the open-discovery sweep to skip enqueue.
     pub fn cooldown_until(&self, npub: &str, now_ms: u64) -> Option<u64> {
-        self.failure_state.cooldown_until(npub, now_ms)
+        self.failure_state
+            .cooldown_until(&canonical_npub(npub), now_ms)
     }
 
     /// Record a fatal protocol mismatch (e.g. `Unknown FMP version` on a
@@ -602,7 +635,7 @@ impl NostrRendezvous {
             .protocol_mismatch_cooldown_secs
             .saturating_mul(1000);
         self.failure_state
-            .record_protocol_mismatch(npub, now_ms, cooldown_ms)
+            .record_protocol_mismatch(&canonical_npub(npub), now_ms, cooldown_ms)
     }
 
     /// Configured protocol-mismatch cooldown in seconds. Exposed so log
@@ -733,10 +766,12 @@ impl NostrRendezvous {
     /// if absent, refreshes if newer than the cached `created_at`,
     /// otherwise leaves the cache untouched.
     pub async fn refetch_advert_for_stale_check(&self, peer_npub: &str) -> NostrRefetchOutcome {
-        let target_pubkey = match PublicKey::parse(peer_npub) {
-            Ok(p) => p,
-            Err(_) => return NostrRefetchOutcome::Skipped,
+        // The caller passes the configured text; the cache and the failure
+        // state are keyed by the canonical npub.
+        let Ok((target_pubkey, canonical)) = peer_key(peer_npub) else {
+            return NostrRefetchOutcome::Skipped;
         };
+        let peer_npub = canonical.as_str();
         if self.config.advert_relays.is_empty() {
             return NostrRefetchOutcome::Skipped;
         }
@@ -828,11 +863,7 @@ impl NostrRendezvous {
         &self,
         peer_npub: &str,
     ) -> Result<Vec<OverlayEndpointAdvert>, BootstrapError> {
-        let target_pubkey =
-            PublicKey::parse(peer_npub).map_err(|e| BootstrapError::InvalidPeerNpub {
-                npub: peer_npub.to_string(),
-                reason: e.to_string(),
-            })?;
+        let (target_pubkey, _) = peer_key(peer_npub)?;
         let advert = self.fetch_advert(target_pubkey).await?;
         Ok(advert.endpoints)
     }
@@ -1341,11 +1372,7 @@ impl NostrRendezvous {
             return Err(BootstrapError::Disabled);
         }
         debug!(peer = %peer_short, "traversal: initiator starting");
-        let target_pubkey =
-            PublicKey::parse(&peer_config.npub).map_err(|e| BootstrapError::InvalidPeerNpub {
-                npub: peer_config.npub.clone(),
-                reason: e.to_string(),
-            })?;
+        let (target_pubkey, _) = peer_key(&peer_config.npub)?;
         let advert = self.fetch_advert(target_pubkey).await?;
         if !advert.has_udp_nat_endpoint() {
             return Err(BootstrapError::MissingNatEndpoint(peer_config.npub.clone()));
@@ -2522,5 +2549,21 @@ impl NostrRendezvous {
     /// or a running traversal task.
     pub(crate) fn push_event_for_test(&self, event: BootstrapEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    /// Replace the configured STUN servers, so a traversal test runs no
+    /// network STUN exchange.
+    pub(crate) fn set_stun_servers_for_test(&mut self, servers: Vec<String>) {
+        self.config.stun_servers = servers;
+    }
+
+    /// Whether an outbound initiator is registered under `npub` as written.
+    pub(crate) fn initiator_active_for_test(&self, npub: &str) -> bool {
+        if self.traversal.begin_initiator(npub) {
+            self.traversal.end_initiator(npub);
+            false
+        } else {
+            true
+        }
     }
 }
