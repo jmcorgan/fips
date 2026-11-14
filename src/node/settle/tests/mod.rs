@@ -421,21 +421,75 @@ fn a_released_setup_pair_keeps_naming_its_link_while_the_link_lives() {
 fn a_leg_noted_again_replaces_its_link_and_taking_or_forgetting_leaves_other_legs() {
     let (first, second) = ((TransportId::new(1), 1), (TransportId::new(1), 2));
     let mut map = LegMap::default();
-    map.note(first, LinkId::new(1));
-    map.note(first, LinkId::new(2));
-    map.note(second, LinkId::new(3));
+    map.note(first, LinkId::new(1), None);
+    map.note(first, LinkId::new(2), None);
+    map.note(second, LinkId::new(3), None);
     assert_eq!(
         map[&first],
         LinkId::new(2),
         "the second note replaces the link"
     );
 
-    assert_eq!(map.take(&first), Some(LinkId::new(2)));
+    assert_eq!(map.take(&first).map(|leg| leg.link), Some(LinkId::new(2)));
     assert_eq!(map.take(&first), None, "a taken entry is gone");
     assert_eq!(map[&second], LinkId::new(3), "another leg keeps its entry");
 
     map.forget(&second);
     assert!(map.is_empty());
+}
+
+#[test]
+fn only_a_candidate_rekeys_leg_is_taken_from_another_transport_and_only_for_a_peer_that_holds_the_pair()
+ {
+    let (t1, t2) = (TransportId::new(1), TransportId::new(2));
+    let (peer, other) = (NodeAddr::from_bytes([1; 16]), NodeAddr::from_bytes([2; 16]));
+    let mut map = LegMap::default();
+    map.note((t1, 7), LinkId::new(1), Some(peer));
+    map.note((t1, 8), LinkId::new(2), None);
+
+    assert_eq!(
+        map.take_moved(8, |_| true),
+        None,
+        "a leg that is not a candidate rekey stays bound to its transport"
+    );
+    assert_eq!(
+        map.take_moved(7, |p| *p == other),
+        None,
+        "a candidate rekey's leg is not taken for a pair its peer does not hold"
+    );
+    assert_eq!(map.take_moved(9, |_| true), None, "no leg holds index 9");
+    assert_eq!(
+        map.take_moved(7, |p| *p == peer),
+        Some((
+            (t1, 7),
+            Leg {
+                link: LinkId::new(1),
+                rekey_of: Some(peer)
+            }
+        )),
+        "a candidate rekey's leg is taken with its own key"
+    );
+    assert!(
+        !map.contains_key(&(t1, 7)),
+        "and its entry is gone with the record"
+    );
+    assert_eq!(map.take_moved(7, |_| true), None, "taken once");
+
+    map.note((t2, 9), LinkId::new(3), Some(peer));
+    map.note((t2, 9), LinkId::new(3), None);
+    assert_eq!(
+        map.take_moved(9, |_| true),
+        None,
+        "a note without a peer drops the record a previous note made"
+    );
+    map.note((t2, 10), LinkId::new(4), Some(peer));
+    map.forget(&(t2, 10));
+    map.note((t2, 10), LinkId::new(5), None);
+    assert_eq!(
+        map.take_moved(10, |_| true),
+        None,
+        "forgetting a leg drops its record"
+    );
 }
 
 #[test]

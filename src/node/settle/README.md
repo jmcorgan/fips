@@ -54,8 +54,11 @@ field, at once.
   store (`add`, `ensure`, `rekey`, `drop`, `get_mut`; `timers`, `arm`,
   `cancel`), `rekey` keying a moved peer's machine under the dial's link;
   `DialMap`, the dials waiting for their msg2 (`note`, `forget`); `LegMap`,
-  the inbound handshakes waiting for their msg3 (`note`, `take`, `forget`);
-  `PeerMap`,
+  the inbound handshakes waiting for their msg3 (`note`, `take`, `forget`),
+  each recording the peer it is a candidate rekey of when its msg1 came
+  from that peer's established link, so `take_moved` finds such a leg for
+  a msg3 that arrived on another path of the peer's bundle while every
+  other leg stays bound to its msg1's transport; `PeerMap`,
   the authenticated peers (`install`, `take`, and `get_mut`, `values_mut`
   and `iter_mut` for a change to a peer that leaves the map as it is); and
   `BindMap`, our session indices and the peer each names (`bind`, `unbind`).

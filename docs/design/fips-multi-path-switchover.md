@@ -9,15 +9,15 @@
 > Sections 4, 5, 7 and 8 and Appendix A, with every `PathAck` field filled
 > as Section 6.5 requires. That draft is written for FMP version 0 and its
 > IK handshake. This node runs FMP version 1 and the XX handshake, the
-> subject of the version 2 draft, and it differs from both in three ways:
+> subject of the version 2 draft, and it differs from both in two ways:
 >
 > - It learns capability by probing, as the version 1 draft does. The
 >   version 2 draft replaces probing with a feature bit, which the node
 >   neither sets nor reads.
 > - It takes a msg1 as the established link's only from a pair the link has
->   been active on, where both drafts also take any Live or acked path.
-> - A rekey's msg3 on another transport than its msg1's is dropped, a
->   known defect (see [Rekey across a switch](#rekey-across-a-switch)).
+>   been active on, where both drafts also take any Live or acked path. The
+>   same pairs make a handshake a candidate rekey, whose msg3 it takes on
+>   any path of the bundle (see [Rekey across a switch](#rekey-across-a-switch)).
 >
 > It also departs from the version 1 draft in one rule. The path that
 > carried the link when it went silent is probed every second for 30
@@ -400,12 +400,15 @@ rate limit, and a transport that does not accept connections refuses it.
 
 A rekey's msg2 is matched by its receiver index and not by the pair, so a
 change of active path between msg1 and msg2 does not abandon the rekey at
-the initiator. Its msg3 is not matched that way. The responder keys that
-leg by the msg1's transport and the index, so a msg3 sent on another
-transport, after the initiator's active path moved there, is dropped: the
-responder never takes the new session, and the initiator's frames under it
-are refused once it cuts over. That is a known defect. A rekey whose msg1
-and msg3 go on one transport completes.
+the initiator. The initiator then sends its msg3 on the new active path,
+on another transport than the msg1's. The responder classifies the
+handshake when its msg1 arrives, as the version 2 draft's Section 5.7
+does: a msg1 from the established link is a candidate rekey of that link,
+and the leg records the peer. A candidate rekey's msg3 is taken on the
+msg1's transport or from any pair the peer's bundle holds as a path, and
+the identity check at msg3 still decides whether it is a rekey of that
+link. Every other handshake stays bound to its msg1's transport: its msg3
+from anywhere else is dropped and its leg kept.
 
 ## One replay window, several paths
 

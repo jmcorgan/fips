@@ -11,11 +11,14 @@ use super::paths::{
     active_of, capable_at, carrier, enabled, excessive, exchange, hand, loopback_mut, phase, probe,
     same_transport, second_transport, state_at, t2, take_packets, two_transports,
 };
-use super::spanning_tree::{TestNode, cleanup_nodes, delay_loopback_delivery};
+use super::spanning_tree::{TestNode, add_loopback_alias, cleanup_nodes, delay_loopback_delivery};
 use super::*;
 use crate::config::TransportRole;
 use crate::peer::PathState;
-use crate::proto::fmp::wire::{PHASE_MSG1, PHASE_MSG2};
+use crate::proto::fmp::NodeProfile;
+use crate::proto::fmp::wire::{
+    Msg2Header, NegotiationPayload, PHASE_MSG1, PHASE_MSG2, build_msg1, build_msg3,
+};
 use fips_core::proto::path::wire::{PathClose, PathCloseReason};
 use fips_core::proto::path::{Config as PathConfig, PathRef};
 
@@ -864,11 +867,11 @@ async fn switch_rekeying(on: TransportId) -> (bool, bool) {
 /// its index registered for dispatch, and after the cutover A's frames go
 /// on the new path and authenticate at B. No new link is dialled.
 ///
-/// A's msg3 goes on the new active path, another transport than the msg1's,
-/// and B drops it: B's leg is keyed by the msg1's transport and the index,
-/// so B never takes the new session.
+/// A's msg3 goes on the new active path, another transport than the msg1's.
+/// The msg1 came from A's established link, so B's leg is a candidate rekey
+/// of that link and takes the msg3 on any path of the bundle (version 2
+/// draft, Section 5.7), and B takes the new session.
 #[tokio::test]
-#[ignore = "known defect: a rekey msg3 sent on a new active path on another transport is dropped, the responder's leg keyed by the msg1's transport"]
 async fn a_switch_between_rekey_msg1_and_msg2_leaves_the_rekey_to_complete_on_the_new_path() {
     let t1 = TransportId::new(1);
     let cases = [
@@ -905,6 +908,78 @@ async fn a_switch_between_rekey_msg1_and_msg2_leaves_the_initiator_to_complete_t
         .map(|(on, _)| format!("msg2 on {on}: not completed"))
         .collect();
     assert!(failed.is_empty(), "{failed:?}");
+}
+
+/// A handshake that is not a candidate rekey stays bound to its msg1's
+/// transport (version 2 draft, Section 5.7). A stranger's msg1 reaches B on
+/// t1 from an address no link of B's holds, so its leg is not a candidate
+/// rekey. Its msg3, sent from (t2, A2), a pair B holds as a path of its link
+/// to A, is dropped with the leg kept, and the same msg3 from the msg1's
+/// transport and address completes the leg.
+#[tokio::test]
+async fn a_strangers_msg3_on_another_transport_is_dropped_though_a_bundle_holds_its_pair() {
+    let (mut nodes, _b, a2, _b2) = rekeyed_transports(REKEY_SECS).await;
+    settle(&mut nodes, &a2).await;
+    let a = *nodes[0].node.node_addr();
+    let t1 = nodes[0].transport_id;
+    let stranger = crate::Identity::generate();
+    let s_addr = add_loopback_alias(&nodes[0].addr, t1);
+    let mut hs = crate::noise::HandshakeState::new_initiator(stranger.keypair());
+    hs.set_local_epoch([7; 8]);
+    let ours = SessionIndex::new(0x1D00_0901);
+    let msg1 = build_msg1(ours, &hs.write_message_1().expect("the msg1 builds"));
+    nodes[1]
+        .node
+        .handle_msg1(ReceivedPacket::new(t1, s_addr.clone(), msg1))
+        .await;
+    let msg2 = take_packets(&mut nodes[0])
+        .into_iter()
+        .find(|p| {
+            phase(p) == Some(PHASE_MSG2)
+                && Msg2Header::parse(&p.data).is_some_and(|h| h.receiver_idx == ours)
+        })
+        .expect("precondition: B answered the stranger's msg1")
+        .data;
+    let header = Msg2Header::parse(&msg2).expect("a framed msg2");
+    let leg = (t1, header.sender_idx.as_u32());
+    let (mut fork, _) = hs
+        .fork_msg2(&msg2[header.noise_msg2_offset..])
+        .expect("the msg2 reads");
+    let mut noise_msg3 = fork.write_message_3().expect("the msg3 builds");
+    let payload = NegotiationPayload::fmp(1, 1, NodeProfile::Full).encode();
+    noise_msg3.extend(fork.encrypt_payload(&payload).expect("the payload seals"));
+    let msg3 = build_msg3(ours, header.sender_idx, &noise_msg3);
+    assert!(
+        state_at(&nodes[1], &a, t2(), &a2).is_some(),
+        "precondition: B holds (t2, A2) as a path of its link to A"
+    );
+
+    nodes[1]
+        .node
+        .handle_msg3(ReceivedPacket::new(t2(), a2.clone(), msg3.clone()))
+        .await;
+    assert!(
+        nodes[1].node.pending_inbound.contains_key(&leg),
+        "the stranger's leg is kept at its msg1's transport"
+    );
+    assert!(
+        nodes[1].node.get_peer(stranger.node_addr()).is_none(),
+        "and the stranger is not linked by the msg3 from another transport"
+    );
+
+    nodes[1]
+        .node
+        .handle_msg3(ReceivedPacket::new(t1, s_addr, msg3))
+        .await;
+    assert!(
+        !nodes[1].node.pending_inbound.contains_key(&leg),
+        "the msg3 from the msg1's transport and address completes the leg"
+    );
+    assert!(
+        nodes[1].node.get_peer(stranger.node_addr()).is_some(),
+        "and links the stranger"
+    );
+    cleanup_nodes(&mut nodes).await;
 }
 
 /// One advance of the clock brings both a path switch and a rekey:

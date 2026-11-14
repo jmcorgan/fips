@@ -119,30 +119,79 @@ impl DialMap {
 
 /// The inbound handshakes waiting for their msg3, keyed by the transport and
 /// the session index our msg2 carried, naming the leg's link.
+///
+/// A leg whose msg1 came from a promoted peer's established link is a
+/// candidate rekey of that peer's link, and the map records the peer beside
+/// it. Every other leg's msg3 is looked up on the transport its msg1 came in
+/// on; a candidate rekey's msg3 may also arrive on another path of that
+/// peer's bundle (multipath version 2 draft, Section 5.7), which
+/// [`LegMap::take_moved`] finds. The record lives and goes with the leg's
+/// entry.
 #[derive(Default)]
 pub(in crate::node) struct LegMap {
     legs: HashMap<(TransportId, u32), LinkId>,
+    rekeys: HashMap<(TransportId, u32), NodeAddr>,
     #[cfg(test)]
     planted: bool,
 }
 
 reads!(LegMap, legs, HashMap<(TransportId, u32), LinkId>);
 
+/// An inbound leg's entry: its link, and the peer whose established link its
+/// msg1 came from when it is a candidate rekey.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::node) struct Leg {
+    pub(in crate::node) link: LinkId,
+    pub(in crate::node) rekey_of: Option<NodeAddr>,
+}
+
 impl LegMap {
     /// A msg2 sent for the leg on `link`, or an unreadable msg3 that leaves
-    /// the leg waiting: its msg3 is looked up at `key`.
-    pub(in crate::node) fn note(&mut self, key: (TransportId, u32), link: LinkId) {
+    /// the leg waiting: its msg3 is looked up at `key`. `rekey_of` names the
+    /// peer the leg is a candidate rekey of, if it is one.
+    pub(in crate::node) fn note(
+        &mut self,
+        key: (TransportId, u32),
+        link: LinkId,
+        rekey_of: Option<NodeAddr>,
+    ) {
         self.legs.insert(key, link);
+        match rekey_of {
+            Some(peer) => self.rekeys.insert(key, peer),
+            None => self.rekeys.remove(&key),
+        };
     }
 
     /// A msg3 arrived for the leg at `key`: its entry is taken out.
-    pub(in crate::node) fn take(&mut self, key: &(TransportId, u32)) -> Option<LinkId> {
-        self.legs.remove(key)
+    pub(in crate::node) fn take(&mut self, key: &(TransportId, u32)) -> Option<Leg> {
+        let link = self.legs.remove(key)?;
+        let rekey_of = self.rekeys.remove(key);
+        Some(Leg { link, rekey_of })
+    }
+
+    /// A msg3 naming our index `index` arrived on a transport no leg at that
+    /// index is keyed by: the candidate rekey's leg at `index` on another
+    /// transport, taken out with its key, when `held` says the peer it is a
+    /// candidate rekey of holds the msg3's pair as a path. Indices come from
+    /// one allocator, so at most one leg holds `index`. Any other leg stays
+    /// bound to its transport.
+    pub(in crate::node) fn take_moved(
+        &mut self,
+        index: u32,
+        held: impl Fn(&NodeAddr) -> bool,
+    ) -> Option<((TransportId, u32), Leg)> {
+        let key = self
+            .rekeys
+            .iter()
+            .find(|(key, peer)| key.1 == index && held(peer))
+            .map(|(key, _)| *key)?;
+        self.take(&key).map(|leg| (key, leg))
     }
 
     /// The leg at `key` is over.
     pub(in crate::node) fn forget(&mut self, key: &(TransportId, u32)) {
         self.legs.remove(key);
+        self.rekeys.remove(key);
     }
 }
 

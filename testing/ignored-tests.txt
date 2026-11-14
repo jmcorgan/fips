@@ -91,7 +91,6 @@ long-running  fips-mesh  node::tests::discovery::test_discovery_100_nodes  src/n
 benchmark     fips-mesh  node::tests::app_tun::app_owned_tun_throughput_between_two_nodes  src/node/tests/app_tun.rs
 benchmark     fips-mesh  transport::udp::io::tests::bench_udp_recv_amortization  src/transport/udp/io/mod.rs
 benchmark     fips-mesh  transport::udp::io::tests::measure_duplicate_ephemeral_ports_for_reuse_flags_set_before_and_after_bind  src/transport/udp/io/mod.rs
-known-defect  fips-mesh  node::tests::path_accept::a_switch_between_rekey_msg1_and_msg2_leaves_the_rekey_to_complete_on_the_new_path  src/node/tests/path_accept.rs
 helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_its_precondition  src/node/tests/settle/lane.rs
 helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_a_bare_unwrap  src/node/tests/settle/lane.rs
 helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_a_plain_expect_in_a_setup_helper  src/node/tests/settle/lane.rs

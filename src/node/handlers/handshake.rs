@@ -13,6 +13,7 @@ use crate::node::diag::{self, HsLine, OrNone, Shown, Withheld};
 use crate::node::handlers::path::NodeFacts;
 use crate::node::rate_limit::Msg1Class;
 use crate::node::reject::{HandshakeReject, RejectReason};
+use crate::node::settle::Leg;
 use crate::node::{Node, NodeError};
 use crate::peer::machine::{
     CrossConnOutcome, DialMsg2Step, HandshakeCrypto, LinkFinal, Msg3Error, PeerAction, PeerEvent,
@@ -28,7 +29,7 @@ use crate::proto::fmp::{
 };
 use crate::proto::settle::output::Why;
 use crate::time::HostClock;
-use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket, TransportError};
+use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket, TransportError, TransportId};
 use crate::utils::index::SessionIndex;
 use fips_core::proto::rekey::{Input, Intent, Reason, Record, allocate};
 use fips_core::time::Clock as _;
@@ -184,18 +185,34 @@ impl Node {
         transport_id: crate::transport::TransportId,
         remote_addr: &crate::transport::TransportAddr,
     ) -> bool {
+        self.established_peer_at(transport_id, remote_addr)
+            .is_some()
+    }
+
+    /// The promoted peer whose established link `(transport_id, remote_addr)`
+    /// is, by the two tests [`Self::is_established_link_msg1`] describes. A
+    /// msg1 from there is a candidate rekey of that peer's link, whose msg3
+    /// may then arrive on any path of the peer's bundle.
+    fn established_peer_at(
+        &self,
+        transport_id: crate::transport::TransportId,
+        remote_addr: &crate::transport::TransportAddr,
+    ) -> Option<NodeAddr> {
         let link_at_addr = self
             .links
             .index()
             .get(&(transport_id, remote_addr.clone()))
             .copied();
-        self.peers.values().any(|p| {
-            Some(p.link_id()) == link_at_addr
-                || matches!(
-                    p.path_match(transport_id, remote_addr),
-                    Match::Proven { active: true, .. }
-                )
-        })
+        self.peers
+            .iter()
+            .find(|(_, p)| {
+                Some(p.link_id()) == link_at_addr
+                    || matches!(
+                        p.path_match(transport_id, remote_addr),
+                        Match::Proven { active: true, .. }
+                    )
+            })
+            .map(|(addr, _)| *addr)
     }
 
     /// Returns true if an inbound msg1 should be admitted past the
@@ -591,9 +608,20 @@ impl Node {
 
         // XX: handshake NOT complete yet — need msg3. A leg whose msg2 send
         // was deferred waits here too, for the initiator's msg1 resend.
-        // Store in pending_inbound for msg3 dispatch.
+        // Store in pending_inbound for msg3 dispatch. A msg1 from a promoted
+        // peer's established link is a candidate rekey of that peer's link:
+        // its leg records the peer, so its msg3 is also taken on another path
+        // of the peer's bundle (`LegMap::take_moved`). The peer is looked up
+        // again here, for that class only, and a peer gone since the
+        // classification leaves the leg bound to its transport.
+        let rekey_of = match class {
+            Msg1Class::EstablishedLink => {
+                self.established_peer_at(packet.transport_id, &packet.remote_addr)
+            }
+            Msg1Class::Stranger => None,
+        };
         self.pending_inbound
-            .note((packet.transport_id, our_index.as_u32()), link_id);
+            .note((packet.transport_id, our_index.as_u32()), link_id, rekey_of);
     }
 
     /// Apply the msg2-send-failure rule to the inbound leg on `link`. Returns
@@ -1534,6 +1562,42 @@ impl Node {
         self.audit_live("handle_msg3");
     }
 
+    /// The leg of a candidate rekey whose msg3 arrived on another transport
+    /// than its msg1, taken out with its key: the leg at the msg3's receiver
+    /// index on another transport, when the peer it is a candidate rekey of
+    /// holds the msg3's transport and source address as a path of its bundle
+    /// (multipath version 2 draft, Section 5.7). The initiator sends each
+    /// rekey message on its active path as it stands, so a switch between its
+    /// msg1 and the msg2 sends the msg3 on the new path. The identity check
+    /// at msg3 still decides whether it is a rekey of that peer's link. Every
+    /// other leg stays bound to its msg1's transport.
+    fn moved_rekey_leg(
+        &mut self,
+        packet: &ReceivedPacket,
+        index: SessionIndex,
+    ) -> Option<((TransportId, u32), Leg)> {
+        let (transport, addr) = (packet.transport_id, &packet.remote_addr);
+        let peers = &self.peers;
+        let held = |peer: &NodeAddr| {
+            peers
+                .get(peer)
+                .and_then(|p| p.bundle())
+                .is_some_and(|b| b.paths().find(transport, addr).is_some())
+        };
+        let found = self.pending_inbound.take_moved(index.as_u32(), held)?;
+        if let Some(peer) = found.1.rekey_of {
+            debug!(
+                peer = %self.peer_display_name(&peer),
+                receiver_idx = %index,
+                transport_id = %transport,
+                remote_addr = %addr,
+                leg_transport_id = %found.0.0,
+                "Candidate rekey msg3 on another path of the bundle"
+            );
+        }
+        Some(found)
+    }
+
     /// The work of [`Self::handle_msg3`], which audits the per-peer maps
     /// after it.
     async fn msg3_body(&mut self, packet: ReceivedPacket) {
@@ -1548,10 +1612,16 @@ impl Node {
             }
         };
 
-        // Look up our pending inbound handshake by our index (receiver_idx in msg3)
+        // Look up our pending inbound handshake by our index (receiver_idx in
+        // msg3) on the transport the msg3 came in on, or, for a candidate
+        // rekey, on any path of the peer's bundle. `key` is the leg's own, the
+        // msg1's transport and the index, under which an unreadable msg3
+        // leaves it waiting.
         let key = (packet.transport_id, header.receiver_idx.as_u32());
-        let link_id = match self.pending_inbound.take(&key) {
-            Some(id) => id,
+        let taken = self.pending_inbound.take(&key).map(|leg| (key, leg));
+        let taken = taken.or_else(|| self.moved_rekey_leg(&packet, header.receiver_idx));
+        let (key, leg) = match taken {
+            Some(found) => found,
             None => {
                 // A link rekey's initiator resends its msg3 until it hears the
                 // peer under the new session, so copies keep arriving after
@@ -1578,6 +1648,7 @@ impl Node {
                 return;
             }
         };
+        let link_id = leg.link;
 
         let our_profile = self.node_profile();
         // The leg is stamped on the interval clock from here, beside the
@@ -1631,7 +1702,7 @@ impl Node {
                     // initiator's resend, still finds it. Debug, not warn:
                     // anyone who saw msg2's cleartext header can send these.
                     debug!(link_id = %link_id, "Unreadable msg3, keeping the pending leg");
-                    self.pending_inbound.note(key, link_id);
+                    self.pending_inbound.note(key, link_id, leg.rekey_of);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;

@@ -9,8 +9,10 @@ tests.
 ## Files
 
 - `mod.rs`: each writer of the map wrappers against the statements it
-  transcribes, the rule that only the ways past the writers mark a map, and
-  each clause of the audit against a state, built through the writers, that
+  transcribes (the leg map's record of a candidate rekey among them: only
+  such a leg is taken from another transport, and only for a pair its peer
+  holds), the rule that only the ways past the writers mark a map, and each
+  clause of the audit against a state, built through the writers, that
   breaks it alone.
 - `table.rs`: the table's rule stated again as data, one line per row and case,
   against `cell`; that every row and case has a line; that a cause no code
