@@ -854,7 +854,7 @@ jobs:
       # kernel returns to root, which `--nocapture` prints. Built as the
       # runner user and only executed under sudo, as the Linux job's
       # privileged step does and for the same reason. The grep fails the step
-      # unless all fifteen ran and passed: a filter that matches fewer passes
+      # unless all seventeen ran and passed: a filter that matches fewer passes
       # quietly.
       - name: Run the TUN setup tests as root
         shell: bash
@@ -873,7 +873,7 @@ jobs:
           fi
           sudo "$BIN" --include-ignored ipv6tun::bsdnet:: --test-threads=1 --nocapture \
             2>&1 | tee "$RUNNER_TEMP/tun-setup-tests.log"
-          grep -qE '^test result: ok\. 15 passed;' "$RUNNER_TEMP/tun-setup-tests.log"
+          grep -qE '^test result: ok\. 17 passed;' "$RUNNER_TEMP/tun-setup-tests.log"
 
       # The ci profile retries a failing test, so a test that passed only on
       # retry leaves the job green. Annotate each one, and list it in the run
