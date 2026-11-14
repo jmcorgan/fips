@@ -167,6 +167,12 @@ faults! {
     /// A BLE writer whose write fails removes every channel pooled at its
     /// address, not only its own.
     BleWriterRemovesByAddress,
+    /// The BLE scan loop's retry tick never prunes its memory of the PSMs
+    /// link addresses advertised.
+    BleRetryTickSkipsPrune,
+    /// The BLE scan loop's retry tick prunes that memory as though no
+    /// address were pooled or in the retry book.
+    BleRetryTickPrunesLive,
     /// A queueing transport puts path messages in the connection's data
     /// queue, behind the data and refused when it is full, instead of in
     /// their own queue, which its writer drains first.

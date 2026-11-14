@@ -114,6 +114,8 @@ ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::tor::a_frame_of_th
 ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::nym::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_from_a_tcp_listener	defect: (delivered, receive errors, connection kept)
 ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::nym::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
 BleWriterRemovesByAddress	red	fips-mesh	transport::ble::close_tests::a_writer_whose_write_fails_leaves_the_other_channel_at_its_address_pooled
+BleRetryTickSkipsPrune	red	fips-mesh	transport::ble::retry_tests::the_retry_tick_ages_out_learned_psms_that_are_not_live_and_keeps_pooled_ones	defect: the retry tick kept the PSM of an address that is not live
+BleRetryTickPrunesLive	red	fips-mesh	transport::ble::retry_tests::the_retry_tick_ages_out_learned_psms_that_are_not_live_and_keeps_pooled_ones	defect: the retry tick aged out the PSM of a pooled link
 PathLaneShared	red	fips-mesh	transport::ble::lane_tests::a_path_message_is_queued_while_the_connections_data_queue_is_full
 PathLaneShared	red	fips-mesh	transport::ble::lane_tests::the_writer_sends_a_waiting_path_message_before_the_data_queued_ahead_of_it
 PathLaneShared	red	fips-mesh	node::tests::ble_queue::a_pinned_ble_path_loaded_past_its_rate_keeps_the_pin_and_stays_live

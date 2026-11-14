@@ -23,6 +23,11 @@ items.
   own queue is full, so its path still fails. The file pools one channel
   with the real writer behind it, over a mock stream pair that holds one
   frame each way, so a far end the test does not read is a stalled link.
+- `retry.rs`: tests for the scan and probe loop's retry tick in `mod.rs`:
+  that it ages out of the learned PSM memory an address that is neither
+  pooled nor in the retry book once it has gone unseen for the age limit,
+  and keeps the address of a pooled link. Declared from `mod.rs` as
+  `mod retry_tests`.
 - `bluez.rs`: tests for the scan-start and dial-address decisions of the
   BlueZ backend in `io_linux.rs`: which cached device objects scan start
   removes, and which LE address type a dial uses. Declared from

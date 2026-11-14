@@ -1336,9 +1336,11 @@ async fn scan_probe_loop<I: io::BleIo>(
                 // Re-probe pending addresses that aren't connected
                 let pool_guard = pool.lock().await;
                 pending.drop_connected(|a| pool_guard.contains(&a.to_transport_addr()));
-                recall(&learned_psm).prune(tokio::time::Instant::now(), |a| {
-                    is_live(&pool_guard, &pending, a)
-                });
+                if !node_fault!(BleRetryTickSkipsPrune) {
+                    recall(&learned_psm).prune(tokio::time::Instant::now(), |a| {
+                        is_live(&pool_guard, &pending, a) && !node_fault!(BleRetryTickPrunesLive)
+                    });
+                }
                 drop(pool_guard);
                 // Rotating rather than always taking the head is what stops one
                 // slow or dead address from starving every other pending one.
@@ -1441,6 +1443,10 @@ mod close_tests;
 #[cfg(test)]
 #[path = "tests/lane.rs"]
 mod lane_tests;
+
+#[cfg(test)]
+#[path = "tests/retry.rs"]
+mod retry_tests;
 
 #[cfg(test)]
 mod tests {
