@@ -828,6 +828,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cargo's target directory, honouring `CARGO_TARGET_DIR` and
   `build.target-dir`. Before, they copied from `target/release`, so a moved
   target directory packaged stale binaries or failed.
+- The FreeBSD and pfSense package builders and the RPM builder also take the
+  binaries from cargo's target directory, honouring `CARGO_TARGET_DIR` and
+  `build.target-dir`. Before, they copied from `target/` under the project
+  root, so when the target directory was moved, a build packaged whatever
+  binaries an older build had left there. `build-rpm.sh --bin-dir` still
+  packages the binaries in the directory it names.
 
 #### Peer and link state
 
@@ -1872,6 +1878,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A beacon heard just before an Ethernet interface went away no longer makes the
   node dial that neighbour on the interface it has just lost.
 
+- On Linux, an Ethernet transport whose interface is moved to another network
+  namespace and back now binds to it again. The interface comes back with the
+  index it had, which the transport took to mean it was still bound, but the
+  kernel detaches the socket when the interface leaves, so the node heard
+  nothing on that interface until it was restarted.
+
 - A TCP link no longer resets on frames it should carry. On Linux, a frame
   above the local MSS but within the configured `mtu` used to reset it, as
   over WireGuard, Tailscale or an MSS-clamping middlebox. Between two peers
@@ -2045,6 +2057,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packets to the second were lost until it retried. Back-to-back oversized
   packets are now each answered, and a flood from one source is still held to
   the rate.
+
+- On macOS and FreeBSD, a route lookup made while setting up the TUN accepts
+  only the kernel's reply to its own request. Every lookup carried the same
+  sequence number, and FreeBSD can deliver a routing reply after the request
+  has returned, to a routing socket opened since, so a lookup could take the
+  reply to an earlier lookup that found no route and report a route that was
+  present as missing. Setup then failed on an `fd00::/8` route through another
+  interface with the kernel's bare "File exists", instead of naming that
+  interface.
 
 #### Native datagram API
 
