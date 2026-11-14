@@ -856,6 +856,19 @@ run_build() {
         return 1
     fi
 
+    # The core's API documentation, with rustdoc's warnings denied, so a
+    # broken intra-doc link or a malformed doc comment fails the run rather
+    # than leaving `cargo doc` to warn. Mirrored in .github/workflows/ci.yml;
+    # check-ci-parity.sh compares integration suites only and would not catch
+    # a step added to one runner and not the other.
+    info "RUSTDOCFLAGS='-D warnings' cargo doc -p fips-core --no-deps"
+    if RUSTDOCFLAGS='-D warnings' cargo doc -p fips-core --no-deps 2>&1; then
+        record "core-doc" 0
+    else
+        record "core-doc" 1
+        return 1
+    fi
+
     # The no_std core on targets with no standard library. The fence above
     # runs on the host, where std exists, so a dependency that links it
     # passes there; this build fails on it. The script holds the command,

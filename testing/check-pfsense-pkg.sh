@@ -27,7 +27,8 @@
 # packaging/pfsense/README.md.
 #
 # Usage: testing/check-pfsense-pkg.sh [<package.pkg>]
-#   With no argument, builds one from target/release via build-pkg.sh --no-build.
+#   With no argument, builds one via build-pkg.sh --no-build, from the binaries
+#   in cargo's target directory (CARGO_TARGET_DIR, or target/ when unset).
 #   FreeBSD only: it needs pkg(8) to have produced the package.
 #
 # Exit 0 = every check passed. Exit 1 = at least one failed. Exit 2 = the check

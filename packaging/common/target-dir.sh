@@ -2,7 +2,9 @@
 # Where cargo put the binaries a package script is about to stage.
 #
 # Sourced, not run, by packaging/macos/build-pkg.sh,
-# packaging/freebsd/build-pkg.sh and packaging/systemd/build-tarball.sh:
+# packaging/freebsd/build-pkg.sh, packaging/freebsd/test-upgrade.sh,
+# packaging/pfsense/build-pkg.sh, packaging/rpm/build-rpm.sh and
+# packaging/systemd/build-tarball.sh:
 #   . "${PROJECT_ROOT}/packaging/common/target-dir.sh"
 #   TARGET_DIR="$(target_dir "${PROJECT_ROOT}" "${BUILT}")" || exit 1
 #   BINARY_DIR="${TARGET_DIR}/release"     # or ${TARGET_DIR}/<triple>/release

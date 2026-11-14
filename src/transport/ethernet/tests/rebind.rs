@@ -6,8 +6,10 @@
 //! one for the node's transport and one for a peer transport, and recreate
 //! the node's veth under the same name, which gives it a new index, or move
 //! it to another namespace and back, which keeps its index. They need
-//! root, so no CI job runs them: they are run by hand under `sudo` with
-//! `--ignored`, and that run is the only coverage of the rebind. macOS (BPF)
+//! root, so they are `#[ignore]`d and run by `testing/root-tests.sh`, which
+//! GitHub CI's Linux job and `testing/ci-local.sh --root-tests` run under
+//! `sudo`; by hand, run the test binary under `sudo` with `--ignored
+//! rebind_tests`. macOS (BPF)
 //! is compiled by the cross-check and not run; there the same check would be
 //! a transport on `bridge9`, `ifconfig bridge9 destroy; ifconfig bridge9
 //! create`, and a frame from a peer. The module is Linux only.
@@ -304,7 +306,7 @@ fn a_recreated_interface_is_rebound_for_sending_and_receiving_with_announce_off(
 /// but the kernel still unhooked the transport's socket when it left. The
 /// node must rebind and go on receiving and sending.
 #[test]
-#[ignore = "needs root: creates network namespaces; fails today: the binder does not rebind an interface that returns with its old index"]
+#[ignore = "needs root: creates network namespaces"]
 fn an_interface_that_returns_with_the_same_index_is_rebound() {
     let away = BridgeNetns::bare();
     let away_name = away.0.clone();
@@ -349,6 +351,28 @@ fn an_interface_that_returns_with_the_same_index_is_rebound() {
             .await,
             "the node's frames do not reach the peer after the round trip"
         );
+        drop(away);
+    });
+}
+
+/// The healthy path of the rebind check: a socket on a present interface
+/// reports the index it was bound to, so the check leaves it alone. Once the
+/// interface leaves the namespace and returns with the same index, the
+/// socket reports no index, which is what makes the check rebind it.
+#[test]
+#[ignore = "needs root: creates network namespaces"]
+fn a_socket_reports_its_bound_index_until_the_interface_is_unregistered() {
+    let away = BridgeNetns::bare();
+    let away_name = away.0.clone();
+    BridgeNetns::new().run(move |ns| async move {
+        let socket = PacketSocket::open(NODE_IF, 0x88b5).expect("open (needs root)");
+        let index = io::interface_index(NODE_IF).expect("fn0 index");
+        assert_eq!(i64::from(socket.bound_index()), i64::from(index));
+
+        ns.round_trip(&away_name);
+
+        assert_eq!(io::interface_index(NODE_IF), Some(index));
+        assert_eq!(socket.bound_index(), -1);
         drop(away);
     });
 }

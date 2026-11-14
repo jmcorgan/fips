@@ -20,6 +20,7 @@ use std::io;
 use std::mem::{size_of, zeroed};
 use std::net::Ipv6Addr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use libc::{c_char, c_int, c_ulong};
 
@@ -543,16 +544,41 @@ pub(crate) fn delete_route(dst: Ipv6Addr, prefix_len: u8) -> io::Result<bool> {
     }
 }
 
+/// The sequence number of this process's next `RTM_GET`.
+static GET_SEQ: AtomicI32 = AtomicI32::new(1);
+
+/// A sequence number no other `RTM_GET` this process has sent carries,
+/// until the counter wraps.
+fn next_get_seq() -> c_int {
+    GET_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Whether `hdr` is the kernel's reply to the `RTM_GET` this process sent
+/// with sequence number `seq`.
+///
+/// The kernel hands each routing message to every routing socket open when
+/// it delivers it, and FreeBSD can deliver a reply milliseconds after the
+/// write that asked for it has returned, so a socket opened since can
+/// receive the reply to an earlier request of this process: a lookup that
+/// found no route returns at once with `ESRCH`, and its reply, also
+/// `ESRCH`, can then reach the next lookup's socket ahead of that lookup's
+/// own. Process id and request type alone would take it for this one; the
+/// sequence number tells them apart.
+fn is_get_reply(hdr: &RtMsghdr, pid: libc::pid_t, seq: c_int) -> bool {
+    c_int::from(hdr.rtm_type) == libc::RTM_GET && hdr.rtm_pid == pid && hdr.rtm_seq == seq
+}
+
 /// The interface index of the route for exactly `dst/prefix_len`, or `None`
 /// when there is none (`ESRCH`).
 ///
 /// Sends `RTM_GET` with the netmask, so the kernel looks up that prefix
 /// rather than the longest match, and reads the reply carrying this
-/// process's id and the request's sequence number. Both kernels put the
-/// route's interface in the reply's `rtm_index`.
+/// process's id and the request's sequence number, which differs from every
+/// earlier request's (see [`is_get_reply`]). Both kernels put the route's
+/// interface in the reply's `rtm_index`.
 pub(crate) fn route_interface(dst: Ipv6Addr, prefix_len: u8) -> io::Result<Option<u32>> {
-    const SEQ: c_int = 0x4650; // arbitrary; only this socket's replies are read
-    let msg = route_message(libc::RTM_GET, SEQ, dst, prefix_len, None)?;
+    let seq = next_get_seq();
+    let msg = route_message(libc::RTM_GET, seq, dst, prefix_len, None)?;
     let sock = route_socket()?;
     let timeout = libc::timeval {
         tv_sec: 1,
@@ -579,8 +605,8 @@ pub(crate) fn route_interface(dst: Ipv6Addr, prefix_len: u8) -> io::Result<Optio
     // SAFETY: getpid(2) cannot fail.
     let pid = unsafe { libc::getpid() };
     let mut buf = vec![0u8; 2048];
-    // Other processes' routing messages can arrive on this socket too; read
-    // a bounded number looking for the reply.
+    // Other routing messages, and replies to earlier requests, can arrive on
+    // this socket too; read a bounded number looking for the reply.
     for _ in 0..64 {
         // SAFETY: `buf` is a valid buffer of `buf.len()` bytes.
         let n = unsafe { libc::read(sock.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
@@ -593,7 +619,7 @@ pub(crate) fn route_interface(dst: Ipv6Addr, prefix_len: u8) -> io::Result<Optio
         // SAFETY: at least a header's worth of bytes was read; the copy has
         // no alignment requirement.
         let hdr: RtMsghdr = unsafe { std::ptr::read_unaligned(buf.as_ptr().cast()) };
-        if c_int::from(hdr.rtm_type) != libc::RTM_GET || hdr.rtm_pid != pid || hdr.rtm_seq != SEQ {
+        if !is_get_reply(&hdr, pid, seq) {
             continue;
         }
         if hdr.rtm_errno != 0 {

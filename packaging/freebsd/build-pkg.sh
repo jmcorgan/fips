@@ -40,14 +40,20 @@ if [ "$NO_BUILD" -eq 0 ]; then
     pkg_cargo_build "$PROJECT_ROOT"
 fi
 
-pkg_require_binaries "${PROJECT_ROOT}/target/release" fips fipsctl fipstop
+# Stage from the directory cargo built into, not a literal target/.
+# shellcheck source=SCRIPTDIR/../common/target-dir.sh
+. "${PROJECT_ROOT}/packaging/common/target-dir.sh"
+TARGET_DIR="$(target_dir "$PROJECT_ROOT" "$((1 - NO_BUILD))")" || exit 1
+BINARY_DIR="${TARGET_DIR}/release"
+
+pkg_require_binaries "$BINARY_DIR" fips fipsctl fipstop
 
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/fips-pkg.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 
 echo "==> staging into ${STAGE}"
 pkg_stage_tree "$STAGE"
-pkg_stage_binaries "${PROJECT_ROOT}/target/release" "$STAGE" fips fipsctl fipstop
+pkg_stage_binaries "$BINARY_DIR" "$STAGE" fips fipsctl fipstop
 
 # Config ships sample-style: copied into place on install if absent,
 # removed on deinstall only if unmodified (see the manifest scripts).

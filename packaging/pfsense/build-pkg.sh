@@ -156,13 +156,10 @@ fi
 # The filename tag: every product this ABI serves, joined with '-'.
 PRODUCT_TAG="$(printf '%s' "$PRODUCTS" | tr ' ' '-')"
 
-# Where cargo leaves the binaries. `--target` puts them one level deeper,
-# and is also the flag that says this is not a host build.
-if [ -n "$TARGET" ]; then
-    BIN_DIR="${PROJECT_ROOT}/target/${TARGET}/release"
-else
-    BIN_DIR="${PROJECT_ROOT}/target/release"
-fi
+# Where cargo leaves the binaries, under its target directory. `--target`
+# puts them one level deeper, and is also the flag that says this is not a
+# host build. The target directory itself is read once cargo has run.
+BIN_SUBDIR="${TARGET:+${TARGET}/}release"
 
 # --- Static linking -------------------------------------------------
 #
@@ -190,7 +187,7 @@ if [ "$STATIC" -eq 1 ]; then
     if [ -z "$TARGET" ]; then
         TARGET="$(rustc -vV | sed -n 's/^host: //p')"
         [ -n "$TARGET" ] || { echo "error: could not determine host target triple" >&2; exit 1; }
-        BIN_DIR="${PROJECT_ROOT}/target/${TARGET}/release"
+        BIN_SUBDIR="${TARGET}/release"
         echo "==> static build for host target ${TARGET}"
     fi
     RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
@@ -239,7 +236,7 @@ if [ "$ABI" != "$HOST_ABI" ]; then
     echo "warning: The binaries must genuinely be ${ARCH} and must link against" >&2
     echo "warning: the target's base libraries — an ABI string alone does not" >&2
     echo "warning: make an amd64 binary run on ARM. Verify with:" >&2
-    echo "warning:     file ${BIN_DIR}/fips" >&2
+    echo "warning:     file <cargo's target directory>/${BIN_SUBDIR}/fips" >&2
     echo "warning: Target mapping: https://docs.netgate.com/pfsense/en/latest/releases/versions.html" >&2
 fi
 
@@ -324,6 +321,12 @@ fi
 if [ "$NO_BUILD" -eq 0 ]; then
     pkg_cargo_build "$PROJECT_ROOT" "$TARGET"
 fi
+
+# Stage from the directory cargo built into, not a literal target/.
+# shellcheck source=SCRIPTDIR/../common/target-dir.sh
+. "${PROJECT_ROOT}/packaging/common/target-dir.sh"
+TARGET_DIR="$(target_dir "$PROJECT_ROOT" "$((1 - NO_BUILD))")" || exit 1
+BIN_DIR="${TARGET_DIR}/${BIN_SUBDIR}"
 
 pkg_require_binaries "$BIN_DIR" fips fipsctl fipstop
 

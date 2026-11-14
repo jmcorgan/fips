@@ -108,7 +108,9 @@ Drivers:
   treats each. Linux only.
 - `bsdnet.rs` (macOS, FreeBSD) and `winnet.rs` (Windows): interface and route
   setup by direct kernel or IP Helper calls, deciding what is benign by error
-  code.
+  code. A route lookup in `bsdnet.rs` gives each request a sequence number of
+  its own and reads only the reply carrying it: FreeBSD can deliver the reply
+  to an earlier lookup to a routing socket opened after it.
 
 `tests/` holds the adapter's tests; `src/ipv6tun/tests/README.md` describes
 each file.

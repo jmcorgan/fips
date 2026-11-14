@@ -113,9 +113,11 @@ in-process ACL tests (see `ci-local.sh`).
 
 Runs the OpenWrt package scripts and the `fips-gateway` init script
 under busybox `ash` against stubbed init scripts and `uci`, and checks
-what the real `build-apk.sh` and `build-ipk.sh` package. No router,
-opkg or apk-tools is involved. Part of both CI runners as
-`openwrt-scripts`.
+what the real `build-apk.sh` and `build-ipk.sh` package. Its firewall
+scenarios run in pinned OpenWrt rootfs images with the real `uci`, `fw4`
+and `nft`, and include a check that `fips-mesh-setup` leaves `fips.yaml`,
+the `fips` init script and the running daemon alone. No router, opkg or
+apk-tools is involved. Part of both CI runners as `openwrt-scripts`.
 
 ### [tarball-install/](tarball-install/) -- systemd Tarball Upgrade
 

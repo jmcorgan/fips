@@ -17,6 +17,8 @@
 #                before each case; default the .ipk's. "none" installs none.
 #   FW_MESH_SETUP  the mesh helper under test; default the one built into the
 #                .ipk.
+#   FW_FIPS_YAML the fips.yaml the no-touch cases install; default the one
+#                built into the .ipk.
 #   FW_CASES     case function names to run, separated by spaces; default all.
 #
 # The mesh cases have no radio: the zone holds each interface by device name,
@@ -36,6 +38,7 @@ REPO="${REPO:-/src}"
 FW_SETUP="${FW_SETUP:-/apk/ipk-root/etc/uci-defaults/90-fips-setup}"
 FW_SNIPPETS="${FW_SNIPPETS:-/apk/ipk-root/usr/share/nftables.d}"
 FW_MESH_SETUP="${FW_MESH_SETUP:-/apk/ipk-root/usr/bin/fips-mesh-setup}"
+FW_FIPS_YAML="${FW_FIPS_YAML:-/apk/ipk-root/etc/fips/fips.yaml}"
 FW_CASES="${FW_CASES:-}"
 FIXTURES="$REPO/testing/openwrt/fixtures"
 
@@ -50,12 +53,13 @@ COPY=/tmp/fips-firewall.uci
 MCOPY=/tmp/fips-mesh-firewall.uci
 WCOPY=/tmp/fips-mesh-wireless.uci
 STUB=/tmp/fw-wrap/stub
+DAEMONPID=/tmp/fw-daemon.pid
 OUT="$WORK/out"
 SYSPATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 # The number of cases in the full run, counted by hand from the list at the
 # end of this file. A run that completes fewer exits 2.
-ALL_CASES=80
+ALL_CASES=82
 
 FAILURES=0
 CASES=0
@@ -340,7 +344,11 @@ fw_clean() {
 	rm -f /etc/fips/firewall.sh /etc/hotplug.d/net/99-fips /etc/uci-defaults/90-fips-setup
 	rm -f "$COPY" "$COPY.staged" "$COPY.now" "$MCOPY" "$MCOPY.staged" "$MCOPY.now"
 	rm -f "$WCOPY" "$WCOPY.staged" "$WCOPY.now"
-	rm -f /usr/bin/fips-mesh-setup
+	rm -f /usr/bin/fips-mesh-setup /etc/fips/fips.yaml /etc/init.d/fips
+	if [ -f "$DAEMONPID" ]; then
+		kill "$(cat "$DAEMONPID")" >/dev/null 2>&1
+		rm -f "$DAEMONPID"
+	fi
 	for l in /sys/class/net/fips-mesh*; do
 		[ -e "$l" ] && ip link del "${l##*/}" >/dev/null 2>&1
 	done
@@ -2513,10 +2521,68 @@ mesh_rates_damaged_save_names_copy() {
 	fw_end
 }
 
+# ── The helper leaves fips.yaml and the daemon alone ────────────────────────
+# The daemon binds a named mesh interface whenever it appears, so the helper
+# only reads fips.yaml and restarts nothing. A stub init script logs every
+# call, `service fips ...` included, and a stand-in process named fips stands
+# for the daemon, so a restart, a kill or a rewrite of the file shows.
+
+FIPSLOG=/tmp/fw-work/fips-init.log
+
+# no_touch_begin <fips.yaml>: install the file, the logging init script and the
+# stand-in daemon, and keep a copy of the file to compare against.
+no_touch_begin() {
+	cp "$1" /etc/fips/fips.yaml && cp "$1" "$WORK/fips.yaml.before" ||
+		harness_fail "cannot install $1 as /etc/fips/fips.yaml"
+	printf '#!/bin/sh\necho "$0 $*" >> %s\n' "$FIPSLOG" > /etc/init.d/fips &&
+		chmod 0755 /etc/init.d/fips || harness_fail "cannot install the fips init script stub"
+	printf '#!/bin/sh\nwhile :; do sleep 1; done\n' > "$WORK/fips" && chmod 0755 "$WORK/fips" ||
+		harness_fail "cannot write the stand-in daemon"
+	"$WORK/fips" >/dev/null 2>&1 &
+	echo $! > "$DAEMONPID"
+}
+
+# fips.yaml still holds the bytes it held before the helper ran.
+yaml_unchanged() { cmp -s "$WORK/fips.yaml.before" /etc/fips/fips.yaml; }
+
+# The stand-in daemon is the one process named fips, and still alive.
+daemon_untouched() {
+	local pid
+	pid="$(cat "$DAEMONPID")"
+	kill -0 "$pid" 2>/dev/null && [ "$(pidof fips)" = "$pid" ]
+}
+
+mesh_add_and_remove_leave_fips_yaml_and_the_daemon_alone() {
+	mesh_begin mesh_add_and_remove_leave_fips_yaml_and_the_daemon_alone "adding, rating, zoning and removing meshes leaves fips.yaml, the init script and the daemon alone"
+	no_touch_begin "$FW_FIPS_YAML"
+	if precond "the stand-in daemon runs as the one process named fips" daemon_untouched; then
+		for args in radio0 radio1 rates zone "remove radio1" remove; do
+			# shellcheck disable=SC2086  # the words are the helper's arguments
+			run_mesh $args
+			check "fips-mesh-setup $args exits 0" same "$RC" 0
+		done
+		check "fips.yaml is byte-identical" yaml_unchanged
+		check "the fips init script was never run" eval '[ ! -s "$FIPSLOG" ]'
+		check "the same daemon process is still running" daemon_untouched
+	fi
+	fw_end
+}
+
+mesh_released_helper_rewrites_fips_yaml_and_the_check_sees_it() {
+	mesh_begin mesh_released_helper_rewrites_fips_yaml_and_the_check_sees_it "the 0.5.2 helper's fips.yaml edit is seen by the no-touch check"
+	no_touch_begin "$FIXTURES/released-fips.yaml"
+	if precond "fips.yaml starts as the copy kept of it" yaml_unchanged; then
+		run_released_mesh radio0
+		refute "fips.yaml changed under the 0.5.2 helper" yaml_unchanged
+	fi
+	fw_end
+}
+
 # ── Harness start ───────────────────────────────────────────────────────────
 
 [ -r "$FW_SETUP" ] || harness_fail "cannot read the setup under test, $FW_SETUP"
 [ -r "$FW_MESH_SETUP" ] || harness_fail "cannot read the mesh helper under test, $FW_MESH_SETUP"
+[ -r "$FW_FIPS_YAML" ] || harness_fail "cannot read the fips.yaml under test, $FW_FIPS_YAML"
 if [ "$FW_SNIPPETS" != none ] && [ ! -d "$FW_SNIPPETS" ]; then
 	harness_fail "FW_SNIPPETS is neither none nor a directory: $FW_SNIPPETS"
 fi
@@ -2628,7 +2694,9 @@ mesh_upgrade_leaves_other_wifi_ifaces_alone
 mesh_upgrade_keeps_operator_basic_rate
 mesh_readd_keeps_operator_basic_rate
 mesh_rates_failed_save_keeps_setup
-mesh_rates_damaged_save_names_copy"
+mesh_rates_damaged_save_names_copy
+mesh_add_and_remove_leave_fips_yaml_and_the_daemon_alone
+mesh_released_helper_rewrites_fips_yaml_and_the_check_sees_it"
 
 # The five continuation cases run only right after the case they continue.
 if [ -n "$FW_CASES" ]; then

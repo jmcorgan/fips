@@ -297,9 +297,12 @@ The others:
 - `bsdnet.rs` tests `../bsdnet.rs` (macOS and FreeBSD only) as module `tests`:
   the routing message layout and socket-address padding, the kernel's error
   codes surfacing for calls it refuses (an unknown sysctl name or interface,
-  a route add the kernel rejects), and, as root, a route added twice through
-  one interface being accepted, one present through another interface being
-  refused with the other interface named, a TUN device created twice in turn
+  a route add the kernel rejects), a route lookup taking only the reply that
+  carries its own sequence number, never one to an earlier lookup, and, as
+  root, a route added twice through one interface being accepted, one
+  present through another interface being refused with the other interface
+  named, a lookup made right after one that found no route still reading
+  its own reply (five hundred such pairs), a TUN device created twice in turn
   coming up with its address, MTU and `fd00::/8` route both times and going
   down at shutdown with its other flags kept, and a configured device set up
   a second time accepting its own address and route.

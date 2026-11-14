@@ -54,11 +54,13 @@ set -uo pipefail
 TEST_GROUPS=(
     "18|node::tests::tun_warning:: ipv6tun::dns:: gateway::dns::mesh_tests::"
     "13|ipv6tun::tun::name_tests::"
+    "4|transport::ethernet::rebind_tests::"
 )
 
-# The tools the tests in the groups above run: ip for the namespaces, nft for
-# the DNS tests' rules and packet counters, and sysctl for the TUN tests that
-# turn IPv6 off inside a namespace. When sysctl is listed, the probe also
+# The tools the tests in the groups above run: ip for the namespaces and the
+# Ethernet rebind tests' bridge and veth pairs, nft for the DNS tests' rules
+# and packet counters, and sysctl for the TUN tests that turn IPv6 off inside
+# a namespace. When sysctl is listed, the probe also
 # writes a sysctl inside its namespace, as those tests do.
 TEST_TOOLS=(ip nft sysctl)
 
