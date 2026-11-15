@@ -357,10 +357,11 @@ mod tests {
         assert!(!read_suspect(1, &healthy));
     }
 
-    #[test]
-    fn the_system_read_holds_every_up_non_loopback_ipv4_interface_prefix() {
-        let interfaces = if_addrs::get_if_addrs().expect("getifaddrs failed");
-        let up_v4: Vec<(std::net::Ipv4Addr, u8)> = interfaces
+    /// The interface addresses `read_system` considers, with the prefix length
+    /// the platform reported for each: loopback and down interfaces skipped.
+    fn listed_interfaces() -> Vec<(IpAddr, u8)> {
+        if_addrs::get_if_addrs()
+            .expect("getifaddrs failed")
             .iter()
             .filter(|iface| !iface.is_loopback())
             .filter(|iface| {
@@ -371,28 +372,86 @@ mod tests {
                         | if_addrs::IfOperStatus::LowerLayerDown
                 )
             })
-            .filter_map(|iface| match &iface.addr {
-                if_addrs::IfAddr::V4(v4) => Some((v4.ip, v4.prefixlen)),
-                if_addrs::IfAddr::V6(_) => None,
+            .map(|iface| match &iface.addr {
+                if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), v4.prefixlen),
+                if_addrs::IfAddr::V6(v6) => (IpAddr::V6(v6.ip), v6.prefixlen),
             })
-            .collect();
-        let read = OnLinkPrefixes::read_system();
-        assert!(!read.contains(ip("127.0.0.1")));
-        if up_v4.is_empty() {
-            // A loopback-only host has nothing to compare.
-            return;
+            .collect()
+    }
+
+    /// Check a system read against the interface list it was read from.
+    ///
+    /// Every listed prefix with a nonzero length is decodable: its address,
+    /// and the first and last address of its range, must be held. A listed
+    /// length of 0 is a netmask the platform handed back undecodable (a macOS
+    /// VPN `utun` interface does this); it must be dropped, and the read's
+    /// discard count must match the number listed. The address checks cover
+    /// IPv4 only.
+    fn check_read(listed: &[(IpAddr, u8)], read: &OnLinkPrefixes) -> Result<(), String> {
+        if read.contains(ip("127.0.0.1")) {
+            return Err("the read holds loopback".into());
         }
-        assert!(
-            up_v4.iter().all(|(_, len)| *len > 0),
-            "an interface reported prefix length 0: {up_v4:?}"
-        );
-        assert!(!read.is_empty());
-        assert_eq!(read.discarded(), 0);
-        for (addr, _) in &up_v4 {
-            assert!(
-                read.contains(IpAddr::V4(*addr)),
-                "{addr} missing from the read"
-            );
+        let undecodable = listed.iter().filter(|(_, len)| *len == 0).count();
+        if read.discarded() != undecodable {
+            return Err(format!(
+                "{} discarded, {undecodable} listed with prefix length 0: {listed:?}",
+                read.discarded()
+            ));
+        }
+        for (addr, len) in listed {
+            let (IpAddr::V4(v4), 1..) = (addr, len) else {
+                continue;
+            };
+            let mask = u32::MAX.checked_shl(32 - u32::from(*len)).unwrap_or(0);
+            let first = std::net::Ipv4Addr::from(u32::from(*v4) & mask);
+            let last = std::net::Ipv4Addr::from(u32::from(*v4) | !mask);
+            for held in [*v4, first, last] {
+                if !read.contains(IpAddr::V4(held)) {
+                    return Err(format!("{held} of {v4}/{len} missing from the read"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_read_check_accepts_undecodable_utun_prefixes_as_counted_discards() {
+        // What a Mac with two VPNs up lists: Wi-Fi reads /24, and both utun
+        // interfaces read /0 from a netmask the reader could not decode.
+        let listed = [
+            (ip("192.168.1.10"), 24),
+            (ip("10.8.0.2"), 0),
+            (ip("10.9.0.2"), 0),
+            (ip("fe80::1"), 64),
+        ];
+        let read = OnLinkPrefixes::from_pairs(listed);
+        assert_eq!(read.discarded(), 2);
+        assert_eq!(check_read(&listed, &read), Ok(()));
+    }
+
+    #[test]
+    fn the_read_check_fails_a_read_that_lost_a_decodable_prefix() {
+        let listed = [
+            (ip("192.168.1.10"), 24),
+            (ip("10.8.0.2"), 0),
+            (ip("172.16.4.2"), 22),
+        ];
+        let lost = OnLinkPrefixes::from_pairs([listed[0], listed[1]]);
+        assert!(check_read(&listed, &lost).is_err());
+        let zeroed = OnLinkPrefixes::from_pairs([listed[0], listed[1], (ip("172.16.4.2"), 0)]);
+        assert!(check_read(&listed, &zeroed).is_err());
+        let narrowed = OnLinkPrefixes::from_pairs([listed[0], listed[1], (ip("172.16.4.2"), 24)]);
+        assert!(check_read(&listed, &narrowed).is_err());
+        let whole = OnLinkPrefixes::from_pairs(listed);
+        assert_eq!(check_read(&listed, &whole), Ok(()));
+    }
+
+    #[test]
+    fn the_system_read_holds_every_decodable_up_non_loopback_ipv4_interface_prefix() {
+        let listed = listed_interfaces();
+        let read = OnLinkPrefixes::read_system();
+        if let Err(problem) = check_read(&listed, &read) {
+            panic!("{problem}");
         }
     }
 }
