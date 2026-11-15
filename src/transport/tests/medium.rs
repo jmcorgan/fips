@@ -205,3 +205,13 @@ fn a_media_word_is_classified_by_its_type_bits() {
     assert_eq!(from_media_word(0x40), Medium::Unknown);
     assert_eq!(from_media_word(0x60), Medium::Unknown);
 }
+
+/// The active media words a field tester read from a Mac (macOS 14.8.9
+/// arm64) with `SIOCGIFMEDIA`: `0x80` on its Wi-Fi interface `en0`, an
+/// 802.11 word on autoselect, and `0x100030` on its USB Ethernet adapter
+/// `en26`, an Ethernet word at full duplex.
+#[test]
+fn the_media_words_read_on_a_mac_are_wireless_for_wifi_and_wired_for_ethernet() {
+    assert_eq!(from_media_word(0x80), Medium::Wireless);
+    assert_eq!(from_media_word(0x0010_0030), Medium::Wired);
+}

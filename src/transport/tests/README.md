@@ -30,9 +30,11 @@ private items.
   a WWAN or VLAN device and an absent interface are unknown. The sysfs read
   gives back the facts a temporary tree lays out the way sysfs does, and a
   name that would leave `/sys/class/net` is unknown without a read. BSD
-  media words, built from `<net/if_media.h>` rather than captured on a Mac,
-  are classified by their type bits. The macOS read itself
-  (`SIOCGIFMEDIA`) is compiled by the cross-check and not run.
+  media words built from `<net/if_media.h>` are classified by their type
+  bits, and so are the two a field tester read on a Mac: `0x80` from Wi-Fi
+  is wireless and `0x100030` from a USB Ethernet adapter is wired. The
+  macOS read itself (`SIOCGIFMEDIA`) is compiled by the cross-check and not
+  run.
 - `sockbuf.rs`: declared from `../sockbuf.rs` as its `tests` module. A
   buffer sized through `set_buffer` is never smaller than the plain socket
   option alone gives and is what the kernel reports, with or without
