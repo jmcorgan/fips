@@ -6,7 +6,7 @@
 //! (Destination Unreachable and Packet Too Big).
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-mod bsdnet;
+pub(crate) mod bsdnet;
 pub mod config;
 pub(crate) mod core;
 pub mod dns;

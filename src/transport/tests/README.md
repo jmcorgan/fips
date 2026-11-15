@@ -34,7 +34,8 @@ private items.
   bits, and so are the two a field tester read on a Mac: `0x80` from Wi-Fi
   is wireless and `0x100030` from a USB Ethernet adapter is wired. The
   macOS read itself (`SIOCGIFMEDIA`) is compiled by the cross-check and not
-  run.
+  run; the structure's 44-byte size and the request number built from it
+  are held by compile-time assertions there.
 - `sockbuf.rs`: declared from `../sockbuf.rs` as its `tests` module. A
   buffer sized through `set_buffer` is never smaller than the plain socket
   option alone gives and is what the kernel reports, with or without

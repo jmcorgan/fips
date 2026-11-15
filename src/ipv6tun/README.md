@@ -110,7 +110,9 @@ Drivers:
   setup by direct kernel or IP Helper calls, deciding what is benign by error
   code. A route lookup in `bsdnet.rs` gives each request a sequence number of
   its own and reads only the reply carrying it: FreeBSD can deliver the reply
-  to an earlier lookup to a routing socket opened after it.
+  to an earlier lookup to a routing socket opened after it. Its ioctl
+  number builder, `ioc`, is shared with the macOS interface medium read in
+  `src/transport/medium.rs`.
 
 `tests/` holds the adapter's tests; `src/ipv6tun/tests/README.md` describes
 each file.
