@@ -95,6 +95,9 @@ impl PacketSocket {
         // Set immediate mode (deliver packets as they arrive)
         set_bpf_immediate(fd)?;
 
+        // Do not read back the frames this descriptor sends
+        clear_bpf_seesent(fd, interface);
+
         // We supply complete Ethernet headers on writes
         set_bpf_hdrcmplt(fd)?;
 
@@ -365,6 +368,9 @@ const BIOCSHDRCMPLT: libc::c_ulong = 0x80044275;
 const BIOCSETF: libc::c_ulong = 0x80104267;
 const BIOCGBLEN: libc::c_ulong = 0x40044266;
 const BIOCSBLEN: libc::c_ulong = 0xC0044266;
+/// `_IOW('B', 119, u_int)` in `<net/bpf.h>`: whether the descriptor also
+/// reads the frames written through it. macOS defaults it to 1.
+const BIOCSSEESENT: libc::c_ulong = 0x80044277;
 
 /// BPF instruction.
 #[repr(C)]
@@ -434,6 +440,24 @@ fn set_bpf_immediate(fd: RawFd) -> Result<(), TransportError> {
         )));
     }
     Ok(())
+}
+
+/// Stop the descriptor reading back the frames written through it.
+///
+/// macOS sets `BIOCSSEESENT` on a new descriptor, so without this the
+/// receive path reads and parses every frame the node sends and counts it
+/// as received. The transport works without it, so a kernel that refuses
+/// it costs a warning rather than the transport.
+fn clear_bpf_seesent(fd: RawFd, interface: &str) {
+    let see_sent: libc::c_uint = 0;
+    let ret = unsafe { libc::ioctl(fd, BIOCSSEESENT, &see_sent) };
+    if ret < 0 {
+        tracing::warn!(
+            interface,
+            error = %std::io::Error::last_os_error(),
+            "BIOCSSEESENT failed; the Ethernet transport will read back the frames it sends"
+        );
+    }
 }
 
 /// Tell BPF we supply complete Ethernet headers on writes.
@@ -587,6 +611,10 @@ fn get_mac_addr(interface: &str) -> Result<[u8; 6], TransportError> {
     unsafe { libc::freeifaddrs(addrs) };
     result
 }
+
+#[cfg(test)]
+#[path = "tests/io_macos.rs"]
+mod ioctl_tests;
 
 // ============================================================================
 // Unit tests

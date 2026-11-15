@@ -22,6 +22,12 @@ source file's private items.
   `group_drops`, and a send to a group destination is refused; the same
   frames from a unicast source are buffered or delivered. It is the only
   unprivileged test of the receive path, and runs in the normal test run.
+- `io_macos.rs` tests `../io_macos.rs` as module `ioctl_tests`: each BPF
+  ioctl request number it checks equals the `<sys/ioccom.h>` encoding of its
+  `<net/bpf.h>` definition. The checks are `const` assertions, evaluated when
+  the test target compiles, so the macOS cross-check on Linux fails on a wrong
+  number. The encoder is also checked against two requests already in use on
+  a Mac, so it is not only agreeing with itself.
 
 ## Rules
 
@@ -41,4 +47,6 @@ source file's private items.
 - A transport opens its socket, and reopens it after a recreate, in the
   calling thread's network namespace, so each test runs its whole body
   inside `testutil::in_netns` on a current-thread runtime built there.
-- macOS (BPF) is compiled by the cross-check and not run.
+- macOS (BPF) is compiled by the cross-check and not run. A check on
+  `io_macos.rs` that must hold without a Mac is written as a `const`
+  assertion in `io_macos.rs` here, since only compilation reaches it.
