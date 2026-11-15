@@ -55,3 +55,47 @@ fn the_path_commands_build_the_requests_the_daemon_takes() {
         "a pin without an address names the whole transport"
     );
 }
+
+/// A `path_pin` reply as the control socket sends it, carrying `pinned`.
+fn pin_reply(pinned: Value) -> Value {
+    serde_json::json!({"status": "ok", "data": {"pinned": pinned}})
+}
+
+#[test]
+fn a_pin_not_in_force_is_warned_about_and_names_why() {
+    let reply = pin_reply(serde_json::json!({
+        "transport_id": 3, "transport": "wifi", "addr": null, "in_force": false
+    }));
+    let warning = pin_warning(&reply).expect("a pin not in force is warned about");
+    assert!(warning.contains("not in force"), "{warning}");
+    assert!(warning.contains("wifi"), "names the transport: {warning}");
+    assert!(warning.contains("live to the peer"), "says why: {warning}");
+    assert!(
+        warning.contains("as if unpinned"),
+        "says what happens: {warning}"
+    );
+
+    let path = pin_reply(serde_json::json!({
+        "transport_id": 3, "transport": null, "addr": "10.0.1.2:2121", "in_force": false
+    }));
+    let warning = pin_warning(&path).expect("a path pin not in force is warned about");
+    assert!(
+        warning.contains("10.0.1.2:2121"),
+        "names the path: {warning}"
+    );
+    assert!(
+        warning.contains('3'),
+        "names the transport by id: {warning}"
+    );
+}
+
+#[test]
+fn a_pin_in_force_or_cleared_gets_no_warning() {
+    let in_force = pin_reply(serde_json::json!({
+        "transport_id": 1, "transport": "main", "addr": null, "in_force": true
+    }));
+    assert_eq!(pin_warning(&in_force), None);
+    assert_eq!(pin_warning(&pin_reply(Value::Null)), None, "an unpin reply");
+    let error = serde_json::json!({"status": "error", "message": "no such peer"});
+    assert_eq!(pin_warning(&error), None, "an error reply");
+}

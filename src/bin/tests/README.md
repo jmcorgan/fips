@@ -17,7 +17,9 @@ The tests run with `cargo test -p fips-mesh --bins`.
   directory, so it is Unix only.
 - `fipsctl_path.rs` tests `../fipsctl.rs` as module `path_tests`: the
   requests `path show`, `path pin` (with and without an address) and
-  `path unpin` build. It reads
+  `path unpin` build, and the warning `path pin` prints on stderr when the
+  reply's pin is set but not in force (`pin_warning`), with none for a pin
+  in force, an unpin or an error. It reads
   `../../control/snapshots/fipsctl_path_requests.json`, the request fixture
   the control socket's round trip test in `src/node/tests/path_control.rs`
   also sends, so the client and the daemon are checked against one source.

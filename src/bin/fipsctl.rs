@@ -389,6 +389,32 @@ fn path_request(what: &PathCommands) -> String {
     }
 }
 
+/// The warning for a `path_pin` reply whose pin is kept but not in force,
+/// as when it names a transport id a restart has given to another
+/// transport. The pin stays set, as the command documents, so this is a
+/// warning on stderr and the exit status stays 0.
+fn pin_warning(reply: &serde_json::Value) -> Option<String> {
+    let pin = reply.get("data")?.get("pinned")?;
+    if pin.get("in_force")?.as_bool()? {
+        return None;
+    }
+    let id = pin
+        .get("transport_id")
+        .map_or_else(String::new, |v| v.to_string());
+    let transport = match pin.get("transport").and_then(|v| v.as_str()) {
+        Some(name) => format!("transport {name} (id {id})"),
+        None => format!("transport id {id}"),
+    };
+    let named = match pin.get("addr").and_then(|v| v.as_str()) {
+        Some(addr) => format!("path {addr} on {transport}"),
+        None => transport,
+    };
+    Some(format!(
+        "the pin to {named} is set but not in force: nothing it names is live \
+         to the peer, so paths are chosen as if unpinned until one is"
+    ))
+}
+
 /// Print a control socket response, handling error status.
 fn print_response(value: &serde_json::Value) {
     let status = value
@@ -787,7 +813,16 @@ fn main() {
         _ => "",
     };
     match query(&socket_path, command, &request) {
-        Ok(value) => print_response(&value),
+        Ok(value) => {
+            print_response(&value);
+            if let Commands::Path {
+                what: PathCommands::Pin { .. },
+            } = &cli.command
+                && let Some(warning) = pin_warning(&value)
+            {
+                eprintln!("warning: {warning}");
+            }
+        }
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);
