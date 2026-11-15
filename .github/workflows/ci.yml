@@ -547,14 +547,14 @@ jobs:
         shell: bash
         run: rm -f target/nextest/ci/junit.xml
 
-      # Each unprivileged test step below runs under an open-file soft limit
-      # of 512: the root lib suite holds about 110 descriptors at most, so a
-      # leak reds here as it would under the internal builder's lower limit.
-      # Mirrored in testing/ci-local.sh (UNIT_FD_LIMIT), which gives the
-      # reason in full.
+      # Each unprivileged test step below runs under the open-file soft limit
+      # testing/unit-fd-limit.sh prints, which testing/ci-local.sh
+      # (UNIT_FD_LIMIT) reads too: 512 on any runner of up to 48 test
+      # threads, so a leak reds here as it would on the internal builder.
+      # ci-local.sh gives the reason in full.
       - name: Run unit tests
         run: |
-          ulimit -Sn 512
+          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
           cargo nextest run --all --profile ci
 
       # The unit tests that need root and network namespaces, which are
@@ -613,7 +613,7 @@ jobs:
       # --all-features clippy step lints them.
       - name: Run the no_std core's tests on their own, with its slow suite
         run: |
-          ulimit -Sn 512
+          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
           cargo test -p fips-core --features slow-tests
 
       # Every known-defect test in testing/ignored-tests.txt must still fail,
@@ -621,7 +621,7 @@ jobs:
       # testing/ci-local.sh.
       - name: Run the known-defect lane
         run: |
-          ulimit -Sn 512
+          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
           bash testing/known-defect-lane.sh
 
       # Each switch in core/src/faults.rs, turned on in a test process of its
@@ -631,7 +631,7 @@ jobs:
       # Mirrored in testing/ci-local.sh.
       - name: Run the mutation lane
         run: |
-          ulimit -Sn 512
+          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
           bash testing/mutations/run.sh
 
       # The bind-success half. Every other unit-test leg runs unprivileged, so
@@ -707,7 +707,7 @@ jobs:
         env:
           FIPS_AUDIT_REACH: ${{ runner.temp }}/audit-reach.txt
         run: |
-          ulimit -Sn 512
+          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
           cargo test -p fips-mesh --lib --features profiling,test-overrides
 
       - name: Check the reach of the live map audit

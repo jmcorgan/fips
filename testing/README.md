@@ -383,14 +383,39 @@ does not name it, so the check does not read nextest runs.
 
 ### The open-file limit and `fd-peak.py`
 
-Every command in the unit-test stage runs under an open-file soft limit of
-512 (`UNIT_FD_LIMIT` in `ci-local.sh`; each unprivileged test step of GitHub
-CI's Linux job sets the same). The root lib suite holds at most about 110
-descriptors at once as threads in one process, so the limit leaves four times
-that, and it sits under the 1024 a Linux service or login gets by default.
-With one bound on every runner, a leak, or a test that needs far more
-descriptors than the rest, reds everywhere rather than only on the host whose
-limit is lowest.
+Every command in the unit-test stage runs under the open-file soft limit
+[`unit-fd-limit.sh`](unit-fd-limit.sh) prints (`UNIT_FD_LIMIT` in
+`ci-local.sh`; each unprivileged test step of GitHub CI's Linux job reads the
+same script): 512 on a runner of up to 48 test threads (`RUST_TEST_THREADS`,
+or else the CPU count), and 8 more for each thread past 48. With one bound on
+every runner, a leak, or a test that needs far more descriptors than the
+rest, reds everywhere rather than only on the host whose limit is lowest.
+512 sits under the 1024 a Linux service or login gets by default.
+
+The root lib suite is the heaviest, run as threads in one process with as
+many tests at once as there are test threads. Its settlement explorer tests
+(`src/node/tests/settle/explore`) each run many walks of real nodes side by
+side, each walk with a runtime of its own, so before the walks were bounded
+the peak grew with the host: more test threads let more of those tests run
+together. A 20-CPU builder reached 511 and failed five tests with "Too many
+open files". The walks are now held to 16 at once per process (`WALKS_AT_ONCE`),
+so the explorer holds at most 16 walks' worth on any host (93 descriptors at
+most in one test alone, and about 180 if all 16 were TCP walks), and the
+rest of the peak is a few descriptors per test thread from the other tests.
+Measured 2026-11-15 on core-vm (12 CPUs, under side load),
+`cargo test -p fips-mesh --lib --features profiling,test-overrides` at each
+`RUST_TEST_THREADS`, read from the `fd-peak:` report:
+
+| Test threads | Before the bound | After |
+| --- | --- | --- |
+| 12 | 401 | 160 |
+| 24 | 511, 9 tests failed | 252 |
+| 24, explorer tests skipped | 201 | 206 |
+| 48 | not run | 341 |
+
+So 512 leaves twice the 24-thread peak and half again the 48-thread one.
+Past 48 threads the remaining growth, at most about 8 descriptors per added
+thread in these runs, is what the limit's growth covers.
 
 [`fd-peak.py`](fd-peak.py) wraps the stage's whole-workspace test run and
 its optional-features run. It runs the command unchanged and passes its exit

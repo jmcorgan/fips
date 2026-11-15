@@ -964,19 +964,25 @@ run_cross_check() {
 
 # ── Stage 2: Unit Tests ───────────────────────────────────────────────────
 
-# The open-file soft limit every command in the unit-test stage runs under.
-# The root lib suite, the heaviest, holds at most about 110 descriptors at
-# once as threads in one process on a 12-CPU host, and none after its tests
-# end. 512 leaves four times that, and sits under the 1024 that Linux gives a
-# service or login by default, the internal builder's included. Without one
-# bound, a leak or a test that needs far more descriptors than the rest reds
-# only on the runner whose limit happens to be lowest. Mirrored in
-# .github/workflows/ci.yml.
-UNIT_FD_LIMIT=512
+# The open-file soft limit every command in the unit-test stage runs under,
+# from testing/unit-fd-limit.sh, which .github/workflows/ci.yml reads too:
+# 512, the same on every runner up to 48 test threads, so a leak or a test
+# that needs far more descriptors than the rest reds everywhere rather than
+# only on the runner whose limit happens to be lowest. The root lib suite, the
+# heaviest, runs as threads in one process; its settlement explorer holds its
+# walks to 16 at once per process (WALKS_AT_ONCE in
+# src/node/tests/settle/explore/explore.rs), and the suite's peak was 160
+# descriptors at 12 test threads, 252 at 24 and 341 at 48 (2026-11-15).
+# testing/README.md has the measurements.
+UNIT_FD_LIMIT=$(bash "$SCRIPT_DIR/unit-fd-limit.sh") || UNIT_FD_LIMIT=""
 
 # Run a command in a subshell held to UNIT_FD_LIMIT open files.
 with_fd_limit() {
     (
+        if [[ -z "$UNIT_FD_LIMIT" ]]; then
+            fail "testing/unit-fd-limit.sh gave no open-file limit"
+            exit 1
+        fi
         if ! ulimit -Sn "$UNIT_FD_LIMIT"; then
             fail "cannot set the open-file soft limit to $UNIT_FD_LIMIT"
             exit 1

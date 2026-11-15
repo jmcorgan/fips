@@ -16,7 +16,9 @@ use super::script::{Kind, Step, run};
 use super::starts::{Clause, NOT_RUN, Order, PINS, Reach, Start, starts};
 use super::world::{Medium, World};
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 
 /// What a variation does to the packet a handshake step names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,11 +273,74 @@ pub(super) fn jobs(medium: Medium, settings: &[bool]) -> Vec<Job> {
 /// The stack of a walk's thread.
 const WALK_STACK: usize = 8 * 1024 * 1024;
 
-/// Run `f` on each job, each on a thread of its own with its own runtime,
-/// and so its own test clock, side by side, and return what they found. A
-/// job names the path it is on in the string it is given; a panic in a
-/// job, the node's live audit among them, is returned as a finding against
-/// that path, and one marked `precondition` fails here as itself.
+/// The most walks that run at once in one test process, across every test
+/// that walks. Each walk holds its own runtime and its world's nodes and
+/// sockets, and libtest runs as many tests at once as the host has CPUs, so
+/// without this bound the process's descriptor peak grew with the host: on
+/// a 20-CPU host the walking tests together reached 511. With it the walks
+/// hold at most this many walks' worth wherever they run. The unit tests'
+/// open-file limit, from `testing/unit-fd-limit.sh`, is sized with it.
+pub(super) const WALKS_AT_ONCE: usize = 16;
+
+/// How many walks are running, and the signal a walk that ends gives the
+/// walks waiting for a place.
+static WALKS: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+/// A walk's place among the `WALKS_AT_ONCE`, given back when dropped.
+struct Place;
+
+impl Place {
+    /// Wait until fewer than `WALKS_AT_ONCE` walks run, then take a place.
+    fn take() -> Place {
+        let (count, freed) = &WALKS;
+        let mut n = count.lock().unwrap_or_else(|e| e.into_inner());
+        while *n >= WALKS_AT_ONCE {
+            n = freed.wait(n).unwrap_or_else(|e| e.into_inner());
+        }
+        *n += 1;
+        Place
+    }
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        let (count, freed) = &WALKS;
+        *count.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        freed.notify_one();
+    }
+}
+
+/// Start a walk on a thread of its own: once it has a place among the
+/// `WALKS_AT_ONCE`, it runs the future `make` gives on a runtime of its own,
+/// and so on its own test clock, and gives the place back when the runtime
+/// and everything on it is dropped.
+pub(super) fn spawn_walk<T, M, Fut>(make: M) -> JoinHandle<T>
+where
+    M: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = T>,
+    T: Send + 'static,
+{
+    // A walk runs a node's handlers to their full depth in a debug build,
+    // which on the loopback starts alone comes within a few per cent of the
+    // default 2 MiB thread stack, so each walk takes more.
+    std::thread::Builder::new()
+        .stack_size(WALK_STACK)
+        .spawn(move || {
+            let _place = Place::take();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("precondition: a runtime for the walk");
+            runtime.block_on(make())
+        })
+        .expect("precondition: a thread for the walk")
+}
+
+/// Run `f` on each job, each a walk of its own (`spawn_walk`), side by side
+/// up to `WALKS_AT_ONCE`, and return what they found. A job names the path
+/// it is on in the string it is given; a panic in a job, the node's live
+/// audit among them, is returned as a finding against that path, and one
+/// marked `precondition` fails here as itself.
 pub(super) fn parallel<F, Fut>(jobs: Vec<Job>, f: F) -> Vec<String>
 where
     F: Fn(Job, Arc<Mutex<String>>) -> Fut + Send + Copy + 'static,
@@ -285,20 +350,7 @@ where
     for job in jobs {
         let at = Arc::new(Mutex::new(String::new()));
         let seen = Arc::clone(&at);
-        // A walk runs a node's handlers to their full depth in a debug
-        // build, which on the loopback starts alone comes within a few per
-        // cent of the default 2 MiB thread stack, so each walk takes more.
-        let run = std::thread::Builder::new()
-            .stack_size(WALK_STACK)
-            .spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("precondition: a runtime for the walk")
-                    .block_on(f(job, seen))
-            })
-            .expect("precondition: a thread for the walk");
-        runs.push((run, at));
+        runs.push((spawn_walk(move || f(job, seen)), at));
     }
     let mut found = Vec::new();
     for (run, at) in runs {
@@ -439,4 +491,32 @@ fn the_explorer_reaches_each_starts_target() {
     all.extend(jobs(Medium::Ble, &[false, true]));
     let bad = parallel(all, reached);
     assert!(bad.is_empty(), "defect: {bad:#?}");
+}
+
+/// No more than `WALKS_AT_ONCE` walks run at once in one process: three
+/// times that many walks, each holding its place for 50 ms, never have more
+/// of their number running together than the bound, and every one runs to
+/// its end. Walks of other tests in the process can only lower the count.
+#[test]
+fn no_more_than_walks_at_once_walks_run_together_in_one_process() {
+    let live = Arc::new(AtomicUsize::new(0));
+    let most = Arc::new(AtomicUsize::new(0));
+    let runs: Vec<_> = (0..3 * WALKS_AT_ONCE)
+        .map(|_| {
+            let (live, most) = (Arc::clone(&live), Arc::clone(&most));
+            spawn_walk(move || async move {
+                let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                most.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                live.fetch_sub(1, Ordering::SeqCst);
+            })
+        })
+        .collect();
+    let ended = runs.into_iter().filter_map(|r| r.join().ok()).count();
+    assert_eq!(ended, 3 * WALKS_AT_ONCE, "defect: a walk did not end");
+    let most = most.load(Ordering::SeqCst);
+    assert!(
+        most <= WALKS_AT_ONCE,
+        "defect: {most} walks ran at once, over the bound of {WALKS_AT_ONCE}"
+    );
 }

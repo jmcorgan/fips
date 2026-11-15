@@ -45,6 +45,7 @@
 
 use super::super::super::spanning_tree::cleanup_nodes;
 use super::super::super::*;
+use super::explore::spawn_walk;
 use super::script::{Kind, Step, run};
 use super::starts::Order;
 use super::world::{Medium, World};
@@ -402,19 +403,13 @@ fn differences(got: &[Line], want: &[Line]) -> Vec<String> {
     out
 }
 
-/// Walk `script` on a thread of its own, with its own runtime and so its
-/// own test clock. Gives whether every step ran, and every difference
-/// from its trace's node lines.
+/// Walk `script` as a walk of its own (`spawn_walk`), on its own runtime
+/// and so its own test clock. Gives whether every step ran, and every
+/// difference from its trace's node lines.
 fn compared(script: &'static Script, medium: Medium, on: bool) -> (bool, Vec<String>) {
     let at = Arc::new(Mutex::new(String::new()));
     let seen = Arc::clone(&at);
-    let run = std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("precondition: a runtime for the walk")
-            .block_on(walk(script, medium, on, &seen))
-    });
+    let run = spawn_walk(move || async move { walk(script, medium, on, &seen).await });
     let got = match run.join() {
         Ok(Ok(got)) => got,
         Ok(Err(e)) => return (false, vec![e]),
@@ -447,9 +442,10 @@ fn at(script: &Script, setting: Setting) -> bool {
 }
 
 /// Walk every shared script whose nodes run at `setting` and that runs
-/// here, each on a thread of its own, side by side. Gives how many walked
-/// to their end, how many should have (every script at the setting less
-/// those not run here), and every difference.
+/// here, each a walk of its own, side by side up to `WALKS_AT_ONCE`
+/// (`spawn_walk`). Gives how many walked to their end, how many should have
+/// (every script at the setting less those not run here), and every
+/// difference.
 fn compare(setting: Setting) -> (usize, usize, Vec<String>) {
     let mut found = Vec::new();
     for (name, why) in UNRUN {
