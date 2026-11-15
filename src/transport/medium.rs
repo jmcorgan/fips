@@ -134,14 +134,24 @@ pub(crate) fn from_media_word(word: i32) -> Medium {
 /// The macOS read: the interface's media word.
 #[cfg(target_os = "macos")]
 mod macos {
-    /// `SIOCGIFMEDIA`, `_IOWR('i', 56, struct ifmediareq)` on a 64-bit
-    /// target, where the structure is 48 bytes.
-    const SIOCGIFMEDIA: libc::c_ulong = 0xC030_6938;
+    use crate::ipv6tun::bsdnet::{IOC_INOUT, ioc};
+    use std::mem::size_of;
 
-    /// `struct ifmediareq` from `<net/if_media.h>`, which the `libc` crate
-    /// does not define for Apple targets. The kernel fills fields this read
-    /// does not use, so they are never read.
-    #[repr(C)]
+    /// `SIOCGIFMEDIA`, `_IOWR('i', 56, struct ifmediareq)`. The number
+    /// carries the structure's size, 44 bytes, and the kernel refuses a
+    /// request whose size does not match its own structure, so it is built
+    /// from the size rather than written out.
+    const SIOCGIFMEDIA: libc::c_ulong = ioc(IOC_INOUT, b'i', 56, size_of::<IfMediaReq>());
+
+    /// `struct ifmediareq`, which the `libc` crate does not define for
+    /// Apple targets. Apple's `<net/if.h>` declares it under
+    /// `#pragma pack(4)`, so the trailing pointer sits at offset 36 rather
+    /// than 40 and the structure is 44 bytes, not the 48 natural alignment
+    /// gives on a 64-bit target. `packed(4)` keeps that layout and the
+    /// header's field types; no field is aligned above 4 except the
+    /// pointer, which is never read and never referenced. The kernel fills
+    /// fields this read does not use.
+    #[repr(C, packed(4))]
     #[allow(dead_code)]
     struct IfMediaReq {
         /// The interface's name, NUL-terminated.
@@ -160,6 +170,9 @@ mod macos {
         ifm_ulist: *mut libc::c_int,
     }
 
+    const _: () = assert!(size_of::<IfMediaReq>() == 44);
+    const _: () = assert!(SIOCGIFMEDIA == 0xC02C_6938);
+
     /// The media word of `interface`: the active word where the driver
     /// gives one, the current word otherwise. `None` where the ioctl fails,
     /// as it does for an interface with no media, such as a bridge or a
@@ -169,29 +182,36 @@ mod macos {
         if name.len() >= libc::IFNAMSIZ {
             return None;
         }
-        // SAFETY: a zeroed `ifmediareq` is a valid request with a null
-        // list and a count of zero, so the kernel writes no list.
-        let mut req: IfMediaReq = unsafe { std::mem::zeroed() };
-        for (dst, src) in req.ifm_name.iter_mut().zip(name) {
+        let mut ifm_name = [0 as libc::c_char; libc::IFNAMSIZ];
+        for (dst, src) in ifm_name.iter_mut().zip(name) {
             *dst = *src as libc::c_char;
         }
+        // A null list with a count of zero, so the kernel writes no list.
+        let mut req = IfMediaReq {
+            ifm_name,
+            ifm_current: 0,
+            ifm_mask: 0,
+            ifm_status: 0,
+            ifm_active: 0,
+            ifm_count: 0,
+            ifm_ulist: std::ptr::null_mut(),
+        };
         // SAFETY: plain socket creation; the descriptor is closed below.
         let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
         if sock < 0 {
             return None;
         }
-        // SAFETY: `req` is a live `ifmediareq` the ioctl fills in place.
-        let ret = unsafe { libc::ioctl(sock, SIOCGIFMEDIA, &mut req) };
+        // SAFETY: `req` is a live `ifmediareq` of the size the request
+        // number names, which the ioctl fills in place.
+        let ret = unsafe { libc::ioctl(sock, SIOCGIFMEDIA, &raw mut req) };
         // SAFETY: `sock` is the descriptor opened above.
         unsafe { libc::close(sock) };
         if ret < 0 {
             return None;
         }
-        Some(if req.ifm_active != 0 {
-            req.ifm_active
-        } else {
-            req.ifm_current
-        })
+        // Copies out of the packed structure; no reference to a field.
+        let (active, current) = (req.ifm_active, req.ifm_current);
+        Some(if active != 0 { active } else { current })
     }
 }
 

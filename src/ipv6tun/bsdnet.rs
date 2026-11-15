@@ -27,12 +27,12 @@ use libc::{c_char, c_int, c_ulong};
 /// `IOC_IN`: the ioctl copies its argument into the kernel.
 const IOC_IN: c_ulong = 0x8000_0000;
 /// `IOC_INOUT`: the ioctl copies its argument in and back out.
-const IOC_INOUT: c_ulong = 0xc000_0000;
+pub(crate) const IOC_INOUT: c_ulong = 0xc000_0000;
 /// `IOCPARM_MASK`: the argument length field of an ioctl number.
 const IOCPARM_MASK: c_ulong = 0x1fff;
 
 /// An ioctl request number, as `<sys/ioccom.h>`'s `_IOC` builds it.
-const fn ioc(dir: c_ulong, group: u8, num: u8, len: usize) -> c_ulong {
+pub(crate) const fn ioc(dir: c_ulong, group: u8, num: u8, len: usize) -> c_ulong {
     dir | (((len as c_ulong) & IOCPARM_MASK) << 16) | ((group as c_ulong) << 8) | (num as c_ulong)
 }
 

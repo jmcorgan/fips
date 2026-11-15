@@ -89,12 +89,24 @@ fn contains_on_holds_only_the_named_interfaces_prefixes() {
 }
 
 #[test]
-fn a_discarded_zero_length_prefix_or_an_empty_read_is_reported() {
-    let partly = set(&[("192.168.1.1", 0), ("10.0.0.1", 8)]);
+fn a_read_is_suspect_only_when_it_failed_or_left_no_usable_prefix() {
+    // A Mac with a VPN up: its utun prefix reads /0 and is dropped, while
+    // the Wi-Fi prefix reads correctly.
+    let partly = set(&[("10.8.0.2", 0), ("192.168.1.10", 24)]);
     assert_eq!(partly.discarded(), 1);
-    assert!(read_suspect(2, &partly));
+    assert!(partly.contains(ip("192.168.1.7")));
+    assert!(
+        !read_suspect(2, &partly),
+        "a partial discard is not suspect"
+    );
+
+    let all_dropped = set(&[("10.8.0.2", 0), ("10.9.0.2", 0)]);
+    assert_eq!(all_dropped.discarded(), 2);
+    assert!(read_suspect(2, &all_dropped));
+
     assert!(read_suspect(2, &OnLinkPrefixes::default()));
     assert!(!read_suspect(0, &OnLinkPrefixes::default()));
+    assert!(read_suspect(0, &OnLinkPrefixes::failed()));
     let healthy = set(&[("10.0.0.1", 8)]);
     assert!(!read_suspect(1, &healthy));
 }

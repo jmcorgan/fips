@@ -59,9 +59,19 @@ pub fn read_system() -> OnLinkPrefixes {
                     | if_addrs::IfOperStatus::LowerLayerDown
             )
         })
-        .map(|iface| match &iface.addr {
-            if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), v4.prefixlen, iface.index),
-            if_addrs::IfAddr::V6(v6) => (IpAddr::V6(v6.ip), v6.prefixlen, iface.index),
+        .map(|iface| {
+            let (ip, len) = match &iface.addr {
+                if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), v4.prefixlen),
+                if_addrs::IfAddr::V6(v6) => (IpAddr::V6(v6.ip), v6.prefixlen),
+            };
+            if len == 0 {
+                debug!(
+                    interface = %iface.name,
+                    address = %ip,
+                    "interface prefix undecodable; discarded"
+                );
+            }
+            (ip, len, iface.index)
         })
         .collect();
     let considered = entries.len();
