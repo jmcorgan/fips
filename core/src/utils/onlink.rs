@@ -148,11 +148,15 @@ impl OnLinkPrefixes {
     }
 }
 
-/// Whether an interface read produced a set that cannot be trusted: some
-/// entry was discarded for a zero prefix length, or `considered` interface
-/// addresses passed the filters and none of them survived.
+/// Whether an interface read produced a set that cannot be trusted: the
+/// system read failed, or `considered` interface addresses passed the filters
+/// and none of them survived.
+///
+/// Some entries discarded for a zero prefix length while others survive is
+/// not suspect. macOS hands back a VPN `utun` interface's netmask in a form
+/// the reader turns into /0, and the other interfaces still read correctly.
 pub fn read_suspect(considered: usize, set: &OnLinkPrefixes) -> bool {
-    set.discarded > 0 || (considered > 0 && set.is_empty())
+    set.failed || (considered > 0 && set.is_empty())
 }
 
 #[cfg(test)]

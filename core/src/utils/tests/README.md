@@ -19,5 +19,7 @@ Unit tests for the files one level up.
   `utils::onlink::tests::...`). They check which addresses a set of
   prefixes holds (each family's ranges, IPv4-mapped addresses, a
   zero-length prefix discarded, the families kept apart, `share_link`
-  and `contains_on`), and that a suspect read is reported. The test of
-  the system read stays in the root crate, in `src/utils/tests/onlink.rs`.
+  and `contains_on`), and that a read is reported suspect only when it
+  failed or left no usable prefix, not when some zero-length prefixes were
+  dropped beside usable ones. The test of the system read stays in the root
+  crate, in `src/utils/tests/onlink.rs`.
