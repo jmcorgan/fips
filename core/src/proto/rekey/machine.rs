@@ -2826,6 +2826,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
             identity,
             peer_epoch: self.mem.peer_epoch,
             last_rx: self.mem.last_rx,
+            rx_cur: self.mem.rx_cur,
             link_since: self.mem.link_since,
             current: self.cur.as_ref().map(show),
             previous: self.drain.as_ref().map(|d| show(&d.ep)),

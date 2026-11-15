@@ -340,6 +340,13 @@ pub struct ActivePeer {
     /// directly by the data plane. See `PeerSendState`.
     send: PeerSendState,
 
+    /// The node's next link id when the session held now was installed, at
+    /// the promotion or at a cross-connection move that rebuilt the link's
+    /// machine: a dial of this node's with a lower link id was already in
+    /// flight then. Zero for a peer built without a session, so no dial
+    /// predates it.
+    mark: u64,
+
     /// Whether a test changed the link's bundle past the feed of the
     /// settlement core's record of the link: a test mutator of the paths, or
     /// a test's own call of [`account`](Self::account). The live audit then
@@ -362,6 +369,7 @@ impl ActivePeer {
             rekey: None,
             data: PeerData::new(authenticated_at, now),
             send: PeerSendState::new(link_id),
+            mark: 0,
             #[cfg(test)]
             past_feed: false,
         }
@@ -479,6 +487,7 @@ impl ActivePeer {
             rekey,
             data,
             send,
+            mark: caps.mark,
             #[cfg(test)]
             past_feed: false,
         };
@@ -518,6 +527,7 @@ impl ActivePeer {
             workers: false,
             profile: NodeProfile::Full,
             path: super::test_caps(),
+            mark: 0,
         };
         let bond = PeerKey::from_xonly(&noise_session.remote_static_xonly());
         let (rekey, _) = link_machine(
@@ -772,7 +782,9 @@ impl ActivePeer {
     /// node's own dial. A move onto this node's own dial that rebuilt the
     /// machine holds the peer on `dial`, the link it dialed (FRC-1201,
     /// Section 5.6), and the caller tears down the link it left. A move onto
-    /// an inbound leg keeps the peer on the link it holds.
+    /// an inbound leg keeps the peer on the link it holds. A move that
+    /// rebuilt the machine records `caps.mark` as the session's install mark
+    /// ([`predates`](Self::predates)).
     ///
     /// Returns the outputs that unbind, revoke and release what the closed
     /// machine held and bind (and offer) the new session, and the outputs of
@@ -811,6 +823,9 @@ impl ActivePeer {
         let old = node_fault!(MoveKeepsOldPair);
         if built && !inbound && !kept && !old {
             self.set_link_id(dial);
+        }
+        if built {
+            self.mark = caps.mark;
         }
         self.settle(&Transition::Move {
             dial,
@@ -1480,6 +1495,25 @@ impl ActivePeer {
             .as_ref()
             .and_then(LinkRekey::base)
             .map_or(0, |base| since(base).as_millis() as u32)
+    }
+
+    /// Whether the dial on `dial` was already in flight when the session the
+    /// link holds now was installed: its link id is below the node's next
+    /// link id then.
+    pub(crate) fn predates(&self, dial: LinkId) -> bool {
+        dial.as_u64() < self.mark
+    }
+
+    /// Whether a frame from this peer has authenticated under the session
+    /// the link holds now, or one it rekeyed from. Unlike [`heard`], a
+    /// cross-connection move starts this afresh: a frame heard under the
+    /// session the move left shows only that the peer held that one.
+    ///
+    /// [`heard`]: ActivePeer::heard
+    pub(crate) fn heard_on_session(&self) -> bool {
+        self.rekey
+            .as_ref()
+            .is_some_and(|rekey| rekey.view().rx_cur.is_some())
     }
 
     /// When the link's rekey machine last heard the peer: the last frame

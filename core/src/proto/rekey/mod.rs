@@ -497,6 +497,12 @@ pub struct View<'a, P: Profile, I> {
     pub peer_epoch: Option<[u8; 8]>,
     /// The last authenticated frame from the peer under any epoch.
     pub last_rx: Option<I>,
+    /// The last authenticated frame from the peer under the current epoch,
+    /// or under one this machine held before it by a cutover. `None` until
+    /// the first since the machine was built: a cross-connection move builds
+    /// a new machine, so a frame heard under the session it left is not
+    /// counted here, though it is in `last_rx`.
+    pub rx_cur: Option<I>,
     /// When the link was promoted (FMP).
     pub link_since: I,
     /// The current epoch; `None` while opening.

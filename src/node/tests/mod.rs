@@ -34,6 +34,7 @@ mod disconnect;
 mod discovery;
 mod discovery_msg1_cap;
 mod dns_mesh;
+mod double_dial;
 mod forged_initial_msg2;
 mod forwarding;
 mod fsp_envelope;

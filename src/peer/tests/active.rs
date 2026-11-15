@@ -595,6 +595,7 @@ fn every_session_change_carries_the_withheld_handshake_lines_and_restarts_the_co
         workers: false,
         profile: NodeProfile::Full,
         path: crate::peer::test_caps(),
+        mark: 0,
     };
     let _ = b.peer.move_session(
         next_recv,
@@ -920,6 +921,7 @@ fn cross_move(end: &mut End) {
         workers: false,
         profile: NodeProfile::Full,
         path: crate::peer::test_caps(),
+        mark: 0,
     };
     let (out, _) = end.peer.move_session(
         next_recv,
@@ -1120,6 +1122,7 @@ fn a_move_refused_for_a_session_of_another_key_rolls_the_counts_and_changes_noth
         workers: false,
         profile: NodeProfile::Full,
         path: crate::peer::test_caps(),
+        mark: 0,
     };
     let (out, paths) = b.peer.move_session(
         session_of_another_key(),
@@ -1182,6 +1185,7 @@ fn join_of_a_setup_of_another_key_builds_neither_machine() {
         workers: false,
         profile: NodeProfile::Full,
         path: crate::peer::test_caps(),
+        mark: 0,
     };
     let transport = TransportId::new(1);
     let setup = Setup {

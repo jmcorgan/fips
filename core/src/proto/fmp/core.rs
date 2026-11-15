@@ -328,6 +328,15 @@ pub struct OutboundSnapshot {
     /// Pre-evaluated cross-connection tie-break: our *outbound* connection wins
     /// (we are the smaller NodeAddr). Only meaningful when `has_existing_peer`.
     pub our_outbound_wins: bool,
+    /// The existing peer is held on a link this node dialled, this msg2's
+    /// dial was already in flight when the session held now was installed,
+    /// and no frame from the peer has authenticated under that session: this
+    /// msg2 answers a second dial of ours that was in flight beside the one
+    /// that installed it, and the peer may not yet hold that session. A
+    /// frame heard under a session a cross-connection move has since left
+    /// does not count, since it shows only that the peer held that one. Only
+    /// meaningful when `has_existing_peer`.
+    pub beside_own: bool,
 }
 
 /// A snapshot of the two identities the *initial outbound* `msg2` completion
@@ -498,6 +507,15 @@ pub enum OutboundDecision {
     /// Tear the stale peer down as on a restart and promote the completed
     /// outbound connection, without the tie-break.
     RestartThenPromote,
+    /// The existing peer came from another dial of ours that was in flight
+    /// beside this one, and nothing from the peer has authenticated under it:
+    /// keep the session it holds, free this dial's index, and send this dial
+    /// no msg3. The peer completes only the handshake whose msg3 it gets, so
+    /// both ends hold that one session whatever order the two transports
+    /// deliver in. Settled by the address order instead, the two ends would
+    /// each take the later (or each the earlier) of two completions they can
+    /// see in different orders, and could end on different sessions.
+    OwnDialKeep,
 }
 
 /// The classification outcome for one initiator-side *initial* `msg2`
@@ -683,10 +701,14 @@ impl Fmp {
                 //
                 // A rekey of ours in flight does NOT suppress the swap, and must
                 // not: this is one half of a two-sided tie-break whose other half
-                // is `establish_outbound`, which sees only `has_existing_peer` and
-                // the address ordering. Declining here while the peer's outbound
-                // half swaps anyway leaves the two ends on different sessions with
-                // neither holding the other's.
+                // is `establish_outbound`, which sees only `has_existing_peer`,
+                // the address ordering, and whether the initiator's session
+                // came from another dial of its own while this one was in
+                // flight and is unheard (in which case it sends this leg no
+                // msg3). Declining
+                // here while the peer's outbound half swaps anyway leaves the
+                // two ends on different sessions with neither holding the
+                // other's.
                 //
                 // The displaced rekey is the executor's to end: moving the session
                 // closes the link's rekey machine, which abandons any attempt in
@@ -724,11 +746,22 @@ impl Fmp {
     ///
     /// No existing same-identity peer is a net-new promote. One whose epoch on
     /// record differs from the msg2's has restarted, and is replaced whatever
-    /// the tie-break. Otherwise this is a cross-connection resolved by the
-    /// (pre-evaluated) tie-break: swap on a win, keep on a loss. That holds
-    /// for a second dial of a peer whose link an earlier dial of ours set up
-    /// too: the peer answers a fresh dial on a new leg, never as a rekey, and
-    /// resolves the dial's msg3 by the same address order at its end.
+    /// the tie-break. One whose session another dial of ours installed while
+    /// this one was in flight, and not heard under since, is kept, and this
+    /// dial sends no msg3 ([`OwnDialKeep`]): the two dials were in flight
+    /// together, and the peer can see their two msg3s in the other order
+    /// from the two msg2s here. Otherwise this is a cross-connection resolved
+    /// by the (pre-evaluated) tie-break: swap on a win, keep on a loss. That
+    /// holds for a dial of a peer whose session an earlier dial of ours
+    /// installed when this dial began only after the install, since its msg3
+    /// goes out at least a round trip after the earlier one's; and once the
+    /// peer has been heard under the session held, since it sent that frame
+    /// from the session it holds, so it holds that session before this
+    /// dial's msg3 can reach it. The peer answers the dial on a new leg,
+    /// never as a rekey, and resolves the msg3 by the same address order at
+    /// its end.
+    ///
+    /// [`OwnDialKeep`]: OutboundDecision::OwnDialKeep
     pub fn establish_outbound(
         &self,
         snap: &OutboundSnapshot,
@@ -739,6 +772,9 @@ impl Fmp {
         }
         if epochs_differ(snap.existing_peer_epoch, epoch) {
             return OutboundDecision::RestartThenPromote;
+        }
+        if snap.beside_own {
+            return OutboundDecision::OwnDialKeep;
         }
         if snap.our_outbound_wins {
             OutboundDecision::CrossConnectionSwap

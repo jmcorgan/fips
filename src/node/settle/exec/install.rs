@@ -331,6 +331,7 @@ impl Node {
                 params: path_params,
                 facts: &facts,
             },
+            mark: self.next_link_id,
         };
         ActivePeer::with_session(
             verified_identity,

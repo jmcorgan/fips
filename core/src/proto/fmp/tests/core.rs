@@ -392,6 +392,7 @@ fn establish_outbound_no_existing_peer_promotes() {
         has_existing_peer: false,
         existing_peer_epoch: None,
         our_outbound_wins: true,
+        beside_own: false,
     };
     assert_eq!(
         fmp.establish_outbound(&snap, None),
@@ -406,10 +407,49 @@ fn establish_outbound_cross_connection_win_swaps() {
         has_existing_peer: true,
         existing_peer_epoch: None,
         our_outbound_wins: true,
+        beside_own: false,
     };
     assert_eq!(
         fmp.establish_outbound(&snap, None),
         OutboundDecision::CrossConnectionSwap
+    );
+}
+
+/// A peer whose session another dial of ours installed while this one was
+/// in flight, unheard since, is kept, with no msg3 for this dial, whichever
+/// address is smaller.
+#[test]
+fn establish_outbound_second_own_dial_in_flight_at_the_install_keeps_without_msg3() {
+    let fmp = Fmp::new();
+    for our_outbound_wins in [true, false] {
+        let snap = OutboundSnapshot {
+            has_existing_peer: true,
+            existing_peer_epoch: None,
+            our_outbound_wins,
+            beside_own: true,
+        };
+        assert_eq!(
+            fmp.establish_outbound(&snap, None),
+            OutboundDecision::OwnDialKeep,
+            "our_outbound_wins = {our_outbound_wins}"
+        );
+    }
+}
+
+/// A restart outranks the own-dial keep: a msg2 at another epoch replaces
+/// the stale peer.
+#[test]
+fn establish_outbound_restart_outranks_the_own_dial_keep() {
+    let fmp = Fmp::new();
+    let snap = OutboundSnapshot {
+        has_existing_peer: true,
+        existing_peer_epoch: Some([1; 8]),
+        our_outbound_wins: false,
+        beside_own: true,
+    };
+    assert_eq!(
+        fmp.establish_outbound(&snap, Some([2; 8])),
+        OutboundDecision::RestartThenPromote
     );
 }
 
@@ -420,6 +460,7 @@ fn establish_outbound_cross_connection_loss_keeps() {
         has_existing_peer: true,
         existing_peer_epoch: None,
         our_outbound_wins: false,
+        beside_own: false,
     };
     assert_eq!(
         fmp.establish_outbound(&snap, None),

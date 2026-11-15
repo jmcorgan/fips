@@ -75,7 +75,7 @@ use std::fmt;
 /// One breach of a property, naming the node (by index in the test's
 /// slice) whose maps show it.
 #[derive(Clone, PartialEq, Eq)]
-pub(super) enum Breach {
+pub(in crate::node::tests) enum Breach {
     /// `OneSession`, first clause: `node` and `peer` hold each other, but
     /// not on one session, or a heartbeat sent now does not authenticate.
     Split {
@@ -258,7 +258,22 @@ pub(super) async fn audit(nodes: &mut [TestNode]) -> Vec<Breach> {
 /// Fail the test, marked as the defect, if [`audit`] reports any breach at
 /// `step`.
 pub(in crate::node::tests) async fn assert_coherent(nodes: &mut [TestNode], step: &str) {
-    let breaches = audit(nodes).await;
+    assert_coherent_but(nodes, step, |_| false).await;
+}
+
+/// [`assert_coherent`], passing only the breaches `known` matches: a test
+/// that reaches a defect outside its subject names that defect's breach
+/// here, narrowly, and any other breach at `step` still fails it.
+pub(in crate::node::tests) async fn assert_coherent_but(
+    nodes: &mut [TestNode],
+    step: &str,
+    known: impl Fn(&Breach) -> bool,
+) {
+    let breaches: Vec<Breach> = audit(nodes)
+        .await
+        .into_iter()
+        .filter(|breach| !known(breach))
+        .collect();
     assert!(
         breaches.is_empty(),
         "defect: incoherent at {step}: {breaches:#?}"

@@ -60,6 +60,7 @@ fn promoted_peer(is_initiator: bool, link_stats: LinkStats) -> ActivePeer {
         workers: false,
         profile: NodeProfile::Full,
         path: test_caps(),
+        mark: 0,
     };
     let built = ActivePeer::with_session(
         identity,

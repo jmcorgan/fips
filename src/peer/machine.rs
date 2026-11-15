@@ -57,7 +57,10 @@
 //! The outbound completion is routed through the machine the same way:
 //! `handle_msg2` crystallizes the learned identity, builds an
 //! [`OutboundSnapshot`], and steps the persistent machine once; the machine
-//! computes the establish decision via `establish_outbound`. A net-new
+//! computes the establish decision via `establish_outbound`. The shell reads
+//! the same pure decision from the same snapshot once before the msg3 goes,
+//! only to send no msg3 on an [`OwnDialKeep`](OutboundDecision::OwnDialKeep),
+//! which the machine resolves as a keep. A net-new
 //! completion promotes through [`PromoteToActive`](PeerAction::PromoteToActive)
 //! (the executor feeds the outcome back via
 //! [`PromotionResolved`](PeerEvent::PromotionResolved)), while a
@@ -1748,6 +1751,14 @@ impl PeerMachine {
                 // frees the unused outbound index.
                 vec![PeerAction::ResolveCrossConnection { swap: false }]
             }
+            OutboundDecision::OwnDialKeep => {
+                // Another dial of ours installed the held session while this
+                // one was in flight, unheard since: the shell sent this dial
+                // no msg3, and
+                // keeps the held session as on a lost crossing, freeing this
+                // dial's index.
+                vec![PeerAction::ResolveCrossConnection { swap: false }]
+            }
         }
     }
 
@@ -2159,6 +2170,7 @@ mod tests {
                 out: OutboundSnapshot {
                     has_existing_peer: false,
                     our_outbound_wins: false,
+                    beside_own: false,
                     existing_peer_epoch: None,
                 },
             },
@@ -2200,6 +2212,7 @@ mod tests {
                 out: OutboundSnapshot {
                     has_existing_peer: false,
                     our_outbound_wins: false,
+                    beside_own: false,
                     existing_peer_epoch: None,
                 },
             },
@@ -2245,6 +2258,7 @@ mod tests {
                 out: OutboundSnapshot {
                     has_existing_peer: true,
                     our_outbound_wins: true,
+                    beside_own: false,
                     existing_peer_epoch: None,
                 },
             },
@@ -2284,6 +2298,7 @@ mod tests {
                 out: OutboundSnapshot {
                     has_existing_peer: true,
                     our_outbound_wins: false,
+                    beside_own: false,
                     existing_peer_epoch: None,
                 },
             },
@@ -2815,6 +2830,7 @@ mod tests {
                 out: OutboundSnapshot {
                     has_existing_peer: false,
                     our_outbound_wins: false,
+                    beside_own: false,
                     existing_peer_epoch: None,
                 },
             },
@@ -2922,6 +2938,7 @@ mod tests {
                 out: OutboundSnapshot {
                     has_existing_peer: false,
                     our_outbound_wins: false,
+                    beside_own: false,
                     existing_peer_epoch: None,
                 },
             },

@@ -24,8 +24,8 @@ use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, bu
 use crate::proto::fmp::{
     DialMsg2Reject, DialMsg2Snapshot, Disconnect, DisconnectReason,
     EPOCH_RESTART_MIN_INTERVAL_SECS, EstablishSnapshot, InboundDecision, InboundReject, LegStamp,
-    Msg1Digest, NegotiationPayload, OutboundSnapshot, PromotionResult, RekeyClaim, WireOutcome,
-    cross_connection_winner, decide_fmp_negotiation,
+    Msg1Digest, NegotiationPayload, OutboundDecision, OutboundSnapshot, PromotionResult,
+    RekeyClaim, WireOutcome, cross_connection_winner, decide_fmp_negotiation,
 };
 use crate::proto::settle::output::Why;
 use crate::time::HostClock;
@@ -38,11 +38,18 @@ use tracing::{debug, info, warn};
 
 impl Node {
     /// Snapshot the registry state the outbound establish decision reads about
-    /// `peer_addr`: whether the identity is already an active peer, and the
+    /// `peer_addr`: whether the identity is already an active peer, the
     /// pre-evaluated cross-connection tie-break for THIS outbound connection
     /// (`is_outbound = true`), resolved into a plain `bool` here so the core
-    /// stays free of the peer helper.
-    fn outbound_snapshot(&self, peer_addr: &NodeAddr) -> OutboundSnapshot {
+    /// stays free of the peer helper, and whether the msg2 of `dial` answers
+    /// a dial that was in flight beside the one the held session came from,
+    /// with nothing heard under that session since: the held peer sits on a
+    /// link of our own dial, `dial` was already in flight when that session
+    /// was installed, at its promotion or at the cross-connection move onto
+    /// it, and no frame from the peer has authenticated under it. A frame
+    /// heard under a session a move has since left does not count: it shows
+    /// only that the peer held that session, not the one moved to.
+    fn outbound_snapshot(&self, peer_addr: &NodeAddr, dial: LinkId) -> OutboundSnapshot {
         let existing = self.peers.get(peer_addr);
         OutboundSnapshot {
             has_existing_peer: existing.is_some(),
@@ -52,6 +59,20 @@ impl Node {
                 peer_addr,
                 true,
             ),
+            // The last two conditions carry the rule. The first only narrows
+            // the keep to the race it is for: a node holding the peer on an
+            // inbound link sent that session no msg3, and the peer, whose
+            // dial it was, completed it first and holds it, so the two ends
+            // end on one session whether this dial is kept or settled by
+            // address order.
+            beside_own: existing.is_some_and(|p| {
+                p.predates(dial)
+                    && !p.heard_on_session()
+                    && self
+                        .links
+                        .get(&p.link_id())
+                        .is_some_and(|link| link.direction() == LinkDirection::Outbound)
+            }),
         }
     }
 
@@ -935,7 +956,7 @@ impl Node {
         // The leg is stamped on the interval clock from here, beside the
         // wall stamp it keeps.
         let interval_ms = Self::interval_ms();
-        let (peer_identity, dialed_peer, msg3_bytes, our_index) = {
+        let (peer_identity, dialed_peer, msg3_bytes, our_index, epoch) = {
             let Some(machine) = self.peer_machines.get_mut(&link_id) else {
                 warn!(link_id = %link_id, "Connection removed during msg2 processing");
                 self.pending_outbound.forget(&key);
@@ -1082,8 +1103,9 @@ impl Node {
             };
 
             let our_index = machine.our_index();
+            let epoch = machine.conn_remote_epoch();
 
-            (peer_identity, dialed_peer, msg3_bytes, our_index)
+            (peer_identity, dialed_peer, msg3_bytes, our_index, epoch)
         };
 
         let peer_node_addr = *peer_identity.node_addr();
@@ -1169,13 +1191,31 @@ impl Node {
             return;
         }
 
+        // The snapshot the establish decision below reads, taken before the
+        // msg3 goes: nothing between here and the decision changes it. A
+        // second dial of ours that was already in flight when another dial of
+        // ours installed the held session, with nothing heard under it since,
+        // sends no msg3, so the peer completes only the handshake the held
+        // session came from, whatever order the two transports deliver the
+        // msg3s in (`OutboundDecision::OwnDialKeep`).
+        let out_snap = self.outbound_snapshot(&peer_node_addr, link_id);
+        let withhold =
+            self.fmp.establish_outbound(&out_snap, epoch) == OutboundDecision::OwnDialKeep;
+
         // Build and send msg3, on the msg2's connection. A reply on the rx
         // loop, so it never dials: with that connection gone the send fails
         // at once and the sweep reclaims the handshake, as on any send failure.
         let our_index = our_index.unwrap_or(header.receiver_idx);
         let wire_msg3 = build_msg3(our_index, header.sender_idx, &msg3_bytes);
 
-        if let Some(transport) = self.transports.get(&packet.transport_id) {
+        if withhold {
+            debug!(
+                peer = %self.peer_display_name(&peer_node_addr),
+                link_id = %link_id,
+                their_index = %header.sender_idx,
+                "Second dial of ours, in flight when another dial installed the peer, unheard since: keeping the held session, no msg3"
+            );
+        } else if let Some(transport) = self.transports.get(&packet.transport_id) {
             match transport
                 .send_existing(&packet.remote_addr, &wire_msg3)
                 .await
@@ -1229,8 +1269,11 @@ impl Node {
         // outbound = the loser's inbound).
         //
         // The same holds when the peer was promoted via an earlier dial of
-        // ours: the peer answers this later dial on a fresh leg and resolves
-        // its msg3 by the same address order.
+        // ours and this dial began after that, or the peer has been heard
+        // under the session held: the peer answers this dial on a fresh leg
+        // and resolves its msg3 by the same address order. A dial already in
+        // flight when a dial of ours installed the held session, with nothing
+        // heard under it since, is kept, and sent no msg3 (above).
         // The machine is the sole computation site of the establish decision:
         // the shell builds the outbound snapshot, steps the machine once here,
         // and routes on the returned decision — a cross-connection resolves as
@@ -1242,7 +1285,6 @@ impl Node {
         // executor's `PromoteToActive` arm can feed `PromotionResolved` back
         // via the same lookup; the `pending_outbound` lifecycle stays
         // shell-side — the machine never touches it.
-        let out_snap = self.outbound_snapshot(&peer_node_addr);
         let actions = match self.peer_machines.get_mut(&link_id) {
             Some(machine) => {
                 machine.crystallize_identity(peer_identity);
@@ -1387,6 +1429,7 @@ impl Node {
                             params: path_params,
                             facts: &facts,
                         },
+                        mark: self.next_link_id,
                     };
                     let (out, paths) = peer.move_session(
                         outbound_session,
@@ -1445,15 +1488,22 @@ impl Node {
                     return;
                 }
             } else {
-                // We're the larger node. Keep our inbound session (it pairs
-                // with the peer's outbound, which is the winning handshake).
+                // Keep the held session. Either we're the larger node, and
+                // keep our inbound session (it pairs with the peer's
+                // outbound, which is the winning handshake), or this is an
+                // own-dial keep (`withhold`): another dial of ours installed
+                // the session held while this one was in flight, nothing has
+                // been heard under it since, and this dial sent no msg3, so
+                // the peer completes only that session's handshake.
                 //
                 // Do NOT update their_index here. Our their_index was set during
                 // promote_connection() from the peer's msg1 sender_idx, which is
                 // the peer's outbound our_index. After the peer (winner) swaps to
                 // their outbound session, that index is exactly what they'll use.
                 // The msg2 sender_idx we see here is the peer's INBOUND our_index,
-                // which becomes stale after the peer swaps.
+                // which becomes stale after the peer swaps. At an own-dial keep
+                // it is the peer's index for this dial's leg, which ends
+                // unanswered.
                 let mut run = crate::node::settle::exec::Run::new(
                     peer_node_addr,
                     crate::node::settle::table::Transition::Keep {
@@ -1468,6 +1518,20 @@ impl Node {
                 facts.loser = Some(link_id);
                 facts.outcome = Some(CrossConnOutcome::Keep);
                 self.run(&mut run).await;
+                if withhold {
+                    // The msg2 authenticated the peer at the dial's pair, and
+                    // nothing else offers that pair: without it the peer's
+                    // next beacon there reads as a stranger's and is dialled
+                    // again. The heard feed offers it to the peer's link as a
+                    // path, unlisted again once the peer goes unheard there.
+                    self.intake(
+                        &peer_node_addr,
+                        crate::node::handlers::path_intake::Feed::Heard,
+                        packet.transport_id,
+                        packet.remote_addr.clone(),
+                    )
+                    .await;
+                }
                 return;
             }
 

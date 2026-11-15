@@ -624,6 +624,12 @@ impl Node {
                                     params: path_params,
                                     facts: &facts,
                                 },
+                                // Not needed for safety: only the larger
+                                // node moves here, where the address order
+                                // keeps the held session anyway, so an
+                                // own-dial keep this mark allows changes
+                                // only whether a msg3 is sent.
+                                mark: self.next_link_id,
                             };
                             let (out, paths) = peer_ref.move_session(
                                 session,

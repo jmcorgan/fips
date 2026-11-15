@@ -166,7 +166,8 @@ pub(crate) fn test_caps() -> PathCaps<'static> {
 /// allocator, its static keys, its address, the parameters a new link's
 /// machine is built with, the replay record it starts from, whether a
 /// decrypt-worker pool runs and the node's profile, which a rekey's msg3
-/// carries; and what building its path machine reads.
+/// carries; what building its path machine reads; and the node's next link
+/// id, which the session installed records.
 pub(crate) struct LinkCaps<'a> {
     /// The node's session-index allocator.
     pub(crate) indices: &'a mut IndexAllocator,
@@ -188,6 +189,10 @@ pub(crate) struct LinkCaps<'a> {
     pub(crate) profile: crate::proto::fmp::NodeProfile,
     /// What the link's path machine is built with.
     pub(crate) path: PathCaps<'a>,
+    /// The node's next link id. A session built or moved with these caps
+    /// records it, so a dial whose link id is below it was already in
+    /// flight when that session was installed.
+    pub(crate) mark: u64,
 }
 
 // ============================================================================
