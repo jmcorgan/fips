@@ -86,13 +86,16 @@ helper that seeds a handshake machine by hand.
 - `explore.rs`: the explorer. `paths` gives a start's scripted path and one
   path per variation, `walk` runs one path to its leaf (`build` and
   `walk_from` are its two halves, for a world a test made itself), and
-  `heal` heals the leaf (below); `parallel` runs walks on threads of their
-  own, each with an 8 MiB stack, since a walk in a debug build comes within
-  a few per cent of the default 2 MiB. Its
-  tests: the map covers every pinned defect and every core start number,
-  and every start reaches its target: its scripted path runs to its end on
-  its transport, and the explorer walks the number of paths the start
-  states, in both orders and at both settings.
+  `heal` heals the leaf (below); `spawn_walk` starts one walk on a thread
+  of its own, with an 8 MiB stack, since a walk in a debug build comes
+  within a few per cent of the default 2 MiB, and a runtime of its own, once
+  fewer than `WALKS_AT_ONCE` walks run in the process (below); `parallel`
+  runs a job per start and order that way and gathers what they found. Its
+  tests: the map covers every pinned defect and every core start number;
+  every start reaches its target: its scripted path runs to its end on its
+  transport, and the explorer walks the number of paths the start states,
+  in both orders and at both settings; and no more than `WALKS_AT_ONCE`
+  walks run at once.
 - `oracle.rs`: what is checked at each leaf (`judge`), and the explorer's
   tests over the starts: every path of every start keeps its properties, per
   transport and setting; each pinned defect the map gives a start is found
@@ -188,6 +191,25 @@ its own, each with its own runtime, and so its own test clock: a loopback
 start takes 3 to 11 s, a TCP or BLE crossing 23 s, and the whole module 23 s
 of wall time, inside the default lane's 120 s, in nextest's `node-synthetic`
 group with the rest of `settle`. Nothing here is `long-running`.
+
+## How many walks run at once
+
+Every walk, `parallel`'s and `parity.rs`'s alike, starts through
+`spawn_walk`, which holds it until fewer than `WALKS_AT_ONCE` (16) walks run
+in the process, across every test. By the counts measured, a walk holds two
+epoll instances and an eventfd and its nodes' sockets: about five
+descriptors on the loopback and up to eleven on TCP. The reach test alone
+runs 36 jobs, and under `cargo test` libtest runs as many tests at once as
+the host has CPUs, so without the bound the walks of every walking test ran
+together and the process's descriptor peak grew with the host: on a 20-CPU
+host the walking tests together reached the unit tests' open-file limit of
+512, and five of them failed. With the bound the walks hold at most 16
+walks' worth wherever they run, and the limit (`testing/unit-fd-limit.sh`)
+is sized from it. Measured 2026-11-15 on 12 cores, each test alone: the
+reach test held 173 descriptors at most before and 93 after, the parity
+tests 103 and 93, every other test here no more than 85 either way, and
+each took about as long as before (the reach test 10 s, a TCP or BLE
+properties test 22 to 24 s), since a walk spends most of its time waiting.
 
 Not covered by this design: an exhaustive search (a joint start explores
 562 to 78,926 states, `fips-core`'s `proto::settle::tests::joint`), two
