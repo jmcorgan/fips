@@ -155,9 +155,19 @@ impl OnLinkPrefixes {
                         | if_addrs::IfOperStatus::LowerLayerDown
                 )
             })
-            .map(|iface| match &iface.addr {
-                if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), v4.prefixlen, iface.index),
-                if_addrs::IfAddr::V6(v6) => (IpAddr::V6(v6.ip), v6.prefixlen, iface.index),
+            .map(|iface| {
+                let (ip, len) = match &iface.addr {
+                    if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), v4.prefixlen),
+                    if_addrs::IfAddr::V6(v6) => (IpAddr::V6(v6.ip), v6.prefixlen),
+                };
+                if len == 0 {
+                    debug!(
+                        interface = %iface.name,
+                        address = %ip,
+                        "interface prefix undecodable; discarded"
+                    );
+                }
+                (ip, len, iface.index)
             })
             .collect();
         let considered = entries.len();
@@ -221,11 +231,15 @@ impl OnLinkPrefixes {
     }
 }
 
-/// Whether an interface read produced a set that cannot be trusted: some
-/// entry was discarded for a zero prefix length, or `considered` interface
-/// addresses passed the filters and none of them survived.
+/// Whether an interface read produced a set that cannot be trusted: the
+/// system read failed, or `considered` interface addresses passed the filters
+/// and none of them survived.
+///
+/// Some entries discarded for a zero prefix length while others survive is
+/// not suspect. macOS hands back a VPN `utun` interface's netmask in a form
+/// the reader turns into /0, and the other interfaces still read correctly.
 pub fn read_suspect(considered: usize, set: &OnLinkPrefixes) -> bool {
-    set.discarded > 0 || (considered > 0 && set.is_empty())
+    set.failed || (considered > 0 && set.is_empty())
 }
 
 #[cfg(test)]
@@ -321,12 +335,24 @@ mod tests {
     }
 
     #[test]
-    fn a_discarded_zero_length_prefix_or_an_empty_read_is_reported() {
-        let partly = set(&[("192.168.1.1", 0), ("10.0.0.1", 8)]);
+    fn a_read_is_suspect_only_when_it_failed_or_left_no_usable_prefix() {
+        // A Mac with a VPN up: its utun prefix reads /0 and is dropped, while
+        // the Wi-Fi prefix reads correctly.
+        let partly = set(&[("10.8.0.2", 0), ("192.168.1.10", 24)]);
         assert_eq!(partly.discarded(), 1);
-        assert!(read_suspect(2, &partly));
+        assert!(partly.contains(ip("192.168.1.7")));
+        assert!(
+            !read_suspect(2, &partly),
+            "a partial discard is not suspect"
+        );
+
+        let all_dropped = set(&[("10.8.0.2", 0), ("10.9.0.2", 0)]);
+        assert_eq!(all_dropped.discarded(), 2);
+        assert!(read_suspect(2, &all_dropped));
+
         assert!(read_suspect(2, &OnLinkPrefixes::default()));
         assert!(!read_suspect(0, &OnLinkPrefixes::default()));
+        assert!(read_suspect(0, &OnLinkPrefixes::failed()));
         let healthy = set(&[("10.0.0.1", 8)]);
         assert!(!read_suspect(1, &healthy));
     }
