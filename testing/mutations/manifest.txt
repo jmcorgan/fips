@@ -354,6 +354,7 @@ HeartbeatsOnStdClock	red	fips-mesh	node::tests::settle::explore::oracle::a_cross
 HeartbeatsOnStdClock	red	fips-mesh	node::tests::settle::explore::oracle::a_crossing_with_the_worker_pool_started_offers_the_moved_session_with_multipath_on
 WorldSkipsWorkerWait	red	fips-mesh	node::tests::settle::explore::oracle::a_crossing_whose_decrypt_workers_lag_heals_to_one_session_on_each_dropped_msg1_path
 WorldSkipsWorkerWait	red	fips-mesh	node::tests::settle::explore::oracle::a_crossing_whose_decrypt_workers_lag_heals_to_one_session_on_each_dropped_msg1_path_with_multipath_on
+DrainSkipsWorkerWait	red	fips-mesh	node::tests::spanning_tree::a_stepped_drain_returns_only_after_the_decrypt_workers_handled_what_they_were_sent
 MediumIgnored	red	fips-core	proto::path::tests::choice::a_cable_within_the_margin_of_a_better_scoring_wifi_takes_the_link_one_dwell_after_its_second_sample
 MediumIgnored	red	fips-core	proto::path::tests::choice::the_mandatory_change_takes_a_cable_within_the_margin_over_a_better_scoring_wifi
 MediumIgnored	red	fips-core	proto::path::tests::choice::a_path_outside_the_margin_of_the_best_gives_way_to_a_cable_within_it_whatever_its_medium

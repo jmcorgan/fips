@@ -900,6 +900,33 @@ impl DecryptWorkerPool {
         })
     }
 
+    /// A pool of one production worker that keeps every message it is sent
+    /// until it is sent a barrier, then handles them all in order before it
+    /// answers: the furthest a worker thread can lag its dispatcher, with no
+    /// real time in it. Unix only, as are the tests that hand sessions to the
+    /// workers.
+    #[cfg(unix)]
+    pub(crate) fn deferred() -> Self {
+        Self::start_with(1, |idx, rx| {
+            std::thread::Builder::new()
+                .name(format!("fips-decrypt-{idx}"))
+                .spawn(move || {
+                    let mut sessions = HashMap::new();
+                    let mut kept = Vec::new();
+                    while let Ok(msg) = rx.recv() {
+                        if matches!(msg, WorkerMsg::Barrier(_)) {
+                            for m in kept.drain(..) {
+                                handle_msg(idx, &mut sessions, m);
+                            }
+                            handle_msg(idx, &mut sessions, msg);
+                        } else {
+                            kept.push(msg);
+                        }
+                    }
+                })
+        })
+    }
+
     /// A pool of `n` workers that each sleep `lag` before they handle each
     /// job, then handle it as the production loop does: the shape of a
     /// worker thread descheduled before it decrypts, on a loaded host.
