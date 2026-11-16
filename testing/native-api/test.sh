@@ -1323,22 +1323,31 @@ check_echo_round_trip() {
 #
 # It runs on the two-node mesh because that is the only place a flow has a real
 # peer to resolve, a real port at each end, and counters nothing but the wire can
-# move. Both clients hold their *descriptors* open across the {"sleep":45} while
-# the check looks, because a flow is gone from the registry the moment its last
+# move. Both clients hold their *descriptors* open in a hold step while the
+# check looks, because a flow is gone from the registry the moment its last
 # descriptor closes, and a query against an empty registry would agree with a
 # publisher that dropped every field. The RPC connections are irrelevant to that:
 # a flow outlives the connection that opened it, and closing one releases
 # nothing.
+#
+# The hold ends when the check writes a release file into each client's socket
+# directory, so the clients leave on their own and must still exit cleanly. A
+# signal would end them sooner but fail that exit check. hold_max is the bound a
+# fixed sleep used to be, and a client that reaches it fails the check: the
+# release did not arrive, and the next run would quietly pay the whole bound.
 check_control_reports_the_flow() {
     local npub_a="$1" npub_b="$2"
     log "The control socket reports a live flow, its peer and its counters"
+
+    local release=flow-check.release hold_max=45
+    rm -f "$DIR_A/$release" "$DIR_B/$release"
 
     local listener='[
       {"command":"listen","params":{"local_port":4500},"keep_listener":"L",
        "expect":{"status":"ok"}},
       {"accept":"L","keep_fd":"a","expect":{"local_port":4500,"peer":"'"$npub_a"'"}},
       {"fd":"a","read":1,"expect_bytes":"a1b2c3"},
-      {"sleep":45}
+      {"hold":"/run/fips/'"$release"'","max":'"$hold_max"'}
     ]'
     local listener_log
     listener_log="$(mktemp)"
@@ -1357,7 +1366,7 @@ check_control_reports_the_flow() {
       {"command":"connect","params":{"peer":"'"$npub_b"'","remote_port":4500,"local_port":4501},
        "keep_fd":"a","expect":{"status":"ok"}},
       {"fd":"a","write":"a1b2c3"},
-      {"sleep":45}
+      {"hold":"/run/fips/'"$release"'","max":'"$hold_max"'}
     ]'
     local sender_log
     sender_log="$(mktemp)"
@@ -1450,9 +1459,16 @@ check_control_reports_the_flow() {
         query_control "$DIR_B" show_native_flows 2>&1 | tail -3
     fi
 
+    touch "$DIR_A/$release" "$DIR_B/$release"
     wait "$sender_pid" || { fail "the sender client did not exit cleanly"; tail -5 "$sender_log"; }
     wait "$listener_pid" || { fail "the listener client did not exit cleanly"; tail -5 "$listener_log"; }
-    rm -f "$sender_log" "$listener_log"
+    if grep -qF "releasing at the limit" "$sender_log" "$listener_log"; then
+        fail "a client held its flow for the whole ${hold_max} s: the release file never reached it"
+        grep -hF "releasing at the limit" "$sender_log" "$listener_log"
+    else
+        pass "both clients let go of the flow when the check released them"
+    fi
+    rm -f "$sender_log" "$listener_log" "$DIR_A/$release" "$DIR_B/$release"
 }
 
 check_disabled_by_default() {

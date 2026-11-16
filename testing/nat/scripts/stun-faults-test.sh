@@ -81,6 +81,10 @@ STUN_SUCCESS_RE='STUN observation succeeded'
 # still in flight under it, which fail after the clear, have logged their
 # failures well before phase 3's evidence window opens 4 s before its restart.
 P2_CLEAR_HOLD_SECS=10
+# The STUN client's response wait in a traversal attempt
+# (TRAVERSAL_STUN_TIMEOUT in src/nostr/stun.rs). A request sent under a fault
+# just before it is cleared logs its failure up to this long after.
+STUN_RESPONSE_WAIT_MS=2000
 
 cleanup() {
     # Best-effort tc/iptables cleanup before tearing the stack down.
@@ -339,6 +343,30 @@ await_stun_success() {
     return 0
 }
 
+# Wait for the fault-node to log a STUN fault (STUN_FAULT_RE) after since_ts,
+# an RFC 3339 time, for up to timeout_secs from the call. Returns 1, having
+# said why, when none appears.
+await_stun_fault() {
+    local since_ts="$1" timeout_secs="$2" start=$SECONDS
+    # One more second for the whole-second SECONDS clock, as above.
+    local deadline=$(( SECONDS + timeout_secs + 1 ))
+    local logs
+    while :; do
+        # A log that cannot be read holds no evidence. Case-blind, as in
+        # stun_fault_logged.
+        logs="$(docker logs --timestamps --since "$since_ts" "$NODE" 2>&1)" \
+            && grep -Eiq "$STUN_FAULT_RE" <<<"$logs" && break
+        if (( SECONDS >= deadline )); then
+            echo "no STUN fault in $NODE logs since $since_ts (waited ${timeout_secs}s): no attempt met the fault" >&2
+            return 1
+        fi
+        sleep 1
+    done
+    echo "  $NODE: STUN fault under the delay seen after $(( SECONDS - start ))s (since $since_ts):"
+    grep -Ei -m1 "$STUN_FAULT_RE" <<<"$logs" | sed 's/\x1b\[[0-9;]*m//g; s/^/    /' | cut -c1-200
+    return 0
+}
+
 # Wait until fips is running in both the fault-node and the fault-peer, for up
 # to timeout_secs. Says which container it is missing from when it gives up.
 wait_daemons_running() {
@@ -474,15 +502,31 @@ run_test() {
         return 1
     fi
     clear_drop
+    local p1_clear_ms
+    p1_clear_ms="$(date +%s%3N)"
 
     echo ""
     echo "=== Phase 2: delay 5000ms then clear (peer restart for clean STUN) ==="
     local p2_rc=0
     if apply_delay; then
+        # Only a fault logged after the restart counts, and none logged
+        # within STUN_RESPONSE_WAIT_MS of phase 1's clear, which may be from a
+        # request sent under the drop.
+        local p2_since_ms p2_since_ts
+        p2_since_ms="$(date +%s%3N)"
+        if (( p2_since_ms < p1_clear_ms + STUN_RESPONSE_WAIT_MS )); then
+            p2_since_ms=$(( p1_clear_ms + STUN_RESPONSE_WAIT_MS ))
+        fi
+        p2_since_ts="$(date -u -d "@$(( p2_since_ms / 1000 )).$(printf '%03d' $(( p2_since_ms % 1000 )))" +%Y-%m-%dT%H:%M:%S.%3NZ)"
         docker restart "$PEER" >/dev/null
         # The fault window: the fault-node's traversal attempts observe STUN
-        # under the delay, which outlasts the client's response wait.
-        sleep 12
+        # under the delay, which outlasts the client's response wait. Hold the
+        # delay until one has failed; recovery from a delay no attempt met
+        # would show nothing. The bound is phase 1's.
+        if ! await_stun_fault "$p2_since_ts" "$FAULT_WAIT_SECS"; then
+            dump_diagnostics
+            return 1
+        fi
         local p2_clear_ts p2_clear_ms
         p2_clear_ts="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
         p2_clear_ms="$(date +%s%3N)"
