@@ -7,6 +7,8 @@
 # skip; and --explorers= takes only core or root. --tier takes 1, 2 or 3 and
 # refuses every option that changes what runs; --plan needs a tier and prints
 # that tier's stages, and no tier a push starts (1 or 2) lists an explorer.
+# --part takes one of the three parts of tier 3 and needs that tier, and each
+# part's plan lists exactly its own results.
 #
 # Every case invokes ci-local.sh with arguments that end during parsing, before
 # the load sampler, traps, containers or any build, so the suite is hermetic and
@@ -191,6 +193,59 @@ FIPS_CI_SLOW_TESTS=1 FIPS_CI_ROOT_TESTS=1 expect_plan "--tier 1 under FIPS_CI_SL
     "root-tests" "mutations" --tier 1 --plan
 check "--tier 1 under FIPS_CI_SLOW_TESTS=1: says the switches are ignored" \
     "$(grep -qF -- "FIPS_CI_* switches in the environment are ignored" <<<"$ERR" && echo 0 || echo 1)"
+# --part: one share of tier 3, so it needs that tier and a known name; the Tor
+# suites go with the chaos part alone.
+expect_usage_error "--part without a value" "--part needs a value" --tier 3 --part
+expect_usage_error "--part with an unknown name" \
+    "--part takes core-explorers, root-explorers or chaos, not: bogus" --tier 3 --part bogus
+expect_usage_error "--part without a tier" "--part needs --tier 3" --part chaos
+expect_usage_error "--part with --tier 2" "--part needs --tier 3" --tier 2 --part chaos
+expect_usage_error "--part --plan without a tier" "--part needs --tier 3" --part chaos --plan
+expect_usage_error "--part core-explorers with --with-tor" \
+    "--with-tor combines only with --part chaos" --tier 3 --part core-explorers --with-tor
+expect_usage_error "--part root-explorers with --with-tor" \
+    "--with-tor combines only with --part chaos" --with-tor --part root-explorers --tier 3
+expect_usage_error "--part with --slow-tests" \
+    "--tier 3 cannot be combined with --slow-tests" --tier 3 --part chaos --slow-tests
+
+# Each part's plan is exactly its own results. The chaos part's count comes
+# from ci-local.sh's own arrays: each CI scenario NIGHTLY_CHAOS_RUNS times,
+# the long scenarios, and the integration build.
+expect_part_plan() {
+    local name="$1" want="$2"
+    shift 2
+    invoke "$@"
+    check "$name: exits 0" "$([ "$RC" -eq 0 ] && echo 0 || echo 1)" "rc=$RC"
+    local got
+    got="$(grep -v '^#' <<<"$OUT" | tr '\n' ' ' | sed 's/ $//')"
+    check "$name: lists exactly $want" "$([ "$got" = "$want" ] && echo 0 || echo 1)" "got: $got"
+    return 0
+}
+expect_part_plan "--part core-explorers --plan" "core-explorers" \
+    --tier 3 --part core-explorers --plan
+expect_part_plan "--part root-explorers --plan" "root-explorers mutations-explorers" \
+    --tier 3 --part root-explorers --plan
+FIPS_CI_TIER=3 expect_part_plan "FIPS_CI_TIER=3 --part root-explorers --plan" \
+    "root-explorers mutations-explorers" --part root-explorers --plan
+n_chaos=$(invoke --list; grep -c '^    chaos-' <<<"$OUT")
+n_runs=$(sed -n 's/^NIGHTLY_CHAOS_RUNS=\([0-9]*\)$/\1/p' "$CI_LOCAL")
+n_long=$(sed -n '/^NIGHTLY_LONG=(/,/^)/p' "$CI_LOCAL" | grep -c '^    "')
+want_chaos=$(( n_chaos * n_runs + n_long + 1 ))
+invoke --tier 3 --part chaos -j 2 --plan
+check "--part chaos -j 2 --plan: exits 0" "$([ "$RC" -eq 0 ] && echo 0 || echo 1)" "rc=$RC"
+plan_lines="$(grep -v '^#' <<<"$OUT")"
+check "--part chaos --plan: lists $want_chaos results ($n_chaos scenarios x $n_runs, $n_long long, the build)" \
+    "$([ "$(grep -c . <<<"$plan_lines")" -eq "$want_chaos" ] && [ "$want_chaos" -gt 1 ] && echo 0 || echo 1)" \
+    "got $(grep -c . <<<"$plan_lines")"
+check "--part chaos --plan: starts with build-integration" \
+    "$([ "$(head -n 1 <<<"$plan_lines")" = build-integration ] && echo 0 || echo 1)"
+check "--part chaos --plan: lists the batch and the long scenarios" \
+    "$(grep -qx chaos-batch1-tcp-mesh <<<"$plan_lines" && grep -qx chaos-dead-grace-long <<<"$plan_lines" && echo 0 || echo 1)"
+check "--part chaos --plan: lists no Tor suite" \
+    "$(grep -qx tor-socks5 <<<"$plan_lines" && echo 1 || echo 0)"
+expect_plan "--part chaos --with-tor --plan" "tor-socks5 tor-directory chaos-maelstrom build-integration" \
+    "core-explorers unit-tests ci-parity" --tier 3 --part chaos --with-tor --plan
+
 check "--tier 1 --plan: core-fence-tests without slow-tests" \
     "$(invoke --tier 1 --plan; grep -qF -- "slow-tests feature" <<<"$OUT" && echo 1 || echo 0)"
 check "--tier 2 --plan: core-fence-tests with slow-tests" \

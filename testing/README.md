@@ -296,6 +296,29 @@ a container, the environment switches (`FIPS_CI_BAREMETAL`,
 changes what runs is refused with exit 2; only `-j`, `--plan` and, at tier 3,
 `--with-tor` combine with it.
 
+Tier 3 is too long for one builder slot, so it also comes in parts, each run
+alone on a fresh checkout by `--tier 3 --part <name>`:
+
+- `testing/ci-local.sh --tier 2`: tier 2, guards and build stage included.
+- `testing/ci-local.sh --tier 3 --part core-explorers`: `core-explorers`.
+- `testing/ci-local.sh --tier 3 --part root-explorers`: `root-explorers` and
+  `mutations-explorers`.
+- `testing/ci-local.sh --tier 3 --part chaos`: `build-integration`, the
+  chaos batch and the long scenarios (with `--with-tor`, the Tor suites).
+
+Together the four record exactly what `--tier 3` records, and
+[`lib/ci-plan-test.sh`](lib/ci-plan-test.sh) holds them to that: no result of
+tier 3 is missing from every part, no part lists a result tier 3 does not,
+and no two parts share a result but `build-integration`, which the chaos
+part builds for itself. The on-demand explorer job is the two explorer
+parts. A part runs no guards and no build stage, since the nightly's tier 2
+part runs those on the same tree; a part whose plan lists nothing of its
+own exits 1, and the chaos part fails before building when it has no
+scenario. A single explorer half streams its output as it runs. `-j` and
+`--plan` combine with any part, `--with-tor` only with `chaos`. A builder
+can test a tree for parts with `testing/ci-local.sh --tier 3 --part chaos
+--plan`, which exits 0 on a tree that has them and 2 on one that does not.
+
 `--tier <n> --plan` prints the results a green run of that tier records, in
 order, and exits without running anything. It reads the same switches and
 suite arrays the run does, and a green tier run is held to it: if the

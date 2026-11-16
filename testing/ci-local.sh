@@ -30,6 +30,23 @@
 #                        3. FIPS_CI_TIER=<n> in the environment does the same.
 #                        No tier runs the explorers from a push: tier 3 is
 #                        the nightly run.
+#   --part <name>        With --tier 3, run one part of the nightly run, so a
+#                        builder can spread it over more than one slot. The
+#                        parts, with --tier 2, record together exactly what
+#                        --tier 3 records (testing/lib/ci-plan-test.sh holds
+#                        them to that), and each runs alone on a fresh
+#                        checkout:
+#                          core-explorers  fips-core's explorer half
+#                          root-explorers  the root crate's explorer half and
+#                                          the mutation lane's explorer lines
+#                          chaos           the integration build, the chaos
+#                                          batch and the long scenarios; with
+#                                          --with-tor, the Tor suites too
+#                        A part runs no guards and no build stage: the
+#                        nightly's tier 2 part runs those on the same tree.
+#                        --plan prints a part's results. -j and --plan
+#                        combine with any part, --with-tor only with chaos.
+#                        A part whose plan lists nothing of its own exits 1.
 #   --plan               With --tier, print the stages the run would record,
 #                        in order, and exit without running anything. A green
 #                        tier run fails if what it recorded differs from this
@@ -190,8 +207,9 @@
 #   2   — usage error (unknown option, missing value, unknown --rerun suite,
 #         an option --rerun cannot be combined with, --build-only with
 #         --root-tests or --explorers, a tier other than 1, 2 or 3, an
-#         option --tier cannot be combined with, or --plan without --tier);
-#         nothing ran
+#         option --tier cannot be combined with, --plan without --tier, an
+#         unknown --part, --part without --tier 3, or --with-tor with a part
+#         other than chaos); nothing ran
 #   130 — interrupted by SIGINT  (128 + 2;  run was cancelled, not a failure)
 #   143 — terminated by SIGTERM  (128 + 15; run was cancelled, not a failure)
 #
@@ -272,6 +290,8 @@ ONLY_GIVEN=false
 # The tier asked for, if any, and whether only its plan is wanted.
 TIER=""
 PLAN=false
+# The part of tier 3 asked for, if any (--part).
+PART=""
 # Options given on the command line that choose what runs, which --tier
 # refuses; the environment switches are not among them.
 GIVEN=()
@@ -534,8 +554,36 @@ nightly_chaos() {
             echo "batch$i-${parts[0]} ${parts[*]:1}"
         done
     done
-    printf '%s\n' "${NIGHTLY_LONG[@]}"
+    # Guarded: printf with no arguments still prints one empty line.
+    (( ${#NIGHTLY_LONG[@]} )) && printf '%s\n' "${NIGHTLY_LONG[@]}"
     return 0
+}
+
+# The results a green run of one part of tier 3 ($PART) records, in the form
+# print_plan uses. With --tier 2, the parts record exactly what tier 3
+# records, and no two share a result but build-integration, which the chaos
+# part builds for itself on a fresh checkout.
+print_part_plan() {
+    local entry
+    echo "# ci-local.sh --tier 3 --part $PART: the results a green run records, in order"
+    case "$PART" in
+        core-explorers)
+            echo core-explorers ;;
+        root-explorers)
+            printf '%s\n' root-explorers mutations-explorers ;;
+        chaos)
+            echo build-integration
+            while read -r entry; do echo "chaos-${entry%% *}"; done < <(nightly_chaos)
+            [[ "$WITH_TOR" == true ]] && printf '%s\n' "${TOR_SUITES[@]}"
+            ;;
+    esac
+    return 0
+}
+
+# Whether the part's plan lists a result of its own, build-integration aside:
+# a part that would record only the shared build has nothing to run.
+part_has_work() {
+    print_part_plan | grep -v '^#' | grep -qvx build-integration
 }
 
 # The results a green run with the current options records, in the order it
@@ -544,6 +592,7 @@ nightly_chaos() {
 # does, and a green tier run is held to it (check_plan).
 print_plan() {
     local g t entry s
+    [[ -n "$PART" ]] && { print_part_plan; return 0; }
     echo "# ci-local.sh --tier $TIER: the results a green run records, in order"
     for g in "${GUARDS[@]}"; do echo "${g#* }"; done
     printf '%s\n' nft-syntax build fmt clippy clippy-default-features \
@@ -620,6 +669,27 @@ apply_tier() {
     return 0
 }
 
+# Set the switches for one part of tier 3 ($PART), after apply_tier: only
+# the part's own stages run. The chaos part keeps NIGHTLY on, which the
+# teardown reads to derive the batch's host interface names.
+apply_part() {
+    BAREMETAL=false
+    CROSS_CHECK=false
+    ROOT_TESTS=false
+    SLOW_TESTS=false
+    MUTATIONS=false
+    MUSL=false
+    SKIP_INTEGRATION=true
+    EXPLORERS=""
+    NIGHTLY=false
+    case "$PART" in
+        core-explorers) EXPLORERS=core ;;
+        root-explorers) EXPLORERS=root ;;
+        chaos)          NIGHTLY=true ;;
+    esac
+    return 0
+}
+
 # ── Parse arguments ────────────────────────────────────────────────────────
 
 # The environment switch is for runners that cannot pass --baremetal, such as
@@ -656,6 +726,7 @@ while [[ $# -gt 0 ]]; do
         --only)             need_value "$@"; ONLY_SUITE="$2"; ONLY_GIVEN=true; GIVEN+=("$1"); shift 2 ;;
         --rerun)            need_value "$@"; ONLY_SUITE="$2"; RERUN=true; GIVEN+=("$1"); shift 2 ;;
         --tier)             need_value "$@"; TIER="$2"; shift 2 ;;
+        --part)             need_value "$@"; PART="$2"; shift 2 ;;
         --plan)             PLAN=true; shift ;;
         -j|--jobs)          need_value "$@"; PARALLEL_JOBS="$2"; shift 2 ;;
         --list)             list_suites ;;
@@ -665,6 +736,19 @@ while [[ $# -gt 0 ]]; do
         *)                  usage_error "Unknown option: $1" ;;
     esac
 done
+
+# A part is one share of tier 3, so it needs that tier, and the Tor suites
+# belong to the chaos part alone.
+if [[ -n "$PART" ]]; then
+    case "$PART" in
+        core-explorers|root-explorers|chaos) ;;
+        *) usage_error "--part takes core-explorers, root-explorers or chaos, not: $PART" ;;
+    esac
+    [[ "$TIER" == 3 ]] || usage_error "--part needs --tier 3"
+    if [[ "$WITH_TOR" == true && "$PART" != chaos ]]; then
+        usage_error "--with-tor combines only with --part chaos"
+    fi
+fi
 
 # A tier is a fixed set of stages, so an option that changes what runs is
 # refused rather than quietly dropped or added; the environment switches are
@@ -677,6 +761,14 @@ if [[ -n "$TIER" ]]; then
         usage_error "--tier $TIER cannot be combined with $_opt"
     done
     apply_tier
+    if [[ -n "$PART" ]]; then
+        apply_part
+        # A part with nothing of its own to run would pass on no results.
+        if ! part_has_work; then
+            echo "ci-local.sh: part $PART lists nothing to run" >&2
+            exit 1
+        fi
+    fi
 elif [[ "$PLAN" == true ]]; then
     usage_error "--plan needs --tier"
 fi
@@ -1481,7 +1573,19 @@ GUARD_META=(
 # build. Both halves run side by side, each in a
 # subshell with its output held until it ends, so the two do not interleave;
 # the parent records each half's status, since a subshell's record() dies
-# with it. Off by default, and then nothing is recorded.
+# with it. One half alone (=core, =root, or a part) runs in the foreground
+# with its output streamed, so a builder's log does not sit silent for the
+# hours the core half takes. Off by default, and then nothing is recorded.
+# One explorer half by name, core or root, in a subshell; its status.
+explorer_half() {
+    if [[ "$1" == core ]]; then
+        ( run_explorer_half core-explorers fips-core fips_core slow-explorers slow-tests \
+            "${GUARD_META[@]}" )
+    else
+        ( run_explorer_half root-explorers fips-mesh fips explorers "" )
+    fi
+}
+
 run_explorers() {
     local halves=() h pids=() logs=() i rc
     case "$EXPLORERS" in
@@ -1490,15 +1594,15 @@ run_explorers() {
         root) halves=(root) ;;
         *)    halves=(core root) ;;
     esac
+    if [[ ${#halves[@]} -eq 1 ]]; then
+        rc=0
+        explorer_half "${halves[0]}" || rc=$?
+        record "${halves[0]}-explorers" "$rc"
+        return 0
+    fi
     for h in "${halves[@]}"; do
         logs+=("$(mktemp "/tmp/ci-explorers-$h.XXXXXX")")
-        if [[ "$h" == core ]]; then
-            ( run_explorer_half core-explorers fips-core fips_core slow-explorers slow-tests \
-                "${GUARD_META[@]}" ) >"${logs[-1]}" 2>&1 &
-        else
-            ( run_explorer_half root-explorers fips-mesh fips explorers "" ) \
-                >"${logs[-1]}" 2>&1 &
-        fi
+        explorer_half "$h" >"${logs[-1]}" 2>&1 &
         pids+=($!)
     done
     for i in "${!halves[@]}"; do
@@ -1513,11 +1617,12 @@ run_explorers() {
     return 0
 }
 
-# With the root explorers (--explorers, --explorers=root or tier 3), the
-# mutation lane's lines whose test only the root crate's explorers feature
-# compiles, built with that feature, recorded as mutations-explorers. The
-# plain lane (mutations) skips those lines and keeps the normal-build fence,
-# so the two stages together run every manifest line once. The lane fails when no line is an explorer walk, so a renamed module
+# With the root explorers (--explorers, --explorers=root, tier 3 or the
+# root-explorers part), the mutation lane's lines whose test only the root
+# crate's explorers feature compiles, built with that feature, recorded as
+# mutations-explorers. The plain lane (mutations) skips those lines and keeps
+# the normal-build fence, so the two stages together run every manifest line
+# once. The lane fails when no line is an explorer walk, so a renamed module
 # cannot turn this stage into a run of nothing.
 run_lane_explorers() {
     [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]] || return 0
@@ -2468,6 +2573,48 @@ run_chaos_set() {
     return 0
 }
 
+# Make this run's integration build and the two test images every
+# integration suite starts (CI_IMAGE_TEST, CI_IMAGE_APP) from it, recording
+# build-integration and, on a failed image build, docker-build or
+# docker-build-app. Non-zero when either is missing.
+prepare_images() {
+    # Populate THIS run's build context, then install the binaries into it.
+    # Everything but the binaries is copied from the tracked context directory;
+    # the binaries are installed fresh, and a previous run's are deliberately
+    # not carried over, since inheriting them is the failure this scoping
+    # exists to prevent.
+    info "Preparing build context $CI_BUILD_CONTEXT"
+    rm -rf "$CI_BUILD_CONTEXT"
+    mkdir -p "$CI_BUILD_CONTEXT" || { record "docker-build" 1; return 1; }
+    local _f
+    for _f in "$SCRIPT_DIR"/docker/*; do
+        case "$(basename "$_f")" in
+            fips|fipsctl|fipstop|fips-gateway|native-echo|native-surface) continue ;;
+        esac
+        cp -a "$_f" "$CI_BUILD_CONTEXT/" || { record "docker-build" 1; return 1; }
+    done
+
+    run_testbuild || return 1
+    info "Installing integration binaries"
+    install_binaries "$CI_BUILD_CONTEXT"
+
+    # Build unified test image once (used by all harnesses). Tag per-run
+    # (fips-test:${run}) so a build killed mid-flight never wedges the next
+    # run's rebuild, and concurrent runs never clobber each other's image.
+    info "Building $CI_IMAGE_TEST Docker image"
+    docker build -t "$CI_IMAGE_TEST" --label "$CI_LABEL" --label "$CI_LABEL_RUN" "$CI_BUILD_CONTEXT" --quiet \
+        || { record "docker-build" 1; return 1; }
+    docker build -t "$CI_IMAGE_APP" --label "$CI_LABEL" --label "$CI_LABEL_RUN" \
+        -f "$CI_BUILD_CONTEXT/Dockerfile.app" "$CI_BUILD_CONTEXT" --quiet \
+        || { record "docker-build-app" 1; return 1; }
+    # Deliberately NOT retagged to fips-test:latest. Every consumer reads
+    # FIPS_TEST_IMAGE, and a bridge back to the shared mutable name would let a
+    # consumer that does not keep working silently — resolving whichever
+    # concurrent run wrote the tag last, and recording that run's binaries under
+    # this run's commit. Without the bridge a missed consumer fails loudly.
+    return 0
+}
+
 # Determine which suites to run and execute them
 run_integration() {
     stage "Stage 3: Integration Tests"
@@ -2491,40 +2638,7 @@ run_integration() {
         return
     fi
 
-    # Populate THIS run's build context, then install the binaries into it.
-    # Everything but the binaries is copied from the tracked context directory;
-    # the binaries are installed fresh, and a previous run's are deliberately
-    # not carried over, since inheriting them is the failure this scoping
-    # exists to prevent.
-    info "Preparing build context $CI_BUILD_CONTEXT"
-    rm -rf "$CI_BUILD_CONTEXT"
-    mkdir -p "$CI_BUILD_CONTEXT" || { record "docker-build" 1; return; }
-    local _f
-    for _f in "$SCRIPT_DIR"/docker/*; do
-        case "$(basename "$_f")" in
-            fips|fipsctl|fipstop|fips-gateway|native-echo|native-surface) continue ;;
-        esac
-        cp -a "$_f" "$CI_BUILD_CONTEXT/" || { record "docker-build" 1; return; }
-    done
-
-    run_testbuild || return
-    info "Installing integration binaries"
-    install_binaries "$CI_BUILD_CONTEXT"
-
-    # Build unified test image once (used by all harnesses). Tag per-run
-    # (fips-test:${run}) so a build killed mid-flight never wedges the next
-    # run's rebuild, and concurrent runs never clobber each other's image.
-    info "Building $CI_IMAGE_TEST Docker image"
-    docker build -t "$CI_IMAGE_TEST" --label "$CI_LABEL" --label "$CI_LABEL_RUN" "$CI_BUILD_CONTEXT" --quiet \
-        || { record "docker-build" 1; return; }
-    docker build -t "$CI_IMAGE_APP" --label "$CI_LABEL" --label "$CI_LABEL_RUN" \
-        -f "$CI_BUILD_CONTEXT/Dockerfile.app" "$CI_BUILD_CONTEXT" --quiet \
-        || { record "docker-build-app" 1; return; }
-    # Deliberately NOT retagged to fips-test:latest. Every consumer reads
-    # FIPS_TEST_IMAGE, and a bridge back to the shared mutable name would let a
-    # consumer that does not keep working silently — resolving whichever
-    # concurrent run wrote the tag last, and recording that run's binaries under
-    # this run's commit. Without the bridge a missed consumer fails loudly.
+    prepare_images || return
 
     # Single suite mode
     if [[ -n "$ONLY_SUITE" ]]; then
@@ -2682,6 +2796,41 @@ run_nightly() {
     return 0
 }
 
+# One part of tier 3 (--part): only that part's stages, with none of the
+# guards or the build stage, which the nightly's tier 2 part runs on the same
+# tree. The chaos part makes its own integration build and images first, as
+# a fresh checkout has none, and fails before that when it has no scenario.
+run_part() {
+    local entries=()
+    stage "Tier 3, part $PART"
+    case "$PART" in
+        core-explorers)
+            run_explorers ;;
+        root-explorers)
+            run_explorers
+            run_lane_explorers ;;
+        chaos)
+            mapfile -t entries < <(nightly_chaos)
+            if [[ ${#entries[@]} -eq 0 ]]; then
+                fail "part chaos has no scenario to run"
+                record "part-chaos" 1
+                return 1
+            fi
+            prepare_images || return 1
+            run_nightly
+            if [[ "$WITH_TOR" == true ]]; then
+                run_tor_socks5
+                run_tor_directory
+            fi
+            ;;
+        *)
+            fail "unknown part: $PART"
+            record "part" 1
+            return 1 ;;
+    esac
+    return 0
+}
+
 # A green tier run must have recorded exactly what --plan lists for it, less
 # the stages skipped for want of something on this host; otherwise a stage
 # has been added to or dropped from one and not the other, and the plan the
@@ -2694,12 +2843,13 @@ check_plan() {
         planned=$(grep -vxF -- "${name%%:*}" <<<"$planned")
     done
     recorded=$(printf '%s\n' "${!RESULTS[@]}" | sort)
+    local what="tier $TIER${PART:+, part $PART}"
     if [[ "$planned" == "$recorded" ]]; then
-        info "the run recorded the $(wc -l <<<"$recorded") results --plan lists for tier $TIER"
+        info "the run recorded the $(wc -l <<<"$recorded") results --plan lists for $what"
         return 0
     fi
     diff=$(diff <(echo "$planned") <(echo "$recorded") | sed -n 's/^< /  planned, not recorded: /p; s/^> /  recorded, not planned: /p')
-    fail "what tier $TIER recorded differs from its --plan:"
+    fail "what $what recorded differs from its --plan:"
     echo "$diff"
     record "plan-match" 1
     return 0
@@ -3099,10 +3249,12 @@ run_veth_host() {
     return 0
 }
 
-# Every static guard, in order. Each gates every mode except --rerun: a
-# divergence invalidates any claim that a local run means what a GitHub run
-# means, whichever subset was asked for. --rerun skips them because it reruns a
-# suite on a tree whose full run already passed them, and says so in its banner.
+# Every static guard, in order. Each gates every mode except --rerun and
+# --part: a divergence invalidates any claim that a local run means what a
+# GitHub run means, whichever subset was asked for. --rerun skips them because
+# it reruns a suite on a tree whose full run already passed them, and says so
+# in its banner. A part of tier 3 skips them because the nightly's tier 2 part
+# runs them on the same tree.
 run_guards() {
     local g
     for g in "${GUARDS[@]}"; do
@@ -3131,13 +3283,18 @@ main() {
 
     stage "FIPS Local CI"
     info "Project root: $PROJECT_ROOT"
-    [[ -n "$TIER" ]] && info "Tier $TIER"
+    [[ -n "$TIER" ]] && info "Tier $TIER${PART:+, part $PART}"
 
     load_sampler &
     CI_LOAD_PID=$!
 
     if [[ "$RERUN" == true ]]; then
         run_rerun
+    elif [[ -n "$PART" ]]; then
+        run_part
+        if [[ $OVERALL -eq 0 ]]; then
+            check_plan
+        fi
     else
         # Above the mode branches deliberately, so --only, --test-only and
         # --build-only are gated too (see run_guards).
