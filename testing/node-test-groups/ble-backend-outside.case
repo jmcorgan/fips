@@ -1,0 +1,83 @@
+# Two modules reach a real BLE radio, one through the BlueZ backend and one
+# through the platform radio backend, and neither is in node-synthetic. A BLE
+# transport over the mock radio (ble_mock, in the base tree) is not flagged.
+expect exit 1
+expect FAIL [profile.ci] node::tests::ble_real::a_bluez_link_comes_up runs in no group, needs node-synthetic: module ble_real is flagged (ble_real::bluez_ble_node uses BluerIo
+expect FAIL [profile.ci] node::tests::ble_radio::a_platform_radio_link_comes_up runs in no group, needs node-synthetic: module ble_radio is flagged (ble_radio::radio_ble_node uses RadioIo
+expect not flagged (5): big ble_mock never_started quiet vec_drain
+=== src/node/tests/mod.rs
+// Fixture tree for testing/check-node-test-groups.py. It is never compiled;
+// the check reads it as text.
+use super::*;
+
+mod big;
+mod ble_mock;
+mod ble_radio;
+mod ble_real;
+mod helpers;
+mod never_started;
+#[path = "renamed_file.rs"]
+mod pathed;
+mod quiet;
+mod rx_shutdown;
+#[cfg(target_os = "linux")]
+mod sock_direct;
+mod vec_drain;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod via_connected;
+mod via_helper;
+mod via_testutil;
+mod via_two_hops;
+
+/// A root helper with no socket; every module reaches it through `use super::*`.
+pub(super) fn make_node() -> Node {
+    Node::new(Config::new()).unwrap()
+}
+
+/// A root helper that installs a real connect()-ed UDP socket on a peer, as
+/// the dataplane does; a module that calls it holds a socket.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn install_connected_udp(node: &mut Node, addr: &NodeAddr, transport_id: TransportId) {
+    let local: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let peer_sa: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let owned = crate::transport::udp::open_connected_fd(local, peer_sa, 65_536, 65_536)
+        .expect("open a connected UDP socket");
+    let socket = std::sync::Arc::new(crate::transport::udp::ConnectedPeerSocket::from_fd(
+        owned, peer_sa, local,
+    ));
+    node.get_peer_mut(addr).unwrap().set_connected_udp(socket, transport_id);
+}
+=== src/node/tests/ble_real.rs
+use super::*;
+use crate::transport::ble::io_linux::BluerIo;
+use crate::transport::ble::BleTransport;
+
+/// A BLE transport over BlueZ: an L2CAP socket on the host's adapter.
+async fn bluez_ble_node() -> BleTransport<BluerIo> {
+    let io = BluerIo::new("hci0").await.unwrap();
+    let mut transport = BleTransport::new(TransportId::new(1), None, BleConfig::default(), io, tx());
+    transport.start_async().await.unwrap();
+    transport
+}
+
+#[tokio::test]
+async fn a_bluez_link_comes_up() {
+    let _t = bluez_ble_node().await;
+}
+=== src/node/tests/ble_radio.rs
+use super::*;
+use crate::transport::ble::io_radio::RadioIo;
+use crate::transport::ble::BleTransport;
+
+/// A BLE transport over the platform's radio.
+async fn radio_ble_node() -> BleTransport<RadioIo> {
+    let io = RadioIo::new("hci0", ble_addr(2));
+    let mut transport = BleTransport::new(TransportId::new(2), None, BleConfig::default(), io, tx());
+    transport.start_async().await.unwrap();
+    transport
+}
+
+#[tokio::test]
+async fn a_platform_radio_link_comes_up() {
+    let _t = radio_ble_node().await;
+}

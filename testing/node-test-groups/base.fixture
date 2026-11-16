@@ -6,13 +6,14 @@
 # the shutdown variant of the rx loop (rx_shutdown); lock
 # holders direct, through a helper, and inside a socket module; socket-free
 # modules whose comments, strings, raw strings and Vec methods only look like
-# socket use (quiet, vec_drain); an exempted never-started transport
+# socket use (quiet, vec_drain); a BLE transport over the in-process mock
+# radio, which opens no socket (ble_mock); an exempted never-started transport
 # (never_started); and an undeclared file (orphan.rs). It must pass, with
 # exactly these memberships.
 expect exit 0
 expect check-node-test-groups: 8 socket module(s) (9 tests) in node-synthetic, 3 lock holder(s) in node-large, both profiles; nextest pinned to 0.9.149
-expect test modules declared: 12
-expect not flagged (4): big never_started quiet vec_drain
+expect test modules declared: 13
+expect not flagged (5): big ble_mock never_started quiet vec_drain
 expect note: exemption for gone::from_this_trunk matches no function in this tree
 expect-absent FAIL
 expect-absent orphan
@@ -100,6 +101,23 @@ async fn test_big_via_helper() {
 fn small_and_quiet() {
     let _node = make_node();
 }
+=== src/node/tests/ble_mock.rs
+use super::*;
+use crate::transport::ble::io::MockBleIo;
+use crate::transport::ble::BleTransport;
+
+/// A BLE transport over the in-process mock radio: started, and no socket.
+async fn mock_ble_node() -> BleTransport<MockBleIo> {
+    let io = MockBleIo::new("hci0", ble_addr(1));
+    let mut transport = BleTransport::new(TransportId::new(1), None, BleConfig::default(), io, tx());
+    transport.start_async().await.unwrap();
+    transport
+}
+
+#[tokio::test]
+async fn a_mock_radio_link_comes_up() {
+    let _t = mock_ble_node().await;
+}
 === src/node/tests/helpers.rs
 use super::*;
 use crate::transport::udp::UdpTransport;
@@ -116,6 +134,7 @@ pub(super) async fn bound_transport() -> UdpTransport {
 use super::*;
 
 mod big;
+mod ble_mock;
 mod helpers;
 mod never_started;
 #[path = "renamed_file.rs"]

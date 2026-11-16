@@ -38,7 +38,12 @@ the job, and no result names the test. `limit-lost.case` shows this firing.
   aliased import, two helpers away, through a `src/testutil.rs` type, through a
   `#[path]` module, through a `mod.rs` helper that opens a connected UDP
   socket, through the rx loop's shutdown variant) and each way text only looks
-  like one (comments, strings, raw strings, a `Vec`'s `.drain(`).
+  like one (comments, strings, raw strings, a `Vec`'s `.drain(`), and a BLE
+  transport over the in-process mock radio, which opens no socket.
+- `ble-backend-outside.case`: two modules whose BLE transports run over a
+  real radio backend (`BluerIo`, `RadioIo`) are outside node-synthetic. A BLE
+  transport is flagged only by its backend: in a test build
+  `DefaultBleTransport` runs over `MockBleIo`, which opens no socket.
 - `*.case`: one case each, in the same format. The runner writes a case's files
   over a copy of the base tree. The header's `#` lines say what the case
   breaks; `expect exit N` is the status the guard must return, and each
