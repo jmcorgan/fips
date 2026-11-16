@@ -25,6 +25,13 @@
 # nothing of a run, and each overwrites one tag rather than adding an image
 # per run.
 #
+# A commit's kept integration images, fips-test:commit-<sha> and
+# fips-test-app:commit-<sha> (ci-local.sh with FIPS_CI_ARTIFACT_DIR), are
+# never swept by label or project: such a tag sits on the image of the run
+# that built it, which carries that run's label, and its whole purpose is to
+# outlive that run for a later re-run of the same commit. The builder's prune
+# owns them. Only a name passed with --images is removed.
+#
 # The generic CI label is shared by every run on the host, so an unscoped label
 # sweep would tear down a CONCURRENT run's resources. So would an unscoped
 # compose-project sweep, and reap_containers runs BOTH. Neither flag alone is
@@ -338,12 +345,14 @@ image_names() {
 }
 
 # Every image name this reap owns, one per line: the --images list, every image
-# carrying the sweep label, and every compose-built image of a matched project.
+# carrying the sweep label, and every compose-built image of a matched project,
+# less a commit's kept tags (COMMIT_TAG_RE; the header says why).
 # Compose names an image it builds <project>-<service>, and `docker image ls
 # --format` cannot read image labels, so the project images are matched by name
 # the way reap_networks matches networks. The prefix is anchored on the `_` that
 # ends the run id: run abc-12 must not reach run abc-123's images, and run ids
 # vary in length, so concurrent runs on one commit can stand in that relation.
+COMMIT_TAG_RE='^fips-test:commit-[0-9a-f]{40}$|^fips-test-app:commit-[0-9a-f]{40}$'
 image_targets() {
     local anchor all labelled img imgs=()
     anchor="$PROJECT_PREFIX"
@@ -359,8 +368,8 @@ image_targets() {
             [[ "${img##*/}" == *:* ]] || img="${img}:latest"
             printf '%s\n' "$img"
         done
-        printf '%s\n' "$labelled"
-        grep -E "^${anchor}" <<< "$all" || true
+        grep -Ev "$COMMIT_TAG_RE" <<< "$labelled" || true
+        grep -E "^${anchor}" <<< "$all" | grep -Ev "$COMMIT_TAG_RE" || true
     } | grep -v '^$' | sort -u
 }
 

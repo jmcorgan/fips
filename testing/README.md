@@ -358,6 +358,28 @@ build's dependencies; a tree that does not compile is caught by the lints
 and unit tests rather than by a build stage of its own at tier 1. `--rerun`
 has no build stage, so there the first package suite builds the package.
 
+### A commit's kept artifacts (`FIPS_CI_ARTIFACT_DIR`)
+
+With `FIPS_CI_ARTIFACT_DIR=<dir>`, which the internal builder sets, a run of
+a clean tree keeps what it built for the integration stage under its commit:
+the two test images, tagged `fips-test:commit-<sha>` and
+`fips-test-app:commit-<sha>` and labelled `com.corganlabs.fips-ci.commit`,
+the integration binaries in `<dir>/<sha>/bin`, and the `.deb` in
+`<dir>/<sha>/deb`. A later run of the same commit in a fresh worktree with
+the same variable (a re-run, a red retry, `--rerun`, or the nightly's chaos
+part after the commit's tier 2) reuses them and skips the integration build,
+the image builds and the package build, logging `reused ...`. Each is
+created only when absent, never replaced, and only from a clean build of
+exactly that commit; a reuse checks the label, the image's `fips` against
+the kept one and the package's version against the commit, and builds
+instead on any mismatch. The suites still start the run's own per-run
+images, built from the commit tags with the run's own label, so the teardown
+of the run that kept them leaves a reusing run's images alone. Two runs of
+one commit that both keep: the one whose binaries are kept is the only one
+whose images are tagged. The teardown never removes a commit tag
+(`ci-cleanup.sh`); pruning them and `<dir>` is the builder's. Unset, or on a
+tree with uncommitted changes, nothing is kept or reused.
+
 ### Base images
 
 Every base image a CI image builds from, and every third-party image a suite
