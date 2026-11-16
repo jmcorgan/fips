@@ -1,5 +1,6 @@
 //! Tests for `testutil.rs`: the bounded runner the explorers use, whose
-//! bound `.config/nextest.toml` declares to nextest.
+//! bound `.config/nextest.toml` declares to nextest, and the scan the
+//! guard-switch meta-tests use to tell an explorer from a missing test.
 
 use alloc::vec::Vec;
 use core::cell::Cell;
@@ -87,4 +88,53 @@ fn each_job_starts_on_a_fresh_thread_with_its_own_thread_locals() {
     let items: Vec<usize> = (0..most() * 3).collect();
     let reused = bounded(&items, |_| USED.with(|u| u.replace(true)));
     assert_eq!(reused, alloc::vec![false; items.len()]);
+}
+
+#[cfg(feature = "slow-tests")]
+#[test]
+fn explorer_only_finds_the_gate_on_a_test_on_a_module_and_on_a_test_in_an_inline_module() {
+    for path in [
+        // The test's own attribute.
+        "proto::settle::tests::joint::runs::the_sweep_of_start_10_keeps_the_properties_off_with_off",
+        // The module's declaration in its parent.
+        "proto::settle::tests::legacy::explore::a_model_of_the_node_on_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
+        "proto::rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals",
+        // A test in `mod checks { .. }` inside its file.
+        "proto::settle::tests::oracle::checks::model_parties_settle_on_every_start",
+    ] {
+        assert!(
+            explorer_only(path),
+            "{path} is behind slow-explorers in the sources"
+        );
+    }
+}
+
+#[cfg(feature = "slow-tests")]
+#[test]
+fn explorer_only_refuses_an_ungated_test_a_misspelled_name_and_a_missing_module() {
+    for path in [
+        "proto::settle::tests::regress::a_removed_peers_link_leaves_no_entry_in_the_address_index",
+        "proto::settle::tests::joint::runs::the_sweep_of_start_10_keeps_the_properties_off_with_of",
+        "proto::settle::tests::legacy::explore::no_such_test",
+        "proto::settle::tests::no_such_module::model_parties_settle_on_every_start",
+        "",
+    ] {
+        assert!(
+            !explorer_only(path),
+            "{path:?} is no test behind slow-explorers"
+        );
+    }
+}
+
+/// Without the explorers' build, no test the binary compiles can be one the
+/// sources show behind slow-explorers; one that is shows the scan reading a
+/// gate where there is none.
+#[cfg(all(feature = "slow-tests", not(feature = "slow-explorers")))]
+#[test]
+fn explorer_only_holds_for_no_test_a_build_without_the_explorers_compiles() {
+    let wrong: Vec<_> = compiled_tests()
+        .into_iter()
+        .filter(|t| explorer_only(t))
+        .collect();
+    assert!(wrong.is_empty(), "read as behind slow-explorers: {wrong:?}");
 }

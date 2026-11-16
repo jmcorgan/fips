@@ -28,8 +28,16 @@ can rebuild any state by replaying the path that reached it.
   under `FIPS_SETTLE_FAULTS` for the first table and `FIPS_REKEY_FAULTS`
   for the second, each must fail, and once with none, each must pass (an
   ignored test does not); its children report a failing seeded run
-  unshrunk. Without `slow-explorers` it leaves out the rows'
-  tests in `legacy/explore.rs`, and fails a row left with none. A row
+  unshrunk. Which tests the build compiles it reads from the test
+  binary's own list (`crate::testutil::compiled_tests`): without
+  `slow-explorers` it leaves out a row's explorers, and leaves a row whose
+  every test is an explorer whole to the explorers' build, printing both
+  counts and those rows; with it, every named test must be compiled and
+  every row runs. A named test it does not compile counts as an explorer
+  only where the sources show it behind `slow-explorers`
+  (`crate::testutil::explorer_only`), so a misspelled or renamed name
+  fails in every build. `testing/ci-local.sh --explorers` runs it in the
+  explorers' build too. A row
   names the cheapest tests its switch reds; the core explorer appears only
   in the rows where it is the closest observation of the defect.
 - `world.rs`: the world. Three transport models (connectionless;
@@ -309,22 +317,17 @@ can rebuild any state by replaying the path that reached it.
 - The world's delivery delay is bounded: what is in flight is lost when the
   clock moves and when a node restarts (switch `DelayUnbounded`), and a
   restart drops what is addressed to the restarting node.
-- The `slow-tests` feature gates the model of `master` explored against
-  itself at each multipath setting on every start but 12
-  (`legacy/findings.rs`), the candidate
-  rules' two scripted tests (`candidates.rs`) and the switches' meta-test
-  (`faults.rs`); GitHub CI's Linux job runs them. The `slow-explorers`
-  feature, which turns `slow-tests` on too, also gates a joint node explored
-  against the models of `master` and `maint` (`legacy/explore.rs`) and
-  the candidate rules explored (`candidates.rs`), and in the joint world
-  the core's own explorer on joint nodes and the sweeps that take tens of
-  minutes (`joint/explore.rs`); only local CI with `--slow-tests` and the
-  internal builder run those. Every other test here runs in every build,
-  on every platform: among them the reach tests at each pairing, the
-  cold start's reach, the model's reach and the sweeps of the joint world
-  at Off with Off and at On with On of the starts that stay cheap there,
-  each named in `.config/nextest.toml`'s list of known-slow tests, whose
-  limit is 480 s. A test that passes that limit on two cores moves to the
-  slow explorers' build, as the core's own explorer did (more than 480 s
-  on two cores under nextest), and `core/Cargo.toml`'s comment on the two
-  features names it.
+- The `slow-tests` feature gates the candidate rules' two scripted tests
+  (`candidates.rs`) and the switches' meta-test (`faults.rs`); GitHub CI's
+  Linux job runs them. The `slow-explorers` feature, which turns
+  `slow-tests` on too, gates every explorer: the model's reach
+  (`explore.rs`), the model parties over every start (`oracle.rs`), a
+  joint node explored against the models of `master` and `maint`
+  (`legacy/explore.rs`), the model of `master` explored against itself
+  (`legacy/findings.rs`), the candidate rules explored (`candidates.rs`),
+  and in the joint world every reach and sweep (`joint/explore.rs`,
+  `joint/runs.rs`). No CI run started by a push runs them; local CI runs
+  them only with `--explorers`. Every other test here runs in every build,
+  on every platform. A new test that walks a state space goes behind
+  `slow-explorers`, and `core/Cargo.toml`'s comment on the two features
+  names it.

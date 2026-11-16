@@ -16,6 +16,7 @@ use super::script::{Kind, Step, run};
 use super::starts::{Clause, NOT_RUN, Order, PINS, Reach, Start, starts};
 use super::world::{Medium, World};
 use std::future::Future;
+#[cfg(feature = "explorers")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -483,6 +484,7 @@ async fn reached((start, order, on): Job, at: Arc<Mutex<String>>) -> Vec<String>
 /// at both settings, its scripted path runs every step to the end of its
 /// script, and the explorer walks the number of paths the start states, its
 /// scripted path and each variation that applies.
+#[cfg(feature = "explorers")]
 #[test]
 fn the_explorer_reaches_each_starts_target() {
     let mut all = jobs(Medium::Loopback, &[false, true]);
@@ -497,6 +499,7 @@ fn the_explorer_reaches_each_starts_target() {
 /// times that many walks, each holding its place for 50 ms, never have more
 /// of their number running together than the bound, and every one runs to
 /// its end. Walks of other tests in the process can only lower the count.
+#[cfg(feature = "explorers")]
 #[test]
 fn no_more_than_walks_at_once_walks_run_together_in_one_process() {
     let live = Arc::new(AtomicUsize::new(0));

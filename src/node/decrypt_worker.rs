@@ -903,8 +903,11 @@ impl DecryptWorkerPool {
     /// A pool of `n` workers that each sleep `lag` before they handle each
     /// job, then handle it as the production loop does: the shape of a
     /// worker thread descheduled before it decrypts, on a loaded host.
-    /// Unix only, as are the tests that hand sessions to the workers.
+    /// Unix only, as are the tests that hand sessions to the workers. Only
+    /// the real-node explorer's walks, which the `explorers` feature
+    /// compiles, reach it.
     #[cfg(unix)]
+    #[cfg_attr(not(feature = "explorers"), allow(dead_code))]
     pub(crate) fn slowed(n: usize, lag: std::time::Duration) -> Self {
         Self::start_with(n, move |idx, rx| {
             std::thread::Builder::new()

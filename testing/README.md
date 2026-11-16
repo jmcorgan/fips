@@ -276,10 +276,19 @@ GitHub's Linux test job also runs fips-core's slow test suites (the models of
 the deployed releases and the guard-switch meta-test, behind the core's
 `slow-tests` feature) on every push; a local run does that only with
 `--slow-tests` or `FIPS_CI_SLOW_TESTS=1`. Every other platform's test run
-skips them. The settlement explorers against the deployed models and the
-candidate rules (the core's `slow-explorers` feature) run only in a local run
-with `--slow-tests` or `FIPS_CI_SLOW_TESTS=1`, which the internal builder
-sets; GitHub CI does not run them.
+skips them.
+
+The explorers, every test that walks a state space (the core's
+`slow-explorers` feature and the root crate's `explorers`), run in no CI run
+started by a push, on either runner. A local run takes them only with
+`--explorers`, which runs, after the unit tests, exactly the tests each
+feature adds to its crate's library, the two halves side by side, recorded
+as `core-explorers` and `root-explorers`; `--explorers=core` or `=root` runs
+one half. Each half's names come from the two builds' own test lists, and an
+empty difference fails the half rather than passing on no tests. They take
+hours: on the incus builder the core's whole test run with `slow-explorers`
+took 123 minutes with the host shared (2026-11-15), against under six for
+the same run with `slow-tests` alone on core-vm.
 
 The Linux and musl legs also create an address-less dummy interface
 (`fips-probe0`) and pass its name to the tests as

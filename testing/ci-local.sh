@@ -21,11 +21,21 @@
 #                        the deployed releases and the guard-switch
 #                        meta-test) in the core's own test run. Off by
 #                        default: they take minutes, and GitHub CI's Linux job
-#                        runs them on every push. The settlement explorers
-#                        against the deployed models and the candidate rules
-#                        run with them here and nowhere else.
-#                        FIPS_CI_SLOW_TESTS=1 in the environment turns it on
-#                        too.
+#                        runs them on every push. The explorers are not among
+#                        them (--explorers). FIPS_CI_SLOW_TESTS=1 in the
+#                        environment turns it on too.
+#   --explorers[=core|root]
+#                        Also run the explorers, after the unit tests: the
+#                        tests fips-core compiles only with its slow-explorers
+#                        feature (recorded as core-explorers) and those the
+#                        root crate compiles only with its explorers feature
+#                        (root-explorers). Each half runs exactly the tests
+#                        its feature adds, read from the two builds' test
+#                        lists, and the two run side by side. =core or =root
+#                        runs one half. Off by default, and no CI run started
+#                        by a push turns it on: they take hours. Cannot be
+#                        combined with --build-only, which skips the unit-test
+#                        stage.
 #   --cross-check        Also compile the macOS, Windows and FreeBSD targets in
 #                        the build stage (testing/cross-check/check.sh). Off
 #                        by default: it needs zig. When asked for, a missing
@@ -50,8 +60,8 @@
 #                        Cannot be combined with --only, --build-only,
 #                        --test-only, --skip-integration, --cross-check,
 #                        --baremetal (or FIPS_CI_BAREMETAL=1), --slow-tests
-#                        (or FIPS_CI_SLOW_TESTS=1) or --root-tests (or
-#                        FIPS_CI_ROOT_TESTS=1).
+#                        (or FIPS_CI_SLOW_TESTS=1), --explorers or
+#                        --root-tests (or FIPS_CI_ROOT_TESTS=1).
 #   -j, --jobs <N>       Max parallel chaos scenarios (default: 4)
 #   --list               List available integration suites
 #   --check-parity       Verify this suite set matches ci.yml's integration
@@ -148,7 +158,7 @@
 #   1   — one or more stages failed
 #   2   — usage error (unknown option, missing value, unknown --rerun suite,
 #         an option --rerun cannot be combined with, or --build-only with
-#         --root-tests); nothing ran
+#         --root-tests or --explorers); nothing ran
 #   130 — interrupted by SIGINT  (128 + 2;  run was cancelled, not a failure)
 #   143 — terminated by SIGTERM  (128 + 15; run was cancelled, not a failure)
 #
@@ -213,6 +223,8 @@ SKIP_INTEGRATION=false
 SKIP_CHAOS=false
 BAREMETAL=false
 SLOW_TESTS=false
+# Which explorer halves run: empty for none, or core, root or all.
+EXPLORERS=""
 CROSS_CHECK=false
 ROOT_TESTS=false
 WITH_TOR=false
@@ -433,6 +445,12 @@ while [[ $# -gt 0 ]]; do
         --skip-chaos)       SKIP_CHAOS=true; shift ;;
         --baremetal)        BAREMETAL=true; shift ;;
         --slow-tests)       SLOW_TESTS=true; shift ;;
+        --explorers)        EXPLORERS=all; shift ;;
+        --explorers=*)
+            EXPLORERS="${1#*=}"
+            [[ "$EXPLORERS" == core || "$EXPLORERS" == root ]] \
+                || usage_error "--explorers takes core or root, not: ${EXPLORERS:-nothing}"
+            shift ;;
         --cross-check)      CROSS_CHECK=true; shift ;;
         --root-tests)       ROOT_TESTS=true; shift ;;
         --with-tor)         WITH_TOR=true; shift ;;
@@ -454,7 +472,8 @@ if [[ "$RERUN" == true ]]; then
     for _opt in only:"$ONLY_GIVEN" build-only:"$BUILD_ONLY" \
             test-only:"$TEST_ONLY" skip-integration:"$SKIP_INTEGRATION" \
             cross-check:"$CROSS_CHECK" baremetal:"$BAREMETAL" \
-            slow-tests:"$SLOW_TESTS" root-tests:"$ROOT_TESTS"; do
+            slow-tests:"$SLOW_TESTS" root-tests:"$ROOT_TESTS" \
+            explorers:"$([[ -n "$EXPLORERS" ]] && echo true)"; do
         [[ "${_opt#*:}" == true ]] \
             && usage_error "--rerun cannot be combined with --${_opt%%:*}"
     done
@@ -463,6 +482,10 @@ fi
 # run asked for both would otherwise exit 0 without having run them.
 if [[ "$BUILD_ONLY" == true && "$ROOT_TESTS" == true ]]; then
     usage_error "--root-tests cannot be combined with --build-only"
+fi
+# The explorers run after the unit tests, for the same reason.
+if [[ "$BUILD_ONLY" == true && -n "$EXPLORERS" ]]; then
+    usage_error "--explorers cannot be combined with --build-only"
 fi
 
 # ── Results tracking ──────────────────────────────────────────────────────
@@ -1005,14 +1028,12 @@ run_tests() {
     # The no_std core's tests under the core's own feature resolution, so a
     # test whose result depends on a feature only the root crate enables runs
     # at least once without it. Mirrored in .github/workflows/ci.yml, which
-    # always runs the slow suites here; locally they need --slow-tests. The
-    # settlement explorers against the deployed models and the candidate
-    # rules (`slow-explorers`, which turns `slow-tests` on too) run only
-    # here, under --slow-tests or FIPS_CI_SLOW_TESTS=1, which the internal
-    # builder sets.
+    # always runs the slow suites here; locally they need --slow-tests (or
+    # FIPS_CI_SLOW_TESTS=1, which the internal builder sets). The explorers
+    # are not among them: they run in run_explorers, only with --explorers.
     local core_test=(cargo test -p fips-core)
     if [[ "$SLOW_TESTS" == true ]]; then
-        core_test+=(--features slow-explorers)
+        core_test+=(--features slow-tests)
     fi
     info "${core_test[*]}"
     if with_fd_limit "${core_test[@]}" 2>&1; then
@@ -1099,7 +1120,133 @@ run_tests() {
     fi
     rm -f "$release_log"
 
+    run_explorers
     run_root_tests
+}
+
+# The executable cargo builds for the library target named $1, for the cargo
+# test command line that follows (run with --no-run and JSON messages added);
+# empty when there is none. Cargo's own output goes to stderr.
+lib_test_exe() {
+    local target="$1"
+    shift
+    "$@" --no-run --message-format=json | python3 -c '
+import json, sys
+exe = ""
+for line in sys.stdin:
+    try:
+        msg = json.loads(line)
+    except ValueError:
+        continue
+    if msg.get("reason") == "compiler-artifact" and msg.get("executable") \
+            and "lib" in msg["target"]["kind"] and msg["target"]["name"] == sys.argv[1]:
+        exe = msg["executable"]
+print(exe)
+' "$target"
+    return 0
+}
+
+# One half of the explorers: run exactly the tests the package's library
+# compiles only with the feature $4, returning their status; $1 names the
+# half in what it prints, and the caller records it. $2 is the package, $3 its
+# library target, $4 the feature and $5 the features of the build it is
+# compared with (empty for the default). The names come from the two builds'
+# own --list, so no list here follows the gates. An empty difference fails:
+# it would mean the feature gates nothing, and a run of no tests passes. So
+# does a result line whose passed and ignored counts do not add up to the
+# names asked for. Any further arguments name tests the base build compiles
+# too that run again in the feature's build; each must be in its list.
+run_explorer_half() {
+    local record_name="$1" pkg="$2" target="$3" feature="$4" base="$5"
+    local again=("${@:6}") t listed
+    local base_args=(cargo test -p "$pkg" --lib) exe base_exe names log rc=0
+    [[ -n "$base" ]] && base_args+=(--features "$base")
+    base_exe=$(lib_test_exe "$target" "${base_args[@]}")
+    exe=$(lib_test_exe "$target" cargo test -p "$pkg" --lib --features "$feature")
+    if [[ -z "$base_exe" || -z "$exe" ]]; then
+        fail "[$record_name] could not build or locate the $pkg library test binaries"
+        return 1
+    fi
+    listed=$("$exe" --list --format terse | sed -n 's/: test$//p' | sort)
+    mapfile -t names < <(comm -13 \
+        <("$base_exe" --list --format terse | sed -n 's/: test$//p' | sort) \
+        <(printf '%s\n' "$listed"))
+    if [[ ${#names[@]} -eq 0 ]]; then
+        fail "[$record_name] the $feature feature adds no test to $pkg, so there is nothing to run"
+        return 1
+    fi
+    for t in "${again[@]}"; do
+        if ! grep -qxF -- "$t" <<<"$listed"; then
+            fail "[$record_name] $pkg's $feature build has no test $t"
+            return 1
+        fi
+        names+=("$t")
+    done
+    info "[$record_name] cargo test -p $pkg --lib --features $feature -- --exact <the $((${#names[@]} - ${#again[@]})) tests $feature adds, and ${#again[@]} run again>"
+    log=$(mktemp "/tmp/ci-$record_name.XXXXXX")
+    with_fd_limit cargo test -p "$pkg" --lib --features "$feature" -- --exact "${names[@]}" 2>&1 \
+        | tee "$log"
+    rc=${PIPESTATUS[0]}
+    if [[ $rc -eq 0 ]] && ! python3 - "${#names[@]}" "$log" <<'PY'
+import re, sys
+want, path = int(sys.argv[1]), sys.argv[2]
+m = None
+for line in open(path, errors="replace"):
+    m = re.match(r"test result: ok\. (\d+) passed; \d+ failed; (\d+) ignored;", line) or m
+sys.exit(0 if m and int(m.group(1)) + int(m.group(2)) == want else 1)
+PY
+    then
+        fail "[$record_name] the run did not report all ${#names[@]} tests it was given"
+        rc=1
+    fi
+    rm -f "$log"
+    return "$rc"
+}
+
+# The guard-switch meta-tests of fips-core. The slow suites run them without
+# the explorers, which leaves out every row test only the explorers' build
+# compiles; the core half runs them again in that build, so those rows run.
+GUARD_META=(
+    proto::settle::tests::faults::run::every_guard_switch_turns_each_test_it_names_red_and_each_passes_with_none
+    proto::rekey::tests::faults::every_guard_switch_turns_each_test_it_names_red_and_each_passes_with_none
+)
+
+# With --explorers, the explorers' two halves: fips-core's slow-explorers
+# tests, and its guard-switch meta-tests (GUARD_META), against its
+# slow-tests build, and the root crate's explorers walks against its default
+# build. Both halves run side by side, each in a
+# subshell with its output held until it ends, so the two do not interleave;
+# the parent records each half's status, since a subshell's record() dies
+# with it. Off by default, and then nothing is recorded.
+run_explorers() {
+    local halves=() h pids=() logs=() i rc
+    case "$EXPLORERS" in
+        "")   return 0 ;;
+        core) halves=(core) ;;
+        root) halves=(root) ;;
+        *)    halves=(core root) ;;
+    esac
+    for h in "${halves[@]}"; do
+        logs+=("$(mktemp "/tmp/ci-explorers-$h.XXXXXX")")
+        if [[ "$h" == core ]]; then
+            ( run_explorer_half core-explorers fips-core fips_core slow-explorers slow-tests \
+                "${GUARD_META[@]}" ) >"${logs[-1]}" 2>&1 &
+        else
+            ( run_explorer_half root-explorers fips-mesh fips explorers "" ) \
+                >"${logs[-1]}" 2>&1 &
+        fi
+        pids+=($!)
+    done
+    for i in "${!halves[@]}"; do
+        rc=0
+        wait "${pids[$i]}" || rc=$?
+        echo "--- ${halves[$i]}-explorers output ---"
+        sed 's/.*\r//' "${logs[$i]}"
+        echo "---"
+        rm -f "${logs[$i]}"
+        record "${halves[$i]}-explorers" "$rc"
+    done
+    return 0
 }
 
 # With --root-tests, run the root-only namespace tests through
@@ -1112,20 +1259,7 @@ run_root_tests() {
     local bin
     [[ "$ROOT_TESTS" == true ]] || return 0
     info "cargo test -p fips-mesh --lib --no-run (for testing/root-tests.sh)"
-    bin=$(cargo test -p fips-mesh --lib --no-run --message-format=json \
-        | python3 -c '
-import json, sys
-exe = ""
-for line in sys.stdin:
-    try:
-        msg = json.loads(line)
-    except ValueError:
-        continue
-    if msg.get("reason") == "compiler-artifact" and msg.get("executable") \
-            and "lib" in msg["target"]["kind"] and msg["target"]["name"] == "fips":
-        exe = msg["executable"]
-print(exe)
-')
+    bin=$(lib_test_exe fips cargo test -p fips-mesh --lib)
     if [[ -z "$bin" || ! -x "$bin" ]]; then
         fail "could not build or locate the fips-mesh library test binary"
         record "root-tests" 1

@@ -256,6 +256,123 @@ pub(crate) fn bounded<T: Sync, R: Send>(
     })
 }
 
+/// The full path of every test this test binary compiles, read from its own
+/// `--list`. The guard-switch meta-tests read it to tell a named test that
+/// only the explorers' build compiles (the core's `slow-explorers` feature)
+/// from one this build runs.
+#[cfg(feature = "slow-tests")]
+pub(crate) fn compiled_tests() -> alloc::vec::Vec<alloc::string::String> {
+    let exe = std::env::current_exe().expect("the test binary's path");
+    let out = std::process::Command::new(exe)
+        .args(["--list", "--format", "terse"])
+        .output()
+        .expect("the test binary lists its tests");
+    assert!(out.status.success(), "the test binary lists its tests");
+    alloc::string::String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_suffix(": test"))
+        .map(alloc::string::String::from)
+        .collect()
+}
+
+/// The attribute that compiles an item only in the explorers' build.
+#[cfg(feature = "slow-tests")]
+const EXPLORERS_GATE: &str = "#[cfg(feature = \"slow-explorers\")]";
+
+/// The attribute and comment lines directly above line `at`, trimmed.
+#[cfg(feature = "slow-tests")]
+fn attributes<'a>(lines: &[&'a str], at: usize) -> impl Iterator<Item = &'a str> {
+    lines[..at]
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .take_while(|l| l.starts_with("#[") || l.starts_with("//"))
+}
+
+/// Whether `line` declares the module `name`, as `mod name;` or
+/// `mod name {`, with any visibility.
+#[cfg(feature = "slow-tests")]
+fn declares(line: &str, name: &str) -> bool {
+    let line = line.trim();
+    let rest = if line.starts_with("pub") {
+        line.split_once(' ').map_or("", |(_, r)| r)
+    } else {
+        line
+    };
+    rest.strip_prefix("mod ")
+        .and_then(|r| r.strip_prefix(name))
+        .is_some_and(|r| r == ";" || r.trim_start().starts_with('{'))
+}
+
+/// Whether the sources show the test at `path`, a path as `--list` prints
+/// it, compiled only by the explorers' build (the core's `slow-explorers`
+/// feature): its function is in the file its module path leads to, and the
+/// function, a module on the path, or that whole file carries the feature's
+/// `cfg`. The guard-switch meta-tests accept a named test this build does
+/// not compile only when this holds, so a misspelled or renamed name fails
+/// them in every build. Modules are followed through `mod name;` (to
+/// `name.rs` or `name/mod.rs`), `#[path = "..."]` and inline `mod name {`;
+/// a layout it cannot follow answers false, which fails the meta-test.
+#[cfg(feature = "slow-tests")]
+pub(crate) fn explorer_only(path: &str) -> bool {
+    use alloc::vec::Vec;
+    use std::path::{Path, PathBuf};
+
+    let mut segs: Vec<&str> = path.split("::").collect();
+    let Some(name) = segs.pop() else {
+        return false;
+    };
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut file: PathBuf = src.join("lib.rs");
+    let mut dir = src;
+    let Ok(mut text) = std::fs::read_to_string(&file) else {
+        return false;
+    };
+    let mut gated = false;
+    for seg in segs {
+        let lines: Vec<&str> = text.lines().collect();
+        let Some(at) = lines.iter().position(|l| declares(l, seg)) else {
+            return false;
+        };
+        gated |= attributes(&lines, at).any(|a| a == EXPLORERS_GATE);
+        if lines[at].trim_end().ends_with('{') {
+            dir = dir.join(seg);
+            continue;
+        }
+        let named = attributes(&lines, at).find_map(|a| {
+            a.strip_prefix("#[path = \"")
+                .and_then(|r| r.strip_suffix("\"]"))
+        });
+        let next = match named {
+            Some(p) => file.parent().map(|d| d.join(p)),
+            None => [
+                dir.join(alloc::format!("{seg}.rs")),
+                dir.join(seg).join("mod.rs"),
+            ]
+            .into_iter()
+            .find(|p| p.is_file()),
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        let Ok(t) = std::fs::read_to_string(&next) else {
+            return false;
+        };
+        dir = dir.join(seg);
+        file = next;
+        text = t;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    gated |= lines
+        .iter()
+        .any(|l| l.trim() == "#![cfg(feature = \"slow-explorers\")]");
+    let def = alloc::format!("fn {name}(");
+    let Some(at) = lines.iter().position(|l| l.trim_start().starts_with(&def)) else {
+        return false;
+    };
+    gated || attributes(&lines, at).any(|a| a == EXPLORERS_GATE)
+}
+
 #[cfg(test)]
 #[path = "tests/testutil.rs"]
 mod tests;

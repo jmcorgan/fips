@@ -80,6 +80,22 @@ test does not resolve is a miss, so a renamed BLE test is never skipped
 silently. A new BLE line whose test is behind `ble_available` and missing
 from `BLE_ONLY` reds on a host without BLE, the loud direction.
 
+## Lines whose test is a root explorer
+
+The root crate's explorer walks (`node::tests::settle::explore::oracle::`
+and `::parity::`) compile only with its `explorers` feature, and no CI run
+a push starts runs them. Without `FIPS_MUTATION_EXPLORERS=1` the lane
+builds without that feature, and when the build lists no test of one of
+those modules, its lines (`run.sh`'s `EXPLORER_ONLY`) are skipped and
+counted. Each skipped line's test must still be defined as `fn <name>(` in
+its module's file, so a misspelled or renamed name is a miss in every
+build. The lane then prints the switches left with no line to run: as of
+this change `CrossedRunsKeep`, `MoveSkipsWorkerOffer` and
+`WorldSkipsWorkerWait`, which only explorer lines show red, so a run a push
+starts does not show them. With `FIPS_MUTATION_EXPLORERS=1` the lane
+builds the root crate's library tests with the feature, and every line
+must resolve and run.
+
 ## Running it
 
 `testing/mutations/run.sh` from any directory of a checkout. It runs in

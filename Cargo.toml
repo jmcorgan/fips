@@ -67,6 +67,15 @@ profiling = []
 # above; no package build may. A build without it ignores those keys with a
 # warning.
 test-overrides = []
+# The real-node settlement explorer's walks
+# (`src/node/tests/settle/explore/`: the property, peer-change and
+# decrypt-worker tests in `oracle.rs`, the reach and walk-bound tests in
+# `explore.rs`, and the shared schedules in `parity.rs`). Off by default, so
+# no CI run started by a push executes them; `testing/ci-local.sh
+# --explorers` turns it on, as does any `cargo test --features explorers`.
+# The --all-features clippy pass lints the code it gates. fips-core's
+# explorers are behind its own `slow-explorers` feature.
+explorers = []
 
 [dependencies]
 ratatui = "0.30"

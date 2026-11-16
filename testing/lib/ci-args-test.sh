@@ -2,8 +2,9 @@
 # Tests for ci-local.sh's argument handling: an unknown option or an option
 # missing its value is a usage error (exit 2, message on stderr), and --help
 # still exits 0 with the usage on stdout. --rerun <suite> rejects an unknown
-# suite name and the options it cannot be combined with, before any build, and
-# --build-only rejects --root-tests, whose stage it would skip.
+# suite name and the options it cannot be combined with, before any build;
+# --build-only rejects --root-tests and --explorers, whose stages it would
+# skip; and --explorers= takes only core or root.
 #
 # Every case invokes ci-local.sh with arguments that end during parsing, before
 # the load sampler, traps, containers or any build, so the suite is hermetic and
@@ -95,7 +96,7 @@ expect_usage_error "--rerun without a value" "--rerun needs a value" --rerun
 expect_usage_error "--rerun of an unknown suite" "Unknown suite: no-such-suite" \
     --rerun no-such-suite
 for opt in --only --build-only --test-only --skip-integration --cross-check \
-        --baremetal --slow-tests --root-tests; do
+        --baremetal --slow-tests --root-tests --explorers; do
     args=(--rerun firewall "$opt")
     [ "$opt" = --only ] && args+=(firewall)
     expect_usage_error "--rerun with $opt" \
@@ -121,6 +122,17 @@ expect_usage_error "--build-only with --root-tests" \
     "--root-tests cannot be combined with --build-only" --build-only --root-tests
 expect_usage_error "--root-tests with --build-only" \
     "--root-tests cannot be combined with --build-only" --root-tests --build-only
+
+expect_usage_error "--build-only with --explorers" \
+    "--explorers cannot be combined with --build-only" --build-only --explorers
+expect_usage_error "--explorers=root with --build-only" \
+    "--explorers cannot be combined with --build-only" --explorers=root --build-only
+expect_usage_error "--rerun with --explorers=core" \
+    "--rerun cannot be combined with --explorers" --rerun firewall --explorers=core
+expect_usage_error "--explorers= with an unknown half" \
+    "--explorers takes core or root, not: both" --explorers=both
+expect_usage_error "--explorers= with no half" \
+    "--explorers takes core or root, not: nothing" --explorers=
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

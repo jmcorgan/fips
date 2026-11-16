@@ -49,8 +49,8 @@
 //! pins of the two cases are run under each candidate as well.
 //!
 //! The explored runs, and everything only they use, need the
-//! `slow-explorers` feature, which local CI turns on with `--slow-tests`
-//! and GitHub CI does not; the two scripted tests need only `slow-tests`.
+//! `slow-explorers` feature, which only local CI's `--explorers` turns on;
+//! the two scripted tests need only `slow-tests`.
 
 use alloc::string::String;
 use alloc::vec::Vec;

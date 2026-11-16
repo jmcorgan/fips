@@ -316,15 +316,15 @@ builds, and changes no line of the core, the machine or the bundle.
   fraction of a second, so each healed leaf of those three steps a
   minute of probes and each sweep takes tens of minutes; they run one test
   per start, the two-path starts one test together and the two mixed
-  pairings' sweeps one test each, in the slow explorers' build only. It
+  pairings' sweeps one test each, in the explorers' build only. It
   exempts a split a known shape left (`oracle::by_shape`), and the breach `pins.rs` holds of a connection-closed
   pair the node's bundle holds as an acknowledged path that is not Live
   (`lapsed`). Each sweep's line counts its exempted breaches by cause and
   the explored states showing each pinned clause of the joint world's
   oracles, and a test shows the pinned breach exempted by its cause and a
   settled, capable pair not.
-  The core's own explorer runs here too, in the slow explorers' build
-  only (it took more than nextest's 480 s on two cores), on joint nodes at Off: every
+  The core's own explorer runs here too, in the explorers' build, on
+  joint nodes at Off: every
   named start but the two late-dial cases, the one with two paths on
   real bundles, with joint nodes at both ends and with one at either end
   against the model, under the same exemption and one more, for what the
@@ -465,19 +465,13 @@ builds, and changes no line of the core, the machine or the bundle.
   message starts `defect:`, and checks the shape it needs with
   `precondition:` assertions; it lands with its `known-defect` line and
   its characterisation entry, and the fix removes all three.
-- The lanes: a test here runs in every build unless it is gated on
-  `slow-explorers`, which only local CI with `--slow-tests` and the
-  internal builder turn on. In every build, under nextest's 480 s for the
-  known-slow list, run the reach tests at the four pairings, the cold
-  start's two reach tests, and the sweeps at Off with Off and at On with
-  On of the starts that stay cheap there (on two cores under nextest,
-  366 s for the slowest, the sweep at Off). In the slow explorers' build
-  only: the core's own explorer on joint nodes, the sweeps at On with On
-  of the three named starts whose links turn capable and of the two-path
-  starts, and the two mixed pairings' sweeps. The cold start's
-  measurement is ignored and run by hand. A test that passes 480 s on two
-  cores moves to the slow explorers' build; one added to the known-slow
-  list goes in both of `.config/nextest.toml`'s profiles.
+- The lanes: every reach and every sweep here, the core's own explorer on
+  joint nodes and the one-start reaches and sweeps of `runs.rs` among
+  them, is gated on `slow-explorers`, which no CI run started by a push
+  turns on; local CI runs them only with `--explorers`. The scripted
+  runs, the feeds and the pins run in every build. The cold start's
+  measurement is ignored and run by hand. A new reach or sweep goes
+  behind `slow-explorers` too.
 - Tests here follow the settlement tests' coverage rules
   (`core/src/proto/settle/tests/README.md`): each needs a switch's row, a
   self-checked entry or a characterisation entry in `../faults.rs`, in the

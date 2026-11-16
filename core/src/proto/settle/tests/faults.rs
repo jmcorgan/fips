@@ -10,10 +10,18 @@
 //!
 //! The tables are compiled in every test build so that the coverage scan,
 //! which is cheap, runs everywhere; only the meta-test, which runs each row
-//! in a child, waits for the `slow-tests` feature. A row's tests in a file
-//! only `slow-explorers` compiles (the runs against the deployed models)
-//! are left out of the meta-test without that feature, and every row must
-//! keep at least one test it runs.
+//! in a child, waits for the `slow-tests` feature. A row's explorers, the
+//! tests only `slow-explorers` compiles, are left out of the meta-test
+//! without that feature, and a row whose every test is an explorer is left
+//! whole to the explorers' build; the meta-test prints both counts and the
+//! rows it left. A named test is accepted as an explorer only where the
+//! sources show it behind that feature's `cfg`
+//! (`crate::testutil::explorer_only`), so a misspelled or renamed name
+//! fails every build. In the explorers' build every named test must be
+//! compiled and every row runs; `testing/ci-local.sh --explorers` runs it
+//! there. Which tests this build compiles is
+//! read from the binary's own list (`crate::testutil::compiled_tests`), so
+//! no list here has to follow the features' gates.
 //!
 //! A row names the cheapest tests its switch was shown to red. The core
 //! explorer reds most of the core's switches, at 20 to 50 s a run, so it is
@@ -1368,19 +1376,11 @@ mod run {
     use alloc::vec::Vec;
 
     use super::super::super::faults::VAR;
-    use super::{LEGACY, REKEY, ROWS, Test};
+    use super::{REKEY, ROWS, Test};
 
     /// The rekey machine's variable, which a child of a [`REKEY`] row takes
     /// (`../../rekey/faults.rs`).
     const REKEY_VAR: &str = "FIPS_REKEY_FAULTS";
-
-    /// The test files only a build with `slow-explorers` compiles.
-    const EXPLORERS: &[&str] = &[LEGACY];
-
-    /// Whether this build compiles the tests of the file `prefix` names.
-    fn built(prefix: &str) -> bool {
-        cfg!(feature = "slow-explorers") || !EXPLORERS.contains(&prefix)
-    }
 
     /// Run the test at `path` alone in a child process with the variable
     /// `var` set to `faults`, or with no switch when `var` is empty; true
@@ -1439,20 +1439,39 @@ mod run {
                     .map(|(f, ts)| (REKEY_VAR, String::from(*f), *ts)),
             )
             .collect();
+        let compiled = crate::testutil::compiled_tests();
+        let built = |prefix: &str, test: &str| compiled.contains(&format!("{prefix}{test}"));
+        let explorers = cfg!(feature = "slow-explorers");
         let mut named: Vec<String> = Vec::new();
         let mut jobs = Vec::new();
         let mut wrong = Vec::new();
         let mut left = 0;
+        let mut rows_left: Vec<&str> = Vec::new();
         for (var, fault, tests) in &tables {
-            if !tests.iter().any(|(prefix, _)| built(prefix)) {
-                wrong.push(format!("{fault} names no test this build compiles"));
+            if !tests.iter().any(|(prefix, test)| built(prefix, test)) {
+                if explorers || tests.is_empty() {
+                    wrong.push(format!("{fault} names no test this build compiles"));
+                } else if tests.iter().all(|(prefix, test)| {
+                    crate::testutil::explorer_only(&format!("{prefix}{test}"))
+                }) {
+                    rows_left.push(fault.as_str());
+                }
             }
             for (prefix, test) in *tests {
-                if !built(prefix) {
+                let path = format!("{prefix}{test}");
+                if !built(prefix, test) {
+                    if explorers {
+                        wrong.push(format!(
+                            "{fault} names {path}, which the explorers' build does not compile"
+                        ));
+                    } else if !crate::testutil::explorer_only(&path) {
+                        wrong.push(format!(
+                            "{fault} names {path}, which this build does not compile and the sources show behind no slow-explorers gate"
+                        ));
+                    }
                     left += 1;
                     continue;
                 }
-                let path = format!("{prefix}{test}");
                 if !named.contains(&path) {
                     named.push(path.clone());
                 }
@@ -1481,11 +1500,12 @@ mod run {
             }
         }
         std::eprintln!(
-            "{} rows and {} rekey rows, {} tests, {} s; {left} row entries left to the explorers' build",
+            "{} rows and {} rekey rows, {} tests, {} s; {left} row entries and {} whole rows left to the explorers' build: {rows_left:?}",
             ROWS.len(),
             REKEY.len(),
             named.len(),
-            started.elapsed().as_secs()
+            started.elapsed().as_secs(),
+            rows_left.len()
         );
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
