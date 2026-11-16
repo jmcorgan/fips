@@ -2,7 +2,7 @@
 """Sign Nostr events with fresh keys and publish them to one relay.
 
 Shared by the NAT-lab suites that put events on the lab's relay themselves:
-nostr-relay-test.sh (a malformed advert) and nostr-open-discovery-test.sh
+nat-test.sh's lan scenario (a malformed advert) and nostr-open-discovery-test.sh
 (adverts seeded before the node starts). Standard library only, so it runs in
 any container with python3; callers feed it on stdin:
 

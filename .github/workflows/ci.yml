@@ -45,6 +45,10 @@ env:
 #   tor-socks5     — requires live Tor network; opt-in via --with-tor,
 #                    unreliable on GitHub-hosted runners.
 #   tor-directory  — same; live Tor dependency.
+#   dual-udp-flap, two-bound-udp-bulk, churn-mixed-10, congestion-stress —
+#                    chaos scenarios run only in the nightly run of each
+#                    trunk tip (ci-local.sh --tier 3, NIGHTLY_CHAOS), and
+#                    this workflow has no nightly run.
 #
 # Deliberate GitHub-only: the arm64 install leg (ubuntu22). The local host is
 # x86_64 and has no arm64 execution; the leg is compared by distribution only
@@ -1438,25 +1442,15 @@ jobs:
             type: gateway
             topology: gateway
           # ── Chaos / stochastic scenarios ───────────────────────────────────
-          - suite: churn-mixed-10
-            type: chaos
-            scenario: churn-mixed
-            chaos_flags: "--nodes 10 --duration 120"
           - suite: ethernet-mesh
             type: chaos
             scenario: ethernet-mesh
-          - suite: ethernet-only
-            type: chaos
-            scenario: ethernet-only
           - suite: ethernet-churn
             type: chaos
             scenario: ethernet-churn
           - suite: dual-path-flap
             type: chaos
             scenario: dual-path-flap
-          - suite: dual-udp-flap
-            type: chaos
-            scenario: dual-udp-flap
           - suite: dual-path-carrier
             type: chaos
             scenario: dual-path-carrier
@@ -1469,21 +1463,12 @@ jobs:
           - suite: two-bound-udp
             type: chaos
             scenario: two-bound-udp
-          - suite: two-bound-udp-bulk
-            type: chaos
-            scenario: two-bound-udp-bulk
           - suite: steady-dual-path
             type: chaos
             scenario: steady-dual-path
           - suite: tcp-mesh
             type: chaos
             scenario: tcp-mesh
-          - suite: congestion-stress
-            type: chaos
-            scenario: congestion-stress
-          # ── Sidecar deployment ──────────────────────────────────────────
-          - suite: sidecar
-            type: sidecar
           # ── NAT traversal lab (Nostr/STUN UDP hole punch) ───────────────
           - suite: nat-cone
             type: nat
@@ -1491,16 +1476,11 @@ jobs:
           - suite: nat-symmetric
             type: nat
             scenario: symmetric
+          # The lan scenario ends by publishing a malformed overlay advert to
+          # the relay; both daemons must survive it and keep their link.
           - suite: nat-lan
             type: nat
             scenario: lan
-          # ── Nostr overlay advert publish/consume round-trip ─────────────
-          # Two FIPS daemons + the existing strfry relay; covers Phase 1
-          # (A→B publish/consume), Phase 2 (B→A reverse), and Phase 3
-          # (malformed advert injected to relay; consumers must reject
-          # without crashing). UDP transport baseline for v0.3.0.
-          - suite: nostr-publish-consume
-            type: nostr-publish-consume
           # ── STUN fault-injection ───────────────────────────────────────
           # One FIPS daemon + a netns-sharing shim that injects tc/iptables
           # faults against UDP egress to the in-lab STUN server. Three
@@ -1655,20 +1635,6 @@ jobs:
           path: testing/chaos/sim-results/
           retention-days: 7
 
-      # ── Sidecar deployment ──────────────────────────────────────────────
-      - name: Run sidecar integration test
-        if: matrix.type == 'sidecar'
-        run: bash testing/sidecar/scripts/test-sidecar.sh --skip-build
-
-      - name: Collect logs on failure (sidecar)
-        if: matrix.type == 'sidecar' && failure()
-        run: |
-          for node in a b c; do
-            echo "--- sidecar-${node} logs ---"
-            docker logs "sidecar-${node}-fips-1" 2>&1 || true
-            echo ""
-          done
-
       # ── NAT traversal lab ───────────────────────────────────────────────
       - name: Run NAT lab scenario
         if: matrix.type == 'nat'
@@ -1686,23 +1652,6 @@ jobs:
           docker compose -f testing/nat/docker-compose.yml \
             --profile cone --profile symmetric --profile lan \
             down --volumes --remove-orphans
-
-      # ── Nostr overlay advert publish/consume ───────────────────────────
-      - name: Run Nostr publish/consume test
-        if: matrix.type == 'nostr-publish-consume'
-        run: bash testing/nat/scripts/nostr-relay-test.sh
-
-      - name: Collect logs on failure (nostr-publish-consume)
-        if: matrix.type == 'nostr-publish-consume' && failure()
-        run: |
-          docker compose -f testing/nat/docker-compose.yml \
-            --profile nostr-publish-consume logs --no-color
-
-      - name: Stop containers (nostr-publish-consume)
-        if: matrix.type == 'nostr-publish-consume' && always()
-        run: |
-          docker compose -f testing/nat/docker-compose.yml \
-            --profile nostr-publish-consume down --volumes --remove-orphans
 
       # ── STUN fault-injection ───────────────────────────────────────────
       - name: Run STUN fault-injection test

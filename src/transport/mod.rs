@@ -67,7 +67,7 @@ use nym::NymTransport;
 use secp256k1::XOnlyPublicKey;
 use std::fmt;
 use std::net::SocketAddr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tcp::TcpTransport;
 use thiserror::Error;
 use tor::TorTransport;
@@ -105,10 +105,7 @@ pub struct ReceivedPacket {
 impl ReceivedPacket {
     /// Create a new received packet with current timestamp.
     pub fn new(transport_id: TransportId, remote_addr: TransportAddr, data: Vec<u8>) -> Self {
-        let timestamp_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let timestamp_ms = crate::time::wall_ms();
         Self {
             transport_id,
             remote_addr,

@@ -65,7 +65,7 @@ impl Node {
     async fn timeouts_body(&mut self) {
         // First, and not behind the connection check below: a node with no
         // handshake in progress still holds TUN packets.
-        self.release_stranded_tun_packets(std::time::Instant::now());
+        self.release_stranded_tun_packets(crate::time::mono_now());
         self.check_timeouts_at(Self::interval_ms()).await;
     }
 

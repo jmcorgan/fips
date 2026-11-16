@@ -40,9 +40,11 @@ and a local STUN responder.
 | symmetric | UDP traversal fails under symmetric NAT, TCP fallback wins   |
 | lan       | Peers on the same LAN prefer local addresses over reflexive  |
 
-The same lab runs the Nostr suites: `nostr-publish-consume` and
-`stun-faults` in every run, and `nostr-open-discovery`, the open-discovery
-startup scenario, only when named (`ci-local.sh --only nostr-open-discovery`).
+The lan scenario also publishes a malformed overlay advert to the relay once
+the peers are up, and requires both daemons to survive it and keep their
+link. The same lab runs `stun-faults` in every run, and
+`nostr-open-discovery`, the open-discovery startup scenario, only when named
+(`ci-local.sh --only nostr-open-discovery`).
 
 ### [chaos/](chaos/) -- Stochastic Simulation
 
@@ -84,7 +86,9 @@ FIPS running as a sidecar container that owns the network namespace of
 a companion application container, with iptables/ip6tables rules
 confining the app to the mesh. `scripts/test-sidecar.sh` boots a
 three-node chain of such pairs and asserts both connectivity and
-isolation.
+isolation. Run by hand only: no CI runs it, since static-chain asserts the
+same multi-hop path and the isolation rules are the test image's own
+(`ci-local.sh`'s header says why).
 
 ### [firewall/](firewall/) -- nftables Baseline
 
@@ -263,7 +267,19 @@ chaos, per distro for deb-install and per scenario for rpm-install, across
 every job that carries a
 matrix, and that every build, lint, guard and unit-test step GitHub runs is a
 stage of `--tier 2` and the reverse, by the check's table of GitHub steps and
-local results; a divergence fails the run. The only exceptions are what one
+local results; a divergence fails the run. A name proves nothing about a
+command, so each mapped step must also run the command fragments the check
+lists for it, taken from what `ci-local.sh` runs for its result, in real
+command text (not a comment or an echo), and each kind of integration leg
+must reach a step that runs its suite's script. Each of these steps must be
+able to fail and must run: a `|| true` or `|| echo`, an `exit 0`, a command
+behind `:` or `if false`, a pipe with no pipefail, `--no-run`, a
+constant-false `if:` or a `continue-on-error:` fails the check. No step in
+any workflow a push or a pull request starts may run the explorers (the
+core's `slow-explorers` feature, the root crate's `explorers` feature, or
+`FIPS_MUTATION_EXPLORERS`), counting values a matrix supplies. Matching by
+fragment does not parse the shell, so review still has to read a CI change.
+The only exceptions are what one
 runner cannot do, listed by name in the check: the Android, macOS and Windows
 jobs, the build job's native release builds on its arm64, macOS and Windows
 legs, and nextest's retry-flake report on GitHub, the zig cross-checks
@@ -287,14 +303,18 @@ internal builder runs for each kind of commit:
   and no integration suites.
 - **Tier 2, trunk tips and landing candidates:** tier 1, with the `.deb`
   built at the start of the build stage, the core's slow suites, the
-  mutation lane, the musl unit tests and every integration suite. This is
-  the set GitHub's `ci.yml` runs too.
+  mutation lane, the musl unit tests and every integration suite but the
+  nightly-only chaos scenarios. This is the set GitHub's `ci.yml` runs too.
 - **Tier 3, the nightly run of each trunk tip:** tier 2, the explorers (on
   next the core half alone, and so not the mutation lane's explorer lines;
   see below), and the nightly extras: a batch of every CI chaos scenario,
-  three runs each, and the long scenarios no other run takes
-  (`dead-grace-long`, `maelstrom`, `maelstrom-sparse`). `--with-tor` adds
-  the Tor suites.
+  three runs each, the same batch of the nightly-only chaos scenarios
+  (`dual-udp-flap`, `two-bound-udp-bulk`, `churn-mixed-10` and
+  `congestion-stress`, which no tier 1 or tier 2 run and no GitHub job
+  takes), and the long scenarios no other run takes (`dead-grace-long`,
+  `maelstrom`, `maelstrom-sparse`). `--with-tor` adds the Tor suites. The
+  parity check lists the nightly-only scenarios as an exception, since
+  GitHub CI has no nightly run.
 
 No tier a push starts runs the explorers. Under a tier the root tests run in
 a container, the environment switches (`FIPS_CI_BAREMETAL`,

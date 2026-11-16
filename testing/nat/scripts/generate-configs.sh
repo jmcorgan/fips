@@ -16,7 +16,7 @@ SCENARIO="${1:?usage: generate-configs.sh <cone|symmetric|lan> [mesh-name]}"
 MESH_NAME="${2:-nat-lab-$(date +%s)-$$}"
 
 case "$SCENARIO" in
-    cone|symmetric|lan|nostr-publish-consume|stun-faults|nostr-open-discovery) ;;
+    cone|symmetric|lan|stun-faults|nostr-open-discovery) ;;
     *)
         echo "Unknown scenario: $SCENARIO" >&2
         exit 1
@@ -43,8 +43,7 @@ lan="${NAT_LAN_PREFIX:-172.31.10}"
 
 relay_addr="ws://${wan}.30:7777"
 stun_addr="stun:${wan}.40:3478"
-if [ "$SCENARIO" = "lan" ] || [ "$SCENARIO" = "nostr-publish-consume" ] \
-        || [ "$SCENARIO" = "stun-faults" ] \
+if [ "$SCENARIO" = "lan" ] || [ "$SCENARIO" = "stun-faults" ] \
         || [ "$SCENARIO" = "nostr-open-discovery" ]; then
     relay_addr="ws://${lan}.30:7777"
     stun_addr="stun:${lan}.40:3478"

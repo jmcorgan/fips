@@ -33,7 +33,7 @@ use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket, TransportErr
 use crate::utils::index::SessionIndex;
 use fips_core::proto::rekey::{Input, Intent, Reason, Record, allocate};
 use fips_core::time::Clock as _;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 impl Node {
@@ -1907,10 +1907,14 @@ impl Node {
                 } else {
                     crate::peer::since(existing_peer.heard_at()).as_millis() as u64
                 },
-                epoch_restart_dampened: self
-                    .restart_dampener
-                    .get(&peer_node_addr)
-                    .is_some_and(|t| t.elapsed().as_secs() < EPOCH_RESTART_MIN_INTERVAL_SECS),
+                epoch_restart_dampened: self.restart_dampener.get(&peer_node_addr).is_some_and(
+                    |t| {
+                        crate::time::mono_now()
+                            .saturating_duration_since(*t)
+                            .as_secs()
+                            < EPOCH_RESTART_MIN_INTERVAL_SECS
+                    },
+                ),
                 silent_backoff,
             },
             None => EstablishSnapshot {
@@ -2100,8 +2104,10 @@ impl Node {
                     // would let a sustained replay starve a genuinely restarting
                     // peer for as long as it kept sending.
                     let cutoff = Duration::from_secs(EPOCH_RESTART_MIN_INTERVAL_SECS);
-                    self.restart_dampener.retain(|_, t| t.elapsed() < cutoff);
-                    self.restart_dampener.insert(*peer, Instant::now());
+                    self.restart_dampener.retain(|_, t| {
+                        crate::time::mono_now().saturating_duration_since(*t) < cutoff
+                    });
+                    self.restart_dampener.insert(*peer, crate::time::mono_now());
                 }
                 // Machine-driven inbound establish/rekey resolution. The leg's
                 // PERSISTENT machine emitted the action stream alongside the

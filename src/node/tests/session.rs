@@ -2185,7 +2185,7 @@ async fn inside_the_hold_a_bloom_miss_packet_is_held_and_a_retransmit_after_the_
         Node::now_ms(),
     );
     assert!(
-        nodes[0].node.routing_hold_active(std::time::Instant::now()),
+        nodes[0].node.routing_hold_active(crate::time::mono_now()),
         "precondition: A is inside the routing hold"
     );
 
@@ -2250,7 +2250,7 @@ async fn outside_the_hold_a_packet_to_a_destination_a_tree_peer_filter_reaches_i
         .node
         .backdate_hold_for_test(std::time::Duration::from_secs(60));
     assert!(
-        !nodes[0].node.routing_hold_active(std::time::Instant::now()),
+        !nodes[0].node.routing_hold_active(crate::time::mono_now()),
         "precondition: A is outside the routing hold"
     );
     let initiated = nodes[0].node.metrics().lookup.req_initiated.get();
@@ -2294,7 +2294,7 @@ async fn hold_a_bloom_miss_for_c_and_backdate_it(
         Node::now_ms(),
     );
     assert!(
-        nodes[0].node.routing_hold_active(std::time::Instant::now()),
+        nodes[0].node.routing_hold_active(crate::time::mono_now()),
         "precondition: A is inside the routing hold"
     );
     let misses = nodes[0].node.metrics().lookup.req_bloom_miss.get();
@@ -7439,10 +7439,7 @@ fn peer_identity_sorting_above(node_addr: &crate::NodeAddr) -> Identity {
 
 /// Wall-clock milliseconds, matching the clock the tick loop reads.
 fn wall_clock_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+    crate::time::wall_ms()
 }
 
 #[tokio::test]
@@ -11624,7 +11621,7 @@ async fn a_tun_packet_held_behind_a_removed_peers_session_is_kept_then_answered_
 
     nodes[0]
         .node
-        .release_stranded_tun_packets(std::time::Instant::now());
+        .release_stranded_tun_packets(crate::time::mono_now());
     let answers = drain_tun(&rx);
     assert_eq!(
         answers.len(),
@@ -11656,7 +11653,7 @@ async fn a_tun_packet_held_behind_a_removed_peers_session_stays_held_while_anoth
     );
     nodes[0]
         .node
-        .release_stranded_tun_packets(std::time::Instant::now());
+        .release_stranded_tun_packets(crate::time::mono_now());
 
     let answers = drain_tun(&rx);
     assert!(

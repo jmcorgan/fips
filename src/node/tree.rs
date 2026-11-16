@@ -278,10 +278,7 @@ impl Node {
             return;
         }
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = Self::now_ms();
 
         // Sample before the TreeState write below: is_tree_peer reads the
         // declaration that write stores, so sampling after it would always
@@ -407,10 +404,7 @@ impl Node {
                 new_parent,
                 new_seq,
             } => {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let timestamp = Self::now_ms() / 1000;
 
                 // Clone identity up front to avoid a split borrow against the
                 // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
@@ -458,10 +452,7 @@ impl Node {
             TreeDecision::SelfRoot => {
                 // Self is the smallest visible NodeAddr — promote to root rather
                 // than continuing to advertise a stale ancestry rooted elsewhere.
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let timestamp = Self::now_ms() / 1000;
                 // Clone identity up front to avoid a split borrow against the
                 // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
                 let our_identity = self.identity().clone();
@@ -494,10 +485,7 @@ impl Node {
                     parent = %self.peer_display_name(from),
                     "Parent ancestry contains us — loop detected, dropping parent"
                 );
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let timestamp = Self::now_ms() / 1000;
                 let outcome = self
                     .tree_state
                     .recover(&peer_costs, &skip, timestamp, mono_now_ms);
@@ -548,10 +536,7 @@ impl Node {
                 let old_addrs: Vec<NodeAddr> =
                     self.tree_state.my_coords().node_addrs().copied().collect();
 
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let timestamp = Self::now_ms() / 1000;
 
                 // Clone identity up front to avoid a split borrow against the
                 // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
@@ -684,7 +669,7 @@ impl Node {
             return;
         }
 
-        let now = std::time::Instant::now();
+        let now = crate::time::mono_now();
         let interval = std::time::Duration::from_secs(interval_secs);
 
         if let Some(last) = self.last_parent_reeval
@@ -715,10 +700,7 @@ impl Node {
                 new_parent,
                 new_seq,
             } => {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let timestamp = Self::now_ms() / 1000;
 
                 // Clone identity up front to avoid a split borrow against the
                 // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
@@ -761,10 +743,7 @@ impl Node {
                 self.bloom_state.mark_all_updates_needed(all_peers);
             }
             TreeDecision::SelfRoot => {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let timestamp = Self::now_ms() / 1000;
                 // Clone identity up front to avoid a split borrow against the
                 // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
                 let our_identity = self.identity().clone();
@@ -854,10 +833,7 @@ impl Node {
 
         // Wall-clock seconds stamped onto the new declaration; monotonic ms for
         // the parent re-evaluation's flap timers.
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now_secs = Self::now_ms() / 1000;
         let mono_now_ms = crate::time::mono_ms();
 
         // Removal is not a pure classify: `handle_parent_lost` is a &mut mutator

@@ -3224,7 +3224,7 @@ impl Node {
         if let Err(e) = self.initiate_session(dest_addr, dest_pubkey).await {
             debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Failed to initiate session, trying discovery");
             let kind = self.maybe_initiate_lookup(&dest_addr).await.kind();
-            let in_hold = self.routing_hold_active(std::time::Instant::now());
+            let in_hold = self.routing_hold_active(crate::time::mono_now());
             let routed =
                 self.peers.contains_key(&dest_addr) || self.find_next_hop(&dest_addr).is_some();
             match held_fate(kind, in_hold, routed) {
@@ -3349,7 +3349,7 @@ impl Node {
         if !self.pending_tun_packets.contains_key(dest) {
             return;
         }
-        let now = std::time::Instant::now();
+        let now = crate::time::mono_now();
         self.pending_tun_since
             .entry(*dest)
             .or_insert_with(|| HeldStamp::new(now))
@@ -3395,7 +3395,7 @@ impl Node {
 
         if is_new {
             self.pending_tun_since
-                .insert(dest_addr, HeldStamp::new(std::time::Instant::now()));
+                .insert(dest_addr, HeldStamp::new(crate::time::mono_now()));
         }
         let per_dest = self.config().node.session.pending_packets_per_dest;
         let queue = self

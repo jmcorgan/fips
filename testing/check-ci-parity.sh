@@ -15,6 +15,17 @@
 #                    when the Nostr rendezvous code changes, and is not in
 #                    local CI's default run either.
 #
+# Deliberate nightly-only (in neither runner's push-started set), with reason:
+#   dual-udp-flap, two-bound-udp-bulk, churn-mixed-10, congestion-stress —
+#                    chaos scenarios ci-local.sh runs only in tier 3's chaos
+#                    batch (its NIGHTLY_CHAOS list), the nightly run of each
+#                    trunk tip. GitHub CI has no nightly run, so they run on
+#                    the internal builder alone. The table NIGHTLY_ONLY below
+#                    holds each one's reason; a NIGHTLY_CHAOS entry without
+#                    one, an entry for a scenario NIGHTLY_CHAOS does not
+#                    list, one also in CHAOS_SUITES or on a GitHub leg, and
+#                    one tier 3's chaos part does not batch each fail.
+#
 # Deliberate GitHub-only (NOT in the local run), with reason:
 #   deb-install ubuntu22 on arm64 — the local host is x86_64 and cannot run an
 #                    arm64 package. The GitHub leg installs the arm64 package
@@ -87,6 +98,37 @@
 #   Local-only stages — cross-check-*: zig compiles of the macOS, Windows
 #                    and FreeBSD targets, which GitHub builds on their own
 #                    runners.
+#
+# ── What each step runs ──
+# A name says nothing about a command, so each mapped step must also contain
+# the command fragments the table CMDS lists for it, each taken from what
+# ci-local.sh runs for the step's result (the script, or the cargo command
+# line with its features). The suite jobs get the same check through the
+# table SUITE_CMDS: each kind of matrix leg has the step that runs its
+# suite, under the `if:` that selects that kind, with the fragments of the
+# suite's script. Only real command text counts: a fragment holding `=` may
+# be in the step's env or its run lines, any other only in its run lines,
+# less comments and less echo lines that write no GitHub file. A mapped step
+# or leg kind with no entry fails, as does a missing fragment and anything
+# that keeps the command from failing the step or from running at all: a
+# `||` whose right side is not a test or a failing exit, an `exit 0` or a
+# bare `exit`, a command behind `:` or `true`, an `if false`, a pipe after
+# the command when the step's shell has no pipefail, `--no-run` or `--list`
+# on a test command, a constant-false `if:` (or a conjunction with one) and
+# a `continue-on-error:` on the step or its job.
+#
+# No step of any workflow started by a push or a pull request may run the
+# explorers: fips-core's slow-explorers feature, the root crate's explorers
+# feature (in any form of --features list), a test run with --all-features,
+# or FIPS_MUTATION_EXPLORERS. That covers ci.yml and the package workflows;
+# a step's matrix values are put in place before the match, so a feature
+# supplied from a matrix is caught too. The explorers run only in the
+# nightly run.
+#
+# Matching by fragment has limits this check does not close: a command can
+# keep every fragment and still be made to run nothing by shell this check
+# does not parse (a function, a heredoc, an alias), and a test filter can
+# narrow what runs. Review of a CI change still has to read it.
 #
 # Exit 0 = parity clean. Exit 1 = unexpected divergence. Exit 2 = the guard
 # could not run (missing file or missing dependency); never treated as a pass.
@@ -320,6 +362,42 @@ deb_github_only += sorted(
 rpm_local_only = sorted(local_rpm - github_rpm)
 rpm_github_only = sorted(github_rpm - local_rpm)
 
+# ── Nightly-only chaos scenarios ─────────────────────────────────────────────
+# By display name, each with why it runs only in the nightly batch. GitHub CI
+# has no nightly run, so these are the one place the two runners' chaos sets
+# differ on purpose.
+NIGHTLY_ONLY = {
+    "dual-udp-flap": "missed its ceiling by tens of ms under load; its interface "
+        "binding is also exercised by forward-only and two-bound-udp",
+    "two-bound-udp-bulk": "its finds came from repeated stability runs, not "
+        "from a per-push gate",
+    "churn-mixed-10": "a pass means only that the mesh formed and nobody "
+        "errored, on thresholds calibrated from 14 runs; its finds came from "
+        "development runs",
+    "congestion-stress": "176 recorded runs met none of its criteria, cause "
+        "unknown",
+}
+nightly_problems = []
+local_nightly = {}
+for entry in bash_array_entries("NIGHTLY_CHAOS"):
+    parts = entry.split()
+    if len(parts) >= 2:
+        local_nightly[parts[0]] = (parts[1], " ".join(parts[2:]))
+chaos_displays = {e.split()[0] for e in arrays.get("CHAOS_SUITES", [])}
+for name, (scenario, flags) in sorted(local_nightly.items()):
+    if name not in NIGHTLY_ONLY:
+        nightly_problems.append(f"{name} is in ci-local.sh's NIGHTLY_CHAOS but has no "
+                                "entry in NIGHTLY_ONLY (add one with its reason)")
+    if name in chaos_displays:
+        nightly_problems.append(f"{name} is in both NIGHTLY_CHAOS and CHAOS_SUITES, so "
+                                "tier 2 runs it too")
+    if scenario in github_chaos and github_chaos[scenario] == flags:
+        nightly_problems.append(f"{name} is nightly-only but a GitHub leg runs scenario "
+                                f"{scenario} on every push")
+for name in sorted(set(NIGHTLY_ONLY) - set(local_nightly)):
+    nightly_problems.append(f"NIGHTLY_ONLY names {name}, which ci-local.sh's "
+                            "NIGHTLY_CHAOS does not list")
+
 # ── Steps, per tier ──────────────────────────────────────────────────────────
 import fnmatch
 import subprocess
@@ -437,10 +515,354 @@ GITHUB_ONLY_STEPS = {
 }
 LOCAL_ONLY = {"cross-check-*": "zig compiles of targets GitHub builds natively"}
 
+# Per job and step, as keyed in STEPS, what the step's command must contain:
+# each fragment is taken from what ci-local.sh runs for the step's result, so
+# a step that keeps its name but runs something else, or nothing, fails. A
+# fragment counts only in real command text: one holding `=` in the step's
+# env (as KEY=VALUE, with the job's and the workflow's) or its run lines, any
+# other in its run lines alone, less comments and less echo or printf lines
+# that write nothing to $GITHUB_ENV, $GITHUB_OUTPUT or $GITHUB_PATH. A mapped
+# step with no entry here fails, as does an entry for a step STEPS does not
+# map.
+CMDS = {
+    ("ci-parity", "Check local and GitHub runners cover the same work"):
+        ["testing/check-ci-parity.sh"],
+    ("ci-parity", "Check test log matchers against the strings the crate sources emit"):
+        ["testing/check-log-strings.py"],
+    ("ci-parity", "Check no tested function's exit status is a log call's"):
+        ["testing/check-trailing-log.py"],
+    ("ci-parity", "Check the chaos draws do not depend on Python's hash seed"):
+        ["testing/check-chaos-schedule.py"],
+    ("ci-parity", "Check the chaos path assertions against planted input"):
+        ["testing/chaos/sim-assert-test.py"],
+    ("ci-parity", "Check nothing resolves the shared mutable test image"):
+        ["testing/check-image-scoping.sh"],
+    ("ci-parity", "Check every action is pinned to a commit SHA"):
+        ["testing/check-action-pins.sh"],
+    ("ci-parity", "Check every CI base image is pinned by digest"):
+        ["testing/check-base-pins.sh"],
+    ("ci-parity", "Check every source comment resolves in-repo"):
+        ["testing/check-comment-refs.sh"],
+    ("ci-parity", "Check every ignored test against its inventory"):
+        ["testing/check-ignored-tests.py"],
+    ("ci-parity", "Check no non-test code uses std 64-bit atomics"):
+        ["testing/check-portable-atomics.py"],
+    ("ci-parity", "Check no bind-mount source comes from a bare mktemp"):
+        ["testing/check-mount-tmpdir.py"],
+    ("ci-parity", "Check every CI container, network and volume carries the run label"):
+        ["testing/check-ci-labels.py"],
+    ("ci-parity", "Check the OpenWrt package's shell scripts with shellcheck"):
+        ["testing/check-shellcheck.sh", "SHELLCHECK="],
+    ("ci-parity", "Run convergence-gate unit tests"): ["testing/lib/wait-converge-test.sh"],
+    ("ci-parity", "Run NAT lab relay start and guard unit tests"):
+        ["testing/lib/relay-verdict-test.sh"],
+    ("ci-parity", "Run RPM install network budget unit tests"):
+        ["testing/rpm-install/budget-test.sh"],
+    ("ci-parity", "Run container start retry unit tests"): ["testing/lib/docker-run-test.sh"],
+    ("ci-parity", "Check the package versions derived for tags and branches"):
+        ["testing/check-package-versions.sh"],
+    ("ci-parity", "Check the flaky-test reporter against its fixtures"):
+        ["testing/nextest-flaky/test.sh"],
+    ("ci-parity", "Check the node test groups guard against its fixtures"):
+        ["testing/node-test-groups/test.sh"],
+    ("ci-parity", "Check every socket node test module is in its nextest group"):
+        ["testing/check-node-test-groups.py"],
+    ("ci-parity", "Check the glibc floor check against its cases"): ["testing/glibc-floor/test.sh"],
+    ("ci-parity", "Check ci-local.sh's argument handling"): ["testing/lib/ci-args-test.sh"],
+    ("ci-parity", "Check ci-local.sh's plan check against planted results"):
+        ["testing/lib/ci-plan-test.sh"],
+    ("ci-parity", "Check the parity check against planted divergences"):
+        ["testing/lib/ci-parity-test.sh"],
+    ("ci-parity", "Check the firewall suite's table check against its cases"):
+        ["testing/firewall/table-check-test.sh"],
+    ("ci-parity", "Check the chaos veth host-command bound against its cases"):
+        ["testing/chaos/veth-host-test.sh"],
+    ("ci-parity", "Check the Node struct declares no NodeContext field"):
+        ["testing/check-node-context.sh"],
+    ("fmt", "cargo fmt --check"): ["cargo fmt --check"],
+    ("clippy", "cargo clippy --all-targets --all-features -- -D warnings"):
+        ["cargo clippy --all-targets --all-features -- -D warnings"],
+    ("clippy", "Clippy (default features)"): ["cargo clippy --all-targets -- -D warnings"],
+    ("clippy", "Clippy the no_std core library on its own"):
+        ["cargo clippy -p fips-core --lib -- -D warnings"],
+    ("clippy", "Clippy the no_std core and its tests on their own"):
+        ["cargo clippy -p fips-core --all-targets -- -D warnings"],
+    ("clippy", "Clippy the no_std core's slow test suites"):
+        ["cargo clippy -p fips-core --all-targets --features slow-tests -- -D warnings"],
+    ("clippy", "Document the no_std core with rustdoc warnings denied"):
+        ["RUSTDOCFLAGS=-D warnings", "cargo doc -p fips-core --no-deps"],
+    ("clippy", "Build with the tick-body profiler enabled"):
+        ["cargo build --workspace --features profiling"],
+    ("core-baremetal", "Build the no_std core for bare-metal targets"):
+        ["testing/build-core-baremetal.sh"],
+    ("build", "Validate fips.nft syntax (Linux only)"):
+        ["nft -c -f packaging/common/fips.nft"],
+    ("build", "Build the integration binaries"):
+        ["cargo build --profile integration --features test-overrides --bins --examples"],
+    ("build", "Build the integration test images"):
+        ["docker build -t fips-test:latest testing/docker",
+         "-f testing/docker/Dockerfile.app testing/docker"],
+    ("deb-package", "Build the .deb in the pinned build container"):
+        ["packaging/debian/build-deb-container.sh --output-dir"],
+    ("test", "Create an address-less interface for the presence probe"):
+        ["ip link add fips-probe0 type dummy", "ip link set fips-probe0 addrgenmode none",
+         "FIPS_TEST_ADDRLESS_IFACE=fips-probe0", "FIPS_TEST_REQUIRE_FIXTURES=1"],
+    ("test", "Run unit tests"): ["cargo nextest run --all"],
+    ("test-core", "Run the no_std core's tests on their own, with its slow suites"):
+        ["cargo test -p fips-core --features slow-tests"],
+    ("test-core", "Run the known-defect lane"): ["testing/known-defect-lane.sh"],
+    ("test-mutations", "Run the mutation lane"): ["testing/mutations/run.sh"],
+    ("test-features", "Create an address-less interface for the presence probe"):
+        ["ip link add fips-probe0 type dummy", "ip link set fips-probe0 addrgenmode none",
+         "FIPS_TEST_ADDRLESS_IFACE=fips-probe0", "FIPS_TEST_REQUIRE_FIXTURES=1"],
+    ("test-features", "Run library tests with the optional root features enabled"):
+        ["FIPS_AUDIT_REACH=", "cargo test -p fips-mesh --lib --features profiling,test-overrides"],
+    ("test-features", "Check the reach of the live map audit"):
+        ["testing/check-audit-reach.py"],
+    ("test-root", "Run the root-only namespace tests"): ["testing/root-tests.sh"],
+    ("test-root", "Run interface-binding tests with privilege"):
+        ["FIPS_TEST_PRIVILEGED=1", "transport::ethernet transport::sockbuf",
+         "test result: ok\\. [1-9][0-9]* passed;"],
+    ("test-release", "Compile the library tests in release mode and run the leg-slot residue test"):
+        ["RESIDUE_TEST=peer::machine::tests::take_leg_leaves_no_session_keys_in_the_slot_it_empties",
+         "cargo test --profile integration --lib -- --exact",
+         "test result: ok\\. 1 passed;"],
+    ("test-musl", "Create an address-less interface for the presence probe"):
+        ["ip link add fips-probe0 type dummy", "ip link set fips-probe0 addrgenmode none",
+         "FIPS_TEST_ADDRLESS_IFACE=fips-probe0", "FIPS_TEST_REQUIRE_FIXTURES=1"],
+    ("test-musl", "Run library tests"): ["cargo test --lib --target x86_64-unknown-linux-musl"],
+}
+import glob
+import os
+
+# Per job and suite step, for the jobs compared by suite above: the kind of
+# matrix leg (its type:, or None for a job whose legs carry none) the step
+# runs the suite for, the if: that selects that kind (None for none), and the
+# fragments of what ci-local.sh runs for the suite. Every kind of leg in a
+# suite job must have its step here, so a leg cannot keep its name in the
+# matrix while the step that runs it changes, empties or never runs.
+SUITE_CMDS = {
+    ("openwrt-scripts", "Run the OpenWrt maintainer-script scenarios"):
+        (None, None, ["bash testing/openwrt/maintainer-scripts-test.sh"]),
+    ("tarball-install", "Run the systemd tarball upgrade scenarios"):
+        (None, None, ["bash testing/tarball-install/test.sh"]),
+    ("integration", "Run ping test (static)"):
+        ("static", "matrix.type == 'static'",
+         ["bash testing/static/scripts/ping-test.sh ${{ matrix.topology }}"]),
+    ("integration", "Run firewall baseline integration test"):
+        ("firewall", "matrix.type == 'firewall'",
+         ["bash testing/firewall/test.sh --skip-build"]),
+    ("integration", "Run interface binding integration test"):
+        ("iface-binding", "matrix.type == 'iface-binding'",
+         ["bash testing/iface-binding/test.sh --skip-build"]),
+    ("integration", "Run chaos scenario"):
+        ("chaos", "matrix.type == 'chaos'",
+         ["bash testing/chaos/scripts/chaos.sh ${{ matrix.scenario }} ${{ matrix.chaos_flags }}"]),
+    ("integration", "Run NAT lab scenario"):
+        ("nat", "matrix.type == 'nat'",
+         ["bash testing/nat/scripts/nat-test.sh ${{ matrix.scenario }}"]),
+    ("integration", "Run STUN fault-injection test"):
+        ("stun-faults", "matrix.type == 'stun-faults'",
+         ["bash testing/nat/scripts/stun-faults-test.sh"]),
+    ("integration", "Run gateway test"):
+        ("gateway", "matrix.type == 'gateway'",
+         ["FIPS_GW_EVIDENCE_DIR=", "bash testing/static/scripts/gateway-test.sh"]),
+    ("integration", "Run medium-change test"):
+        ("medium-change", "matrix.type == 'medium-change'",
+         ["bash testing/medium-change/scripts/test.sh"]),
+    ("integration", "Run native-api test"):
+        ("native-api", "matrix.type == 'native-api'", ["bash testing/native-api/test.sh"]),
+    ("integration", "Run mDNS LAN discovery test"):
+        ("mdns", "matrix.type == 'mdns'", ["bash testing/mdns/test.sh"]),
+    ("dns-resolver", "Run dns-resolver test"):
+        (None, None, ['bash testing/dns-resolver/test.sh --deb "$deb"']),
+    ("deb-install", "Run deb-install scenario"):
+        ("deb-install", None,
+         ['bash testing/deb-install/test.sh --deb "$deb" ${{ matrix.scenario }}']),
+    ("rpm-install", "Run rpm-install scenario"):
+        ("rpm-install", None,
+         ['bash testing/rpm-install/test.sh --deb "$deb" ${{ matrix.scenario }}']),
+}
+# What no step may run, in any job of any workflow a push or a pull request
+# starts, mapped or not: the explorers run only in the nightly run
+# (ci-local.sh --tier 3). Matched against the step's env, run lines and
+# action inputs, with each matrix leg's values put in place.
+FORBIDDEN = [
+    (re.compile(r"slow-explorers"), "fips-core's slow-explorers feature"),
+    (re.compile(r"\bcargo\s+(\+\S+\s+)?(test|nextest\s+run)\b.*--all-features"),
+     "a test run with every feature, the explorers among them"),
+    (re.compile(r"FIPS_MUTATION_EXPLORERS"), "the mutation lane's explorer lines"),
+]
+# A --features (or -F) list, bare, quoted, comma- or space-separated.
+FEATURES = re.compile(r"""(?:--features(?:=|\s+)|(?<!\S)-F\s*)("[^"]*"|'[^']*'|\S+)""")
+# What may follow `||` and still leave the step able to fail: a test (the
+# second half of an if condition), or a block or command that fails.
+FAILING_OR = re.compile(r"\|\|(?!\s*(\[|test\b|!|false\b|exit\s+[1-9]|return\s+[1-9]"
+                        r"|\{[^}]*\b(exit\s+[1-9]|false)\b))")
+# Lines that skip the command outright: an exit that reports success, a
+# command handed to : or true as arguments, a branch that never runs.
+SKIPS = re.compile(r"\bexit(\s+0)?\s*(;|$)|^(:|true)\s+\S"
+                   r"|\b(if|elif|while)\s+(false|!\s*true|!\s*:)\s*(;|$)"
+                   r"|\buntil\s+(true|:)\s*(;|$)")
+NEVER = re.compile(r"false|0|''|\"\"|!\s*true|null")
+MATRIX_REF = re.compile(r"\$\{\{\s*matrix\.([\w-]+)\s*\}\}")
+
+
+def env_text(env_maps):
+    """The env a step sees, as KEY=VALUE lines, from the maps given."""
+    return "\n".join(f"{k}={v}" for env in env_maps for k, v in (env or {}).items())
+
+
+def run_text(run):
+    """A run block's real command lines.
+
+    Backslash continuations are joined and whitespace collapsed. Comment
+    lines, trailing comments, and echo or printf lines that write to no
+    GitHub file are dropped, so a fragment there does not count.
+    """
+    lines = []
+    for line in re.sub(r"\\\n\s*", " ", str(run or "")).splitlines():
+        s = re.sub(r"\s+#.*$", "", line.strip())
+        if not s or s.startswith("#"):
+            continue
+        if (re.match(r"(echo|printf)\b", s)
+                and not re.search(r'>>?\s*"?\$\{?GITHUB_(ENV|OUTPUT|PATH)\b', s)):
+            continue
+        lines.append(" ".join(s.split()))
+    return "\n".join(lines)
+
+
+def never_runs(cond):
+    """Whether an if: value is constant false, alone or in a conjunction."""
+    if cond is False:
+        return True
+    s = str(cond).strip()
+    m = re.fullmatch(r"\$\{\{(.*)\}\}", s, re.DOTALL)
+    s = (m.group(1) if m else s).strip().lower()
+    parts = [s] if "||" in s else s.split("&&")
+    return any(NEVER.fullmatch(p.strip().strip("()").strip()) for p in parts)
+
+
+def bare_if(cond):
+    """An if: value without ${{ }} and with its whitespace collapsed."""
+    s = str(cond or "").strip()
+    m = re.fullmatch(r"\$\{\{(.*)\}\}", s, re.DOTALL)
+    return " ".join((m.group(1) if m else s).split())
+
+
+def legs_of(job):
+    """Each matrix leg of a job as a dict, or one empty leg if it has none."""
+    matrix = (job.get("strategy") or {}).get("matrix")
+    if not isinstance(matrix, dict):
+        return [{}]
+    combos = [{}]
+    for key, values in matrix.items():
+        if key not in ("include", "exclude") and isinstance(values, list):
+            combos = [dict(c, **{key: v}) for c in combos for v in values]
+    include = [leg for leg in (matrix.get("include") or []) if isinstance(leg, dict)]
+    return combos + include + [dict(c, **leg) for c in combos for leg in include]
+
+
+def has_pipefail(wf, job, st, run):
+    """Whether a pipe in the step's run block reports its first command's failure.
+
+    GitHub runs `shell: bash` as bash -eo pipefail, and the default shell, or
+    any other, without pipefail unless the script turns it on.
+    """
+    shell = (st.get("shell") or ((job.get("defaults") or {}).get("run") or {}).get("shell")
+             or ((wf.get("defaults") or {}).get("run") or {}).get("shell") or "")
+    return (str(shell).strip() == "bash"
+            or bool(re.search(r"\bset\s+(-\w+\s+)*-\w*o\s+pipefail\b", str(run or ""))))
+
+
+def step_faults(where, wf, job, st, frags):
+    """Problems with a step that must run the given fragments and be able to fail."""
+    out = []
+    env = env_text([wf.get("env"), job.get("env"), st.get("env")])
+    run = run_text(st.get("run"))
+    pipefail = has_pipefail(wf, job, st, st.get("run"))
+    for frag in frags:
+        if frag not in (env + "\n" + run if "=" in frag else run):
+            out.append(f"{where} does not run '{frag}'")
+            continue
+        for line in run.splitlines():
+            if frag not in line:
+                continue
+            tail = line[line.index(frag) + len(frag):]
+            if not pipefail and re.search(r"(?<!\|)\|(?!\|)", tail):
+                out.append(f"{where} hides the exit status of '{frag}' behind a pipe, "
+                           f"in a shell without pipefail: '{line}'")
+            if (re.match(r"cargo (test|nextest run)\b", frag)
+                    and re.search(r"(?<!\S)(--no-run|--list)\b", line)):
+                out.append(f"{where} builds its tests but runs none: '{line}'")
+    for line in run.splitlines():
+        if FAILING_OR.search(line):
+            out.append(f"{where} cannot fail: '{line}'")
+        if SKIPS.search(line):
+            out.append(f"{where} skips its command: '{line}'")
+    for what, obj in (("step", st), ("job", job)):
+        if never_runs(obj.get("if", True)):
+            out.append(f"{where} never runs: its {what}'s if: is {obj.get('if')!r}")
+        if obj.get("continue-on-error") not in (None, False):
+            out.append(f"{where} cannot fail its run: its {what} has "
+                       f"continue-on-error: {obj.get('continue-on-error')!r}")
+    return out
+
+
 step_problems = []
 github_records = set()
 seen_steps = set()
 used_github_only = set()
+used_cmds = set()  # CMDS entries a mapped step used
+
+
+def forbid(where, text):
+    """Record each forbidden pattern the text matches, against where, once."""
+    found = [what for pat, what in FORBIDDEN if pat.search(text)]
+    for line in text.splitlines():
+        if not re.search(r"\bcargo\b", line):
+            continue
+        for m in FEATURES.finditer(line):
+            names = re.split(r"[,\s]+", m.group(1).strip("\"'"))
+            if any(n == "explorers" or n.endswith("/explorers") for n in names):
+                found.append("the root crate's explorers feature")
+    for what in dict.fromkeys(found):
+        msg = f"{where} runs {what}, which only the nightly run may run"
+        if msg not in step_problems:
+            step_problems.append(msg)
+
+
+def started_by_push(wf):
+    """Whether a workflow runs on a push or a pull request."""
+    on = wf.get("on", wf.get(True))
+    names = on if isinstance(on, (list, dict)) else [on]
+    return any(n in ("push", "pull_request", "pull_request_target") for n in names)
+
+
+def forbid_workflow(wf, prefix):
+    """Apply FORBIDDEN to every step of a workflow, leg by leg."""
+    forbid(f"{prefix}the workflow's env", env_text([wf.get("env")]))
+    for jid, job in (wf.get("jobs") or {}).items():
+        forbid(f"{prefix}{jid}: the job's env", env_text([job.get("env")]))
+        for st in job.get("steps") or []:
+            inputs = "\n".join(str(v) for v in (st.get("with") or {}).values())
+            text = "\n".join([env_text([st.get("env")]), run_text(st.get("run")),
+                              run_text(inputs)])
+            name = st.get("name") or (text.strip().splitlines() or [st.get("uses", "")])[0]
+            for leg in legs_of(job):
+                forbid(f"{prefix}{jid}: step '{name}'",
+                       MATRIX_REF.sub(lambda m: str(leg.get(m.group(1), m.group(0))), text))
+
+
+workflows_dir = os.path.dirname(ci_yml_path)
+for path in sorted(glob.glob(f"{workflows_dir}/*.y*ml")):
+    if os.path.samefile(path, ci_yml_path):
+        forbid_workflow(doc, "")
+        continue
+    with open(path, encoding="utf-8") as fh:
+        other = yaml.safe_load(fh) or {}
+    if started_by_push(other):
+        forbid_workflow(other, f"{os.path.basename(path)}: ")
 for jid, job in (doc.get("jobs") or {}).items():
     if jid in SUITE_JOBS or jid in GITHUB_ONLY_JOBS:
         continue
@@ -460,6 +882,17 @@ for jid, job in (doc.get("jobs") or {}).items():
         if key in STEPS[jid]:
             github_records.add(STEPS[jid][key])
             seen_steps.add((jid, key))
+            where = f"{jid}: mapped step '{key}'"
+            if (jid, key) not in CMDS:
+                step_problems.append(f"{where} has no entry in CMDS, so nothing checks "
+                                     "what it runs")
+                frags = []
+            else:
+                used_cmds.add((jid, key))
+                frags = CMDS[(jid, key)]
+            for p in step_faults(where, doc, job, st, frags):
+                step_problems.append(p if "does not run" not in p
+                                     else f"{p} ({STEPS[jid][key]} locally)")
         else:
             step_problems.append(f"{jid}: step '{key}' maps to no ci-local.sh result "
                                  "(add it to STEPS, or to an exception with its reason)")
@@ -470,6 +903,43 @@ for jid, steps in STEPS.items():
 for jid in STEPS:
     if jid not in (doc.get("jobs") or {}):
         step_problems.append(f"job {jid} is mapped but no longer in ci.yml")
+for jid, key in CMDS:
+    if key not in STEPS.get(jid, {}):
+        step_problems.append(f"{jid}: CMDS has an entry for '{key}', which STEPS does not map")
+
+# The suite jobs: each kind of leg has the step that runs its suite, under
+# the if: that selects that kind, and the step runs the suite's script.
+suite_steps = 0
+for jid in sorted(SUITE_JOBS):
+    job = (doc.get("jobs") or {}).get(jid)
+    if job is None:
+        continue
+    by_name = {st.get("name"): st for st in job.get("steps") or [] if st.get("name")}
+    kinds = {(str(leg["type"]) if "type" in leg else None)
+             for leg in legs_of(job) if leg}
+    covered = set()
+    for (sjid, key), (kind, cond, frags) in SUITE_CMDS.items():
+        if sjid != jid:
+            continue
+        covered.add(kind)
+        st = by_name.get(key)
+        where = f"{jid}: suite step '{key}'"
+        if st is None:
+            step_problems.append(f"{where} is no longer in ci.yml")
+            continue
+        suite_steps += 1
+        if bare_if(st.get("if")) != bare_if(cond):
+            step_problems.append(f"{where} runs under if: {st.get('if')!r}, not "
+                                 f"{cond!r}, so its legs do not all reach it")
+        step_problems.extend(step_faults(where, doc, job, st, frags))
+    for kind in sorted(kinds - covered, key=str):
+        what = f"of type {kind}" if kind else "without a type:"
+        step_problems.append(f"{jid}: legs {what} have no step in SUITE_CMDS, so "
+                             "nothing checks what they run")
+for (jid, key) in SUITE_CMDS:
+    if jid not in SUITE_JOBS:
+        step_problems.append(f"{jid}: SUITE_CMDS has an entry for '{key}', but {jid} "
+                             "is not a suite job")
 for k in GITHUB_ONLY_STEPS:
     if k not in used_github_only:
         step_problems.append(f"{k[0]}: GitHub-only step '{k[1]}' is no longer in ci.yml")
@@ -517,10 +987,26 @@ for pat in LOCAL_ONLY:
     if pat not in used_local_only:
         step_problems.append(f"local-only stage {pat} matches no tier 2 stage")
 
+# Each nightly-only scenario must still be batched by tier 3's chaos part.
+part = subprocess.run(["bash", ci_local_path, "--tier", "3", "--part", "chaos", "--plan"],
+                      capture_output=True, text=True,
+                      env={k: v for k, v in __import__("os").environ.items()
+                           if k != "FIPS_CI_TIER"})
+if part.returncode != 0:
+    print("check-ci-parity: ci-local.sh --tier 3 --part chaos --plan failed: "
+          f"{part.stderr.strip()}", file=sys.stderr)
+    sys.exit(2)
+batched = {l.strip().split("-", 2)[2] for l in part.stdout.splitlines()
+           if l.startswith("chaos-batch")}
+for name in sorted(local_nightly):
+    if name not in batched:
+        nightly_problems.append(f"{name} is nightly-only but tier 3's chaos part does "
+                                "not batch it")
+
 problems = (local_only or github_only or chaos_local_only or chaos_github_only
             or chaos_flag_drift or deb_local_only or deb_github_only
             or rpm_local_only or rpm_github_only
-            or dispatch_uncovered or malformed or step_problems)
+            or dispatch_uncovered or malformed or step_problems or nightly_problems)
 
 if problems:
     print("CI parity FAILED: the two runners do not cover the same work.\n")
@@ -565,6 +1051,10 @@ if problems:
         print("  Matrix legs this guard cannot identify:")
         for n in malformed:
             print(f"    - {n}")
+    if nightly_problems:
+        print("  Nightly-only chaos scenarios out of place:")
+        for n in nightly_problems:
+            print(f"    - {n}")
     if step_problems:
         print("  Steps that do not match between ci.yml and ci-local.sh --tier 2:")
         for n in step_problems:
@@ -589,9 +1079,14 @@ print(f"  {len(github)} suites, {len(github_chaos)} chaos scenarios "
       f"— {total} legs on each side.")
 print(f"  {len(github_records)} build, lint, guard and unit-test results match "
       "ci-local.sh --tier 2, step for step.")
+print(f"  {len(used_cmds)} mapped steps run what ci-local.sh runs for their result, "
+      "and no step runs the explorers.")
+print(f"  plus {len(local_nightly)} nightly-only chaos scenarios, batched by tier 3 "
+      f"alone ({', '.join(sorted(local_nightly))}).")
 for arch, distros in sorted(github_deb_extra.items()):
     legs = "leg" if len(distros) == 1 else "legs"
     print(f"  plus {len(distros)} GitHub-only {arch} install {legs} "
           f"({', '.join(sorted(distros))}).")
+print(f"  {suite_steps} suite steps run their suite's script for every kind of leg.")
 sys.exit(0)
 PY

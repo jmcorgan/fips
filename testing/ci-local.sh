@@ -24,8 +24,10 @@
 #                             explorers (on next the core half alone, so not
 #                             the mutation lane's explorer lines either; see
 #                             --explorers), a chaos batch of each
-#                             CI scenario and the long scenarios no other run
-#                             takes. --with-tor adds the Tor suites.
+#                             CI scenario and of the nightly-only ones
+#                             (NIGHTLY_CHAOS), and the long scenarios no
+#                             other run takes. --with-tor adds the Tor
+#                             suites.
 #                        Under a tier the root tests run in a container
 #                        (run_root_tests), never under sudo, and the
 #                        environment switches below (FIPS_CI_BAREMETAL,
@@ -136,14 +138,16 @@
 # Integration suites (default coverage):
 #   static-mesh, static-chain, gateway,
 #   firewall, nat-cone, nat-symmetric,
-#   nat-lan, nostr-publish-consume, stun-faults,
-#   chaos-churn-mixed-10, chaos-ethernet-mesh,
-#   chaos-ethernet-only, chaos-ethernet-churn, chaos-tcp-mesh,
-#   chaos-congestion-stress, chaos-dual-path-flap, chaos-dual-udp-flap,
-#   chaos-dual-path-carrier, chaos-forward-only, chaos-loaded-standby,
-#   chaos-two-bound-udp, chaos-two-bound-udp-bulk, chaos-steady-dual-path,
-#   sidecar, native-api, mdns, dns-resolver, deb-install, rpm-install,
+#   nat-lan, stun-faults,
+#   chaos-ethernet-mesh, chaos-ethernet-churn, chaos-tcp-mesh,
+#   chaos-dual-path-flap, chaos-dual-path-carrier, chaos-forward-only,
+#   chaos-loaded-standby, chaos-two-bound-udp, chaos-steady-dual-path,
+#   native-api, mdns, dns-resolver, deb-install, rpm-install,
 #   medium-change
+#
+# Nightly only (tier 3's chaos batch; known to --only and --rerun):
+#   chaos-dual-udp-flap, chaos-two-bound-udp-bulk, chaos-churn-mixed-10,
+#   chaos-congestion-stress
 #
 # Opt-in (require --with-tor; depend on live Tor network):
 #   tor-socks5, tor-directory
@@ -216,6 +220,31 @@
 #                    the leaf root-election gate reds it in roughly a third of
 #                    runs — rather than on a green run alone. Still runnable by
 #                    hand: bash testing/static/scripts/mixed-profile-test.sh
+#   sidecar/         Retired from CI 2026-11-16 as redundant, not unrunnable.
+#                    Its product path, pinging <npub>.fips over fips0 to an
+#                    adjacent node and across two hops both ways, is the one
+#                    static-chain asserts (static/scripts/ping-test.sh, one
+#                    to four hops and back). What it adds is the test image's
+#                    own sidecar mode: config generation and IPv4 isolation
+#                    rules in docker/entrypoint.sh, which ships nowhere, and
+#                    an app container sharing the daemon's network
+#                    namespace, which is Docker's feature. Neither suite
+#                    tests the shipped examples/sidecar-* deployments. Still
+#                    runnable by hand: bash testing/sidecar/scripts/test-sidecar.sh
+#   nostr-publish-consume
+#                    Folded into nat-lan 2026-11-16. Its advert round trip
+#                    (each node publishes, finds the other's advert on the
+#                    relay, dials, pings) is the lan scenario's, on the same
+#                    lab and config; its malformed-advert check now runs at
+#                    the end of nat-test.sh's lan scenario.
+#   ethernet-only    Chaos scenario retired from CI 2026-11-16 as redundant:
+#                    ethernet-churn runs the same 4-node Ethernet ring with
+#                    the same netem, seed and baseline thresholds, for 240 s
+#                    with traffic and churn rather than 30 s idle, so only
+#                    the check that the ring forms from cold within 30 s is
+#                    lost. The yaml stays: veth-host-test.sh runs the chaos
+#                    runner on it. Still runnable by hand:
+#                    bash testing/chaos/scripts/chaos.sh ethernet-only
 #   ecn-ab-on, ecn-ab-off, maelstrom, maelstrom-sparse, dead-grace-long
 #                    Chaos scenarios excluded from CHAOS_SUITES. The two
 #                    ecn-ab ones are halves of the manual comparison above.
@@ -351,6 +380,19 @@ MUSL_TARGET=x86_64-unknown-linux-musl
 # scenarios only the nightly run takes, each "display-name scenario
 # [--flag value ...]" as in CHAOS_SUITES.
 NIGHTLY_CHAOS_RUNS=3
+# Chaos scenarios run only in the nightly batch, NIGHTLY_CHAOS_RUNS times
+# each like the CI scenarios, and in no tier 1 or tier 2 run. Each has a
+# weak or calibrated assertion or found its defects in repeated runs rather
+# than as a gate, a record of load sensitivity, and its decision logic
+# covered in simulated time, so a defect of its kind surfaces at the next
+# nightly rather than at the landing. GitHub CI, which has no nightly run,
+# does not run them (check-ci-parity.sh lists them as an exception).
+NIGHTLY_CHAOS=(
+    "dual-udp-flap dual-udp-flap"
+    "two-bound-udp-bulk two-bound-udp-bulk"
+    "churn-mixed-10 churn-mixed --nodes 10 --duration 120"
+    "congestion-stress congestion-stress"
+)
 NIGHTLY_LONG=(
     "dead-grace-long dead-grace-long"
     "maelstrom maelstrom"
@@ -367,17 +409,12 @@ CHAOS_SUITES=(
     "steady-dual-path steady-dual-path"
     "ethernet-churn ethernet-churn"
     "dual-path-flap dual-path-flap"
-    "dual-udp-flap dual-udp-flap"
     "dual-path-carrier dual-path-carrier"
     "forward-only forward-only"
     "two-bound-udp two-bound-udp"
-    "two-bound-udp-bulk two-bound-udp-bulk"
     "ethernet-mesh ethernet-mesh"
-    "churn-mixed-10 churn-mixed --nodes 10 --duration 120"
     "tcp-mesh tcp-mesh"
-    "congestion-stress congestion-stress"
     "loaded-standby loaded-standby"
-    "ethernet-only ethernet-only"
 )
 # Scenarios retired 2026-07-23 because their subject was a pure decision the
 # Docker harness could not test reliably, now covered by sans-IO unit tests
@@ -395,8 +432,9 @@ CHAOS_SUITES=(
 #   - smoke-10: a no-stressor 10-node tree-convergence sanity check (netem
 #     off, no ping). The convergence logic it exercised is covered in-process,
 #     faster and deterministically, by the loopback spanning-tree harness
-#     (src/node/tests/spanning_tree.rs: ring/star/chain/100-node/disconnected)
-#     plus end-to-end datagram delivery (src/node/tests/forwarding.rs). Real-
+#     (src/node/tests/spanning_tree.rs: ring/star/chain/disconnected;
+#     bloom.rs: 100-node convergence) plus end-to-end datagram delivery
+#     (src/node/tests/forwarding.rs). Real-
 #     UDP convergence smoke still runs via static-mesh and the other chaos
 #     scenarios' baseline assertions, so no Docker coverage is lost.
 #
@@ -420,11 +458,9 @@ CHAOS_SUITES=(
 GATEWAY_SUITES=(gateway)
 OPENWRT_SUITES=(openwrt-scripts)
 TARBALL_INSTALL_SUITES=(tarball-install)
-SIDECAR_SUITES=(sidecar)
 FIREWALL_SUITES=(firewall)
 IFACE_BINDING_SUITES=(iface-binding)
 NAT_SUITES=(cone symmetric lan)
-NOSTR_RELAY_SUITES=(nostr-publish-consume)
 # Opt-in: known to --only and --rerun, left out of the default run.
 NOSTR_OPEN_DISCOVERY_SUITES=(nostr-open-discovery)
 STUN_FAULTS_SUITES=(stun-faults)
@@ -478,9 +514,6 @@ list_suites() {
     echo "  NAT scenarios:"
     for s in "${NAT_SUITES[@]}"; do echo "    nat-$s"; done
     echo ""
-    echo "  Nostr publish/consume:"
-    for s in "${NOSTR_RELAY_SUITES[@]}"; do echo "    $s"; done
-    echo ""
     echo "  Nostr open-discovery (opt-in via --only):"
     for s in "${NOSTR_OPEN_DISCOVERY_SUITES[@]}"; do echo "    $s"; done
     echo ""
@@ -493,8 +526,11 @@ list_suites() {
         echo "    chaos-${parts[0]}  (${parts[*]:1})"
     done
     echo ""
-    echo "  Sidecar:"
-    for s in "${SIDECAR_SUITES[@]}"; do echo "    $s"; done
+    echo "  Chaos scenarios, nightly only (tier 3's chaos batch):"
+    for entry in "${NIGHTLY_CHAOS[@]}"; do
+        read -ra parts <<< "$entry"
+        echo "    chaos-${parts[0]}  (${parts[*]:1})"
+    done
     echo ""
     echo "  Native API:"
     for s in "${NATIVE_API_SUITES[@]}"; do echo "    $s"; done
@@ -582,12 +618,12 @@ GUARDS=(
 )
 
 # The nightly chaos runs, one entry per line in CHAOS_SUITES' form: each CI
-# scenario NIGHTLY_CHAOS_RUNS times, as batch<i>-<name>, then the long
-# scenarios. The teardown derives their host interface names from the same
-# list.
+# scenario and each nightly-only one NIGHTLY_CHAOS_RUNS times, as
+# batch<i>-<name>, then the long scenarios. The teardown derives their host
+# interface names from the same list.
 nightly_chaos() {
     local entry i parts
-    for entry in "${CHAOS_SUITES[@]}"; do
+    for entry in "${CHAOS_SUITES[@]}" "${NIGHTLY_CHAOS[@]}"; do
         read -ra parts <<< "$entry"
         for (( i = 1; i <= NIGHTLY_CHAOS_RUNS; i++ )); do
             echo "batch$i-${parts[0]} ${parts[*]:1}"
@@ -678,10 +714,9 @@ print_plan() {
         printf '%s\n' openwrt-scripts tarball-install build-integration "${STATIC_SUITES[@]}" \
             "${GATEWAY_SUITES[@]}" "${FIREWALL_SUITES[@]}" "${IFACE_BINDING_SUITES[@]}"
         for s in "${NAT_SUITES[@]}"; do echo "nat-$s"; done
-        printf '%s\n' "${NOSTR_RELAY_SUITES[@]}" "${STUN_FAULTS_SUITES[@]}" \
-            "${MEDIUM_CHANGE_SUITES[@]}"
+        printf '%s\n' "${STUN_FAULTS_SUITES[@]}" "${MEDIUM_CHANGE_SUITES[@]}"
         for entry in "${CHAOS_SUITES[@]}"; do echo "chaos-${entry%% *}"; done
-        printf '%s\n' "${SIDECAR_SUITES[@]}" "${NATIVE_API_SUITES[@]}" "${MDNS_SUITES[@]}" \
+        printf '%s\n' "${NATIVE_API_SUITES[@]}" "${MDNS_SUITES[@]}" \
             "${DNS_RESOLVER_SUITES[@]}" "${DEB_INSTALL_SUITES[@]}" "${RPM_INSTALL_SUITES[@]}"
         [[ "$WITH_TOR" == true ]] && printf '%s\n' "${TOR_SUITES[@]}"
     fi
@@ -1059,7 +1094,7 @@ ci_teardown() {
     #    a bad option, and a sweep that quietly stops reaping is how
     #    interfaces and images would accumulate unnoticed. Let it through.
     local _suffixes=() _entry
-    for _entry in "${CHAOS_SUITES[@]}"; do
+    for _entry in "${CHAOS_SUITES[@]}" "${NIGHTLY_CHAOS[@]}"; do
         _suffixes+=("$(ci_chaos_suffix "${_entry%% *}")")
     done
     if [[ "$NIGHTLY" == true ]]; then
@@ -1073,6 +1108,12 @@ ci_teardown() {
     #    the half of that fix that fails silently: widening the regex in
     #    ci-cleanup.sh without this line looks correct and reaps nothing.
     _suffixes+=("$CI_RUN_NAME_SUFFIX")
+    #    A chaos scenario named with --only but declared in no list above
+    #    (an ethernet one run by hand, say) runs under its own name as the
+    #    scenario, so its interfaces carry that name's suffix.
+    if [[ "${ONLY_SUITE:-}" == chaos-* ]]; then
+        _suffixes+=("$(ci_chaos_suffix "${ONLY_SUITE#chaos-}")")
+    fi
     timeout 150 bash "$SCRIPT_DIR/ci-cleanup.sh" \
         --label "$CI_LABEL" \
         --run-id "$CI_RUN_ID" \
@@ -2052,21 +2093,6 @@ run_gateway() {
     record "gateway" "$rc"
 }
 
-# Run sidecar test
-run_sidecar() {
-    local rc=0
-    export COMPOSE_PROJECT_NAME="$(ci_project sidecar)"
-
-    info "[sidecar] Running integration test"
-    if bash testing/sidecar/scripts/test-sidecar.sh --skip-build 2>&1; then
-        rc=0
-    else
-        rc=1
-    fi
-
-    record "sidecar" "$rc"
-}
-
 # Run the dynamic interface binding integration test.
 #
 # Creates a veth pair from the host namespace after the daemons are up, so it
@@ -2117,8 +2143,8 @@ run_firewall() {
 # 10.41.0.0/16, because the lan scenario needs a private shared LAN.
 #
 # The claim lives here rather than in the suite scripts because
-# .github/workflows/ci.yml invokes nat-test.sh, nostr-relay-test.sh and
-# stun-faults-test.sh directly and testing/mesh-lab/run-loop.sh invokes
+# .github/workflows/ci.yml invokes nat-test.sh and stun-faults-test.sh
+# directly and testing/mesh-lab/run-loop.sh invokes
 # `nat-test.sh lan`; none of those want a claim, and all tear down with the
 # base compose file only.
 #
@@ -2210,7 +2236,7 @@ ci_release_nat_networks() {
         -f testing/nat/docker-compose.yml \
         -f testing/nat/docker-compose.external-net.yml \
         --profile cone --profile symmetric --profile lan \
-        --profile nostr-publish-consume --profile stun-faults \
+        --profile stun-faults \
         --profile nostr-open-discovery --profile nostr-seed \
         down --volumes --remove-orphans >/dev/null 2>&1 || true
     [[ -n "${FIPS_NAT_WAN_NET:-}" ]] && \
@@ -2312,31 +2338,6 @@ run_nat() {
 
     ci_release_nat_networks
     record "nat-$scenario" $rc
-}
-
-# Run the Nostr overlay advert publish/consume integration test.
-# Two FIPS daemons + the existing strfry relay; exercises Phase 1
-# (A→B publish/consume), Phase 2 (B→A reverse), and Phase 3 (malformed
-# advert injected directly to the relay; consumer-liveness assertion).
-run_nostr_publish_consume() {
-    local rc=0
-    export COMPOSE_PROJECT_NAME="$(ci_project nat)"
-
-    info "[nostr-publish-consume] Claiming lab networks"
-    if ! ci_claim_nat_networks; then
-        record "nostr-publish-consume" 1
-        return
-    fi
-
-    local _extra
-    _extra="$(ci_nat_extra_compose)"
-    local -x FIPS_NAT_EXTRA_COMPOSE="$_extra"
-
-    info "[nostr-publish-consume] Running Nostr publish/consume test"
-    bash testing/nat/scripts/nostr-relay-test.sh 2>&1 || rc=1
-
-    ci_release_nat_networks
-    record "nostr-publish-consume" "$rc"
 }
 
 # Run the Nostr open-discovery startup scenario (opt-in, --only).
@@ -2976,11 +2977,6 @@ run_integration() {
         run_nat "$scenario"
     done
 
-    # Nostr publish/consume (sequential — shares the NAT compose project)
-    for _suite in "${NOSTR_RELAY_SUITES[@]}"; do
-        run_nostr_publish_consume
-    done
-
     # STUN fault-injection (sequential — shares the NAT compose project)
     for _suite in "${STUN_FAULTS_SUITES[@]}"; do
         run_stun_faults
@@ -2995,9 +2991,6 @@ run_integration() {
     if [[ "$SKIP_CHAOS" != true ]]; then
         run_chaos_set "${CHAOS_SUITES[@]}"
     fi
-
-    # Sidecar
-    run_sidecar
 
     # Native datagram API (light — one single-node run plus a two-node pair)
     run_native_api
@@ -3039,8 +3032,6 @@ run_suite() {
             run_iface_binding ;;
         nat-cone|nat-symmetric|nat-lan)
             run_nat "${suite#nat-}" ;;
-        nostr-publish-consume)
-            run_nostr_publish_consume ;;
         nostr-open-discovery)
             run_nostr_open_discovery ;;
         stun-faults)
@@ -3048,7 +3039,7 @@ run_suite() {
         chaos-*)
             local chaos_name="${suite#chaos-}"
             local found=false
-            for entry in "${CHAOS_SUITES[@]}"; do
+            for entry in "${CHAOS_SUITES[@]}" "${NIGHTLY_CHAOS[@]}"; do
                 read -ra parts <<< "$entry"
                 if [[ "${parts[0]}" == "$chaos_name" ]]; then
                     run_chaos "$chaos_name" "${parts[@]:1}"
@@ -3057,17 +3048,13 @@ run_suite() {
                 fi
             done
             if [[ "$found" != true ]]; then
-                # Fall back to using the name as the scenario directly. Note
-                # teardown rebuilds veth suffixes from CHAOS_SUITES only, so a
-                # scenario named here but absent from that list is outside the
-                # host-interface reap. Harmless while every ethernet-transport
-                # scenario is declared there; add one that isn't and its
-                # orphaned pairs will need an unscoped `--reap` to clear.
+                # Fall back to using the name as the scenario directly, for a
+                # scenario run by hand that no list declares. Teardown adds
+                # the --only name's suffix to the host-interface reap, so a
+                # killed run of one leaves no veth pairs behind.
                 run_chaos "$chaos_name" "$chaos_name"
             fi
             ;;
-        sidecar)
-            run_sidecar ;;
         dns-resolver)
             run_dns_resolver ;;
         native-api)
@@ -3092,8 +3079,9 @@ run_suite() {
 
 # ── Stage 4: the nightly extras ────────────────────────────────────────────
 
-# Tier 3 only: a batch of every CI chaos scenario, NIGHTLY_CHAOS_RUNS runs of
-# each, then the long scenarios no other run takes (NIGHTLY_LONG), through the
+# Tier 3 only: a batch of every CI chaos scenario and every nightly-only one
+# (NIGHTLY_CHAOS), NIGHTLY_CHAOS_RUNS runs of each, then the long scenarios no
+# other run takes (NIGHTLY_LONG), through the
 # same parallel runner as the integration stage. Repeated runs at one tree are
 # where the chaos scenarios have found most of their product defects, and a
 # single pass cannot tell an intermittent defect from a fixed one.

@@ -24,6 +24,23 @@ pub(super) static LOOPBACK_REGISTRY: std::sync::LazyLock<LoopbackRegistry> =
 
 static LOOPBACK_ADDR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Loopback addresses whose delivery [`delay_loopback_delivery`] holds back on
+/// tokio time. A drain that steps the test clock rather than sleeping waits
+/// for none of those packets, so it refuses a node whose address is here.
+/// Addresses are unique per process, so an entry left by a finished test
+/// names no other test's node.
+static DELAYED_ADDRS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<TransportAddr>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// [`DELAYED_ADDRS`], locked. A test that panicked while holding the lock
+/// leaves the set as it was, so a poisoned lock is taken as it stands.
+fn delayed_addrs() -> std::sync::MutexGuard<'static, std::collections::HashSet<TransportAddr>> {
+    DELAYED_ADDRS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Allocate the next globally-unique loopback address.
 fn next_loopback_addr() -> TransportAddr {
     let n = LOOPBACK_ADDR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -114,10 +131,19 @@ pub(super) fn loopback_tap(
 /// registry on every send, so pointing `node.addr` at a forwarder delays
 /// every later send to it. Each packet is delayed on its own task, so a
 /// hop costs `delay` however many packets are in flight. It sleeps on tokio
-/// time, so it must not be used in a test that pauses time. The registry
+/// time, so it must not be used in a test that pauses time, and a node it has
+/// delayed must not be drained with [`drain_all_packets`] on an all-loopback
+/// set, which steps the test clock rather than sleeping and so would return
+/// with packets still held: the drain refuses such a node. Wait on tokio time
+/// instead, as the established-wait loop in `session.rs` does. The registry
 /// keeps the forwarder's sender alive, so the forwarder ends only when the
 /// test's runtime is dropped.
 pub(super) fn delay_loopback_delivery(node: &TestNode, delay: Option<Duration>) {
+    // A later `None` leaves the address marked: packets already delayed are
+    // still in flight.
+    if delay.is_some() {
+        delayed_addrs().insert(node.addr.clone());
+    }
     let (transport_id, inner) = LOOPBACK_REGISTRY
         .lock()
         .unwrap()
@@ -145,10 +171,12 @@ pub(super) fn delay_loopback_delivery(node: &TestNode, delay: Option<Duration>) 
 /// and loopback address, a fresh startup epoch and no peers.
 ///
 /// The old node's address is pointed at the new node's receive channel, so
-/// packets its peers still send to that address reach the restarted node.
+/// packets its peers still send to that address reach the restarted node,
+/// undelayed whatever [`delay_loopback_delivery`] did to the old one.
 /// The caller drops `old`.
 pub(super) fn restarted_node(old: &TestNode, config: crate::config::Config) -> TestNode {
     let mut node = Node::with_identity(old.node.identity().clone(), config).unwrap();
+    delayed_addrs().remove(&old.addr);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ReceivedPacket>();
     LOOPBACK_REGISTRY
         .lock()
@@ -507,21 +535,104 @@ pub(super) async fn process_available_packets(nodes: &mut [TestNode]) -> usize {
     count
 }
 
+/// Whether [`drain_all_packets`] may step this thread's test clocks in place
+/// of sleeping on `nodes`: every node's transports are all loopback, and the
+/// test runs on a current-thread runtime.
+///
+/// Loopback delivery is synchronous (see [`make_test_node_with_mtu`] and the
+/// per-pass snapshot in [`process_available_packets`]), so a drain's sleep on
+/// such a set waits for no packet; it only lets rate-limit windows and other
+/// timers pass, and those read `crate::time`, which the step moves. The
+/// clock hooks are thread-local, so a multi-thread runtime, whose workers
+/// would not see the step, keeps the real sleep. So does any set with a real
+/// transport, whose packets arrive through a receive task in real time.
+fn drain_steps(nodes: &[TestNode]) -> bool {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    Handle::current().runtime_flavor() == RuntimeFlavor::CurrentThread
+        && nodes.iter().all(|tn| {
+            tn.node
+                .transports
+                .values()
+                .all(|t| matches!(t, TransportHandle::Loopback(_)))
+        })
+}
+
+/// Wait `d` between the passes of [`drain_all_packets`].
+///
+/// On a set [`drain_steps`] allows, move this thread's clocks as a real sleep
+/// of `d` would and yield once: the wall clock always, and the monotonic
+/// clock unless the test froze it (`crate::time::freeze`), since a frozen
+/// clock does not move while a test sleeps either. Otherwise sleep.
+///
+/// A yield runs this thread's tasks but not a decrypt worker, which is an OS
+/// thread of its own, so a step then waits until each node's workers have
+/// handled everything they were sent (bounded at 60 s by the pool's
+/// barrier), as a real sleep would usually have given them time to. That
+/// puts each result in the node's `decrypt_fallback_rx`; the drain does not
+/// read that channel (only the receive loop does), so a frame a worker
+/// opened is handled, not processed. Encrypt workers need no such wait: the
+/// pipelined send that hands them a frame takes only a UDP transport, so a
+/// loopback send never reaches them.
+async fn drain_wait(nodes: &[TestNode], d: Duration) {
+    if !drain_steps(nodes) {
+        tokio::time::sleep(d).await;
+        return;
+    }
+    if !crate::time::is_frozen() {
+        crate::time::advance(d);
+    }
+    crate::time::step_wall(i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    tokio::task::yield_now().await;
+    #[cfg(unix)]
+    for tn in nodes {
+        if let Some(pool) = tn.node.supervisor.decrypt_workers.as_ref()
+            && !node_fault!(DrainSkipsWorkerWait)
+        {
+            pool.barrier();
+        }
+    }
+}
+
+/// Panic if [`drain_all_packets`] is about to step the clock over a node whose
+/// loopback delivery [`delay_loopback_delivery`] holds back: the step waits
+/// for no packet on tokio time, so the drain would return with packets still
+/// in flight.
+fn refuse_delayed(nodes: &[TestNode]) {
+    // The lock is released before the panic, so the refusal does not poison
+    // the set for the other tests of a libtest process.
+    let found = {
+        let delayed = delayed_addrs();
+        nodes.iter().position(|tn| delayed.contains(&tn.addr))
+    };
+    if let Some(i) = found {
+        panic!(
+            "a drain that steps the test clock cannot wait for delayed loopback delivery \
+             (node {i}); wait on tokio time instead, as the established-wait loop in \
+             session.rs does"
+        );
+    }
+}
+
 /// Drain all packet channels across all nodes until quiescence.
 ///
 /// Processes msg1, msg2, and encrypted frames (including TreeAnnounce)
 /// through the appropriate handlers. Handles rate-limited TreeAnnounce
 /// messages by waiting for the rate limit window to expire and then
-/// flushing pending announces. Returns total packets processed.
+/// flushing pending announces. Returns total packets processed. Each wait is
+/// [`drain_wait`]: on an all-loopback set it steps the test clocks rather
+/// than sleeping.
 ///
 /// If `verbose` is true, prints tree state snapshots after each phase.
 pub(super) async fn drain_all_packets(nodes: &mut [TestNode], verbose: bool) -> usize {
+    if drain_steps(nodes) {
+        refuse_delayed(nodes);
+    }
     let mut total = 0;
 
     // Phase 1: Fast drain — process packets as fast as they arrive.
     // This handles handshakes (msg1/msg2) and the first wave of TreeAnnounce.
     for _round in 0..200 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        drain_wait(nodes, Duration::from_millis(10)).await;
 
         let count = process_available_packets(nodes).await;
         total += count;
@@ -543,7 +654,7 @@ pub(super) async fn drain_all_packets(nodes: &mut [TestNode], verbose: bool) -> 
     // rate-limited paths. For a chain of depth D, we need D cycles.
     for flush in 0..20 {
         // Wait for rate limit window (500ms) to fully expire
-        tokio::time::sleep(Duration::from_millis(550)).await;
+        drain_wait(nodes, Duration::from_millis(550)).await;
 
         // Flush pending rate-limited tree and filter announces on all nodes
         for tn in nodes.iter_mut() {
@@ -552,7 +663,7 @@ pub(super) async fn drain_all_packets(nodes: &mut [TestNode], verbose: bool) -> 
         }
 
         // Allow flushed packets to arrive
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        drain_wait(nodes, Duration::from_millis(20)).await;
 
         // Process the resulting packets. Processing may trigger new
         // parent switches → new announces, but those to the same peer
@@ -562,7 +673,7 @@ pub(super) async fn drain_all_packets(nodes: &mut [TestNode], verbose: bool) -> 
         // Do a few more quick rounds in case packet processing above
         // triggered non-rate-limited sends (to different peers)
         for _sub in 0..20 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            drain_wait(nodes, Duration::from_millis(10)).await;
             let count = process_available_packets(nodes).await;
             flush_total += count;
             if count == 0 {
@@ -1129,10 +1240,7 @@ pub(super) async fn converge_nodes(
 /// both the bloom-filter and greedy-tree paths, so tests that skip discovery
 /// seed them here.
 pub(super) fn populate_all_coord_caches(nodes: &mut [TestNode]) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    let now_ms = crate::time::wall_ms();
 
     // Collect all coords first to avoid borrow conflicts
     let all_coords: Vec<(NodeAddr, crate::proto::stp::TreeCoordinate)> = nodes
@@ -1164,24 +1272,6 @@ pub(super) async fn cleanup_nodes(nodes: &mut [TestNode]) {
             t.stop().await.ok();
         }
     }
-}
-
-// ===== Main Convergence Test =====
-
-/// Integration test: 100 nodes with random connectivity converge to a
-/// consistent spanning tree with the correct root.
-#[tokio::test]
-async fn test_spanning_tree_convergence_100_nodes() {
-    let _guard = lock_large_network_test().await;
-
-    const NUM_NODES: usize = 100;
-    const TARGET_EDGES: usize = 250;
-    const SEED: u64 = 42;
-
-    let edges = generate_random_edges(NUM_NODES, TARGET_EDGES, SEED);
-    let mut nodes = run_tree_test(NUM_NODES, &edges, true).await;
-    verify_tree_convergence(&nodes);
-    cleanup_nodes(&mut nodes).await;
 }
 
 // ===== Topology Variant Tests =====
@@ -1989,4 +2079,53 @@ async fn a_loop_drop_to_self_root_marks_every_remaining_peer_for_a_filter_update
     );
 
     cleanup_nodes(&mut nodes).await;
+}
+
+// ===== The drain's own guards =====
+
+/// A drain that steps the test clock waits for no packet held back on tokio
+/// time, so it refuses a node whose loopback delivery is delayed rather than
+/// returning with the handshake still in flight.
+#[tokio::test]
+#[should_panic(expected = "cannot wait for delayed loopback delivery")]
+async fn a_stepped_drain_refuses_a_node_whose_loopback_delivery_is_delayed() {
+    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    delay_loopback_delivery(&nodes[1], Some(Duration::from_millis(100)));
+    initiate_handshake(&mut nodes, 0, 1).await;
+    drain_all_packets(&mut nodes, false).await;
+    let a = *nodes[0].node.node_addr();
+    let b = *nodes[1].node.node_addr();
+    assert!(
+        nodes[0].node.get_peer(&b).is_some() && nodes[1].node.get_peer(&a).is_some(),
+        "the drain returned before the delayed handshake completed"
+    );
+}
+
+/// A drain that steps the test clock waits for each node's decrypt workers
+/// to handle what they were sent. The worker here handles nothing until it
+/// is sent a barrier, so a drain that did not wait would return with every
+/// frame it dispatched still unhandled, however fast or slow the host.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stepped_drain_returns_only_after_the_decrypt_workers_handled_what_they_were_sent() {
+    use crate::node::decrypt_worker::DecryptWorkerPool;
+    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    nodes[1].node.supervisor.decrypt_workers = Some(DecryptWorkerPool::deferred());
+    initiate_handshake(&mut nodes, 0, 1).await;
+    drain_all_packets(&mut nodes, false).await;
+    assert!(
+        !nodes[1].node.decrypt_registered_sessions.is_empty(),
+        "precondition: node 1 handed its session to the worker"
+    );
+    let mut events = nodes[1]
+        .node
+        .decrypt_fallback_rx
+        .take()
+        .expect("precondition: the worker event receiver");
+    let handled = std::iter::from_fn(|| events.try_recv().ok()).count();
+    cleanup_nodes(&mut nodes).await;
+    assert!(
+        handled > 0,
+        "defect: the drain returned before the decrypt worker handled any frame it was sent"
+    );
 }

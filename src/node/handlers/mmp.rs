@@ -272,10 +272,7 @@ impl Node {
                 .collect();
             // Wall-clock seconds for the escaping declaration timestamp;
             // monotonic ms for the flap-dampening / hold-down timers.
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let now_secs = Self::now_ms() / 1000;
             let mono_now_ms = crate::time::mono_ms();
             let skip = self.non_full_peers();
             // Compute the flap-dampening / hold-down veto at the edge; a mandatory
@@ -589,10 +586,7 @@ impl Node {
         let actions = self.mmp.plan_heartbeats(&snapshots);
 
         // Wall-clock basis for reconnect scheduling, sourced once (as before).
-        let wall_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let wall_ms = Self::now_ms();
 
         // Drive the planned actions: all reaps first (each removed +
         // reconnect-scheduled), then all heartbeats (a just-reaped peer is never

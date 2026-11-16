@@ -1637,10 +1637,7 @@ async fn a_single_unroutable_datagram_still_produces_its_error() {
 
 /// Wall-clock milliseconds, the clock the warm path stamps entries with.
 fn wall_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+    crate::time::wall_ms()
 }
 
 /// Coordinates for `addr` carrying `len` addresses in all: `addr`, then
@@ -1694,7 +1691,7 @@ async fn one_link_peer_cannot_put_more_new_destinations_in_the_cache_than_its_bu
         .insert(dest, dest_coords.clone(), wall_ms());
 
     let sent = 5_000u32;
-    let started = std::time::Instant::now();
+    let started = crate::time::mono_now();
     for i in 0..sent {
         let src = minted_dest(i);
         let frame = setup_frame(
@@ -1706,7 +1703,9 @@ async fn one_link_peer_cannot_put_more_new_destinations_in_the_cache_than_its_bu
         );
         node.handle_session_datagram(&from, &frame, false).await;
     }
-    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let elapsed_ms = crate::time::mono_now()
+        .saturating_duration_since(started)
+        .as_millis() as u64;
     let allowed = (elapsed_ms * HINT_KEYS_PER_SEC).div_ceil(1000) + UNPAID_HINT_ENTRIES;
     assert!(
         allowed < u64::from(sent),
@@ -2123,9 +2122,11 @@ async fn main_placements_match_the_budget_and_the_rest_are_counted_unfunded() {
     let sent = 3_000u32;
     let unfunded = node.metrics().forwarding.coord_hint_unfunded.get();
 
-    let started = std::time::Instant::now();
+    let started = crate::time::mono_now();
     send_fresh_sources(&mut node, &from, 0, sent, 2).await;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let elapsed_ms = crate::time::mono_now()
+        .saturating_duration_since(started)
+        .as_millis() as u64;
 
     let (main, probation) = placements(&node, 0, sent);
     let counted = node.metrics().forwarding.coord_hint_unfunded.get() - unfunded;
@@ -2148,12 +2149,14 @@ async fn twenty_fresh_link_peers_place_no_more_in_main_than_twenty_initial_fills
 {
     let mut node = node_with_cached_dest();
     let (peers, each) = (20u32, 200u32);
-    let started = std::time::Instant::now();
+    let started = crate::time::mono_now();
     for p in 0..peers {
         let from = make_node_addr(0x40 + p as u8);
         send_fresh_sources(&mut node, &from, p * each, each, 2).await;
     }
-    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let elapsed_ms = crate::time::mono_now()
+        .saturating_duration_since(started)
+        .as_millis() as u64;
 
     // Each peer starts with no weight and earns at most its rate for the run.
     // The initial fill of zero is what this test pins, so it is not read from
@@ -2194,7 +2197,7 @@ async fn a_peer_holding_fifteen_units_places_a_depth_sixteen_key_in_probation() 
     );
     assert_eq!(
         node.coord_hint_budget
-            .available(&from, std::time::Instant::now()),
+            .available(&from, crate::time::mono_now()),
         0
     );
 }
@@ -2239,7 +2242,7 @@ async fn a_hint_refused_for_a_verified_entry_costs_its_link_peer_nothing() {
     );
     assert_eq!(
         node.coord_hint_budget
-            .available(&from, std::time::Instant::now()),
+            .available(&from, crate::time::mono_now()),
         100,
         "a refused write must not be charged"
     );

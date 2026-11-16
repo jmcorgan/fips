@@ -181,60 +181,6 @@ async fn test_tcp_mixed_transport_coexistence() {
     cleanup_nodes(&mut nodes).await;
 }
 
-/// TCP connection drop is detected by MMP link-dead timeout.
-///
-/// Establishes peering, force-closes the TCP connection, then verifies
-/// that `check_link_heartbeats()` detects the dead peer after the
-/// link-dead timeout fires.
-#[tokio::test]
-async fn test_tcp_connection_loss_detection() {
-    // Short heartbeat/link-dead timeouts for faster test execution. A node
-    // built with a link-dead timeout below 30 s runs at 30 s, so the short
-    // one is set on the built nodes.
-    let mut config = Config::new();
-    config.node.heartbeat_interval_secs = 1;
-    let mut nodes = vec![
-        make_test_node_tcp_with(config.clone()).await,
-        make_test_node_tcp_with(config).await,
-    ];
-    for tn in nodes.iter_mut() {
-        set_link_dead_timeout(&mut tn.node, 3);
-    }
-
-    // Establish peering
-    initiate_handshake(&mut nodes, 0, 1).await;
-    let total = drain_all_packets(&mut nodes, false).await;
-    assert!(total > 0);
-
-    let addr_0 = *nodes[0].node.node_addr();
-    let addr_1 = *nodes[1].node.node_addr();
-    assert!(nodes[0].node.get_peer(&addr_1).is_some());
-    assert!(nodes[1].node.get_peer(&addr_0).is_some());
-
-    // Force-close the TCP connection on node 0's side toward node 1
-    let node1_listen_addr = nodes[1].addr.clone();
-    let transport = nodes[0]
-        .node
-        .transports
-        .get(&nodes[0].transport_id)
-        .unwrap();
-    transport.close_connection(&node1_listen_addr).await;
-
-    // Wait for link-dead timeout to fire (3 seconds + margin)
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    // Trigger heartbeat check (normally done by the tick handler)
-    nodes[0].node.check_link_heartbeats().await;
-
-    // Node 0 should have detected node 1 as dead and removed it
-    assert!(
-        nodes[0].node.get_peer(&addr_1).is_none(),
-        "node 0 should have removed dead peer node 1"
-    );
-
-    cleanup_nodes(&mut nodes).await;
-}
-
 /// A TCP link whose only traffic is heartbeats outlives several inbound idle
 /// deadlines when the deadline is the one the node derives from its own
 /// liveness timers.
@@ -319,7 +265,10 @@ async fn tcp_link_kept_alive_only_by_heartbeats_survives_several_idle_deadlines(
 ///
 /// After both peers detect a dead link and remove each other, a fresh
 /// handshake triggers TCP connect-on-send to open a new connection.
-/// Verifies that bidirectional peering is restored.
+/// Verifies that bidirectional peering is restored. Each end's
+/// `check_link_heartbeats()` removes the peer once the link-dead timeout
+/// passes, so this covers the detection of the dead link as well as the
+/// reconnection.
 #[tokio::test]
 async fn test_tcp_reconnection_after_link_death() {
     // Short timeouts; the link-dead one is set on the built nodes, which
@@ -342,6 +291,10 @@ async fn test_tcp_reconnection_after_link_death() {
     let addr_0 = *nodes[0].node.node_addr();
     let addr_1 = *nodes[1].node.node_addr();
     assert!(nodes[0].node.get_peer(&addr_1).is_some());
+    assert!(
+        nodes[1].node.get_peer(&addr_0).is_some(),
+        "precondition: node 1 holds node 0 before the close"
+    );
 
     // Force-close the TCP connection on node 0's side
     let node1_listen_addr = nodes[1].addr.clone();

@@ -316,6 +316,10 @@ faults! {
     /// Heartbeat pacing reads `std::time::Instant` instead of the node's
     /// monotonic clock, which the link-dead check reads.
     HeartbeatsOnStdClock,
+    /// The node tests' drain steps the test clock without waiting for the
+    /// jobs dispatched to the nodes' decrypt workers, so it returns with a
+    /// frame still on a worker thread.
+    DrainSkipsWorkerWait,
     /// Choosing the active path ignores the medium a path runs over, as
     /// before the medium ranked paths, so a cable within the switch margin
     /// of a better-scoring Wi-Fi path never takes the link from it.

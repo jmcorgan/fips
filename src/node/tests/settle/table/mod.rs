@@ -1026,9 +1026,9 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
             }
         }
         Row::Dampener => {
-            let past = std::time::Instant::now()
+            let past = crate::time::mono_now()
                 .checked_sub(Duration::from_secs(3600))
-                .unwrap_or_else(std::time::Instant::now);
+                .unwrap_or_else(crate::time::mono_now);
             node.restart_dampener.insert(*peer, past);
         }
         Row::Silent => {
@@ -1125,7 +1125,7 @@ pub(super) fn dirty_record(p: &mut ActivePeer, row: DataRow) {
         DataRow::Heard => p.touch(now_ms()),
         DataRow::StoredSetup => p.set_handshake_msg2(vec![0xd5; 48]),
         DataRow::Stats => {
-            p.mark_heartbeat_attempt(std::time::Instant::now());
+            p.mark_heartbeat_attempt(crate::time::mono_now());
             p.record_failed(SessionIndex::new(0x0dd_fa11));
         }
         DataRow::Profile => p.test_take_profile(crate::proto::fmp::NodeProfile::Leaf),

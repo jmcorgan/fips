@@ -21,10 +21,7 @@ fn parse_peer_npub(s: &str) -> Result<NodeAddr, String> {
 
 /// Helper: get current Unix time in milliseconds.
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    crate::time::wall_ms()
 }
 
 /// Classify a DualEwma trend as "rising", "falling", or "stable".

@@ -36,10 +36,7 @@ struct Fixture {
 /// `find_next_hop` read. A verification stamped on any other clock reads as
 /// aged out to the handler.
 fn wall_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+    crate::time::wall_ms()
 }
 
 /// `dest` hung directly under `parent`, sharing its root.

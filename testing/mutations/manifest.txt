@@ -257,6 +257,7 @@ DeadRecheckDoubles	pass	fips-core	proto::path::tests::floor::a_silent_standby_ke
 DeadRecheckDoubles	pass	fips-core	proto::path::tests::floor::the_silent_active_path_brought_back_by_the_peers_probe_in_its_span_resumes_at_once
 DeadRecheckDoubles	red	fips-core	proto::path::tests::floor::a_path_that_carried_the_link_and_returns_narrower_than_it_proved_steps_down_the_ladder_and_is_found
 HeartbeatsOnStdClock	red	fips-mesh	node::tests::heartbeat::a_linked_peer_is_heartbeated_again_once_the_clock_link_dead_reads_passes_the_interval
+DrainSkipsWorkerWait	red	fips-mesh	node::tests::spanning_tree::a_stepped_drain_returns_only_after_the_decrypt_workers_handled_what_they_were_sent
 MediumIgnored	red	fips-core	proto::path::tests::choice::a_cable_within_the_margin_of_a_better_scoring_wifi_takes_the_link_one_dwell_after_its_second_sample
 MediumIgnored	red	fips-core	proto::path::tests::choice::the_mandatory_change_takes_a_cable_within_the_margin_over_a_better_scoring_wifi
 MediumIgnored	red	fips-core	proto::path::tests::choice::a_path_outside_the_margin_of_the_best_gives_way_to_a_cable_within_it_whatever_its_medium

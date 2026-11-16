@@ -31,6 +31,13 @@ struct ChildEcho {
 ///
 /// The offset hides the node's uptime, which a peer's first sequence would
 /// otherwise reveal.
+///
+/// The origin, and [`Node::seq_floor`]'s elapsed time from it, stay on the
+/// raw `std::time::Instant` on purpose. The floor must rise in real time: a
+/// test that froze `crate::time` would otherwise hold it still, and a peer
+/// re-established in that test could be seeded at or below a sequence it was
+/// already sent. Under a test's clock step the floor only rises more slowly
+/// than the hooked clocks, and stays monotonic, so no outcome changes.
 pub(super) fn new_seq_origin() -> (u64, std::time::Instant) {
     use rand::RngExt;
     (
@@ -356,10 +363,7 @@ impl Node {
 
         self.metrics().bloom.accepted.inc();
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = Self::now_ms();
 
         debug!(
             from = %self.peer_display_name(from),

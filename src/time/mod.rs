@@ -42,6 +42,14 @@ pub(crate) fn mono_ms_at(instant: HostInstant) -> u64 {
     instant.0.saturating_duration_since(*START).as_millis() as u64
 }
 
+/// Now on [`HostClock`], as the `std::time::Instant` that code holding std
+/// instants stores and measures from. Outside test builds it is exactly
+/// `std::time::Instant::now()`; in a test it moves with [`advance`] and stops
+/// with [`freeze`], as [`mono_ms`] does.
+pub(crate) fn mono_now() -> StdInstant {
+    HostClock.now().into()
+}
+
 /// Current Unix time in milliseconds, or 0 if the system clock reads before
 /// the epoch.
 pub(crate) fn wall_ms() -> u64 {
@@ -172,6 +180,12 @@ pub(crate) fn advance(d: Duration) {
 pub(crate) fn freeze() {
     LazyLock::force(&START);
     hooks::FROZEN.with(|f| f.set(Some(StdInstant::now())));
+}
+
+/// Whether this thread's monotonic clock is stopped by [`freeze`].
+#[cfg(test)]
+pub(crate) fn is_frozen() -> bool {
+    hooks::FROZEN.with(|f| f.get().is_some())
 }
 
 /// A clock with a fixed instant to count test times from, so a test can name

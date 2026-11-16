@@ -953,7 +953,7 @@ impl Node {
         let at_bound = self.lookup.backoff.entry_count() >= MAX_BACKOFF_ENTRIES;
         if let Some(evicted) = self
             .backoff_bound_log
-            .tick(at_bound, std::time::Instant::now())
+            .tick(at_bound, crate::time::mono_now())
         {
             info!(
                 evicted,
@@ -968,7 +968,7 @@ impl Node {
         let at_bound = self.lookup.forward_limiter.entry_count() >= MAX_FORWARD_ENTRIES;
         if let Some(evicted) = self
             .forward_bound_log
-            .tick(at_bound, std::time::Instant::now())
+            .tick(at_bound, crate::time::mono_now())
         {
             info!(
                 evicted,

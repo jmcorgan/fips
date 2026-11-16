@@ -4,8 +4,12 @@
 # cross-check target list) into a scratch tree, plants one divergence, and
 # runs the check there. The healthy copy must pass; a unit-test step or a
 # suite added to ci.yml only, a stage dropped from or added to ci-local.sh's
-# tier 2 only, and an exception removed from the check's lists must each
-# fail it, naming what diverged.
+# tier 2 only, an exception removed from the check's lists, a mapped step
+# or a suite leg's step that keeps its name but runs something else,
+# nothing, or the explorers, or cannot fail, the explorers in a package
+# workflow, and a nightly-only chaos scenario without its reason, back in
+# tier 2 or on GitHub, or out of tier 3's batch must each fail it, naming
+# what diverged.
 #
 # Hermetic: nothing is built or started, and the tree under test is never
 # written. Each case runs the check once, which runs ci-local.sh --tier 2
@@ -147,6 +151,224 @@ fresh && plant testing/ci-local.sh \
     ""
 expect_red "the .deb build dropped from tier 2 only" \
     "GitHub runs the work of deb-build, which ci-local.sh --tier 2 does not"
+
+# What a mapped step runs, not only its name: each of these keeps the step's
+# name and changes or empties its command.
+fresh && plant .github/workflows/ci.yml \
+    "          bash testing/known-defect-lane.sh" \
+    "          true"
+expect_red "the known-defect lane's run line replaced by true" \
+    "test-core: mapped step 'Run the known-defect lane' does not run 'testing/known-defect-lane.sh'"
+
+fresh && plant .github/workflows/ci.yml \
+    "          cargo test -p fips-core --features slow-tests" \
+    "          cargo test -p fips-core --features slow-explorers"
+expect_red "the core's slow suites changed to the explorers" \
+    "test-core: step 'Run the no_std core's tests on their own, with its slow suites' runs fips-core's slow-explorers feature"
+
+fresh && plant .github/workflows/ci.yml \
+    "          cargo test -p fips-mesh --lib --features profiling,test-overrides" \
+    "          cargo test -p fips-mesh --lib --features profiling,test-overrides,explorers"
+expect_red "the root crate's explorers feature added to a test run" \
+    "runs the root crate's explorers feature"
+
+fresh && plant .github/workflows/ci.yml \
+    "          bash testing/mutations/run.sh" \
+    "          FIPS_MUTATION_EXPLORERS=1 bash testing/mutations/run.sh"
+expect_red "the mutation lane's explorer lines turned on" \
+    "test-mutations: step 'Run the mutation lane' runs the mutation lane's explorer lines"
+
+fresh && plant testing/check-ci-parity.sh \
+    '    ("test-core", "Run the known-defect lane"): ["testing/known-defect-lane.sh"],' \
+    ''
+expect_red "a mapped step with no fragment entry" \
+    "test-core: mapped step 'Run the known-defect lane' has no entry in CMDS"
+
+fresh && plant .github/workflows/ci.yml \
+    "          bash testing/known-defect-lane.sh" \
+    "          true  # bash testing/known-defect-lane.sh"
+expect_red "the known-defect lane only in a comment" \
+    "test-core: mapped step 'Run the known-defect lane' does not run 'testing/known-defect-lane.sh'"
+
+fresh && plant .github/workflows/ci.yml \
+    "          bash testing/known-defect-lane.sh" \
+    "          echo bash testing/known-defect-lane.sh"
+expect_red "the known-defect lane only in an echo" \
+    "test-core: mapped step 'Run the known-defect lane' does not run 'testing/known-defect-lane.sh'"
+
+fresh && plant .github/workflows/ci.yml \
+    "          bash testing/known-defect-lane.sh" \
+    "          bash testing/known-defect-lane.sh || true"
+expect_red "the known-defect lane neutralised by || true" \
+    "test-core: mapped step 'Run the known-defect lane' cannot fail: 'bash testing/known-defect-lane.sh || true'"
+
+fresh && plant .github/workflows/ci.yml \
+    "          bash testing/known-defect-lane.sh" \
+    "          bash testing/known-defect-lane.sh || echo skipped"
+expect_red "the known-defect lane neutralised by || echo" \
+    "test-core: mapped step 'Run the known-defect lane' cannot fail: 'bash testing/known-defect-lane.sh || echo skipped'"
+
+fresh && plant .github/workflows/ci.yml \
+    "          bash testing/known-defect-lane.sh" \
+    "          exit 0
+          bash testing/known-defect-lane.sh"
+expect_red "an exit 0 before the known-defect lane" \
+    "test-core: mapped step 'Run the known-defect lane' skips its command: 'exit 0'"
+
+fresh && plant .github/workflows/ci.yml \
+    "          bash testing/known-defect-lane.sh" \
+    "          : bash testing/known-defect-lane.sh"
+expect_red "the known-defect lane handed to :" \
+    "test-core: mapped step 'Run the known-defect lane' skips its command: ': bash testing/known-defect-lane.sh'"
+
+fresh && plant .github/workflows/ci.yml \
+    "          bash testing/known-defect-lane.sh" \
+    "          if false; then bash testing/known-defect-lane.sh; fi"
+expect_red "the known-defect lane behind if false" \
+    "test-core: mapped step 'Run the known-defect lane' skips its command"
+
+fresh && plant .github/workflows/ci.yml \
+    "          bash testing/known-defect-lane.sh" \
+    "          bash testing/known-defect-lane.sh | tee kd.log"
+expect_red "the known-defect lane piped in a shell without pipefail" \
+    "test-core: mapped step 'Run the known-defect lane' hides the exit status of 'testing/known-defect-lane.sh' behind a pipe"
+
+fresh && plant .github/workflows/ci.yml \
+    "      - name: Run the known-defect lane
+        run: |" \
+    "      - name: Run the known-defect lane
+        env:
+          LANE: testing/known-defect-lane.sh
+        run: |" \
+    && plant .github/workflows/ci.yml \
+    "          bash testing/known-defect-lane.sh" \
+    "          true"
+expect_red "the known-defect lane only in the step's env" \
+    "test-core: mapped step 'Run the known-defect lane' does not run 'testing/known-defect-lane.sh'"
+
+fresh && plant .github/workflows/ci.yml \
+    "      - name: Run the known-defect lane" \
+    "      - name: Run the known-defect lane
+        if: \${{ false && github.ref }}"
+expect_red "the known-defect lane under a false conjunction" \
+    "test-core: mapped step 'Run the known-defect lane' never runs"
+
+fresh && plant .github/workflows/ci.yml \
+    "          cargo test -p fips-core --features slow-tests" \
+    "          cargo test -p fips-core --features slow-tests --no-run"
+expect_red "the core's slow suites built but not run" \
+    "test-core: mapped step 'Run the no_std core's tests on their own, with its slow suites' builds its tests but runs none"
+
+fresh && plant .github/workflows/ci.yml \
+    "          cargo test -p fips-mesh --lib --features profiling,test-overrides" \
+    "          cargo test -p fips-mesh --lib --features profiling,test-overrides --features \"test-overrides explorers\""
+expect_red "the root crate's explorers in a quoted, space-separated feature list" \
+    "test-features: step 'Run library tests with the optional root features enabled' runs the root crate's explorers feature"
+
+fresh && plant .github/workflows/ci.yml \
+    "          cargo test -p fips-core --features slow-tests" \
+    "          cargo test -p fips-core --features slow-tests,\${{ matrix.extra }}" \
+    && plant .github/workflows/ci.yml \
+    "  test-core:
+    name:" \
+    "  test-core:
+    strategy:
+      matrix:
+        extra: [slow-explorers]
+    name:"
+expect_red "the core's explorers supplied by a matrix value" \
+    "test-core: step 'Run the no_std core's tests on their own, with its slow suites' runs fips-core's slow-explorers feature"
+
+cp "$ROOT/.github/workflows/package-freebsd.yml" "$SCRATCH/freebsd.yml"
+fresh && cp "$SCRATCH/freebsd.yml" "$SCRATCH/tree/.github/workflows/package-freebsd.yml" \
+    && run_check \
+    && check "the healthy tree with the FreeBSD package workflow passes" \
+        "$([ "$RC" -eq 0 ] && echo 0 || echo 1)" "rc=$RC" \
+    && plant .github/workflows/package-freebsd.yml \
+    "            cargo test --no-run" \
+    "            cargo test --no-run --features explorers"
+expect_red "the root crate's explorers in a push-started package workflow" \
+    "package-freebsd.yml: build: step"
+
+# The suite jobs: each kind of leg needs the step that runs its suite, under
+# the if: that selects it, able to fail.
+fresh && plant .github/workflows/ci.yml \
+    "        run: bash testing/nat/scripts/nat-test.sh \${{ matrix.scenario }}" \
+    "        run: true"
+expect_red "the NAT legs' run line replaced by true" \
+    "integration: suite step 'Run NAT lab scenario' does not run 'bash testing/nat/scripts/nat-test.sh \${{ matrix.scenario }}'"
+
+fresh && plant .github/workflows/ci.yml \
+    "        run: bash testing/chaos/scripts/chaos.sh \${{ matrix.scenario }} \${{ matrix.chaos_flags }}" \
+    "        run: bash testing/chaos/scripts/chaos.sh \${{ matrix.scenario }} \${{ matrix.chaos_flags }} || true"
+expect_red "the chaos legs neutralised by || true" \
+    "integration: suite step 'Run chaos scenario' cannot fail"
+
+fresh && plant .github/workflows/ci.yml \
+    "      - name: Run chaos scenario
+        if: matrix.type == 'chaos'" \
+    "      - name: Run chaos scenario
+        if: matrix.type == 'chaos-off'"
+expect_red "the chaos step selected by a type no leg has" \
+    "integration: suite step 'Run chaos scenario' runs under if: \"matrix.type == 'chaos-off'\""
+
+fresh && plant .github/workflows/ci.yml \
+    "          - suite: mdns
+            type: mdns" \
+    "          - suite: mdns
+            type: mdns-lan"
+expect_red "an integration leg whose type no suite step selects" \
+    "integration: legs of type mdns-lan have no step in SUITE_CMDS"
+
+fresh && plant .github/workflows/ci.yml \
+    "      - name: Run the known-defect lane" \
+    "      - name: Run the known-defect lane
+        if: false"
+expect_red "the known-defect lane under if: false" \
+    "test-core: mapped step 'Run the known-defect lane' never runs"
+
+fresh && plant .github/workflows/ci.yml \
+    "      - name: Run the known-defect lane" \
+    "      - name: Run the known-defect lane
+        continue-on-error: true"
+expect_red "the known-defect lane under continue-on-error" \
+    "test-core: mapped step 'Run the known-defect lane' cannot fail its run"
+
+# The nightly-only chaos scenarios: each needs its reason in the check, and
+# must stay out of tier 2 and GitHub and in tier 3's batch.
+fresh && plant testing/check-ci-parity.sh \
+    '    "congestion-stress": "176 recorded runs met none of its criteria, cause "
+        "unknown",' \
+    ''
+expect_red "a nightly-only scenario's exception removed" \
+    "congestion-stress is in ci-local.sh's NIGHTLY_CHAOS but has no entry in NIGHTLY_ONLY"
+
+fresh && plant .github/workflows/ci.yml \
+    "          - suite: tcp-mesh" \
+    "          - suite: dual-udp-flap
+            type: chaos
+            scenario: dual-udp-flap
+          - suite: tcp-mesh"
+expect_red "a nightly-only scenario back on GitHub" \
+    "dual-udp-flap is nightly-only but a GitHub leg runs scenario dual-udp-flap on every push"
+
+fresh && plant testing/ci-local.sh \
+    '    "tcp-mesh tcp-mesh"' \
+    '    "tcp-mesh tcp-mesh"
+    "dual-udp-flap dual-udp-flap"'
+expect_red "a nightly-only scenario back in tier 2" \
+    "dual-udp-flap is in both NIGHTLY_CHAOS and CHAOS_SUITES"
+
+# shellcheck disable=SC2016  # the plant is ci-local.sh's text, not this shell's
+fresh && plant testing/ci-local.sh \
+    '    for entry in "${CHAOS_SUITES[@]}" "${NIGHTLY_CHAOS[@]}"; do
+        read -ra parts <<< "$entry"
+        for (( i = 1;' \
+    '    for entry in "${CHAOS_SUITES[@]}"; do
+        read -ra parts <<< "$entry"
+        for (( i = 1;'
+expect_red "the nightly-only scenarios dropped from tier 3's batch" \
+    "two-bound-udp-bulk is nightly-only but tier 3's chaos part does not batch it"
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

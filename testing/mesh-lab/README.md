@@ -53,6 +53,9 @@ Initial target set:
 - `rekey`, `rekey-accept-off`, `rekey-outbound-only` — rekey-suite
   Phase 5 post-second-rekey connectivity flake class.
 - `nat-lan` — two-node NAT-traversal handshake-completion flake class.
+  Each rep runs `nat-test.sh lan`, which since 2026-11-16 ends by
+  publishing one malformed overlay advert to the relay and waiting 5 s
+  for both daemons to survive it, so each rep is that much longer.
 - `bloom-storm` — chaos scenario; covers the `bloom_send_rate`
   per-node ceiling exceedance class (single node spiking above the
   ceiling while peers stay well under). Note that
