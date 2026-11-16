@@ -2,10 +2,11 @@
 # ── Install the pinned shellcheck, checksum-verified ────────────────────────
 # Every CI run of testing/check-shellcheck.sh uses the shellcheck version
 # pinned here: ci.yml's CI parity job, package-openwrt.yml's .ipk build and
-# ci-local.sh's shellcheck stage. Without the pin each GitHub job used the
-# runner image's shellcheck and local CI used the host's package, so a runner
-# image update could turn the lint red with no change in the tree: 0.11.0
-# reports a trap-only function under a code 0.9.0 did not have.
+# ci-local.sh's shellcheck stage. package-freebsd.yml's lint of
+# testing/pfsense-install-smoke.sh uses it too. Without the pin each GitHub
+# job used the runner image's shellcheck and local CI used the host's package,
+# so a runner image update could turn the lint red with no change in the tree:
+# 0.11.0 reports a trap-only function under a code 0.9.0 did not have.
 #
 # Usage: install-shellcheck.sh <dir>
 #   Leaves the pinned binary at <dir>/shellcheck and prints its version. The

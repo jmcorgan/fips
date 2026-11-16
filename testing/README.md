@@ -709,6 +709,8 @@ tarball, checks it against a pinned SHA-256 and leaves the binary at
 keeps the tarball in `${XDG_CACHE_HOME:-~/.cache}/fips-ci/shellcheck/`, so a
 host needs the network only for its first run. If the pinned binary cannot be
 installed the stage fails rather than falling back to the host's shellcheck.
+The FreeBSD package workflow lints `pfsense-install-smoke.sh` with the same
+pinned binary.
 
 ### Per-run isolation and the `FIPS_CI_RUN_ID` override
 
