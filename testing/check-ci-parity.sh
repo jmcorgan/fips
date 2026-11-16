@@ -416,6 +416,8 @@ SETUP = {
     "Resolve the builder image cache key", "Restore the builder image",
     "Check for a new builder image archive", "Save the builder image", "Upload the .deb",
     "Save the integration test images", "Upload the integration test images",
+    "Restore the .deb build's dependency cache", "Make the .deb dependency cache readable",
+    "Drop the workspace crates from the .deb dependency cache", "Save the .deb build's dependency cache",
 }
 # Jobs compared by suite above, and jobs only GitHub can run, with why.
 SUITE_JOBS = {"openwrt-scripts", "tarball-install", "integration",

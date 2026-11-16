@@ -1893,12 +1893,34 @@ jobs:
           path: ${{ runner.temp }}/deb-builder-image.tar
           key: ${{ steps.builder.outputs.key }}
 
+      # The container build's cargo target and registry, carried between
+      # runners like the builder image: keyed on the builder image (base,
+      # toolchain, Dockerfile) and Cargo.lock, falling back to the newest entry
+      # for the same image, and saved only by a push to a trunk. The workflow
+      # has no tag trigger, so no release build restores it. It is saved with
+      # the workspace crates dropped (below), so it holds dependencies only;
+      # build-in-container.sh also cleans the workspace crates and rejects one
+      # cargo calls fresh at every build, so a restored entry cannot carry
+      # another tree's code either way.
+      - name: Restore the .deb build's dependency cache
+        id: deb-deps
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ${{ runner.temp }}/deb-target
+            ${{ runner.temp }}/deb-registry
+          key: deb-deps-${{ steps.builder.outputs.key }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: deb-deps-${{ steps.builder.outputs.key }}-
+
       # The package path is the script's last line of stdout. A leg that
       # produced the other architecture's package goes red here rather than
       # handing an amd64 package to the arm64 install leg.
       - name: Build the .deb in the pinned build container
         timeout-minutes: 30
         shell: bash
+        env:
+          FIPS_DEB_TARGET_VOLUME: ${{ runner.temp }}/deb-target
+          FIPS_DEB_REGISTRY_VOLUME: ${{ runner.temp }}/deb-registry
         run: |
           set -euo pipefail
           bash packaging/debian/build-deb-container.sh --output-dir deploy \
@@ -1933,6 +1955,47 @@ jobs:
         with:
           path: ${{ runner.temp }}/deb-builder-image.tar
           key: ${{ steps.builder.outputs.key }}
+
+      # The container wrote the cache directories as root.
+      - name: Make the .deb dependency cache readable
+        if: >-
+          github.event_name == 'push'
+          && contains(fromJSON('["refs/heads/maint", "refs/heads/master", "refs/heads/next"]'), github.ref)
+          && steps.deb-deps.outputs.cache-hit != 'true'
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/deb-target" "$RUNNER_TEMP/deb-registry"
+
+      # The next build cleans them anyway, so saving them only spends the
+      # repository's cache allowance: this build's fips-core and fips-mesh
+      # output (every name under release/ that starts with fips or libfips,
+      # their fingerprints and build-script output) and every directory
+      # beside release/, which today holds only cargo-deb's stripped copies.
+      # No dependency's name starts with fips (Cargo.lock).
+      - name: Drop the workspace crates from the .deb dependency cache
+        if: >-
+          github.event_name == 'push'
+          && contains(fromJSON('["refs/heads/maint", "refs/heads/master", "refs/heads/next"]'), github.ref)
+          && steps.deb-deps.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          t="$RUNNER_TEMP/deb-target"
+          [ -d "$t/release/deps" ] || { echo "no release build in $t" >&2; exit 1; }
+          find "$t" -mindepth 1 -maxdepth 1 -type d ! -name release -exec rm -rf {} +
+          rm -rf "$t"/release/fips* "$t"/release/libfips* "$t"/release/deps/fips* \
+            "$t"/release/deps/libfips* "$t"/release/.fingerprint/fips-* "$t"/release/build/fips-*
+          du -sh "$t"
+
+      - name: Save the .deb build's dependency cache
+        if: >-
+          github.event_name == 'push'
+          && contains(fromJSON('["refs/heads/maint", "refs/heads/master", "refs/heads/next"]'), github.ref)
+          && steps.deb-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ${{ runner.temp }}/deb-target
+            ${{ runner.temp }}/deb-registry
+          key: deb-deps-${{ steps.builder.outputs.key }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Upload the .deb
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
