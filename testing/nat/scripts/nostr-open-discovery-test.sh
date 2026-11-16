@@ -36,7 +36,7 @@ SCENARIO="$PROFILE"
 COMPOSE=(docker compose -f "$NAT_DIR/docker-compose.yml")
 
 # Optional extra compose-file overlay chain (colon-separated paths), as in
-# nostr-relay-test.sh: ci-local.sh appends the external-network overlay so
+# nat-test.sh: ci-local.sh appends the external-network overlay so
 # this suite attaches to the networks the run claimed.
 if [ -n "${FIPS_NAT_EXTRA_COMPOSE:-}" ]; then
     IFS=':' read -ra _NAT_EXTRA <<< "${FIPS_NAT_EXTRA_COMPOSE}"
@@ -95,7 +95,7 @@ require_test_image() {
     if docker image inspect "$img" >/dev/null 2>&1; then
         return 0
     fi
-    # As in nostr-relay-test.sh: a harness that set FIPS_TEST_IMAGE built it,
+    # As in nat-test.sh: a harness that set FIPS_TEST_IMAGE built it,
     # so a miss is an upstream failure, not something to paper over.
     if [ -n "${FIPS_TEST_IMAGE:-}" ]; then
         echo "ERROR: $img not present, and FIPS_TEST_IMAGE names the caller's own image" >&2

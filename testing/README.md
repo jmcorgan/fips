@@ -40,9 +40,11 @@ and a local STUN responder.
 | symmetric | UDP traversal fails under symmetric NAT, TCP fallback wins   |
 | lan       | Peers on the same LAN prefer local addresses over reflexive  |
 
-The same lab runs the Nostr suites: `nostr-publish-consume` and
-`stun-faults` in every run, and `nostr-open-discovery`, the open-discovery
-startup scenario, only when named (`ci-local.sh --only nostr-open-discovery`).
+The lan scenario also publishes a malformed overlay advert to the relay once
+the peers are up, and requires both daemons to survive it and keep their
+link. The same lab runs `stun-faults` in every run, and
+`nostr-open-discovery`, the open-discovery startup scenario, only when named
+(`ci-local.sh --only nostr-open-discovery`).
 
 ### [chaos/](chaos/) -- Stochastic Simulation
 
@@ -84,7 +86,9 @@ FIPS running as a sidecar container that owns the network namespace of
 a companion application container, with iptables/ip6tables rules
 confining the app to the mesh. `scripts/test-sidecar.sh` boots a
 three-node chain of such pairs and asserts both connectivity and
-isolation.
+isolation. Run by hand only: no CI runs it, since static-chain asserts the
+same multi-hop path and the isolation rules are the test image's own
+(`ci-local.sh`'s header says why).
 
 ### [firewall/](firewall/) -- nftables Baseline
 

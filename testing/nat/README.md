@@ -82,10 +82,9 @@ Run one scenario:
   - injects and configures the NAT LAN `veth` pairs in the container
     namespaces; see "Start order and interface waits"
 - `scripts/nat-test.sh`
-  - boots the lab, waits for convergence, and asserts the resulting path
-- `scripts/nostr-relay-test.sh`
-  - exercises the Nostr overlay advert publish/consume round-trip, including
-    rejection of a malformed advert event
+  - boots the lab, waits for convergence, and asserts the resulting path;
+    the lan scenario then publishes a malformed overlay advert to the relay
+    and requires both daemons to survive it and keep their link
 - `scripts/stun-faults-test.sh`
   - cycles the daemon through STUN drop, delay and outage faults and asserts
     graceful behavior at each step

@@ -257,43 +257,6 @@ services:
       shared-lan:
         ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.11
 
-  # ── Nostr publish/consume profile ──────────────────────────────────────
-  # Two FIPS daemons + the existing strfry relay, exercising the overlay
-  # advert publish → relay → consumer round-trip end-to-end. Both nodes
-  # share the same LAN bridge as the relay (no NAT in the way) so the
-  # focus of the test is the Nostr discovery layer rather than NAT
-  # traversal mechanics. Phase 3 (malformed advert) is driven by a
-  # one-shot publish from the test runner via the relay's WebSocket.
-  nostr-pub-a:
-    <<: *fips-common
-    profiles: ["nostr-publish-consume"]
-    container_name: fips-nat-nostr-pub-a${FIPS_CI_NAME_SUFFIX:-}
-    hostname: fips-nat-nostr-pub-a
-    depends_on:
-      - relay
-      - stun
-    volumes:
-      - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/nostr-publish-consume/node-a.yaml:/etc/fips/fips.yaml:ro
-    networks:
-      shared-lan:
-        ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.20
-
-  nostr-pub-b:
-    <<: *fips-common
-    profiles: ["nostr-publish-consume"]
-    container_name: fips-nat-nostr-pub-b${FIPS_CI_NAME_SUFFIX:-}
-    hostname: fips-nat-nostr-pub-b
-    depends_on:
-      - relay
-      - stun
-    volumes:
-      - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/nostr-publish-consume/node-b.yaml:/etc/fips/fips.yaml:ro
-    networks:
-      shared-lan:
-        ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.21
-
   # ── Nostr open-discovery startup profile (opt-in) ──────────────────────
   # One FIPS daemon with `policy: open` and no configured peers, started
   # after the relay already holds adverts from keys it has never heard of;

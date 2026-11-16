@@ -627,12 +627,6 @@ SUITE_CMDS = {
         ("native-api", "matrix.type == 'native-api'", ["bash testing/native-api/test.sh"]),
     ("integration", "Run mDNS LAN discovery test"):
         ("mdns", "matrix.type == 'mdns'", ["bash testing/mdns/test.sh"]),
-    ("integration", "Run sidecar integration test"):
-        ("sidecar", "matrix.type == 'sidecar'",
-         ["bash testing/sidecar/scripts/test-sidecar.sh --skip-build"]),
-    ("integration", "Run Nostr publish/consume test"):
-        ("nostr-publish-consume", "matrix.type == 'nostr-publish-consume'",
-         ["bash testing/nat/scripts/nostr-relay-test.sh"]),
     ("dns-resolver", "Run dns-resolver test"):
         (None, None, ['bash testing/dns-resolver/test.sh --deb "$deb"']),
     ("deb-install", "Run deb-install scenario"):

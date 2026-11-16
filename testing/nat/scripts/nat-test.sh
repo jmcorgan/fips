@@ -11,6 +11,8 @@ TOPOLOGY_SCRIPT="$SCRIPT_DIR/setup-topology.sh"
 WAIT_LIB="$ROOT_DIR/testing/lib/wait-converge.sh"
 RELAY_LIB="$ROOT_DIR/testing/lib/relay-verdict.sh"
 IMAGE_LIB="$ROOT_DIR/testing/lib/image-build.sh"
+# Signs and publishes an event to the relay; fed to a container on stdin.
+PUBLISH_LIB="$ROOT_DIR/testing/lib/nostr-publish.py"
 # Must track generate-configs.sh's OUTPUT_DIR and the compose bind-mounts: the
 # npubs are read back here after the containers are up, so reading a different
 # directory than the one the generator wrote pings an npub no node owns.
@@ -493,6 +495,118 @@ print(len(events))
     return 0
 }
 
+# Publish a malformed Kind-37195 (overlay-advert) event directly to the
+# relay, from inside $1. The event is signed with a fresh ephemeral keypair,
+# so the relay accepts it on the wire, and both consumer daemons must reject
+# it and stay alive.
+#
+# Which rejection they take is not what the event's gibberish `content`
+# suggests. `parse_overlay_advert_event` looks for the `protocol` tag first
+# and this event carries only `d` and `app`, so it fails with `missing
+# required protocol tag` and never reaches the JSON parse of the content.
+# The content is therefore belt and braces rather than the thing under test.
+# Neither branch logs anything: see the coverage-gap note in
+# check_malformed_advert.
+publish_malformed_advert() {
+    local container="$1" relay_host="$2" relay_port="$3"
+
+    # Both of these must match the consumers' subscription filter, which is
+    # kind + identifier and no author clause. The literals are ADVERT_KIND and
+    # ADVERT_IDENTIFIER in src/nostr/types.rs and are duplicated here rather
+    # than derived, so changing either there silently stops this event
+    # reaching the daemons while the relay goes on accepting it. `next` uses
+    # `fips-overlay-v1-next`, which is the one line that differs between the
+    # branches' copies of this script.
+    local kind=37195
+    local tags='[["d","fips-overlay-v1"],["app","fips.nat.lab.v1"]]'
+    local content='this-is-not-a-valid-overlay-advert-{garbage}'
+
+    # `-i` is required: without it docker attaches no stdin, `python3 -` reads an
+    # empty program, runs nothing and exits 0, so the stimulus is never injected.
+    # The publisher exits non-zero unless the relay answered OK true, and prints
+    # "malformed advert published: <verdict>" either way.
+    docker exec -i "$container" python3 - "$relay_host" "$relay_port" \
+        "malformed advert" "$kind" "$tags" "$content" < "$PUBLISH_LIB"
+}
+
+assert_process_alive() {
+    local container="$1"
+    if ! docker exec "$container" pidof fips >/dev/null 2>&1; then
+        echo "fips daemon NOT running in $container after malformed advert" >&2
+        return 1
+    fi
+    echo "  $container: fips daemon still alive after malformed advert"
+    return 0
+}
+
+# A container whose logs cannot be read has not been shown to be panic-free:
+# a `|| true` here would make the assertion's failure mode indistinguishable
+# from its success condition.
+assert_no_panic() {
+    local container="$1"
+    local logs
+    if ! logs="$(docker logs "$container" 2>&1)"; then
+        echo "could not read logs from $container; absence of panics is not established" >&2
+        return 1
+    fi
+    if grep -Eq "panicked at|RUST_BACKTRACE|fatal runtime error" <<<"$logs"; then
+        echo "panic detected in $container logs" >&2
+        return 1
+    fi
+    return 0
+}
+
+# The consumers' handling of a malformed overlay advert, on a lab whose two
+# nodes have already peered over the relay: one is published to the relay,
+# and both daemons must stay up, log no panic, and keep their link.
+check_malformed_advert() {
+    local node_a="$1" node_b="$2" relay_host="$3" relay_port="$4" peer_npub="$5"
+    local publish_out
+
+    echo ""
+    echo "--- malformed overlay advert ---"
+    # The publisher's verdict line is the evidence that the relay STORED the
+    # event. Without this check the step passes whether or not anything was
+    # published: the assertions below re-test properties the scenario has
+    # already established, so they all hold when the stimulus is absent.
+    #
+    # Accepted by the relay is one hop short of received by the consumers.
+    # A daemon whose relay socket is down at that moment, or whose `d` tag no
+    # longer matches the one published above, never sees a stored event and
+    # this check still passes. That hop is unguarded.
+    if ! publish_out="$(publish_malformed_advert "$node_a" "$relay_host" "$relay_port" 2>&1)"; then
+        printf '%s\n' "$publish_out"
+        echo "malformed-advert publisher failed: nothing was published, so" >&2
+        echo "the check would prove nothing about ingest." >&2
+        return 1
+    fi
+    printf '%s\n' "$publish_out"
+    if ! grep -q "malformed advert published: accepted" <<<"$publish_out"; then
+        echo "malformed-advert publisher reported no accepted relay verdict:" >&2
+        echo "the relay did not store the event, so it reached no consumer" >&2
+        echo "and the check would prove nothing about the reject path." >&2
+        return 1
+    fi
+
+    # Give consumers a moment to ingest and reject.
+    sleep 5
+
+    assert_process_alive "$node_a" || return 1
+    assert_process_alive "$node_b" || return 1
+    assert_no_panic "$node_a" || return 1
+    assert_no_panic "$node_b" || return 1
+
+    # Coverage gap, deliberate and not discharged: this asserts that the
+    # daemons did not crash on the malformed advert, not that they rejected
+    # it. The reject path emits no log (the advert handler discards the parse
+    # error with `let Ok(advert) =` and no diagnostic), so there is nothing
+    # observable from outside the process to assert on. The existing link
+    # must still carry traffic: a consumer must not tear it down on a bad
+    # advert.
+    ping_peer "$node_a" "$peer_npub" || return 1
+    return 0
+}
+
 # Start one scenario's lab. Each step is checked here because these run under
 # relay_lab_start's caller's `||`, where `set -e` does not stop on a failure.
 start_cone() {
@@ -675,6 +789,11 @@ run_lan() {
         return 1
     }
     ping_peer fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} "$NPUB_A" || {
+        dump_lan_diagnostics
+        return 1
+    }
+    check_malformed_advert "fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-}" \
+        "fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-}" "${NAT_LAN}.30" 7777 "$NPUB_B" || {
         dump_lan_diagnostics
         return 1
     }

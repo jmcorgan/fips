@@ -144,6 +144,16 @@ docker compose exec app ping -c1 -W2 172.20.0.13
 docker compose exec app ping -c1 127.0.0.1
 ```
 
+## Integration Test
+
+`scripts/test-sidecar.sh` boots a three-node chain of sidecar pairs and
+asserts the link counts, adjacent and multi-hop pings over `fips0`, and each
+app container's IPv4 isolation. It is run by hand and by no CI: static-chain
+asserts the same multi-hop path, and the isolation rules it checks are the
+test image's own (`testing/ci-local.sh`'s header records the retirement).
+It builds `fips-test:latest` and `fips-test-app:latest` first unless given
+`--skip-build`.
+
 ## Environment Variables
 
 | Variable | Default | Description |

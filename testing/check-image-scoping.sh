@@ -80,12 +80,10 @@ RUN_SUFFIX='${FIPS_CI_NAME_SUFFIX:-}'
 # NEW shared-tag or shared-context reference added anywhere in one of these
 # files is still a violation.
 #
-# Two of these files ARE reached from ci-local.sh, which is why a
-# whole-file exemption would not be honest here:
-#   * sidecar/scripts/test-sidecar.sh is invoked with --skip-build, so the
-#     build block holding its two references never executes under CI;
-#   * ci-cleanup.sh is invoked to reap, and its references only pick the
-#     throwaway image ip(8) runs in — it addresses no test container.
+# A whole-file exemption would not be honest here: ci-cleanup.sh is reached
+# from ci-local.sh, invoked to reap, and its references only pick the
+# throwaway image ip(8) runs in — it addresses no test container. The sidecar
+# suite is run by hand only, and its build block sits behind --skip-build.
 ALLOWED_REFS=(
     # The developer build. The shared directory is its context and the shared
     # tags are its product; that is the whole point of the script, and CI does
@@ -95,9 +93,9 @@ ALLOWED_REFS=(
     'scripts/build.sh::docker build -t fips-test-app:latest -f "$DOCKER_DIR/Dockerfile.app"'
     'scripts/build.sh::echo "Done. Images: fips-test:latest, fips-test-app:latest"'
 
-    # The hand-run sidecar build, behind its --skip-build guard. ci-local.sh
-    # always passes that flag, so under CI these two lines do not run and the
-    # image comes from FIPS_TEST_IMAGE like everywhere else.
+    # The hand-run sidecar build, behind its --skip-build guard. No CI runs
+    # the sidecar suite; a hand run that passes the flag takes the image from
+    # FIPS_TEST_IMAGE like everywhere else.
     'sidecar/scripts/test-sidecar.sh::docker build -t fips-test:latest "$DOCKER_DIR"'
     'sidecar/scripts/test-sidecar.sh::docker build -t fips-test-app:latest -f "$DOCKER_DIR/Dockerfile.app"'
 

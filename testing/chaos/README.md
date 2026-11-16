@@ -104,7 +104,7 @@ Explicit topologies exercising non-UDP transports.
 
 | Scenario      | Nodes | Transport      | Shape | Duration | Netem | Link Flaps | What it tests                              |
 | ------------- | ----- | -------------- | ----- | -------- | ----- | ---------- | ------------------------------------------ |
-| ethernet-only | 4     | Ethernet       | Ring  | 30s      | yes   | --         | AF_PACKET transport with beacon discovery  |
+| ethernet-only | 4     | Ethernet       | Ring  | 30s      | yes   | --         | By hand: AF_PACKET transport with beacon discovery |
 | ethernet-mesh | 6     | UDP + Ethernet | Mesh  | 120s     | yes   | yes        | Mixed UDP/Ethernet, netem mutation + flaps |
 | tcp-mesh      | 6     | UDP + TCP      | Mesh  | 120s     | yes   | yes        | Mixed UDP/TCP, netem mutation + flaps      |
 | dual-path-flap | 2    | Ethernet + UDP | Pair  | 180s     | yes   | yes        | Two paths; netem flaps of the cable, K-timeout switch |
@@ -118,7 +118,10 @@ Explicit topologies exercising non-UDP transports.
 | dead-grace-long | 2   | Ethernet + UDP | Pair  | 780s     | yes   | scheduled  | By hand: the cable down past the 600 s grace |
 
 - **ethernet-only**: 4-node ring on raw Ethernet (AF_PACKET). Peers discovered
-  via beacons, not static config. Minimal netem (1-5ms delay).
+  via beacons, not static config. Minimal netem (1-5ms delay). Run by hand,
+  in neither runner: `ethernet-churn` is the same ring with the same netem,
+  seed and baseline thresholds, run for 240 s with traffic and churn. The
+  yaml stays for hand runs and as the scenario `veth-host-test.sh` drives.
 - **ethernet-mesh**: Mirrors `tcp-mesh` topology but with Ethernet instead of
   TCP. UDP edges use static config; Ethernet edges use beacon discovery. The
   only scenario that asserts datagram delivery over Ethernet: its `delivery`
