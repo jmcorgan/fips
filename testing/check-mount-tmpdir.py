@@ -88,6 +88,7 @@ from pathlib import Path
 
 NAME = "check-mount-tmpdir"
 LIBRARY = "testing/lib/image-build.sh"
+PROXY_LIBRARY = "testing/lib/build-proxy.sh"
 
 FLAG_RE = re.compile(r"(?:^|(?<=[\s;&|(]))(-v|--volume)(?=[\s=])")
 MOUNT_RE = re.compile(r"(?:^|(?<=[\s;&|(]))--mount(?=[\s=])")
@@ -541,7 +542,7 @@ def new_dir(proc: subprocess.CompletedProcess[str], root: Path, name: str) -> bo
             and Path(out).is_dir())
 
 
-def selftest_helper(helper_text: str) -> list[str]:
+def selftest_helper(helper_text: str, proxy_text: str) -> list[str]:
     """Run the helper through bash in a temporary directory.
 
     The directory is never a mount source, which is why it may live in the
@@ -552,6 +553,8 @@ def selftest_helper(helper_text: str) -> list[str]:
         base = Path(tmp)
         src = base / "image-build.sh"
         src.write_text(helper_text)
+        # image-build.sh sources build-proxy.sh from its own directory.
+        (base / "build-proxy.sh").write_text(proxy_text)
         stuck_sub = None
         try:
             root = base / "plain"
@@ -661,6 +664,7 @@ def main(argv: list[str]) -> int:
                 print(f"{NAME}: cannot read {a}: {e}", file=sys.stderr)
                 return 2
         helper_text = (Path(__file__).resolve().parent / "lib" / "image-build.sh").read_text()
+        proxy_text = (Path(__file__).resolve().parent / "lib" / "build-proxy.sh").read_text()
     else:
         root = git(None, "rev-parse", "--show-toplevel").strip()
         if not root:
@@ -668,8 +672,9 @@ def main(argv: list[str]) -> int:
             return 2
         files = committed_blobs(root)
         helper_text = git(root, "show", f"HEAD:{LIBRARY}")
+        proxy_text = git(root, "show", f"HEAD:{PROXY_LIBRARY}")
 
-    errors = selftest_rules() + selftest_helper(helper_text)
+    errors = selftest_rules() + selftest_helper(helper_text, proxy_text)
     if errors:
         for e in errors:
             print(f"{NAME}: self-test: {e}", file=sys.stderr)

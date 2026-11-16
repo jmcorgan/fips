@@ -194,7 +194,7 @@ run_test() {
     # reproduces with upstream's own image and config (relay-verdict.sh). A
     # start that fails for any other reason is not retried, and a relay fault
     # after the window still fails the run through assert_relay.
-    retry_build "compose build ($PROFILE)" "${COMPOSE[@]}" --profile "$PROFILE" build
+    retry_build "compose build ($PROFILE)" "${COMPOSE[@]}" --profile "$PROFILE" build "${CI_BUILD_PROXY[@]}"
     relay_lab_start "$RELAY_CONTAINER" 2 45 start_lab cleanup || {
         dump_diagnostics
         return 1

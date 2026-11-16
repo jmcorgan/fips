@@ -207,7 +207,8 @@ COPY native-echo /usr/local/bin/native-echo
 COPY native-surface /usr/local/bin/native-surface
 RUN chmod +x /usr/local/bin/fips /usr/local/bin/native-echo /usr/local/bin/native-surface
 DOCKERFILE
-    docker build -t "$BUILT_IMAGE" "${CI_LABELS[@]}" --build-arg "BASE=$DEBIAN13_SLIM" "$context" --quiet >/dev/null
+    docker build -t "$BUILT_IMAGE" "${CI_LABELS[@]}" "${CI_BUILD_PROXY[@]}" \
+        --build-arg "BASE=$DEBIAN13_SLIM" "$context" --quiet >/dev/null
     local status=$?
     rm -rf "$context"
     [[ $status -ne 0 ]] && return 1

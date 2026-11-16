@@ -147,6 +147,7 @@ if [ "$BUILT_IMAGE" -eq 1 ]; then
     # Retried because the build pulls the floor image and fetches apt packages,
     # rustup and crates, any of which can fail for a few seconds at a time.
     retry_build "docker build $IMAGE_TAG" docker build \
+        "${CI_BUILD_PROXY[@]}" \
         --build-arg "BASE=$FIPS_BUILD_IMAGE" \
         --build-arg "RUST_TOOLCHAIN=$RUST_TOOLCHAIN" \
         -t "$IMAGE_TAG" \

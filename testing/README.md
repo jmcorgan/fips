@@ -372,6 +372,23 @@ GitHub's ci-parity job) fails on a base without a digest, after showing on
 planted fixtures that it can; `check-base-pins.sh --current` prints each
 pin beside the digest the registry serves now.
 
+### An apt proxy for image builds (`FIPS_CI_APT_PROXY`)
+
+A host with an apt cache sets `FIPS_CI_APT_PROXY=http://<host>:<port>`, and
+every image build a CI run makes passes it to `docker build` or `docker
+compose build` as the `http_proxy` build argument, from
+[`lib/build-proxy.sh`](lib/build-proxy.sh): the test image, the root tests'
+image, the package builder, the install and resolver suites' images, the NAT
+and medium-change lab images, and the mdns and native-api images. Docker
+predefines that argument, so no Dockerfile declares it, and it is not
+written into the image, so no running container has it; it is never
+exported and never given to `docker run`, so cargo, rustup and the test
+containers' own traffic do not go through the proxy. Only plain-http
+fetches use it; HTTPS fetches go direct. That is apt's mirrors, but also
+any plain-http dnf or apk mirror the Fedora, AlmaLinux and Alpine images
+fetch from, so the proxy must pass those through rather than serve apt
+alone. Unset or empty, it changes nothing. GitHub never sets it.
+
 ### What only GitHub runs
 
 GitHub additionally runs the library tests on macOS and Windows, and on

@@ -2,8 +2,8 @@
 # Shared helpers for building test images and starting test containers.
 #
 # Source this file to get dump_output(), run_quiet(), build_inline(),
-# retry_build(), budget_allows_retry() and shared_tmpdir(), and the CI_LABELS
-# array:
+# retry_build(), budget_allows_retry() and shared_tmpdir(), the CI_LABELS
+# array, and CI_BUILD_PROXY from build-proxy.sh beside it:
 #   source "$SCRIPT_DIR/../lib/image-build.sh"
 #   echo "$dockerfile" | run_quiet "docker build -t $tag" \
 #       docker build -t "$tag" -f - "$REPO_ROOT"
@@ -43,6 +43,10 @@ CI_LABELS=(
     --label "com.corganlabs.fips-ci.run=${FIPS_CI_RUN_ID:-manual}"
 )
 
+# The apt proxy, as build arguments for every image build (build-proxy.sh).
+# shellcheck source=SCRIPTDIR/build-proxy.sh
+. "$(dirname "${BASH_SOURCE[0]}")/build-proxy.sh"
+
 # Emit a captured output file to stderr, delimited and labelled with the
 # command it came from. Callers use this only on failure: a command that
 # succeeds leaves no trace, so the suite stays quiet when it is green.
@@ -81,7 +85,7 @@ build_inline() {
     local tag="$1" dockerfile="$2" context="$3"
     shift 3
     echo "$dockerfile" | run_quiet "docker build -t $tag" \
-        docker build -t "$tag" "$@" -f - "$context"
+        docker build -t "$tag" "${CI_BUILD_PROXY[@]}" "$@" -f - "$context"
 }
 
 # Run an image build, and run it again after a failure, up to three attempts

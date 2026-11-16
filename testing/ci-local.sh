@@ -272,6 +272,11 @@ fi
 
 cd "$PROJECT_ROOT" || exit 1
 
+# CI_BUILD_PROXY: the builder's apt proxy (FIPS_CI_APT_PROXY) as build
+# arguments for this script's own image builds, and only those.
+# shellcheck source=SCRIPTDIR/lib/build-proxy.sh
+. "$SCRIPT_DIR/lib/build-proxy.sh"
+
 # ── Configuration ──────────────────────────────────────────────────────────
 
 PARALLEL_JOBS=4
@@ -1741,7 +1746,7 @@ run_root_tests() {
 root_image() {
     docker image inspect "$ROOT_IMAGE" >/dev/null 2>&1 && return 0
     info "building $ROOT_IMAGE from testing/root-tests/Dockerfile"
-    docker build --quiet -t "$ROOT_IMAGE" "$SCRIPT_DIR/root-tests" >/dev/null || return 1
+    docker build --quiet "${CI_BUILD_PROXY[@]}" -t "$ROOT_IMAGE" "$SCRIPT_DIR/root-tests" >/dev/null || return 1
     return 0
 }
 
@@ -2657,9 +2662,10 @@ prepare_images() {
     # (fips-test:${run}) so a build killed mid-flight never wedges the next
     # run's rebuild, and concurrent runs never clobber each other's image.
     info "Building $CI_IMAGE_TEST Docker image"
-    docker build -t "$CI_IMAGE_TEST" --label "$CI_LABEL" --label "$CI_LABEL_RUN" "$CI_BUILD_CONTEXT" --quiet \
+    docker build -t "$CI_IMAGE_TEST" --label "$CI_LABEL" --label "$CI_LABEL_RUN" "${CI_BUILD_PROXY[@]}" \
+        "$CI_BUILD_CONTEXT" --quiet \
         || { record "docker-build" 1; return 1; }
-    docker build -t "$CI_IMAGE_APP" --label "$CI_LABEL" --label "$CI_LABEL_RUN" \
+    docker build -t "$CI_IMAGE_APP" --label "$CI_LABEL" --label "$CI_LABEL_RUN" "${CI_BUILD_PROXY[@]}" \
         -f "$CI_BUILD_CONTEXT/Dockerfile.app" "$CI_BUILD_CONTEXT" --quiet \
         || { record "docker-build-app" 1; return 1; }
     # Deliberately NOT retagged to fips-test:latest. Every consumer reads

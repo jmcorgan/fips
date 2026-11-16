@@ -108,7 +108,8 @@ RUN apt-get update && \
 COPY fips fipsctl /usr/local/bin/
 RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl && mkdir -p /run/fips
 DOCKERFILE
-    docker build -t "$BUILT_IMAGE" "${CI_LABELS[@]}" --build-arg "BASE=$DEBIAN13_SLIM" "$context" --quiet >/dev/null || return 1
+    docker build -t "$BUILT_IMAGE" "${CI_LABELS[@]}" "${CI_BUILD_PROXY[@]}" \
+        --build-arg "BASE=$DEBIAN13_SLIM" "$context" --quiet >/dev/null || return 1
     IMAGE="$BUILT_IMAGE"
     return 0
 }
