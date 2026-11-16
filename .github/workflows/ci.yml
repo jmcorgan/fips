@@ -471,6 +471,45 @@ jobs:
           cp target/integration/examples/native-echo target/integration/native-echo
           cp target/integration/examples/native-surface target/integration/native-surface
 
+      # The integration test images, built once here and handed to every
+      # integration leg, which loads them instead of building its own. Each job
+      # runs on a fresh VM, so the names fips-test:latest and
+      # fips-test-app:latest cannot reach another run; the integration job
+      # checks each loaded image's ID against the one recorded here. Local CI
+      # builds the same images once per run too, within build-integration.
+      - name: Build the integration test images
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          for f in fips fipsctl fipstop fips-gateway native-echo native-surface; do
+            cp "target/integration/$f" "testing/docker/$f"
+            chmod +x "testing/docker/$f"
+          done
+          # Retried: both builds pull from Docker Hub and the Debian mirrors.
+          source testing/lib/image-build.sh
+          retry_build "docker build fips-test" docker build -t fips-test:latest testing/docker
+          retry_build "docker build fips-test-app" docker build -t fips-test-app:latest -f testing/docker/Dockerfile.app testing/docker
+          mkdir -p "$RUNNER_TEMP/fips-test-images"
+          docker image inspect --format '{{.Id}}' fips-test:latest fips-test-app:latest \
+            > "$RUNNER_TEMP/fips-test-images/ids.txt"
+          cat "$RUNNER_TEMP/fips-test-images/ids.txt"
+
+      # An uncompressed tar: the artifact upload compresses it.
+      - name: Save the integration test images
+        if: matrix.os == 'ubuntu-latest'
+        run: docker save -o "$RUNNER_TEMP/fips-test-images/images.tar" fips-test:latest fips-test-app:latest
+
+      - name: Upload the integration test images
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fips-test-images
+          path: |
+            ${{ runner.temp }}/fips-test-images/images.tar
+            ${{ runner.temp }}/fips-test-images/ids.txt
+          if-no-files-found: error
+          retention-days: 1
+
       # Upload the Linux binary so integration jobs can use it without rebuilding
       - name: Upload Linux binary
         if: matrix.os == 'ubuntu-latest'
@@ -1369,8 +1408,8 @@ jobs:
 # artifact, so it does not wait on the unit tests. Each topology / scenario is
 # a separate matrix entry so they run in parallel.
 #
-# All harnesses share a single Docker image (fips-test:latest) built once
-# in the setup step from testing/docker/.
+# All harnesses share a single Docker image (fips-test:latest), built once in
+# the build job from testing/docker/ and loaded in the setup step.
 # ─────────────────────────────────────────────────────────────────────────────
   integration:
     name: Integration (${{ matrix.suite }})
@@ -1502,8 +1541,17 @@ jobs:
           name: fips-linux
           path: _bin
 
-      # Install binaries to unified docker context and build shared image
-      - name: Install binaries and build Docker image
+      - name: Download the integration test images
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: fips-test-images
+          path: ${{ runner.temp }}/fips-test-images
+
+      # Install binaries to the unified docker context, which the static
+      # compose file still names as a build context, and load the shared
+      # images the build job made, failing if either is not the image it
+      # recorded.
+      - name: Install binaries and load the Docker images
         run: |
           chmod +x _bin/fips _bin/fipsctl
           [ -f _bin/fipstop ] && chmod +x _bin/fipstop || true
@@ -1519,10 +1567,13 @@ jobs:
           chmod +x _bin/native-echo _bin/native-surface
           cp _bin/native-echo testing/docker/native-echo
           cp _bin/native-surface testing/docker/native-surface
-          # Retried: both builds pull from Docker Hub and the Debian mirrors.
-          source testing/lib/image-build.sh
-          retry_build "docker build fips-test" docker build -t fips-test:latest testing/docker
-          retry_build "docker build fips-test-app" docker build -t fips-test-app:latest -f testing/docker/Dockerfile.app testing/docker
+          docker load -i "$RUNNER_TEMP/fips-test-images/images.tar"
+          docker image inspect --format '{{.Id}}' fips-test:latest fips-test-app:latest \
+            > "$RUNNER_TEMP/loaded-ids.txt"
+          if ! diff "$RUNNER_TEMP/fips-test-images/ids.txt" "$RUNNER_TEMP/loaded-ids.txt"; then
+            echo "The loaded test images are not the ones the build job built" >&2
+            exit 1
+          fi
 
       # ── Static topology ────────────────────────────────────────────────────
       - name: Generate configs (static)

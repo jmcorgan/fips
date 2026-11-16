@@ -372,6 +372,7 @@ STEPS = {
     "build": {
         "Validate fips.nft syntax (Linux only)": "nft-syntax",
         "Build the integration binaries": "build-integration",
+        "Build the integration test images": "build-integration",
     },
     "deb-package": {"Build the .deb in the pinned build container": "deb-build"},
     "test": {
@@ -414,6 +415,7 @@ SETUP = {
     "Upload Linux binary", "Publish test report (Checks tab)", "Publish test report (run summary)",
     "Resolve the builder image cache key", "Restore the builder image",
     "Check for a new builder image archive", "Save the builder image", "Upload the .deb",
+    "Save the integration test images", "Upload the integration test images",
 }
 # Jobs compared by suite above, and jobs only GitHub can run, with why.
 SUITE_JOBS = {"openwrt-scripts", "tarball-install", "integration",
