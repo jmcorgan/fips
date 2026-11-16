@@ -66,7 +66,13 @@ with it, and the whole lane runs against one build.
   `FIPS_NODE_FAULTS` to appear in it 0 times, so a build that let
   `test-hooks` into a normal build, and the switches with it, is a miss. A
   failed build or a missing binary exits 2 and is never read as a count of
-  0.
+  0. `FIPS_MUTATION_FENCE_BIN=<path>` hands it a binary to read instead of
+  building one, and a path that is not an executable exits 2. Local CI
+  passes the `fips` from the `.deb` its build stage made (`deb-build`), a
+  release `--locked` build with no dev-dependency features, which is what
+  users install; a run with no package lets the lane build its own, as
+  GitHub's `test-mutations` job does, since it starts before its package
+  exists.
 
 ## Hosts with no BLE transport
 

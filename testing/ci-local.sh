@@ -1385,13 +1385,34 @@ run_tests() {
     # are skipped here, and run in a stage of their own with the root
     # explorers (run_lane_explorers), so the nightly can run them apart from
     # tier 2.
+    #
+    # Its normal-build fence reads the fips from the .deb the build stage
+    # made (deb-build), which is what users install, instead of building a
+    # dev fips of its own. The package is unpacked into a private directory,
+    # never bind-mounted, and removed after; one that cannot be unpacked reds
+    # the stage. A run with no package, or a host without dpkg-deb, leaves the
+    # lane to build its own, as GitHub's does.
     if [[ "$MUTATIONS" == true ]]; then
-        info "testing/mutations/run.sh"
-        if with_fd_limit bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
-            record "mutations" 0
+        local fence_dir="" fence_bin="" lane_rc=0
+        if [[ -n "$CI_DEB_PATH" ]] && command -v dpkg-deb >/dev/null 2>&1; then
+            fence_dir=$(mktemp -d "/tmp/ci-mutation-fence.XXXXXX") # mount-tmpdir: dpkg-deb unpacks the package here, never a bind mount
+            if dpkg-deb -x "$CI_DEB_PATH" "$fence_dir" && [[ -x "$fence_dir/usr/bin/fips" ]]; then
+                fence_bin="$fence_dir/usr/bin/fips"
+                info "the mutation lane's fence reads usr/bin/fips from $CI_DEB_PATH"
+            else
+                fail "could not unpack usr/bin/fips from $CI_DEB_PATH for the mutation lane's fence"
+                lane_rc=1
+            fi
         else
-            record "mutations" 1
+            info "no package in this run; the mutation lane builds its own fips for its fence"
         fi
+        if [[ $lane_rc -eq 0 ]]; then
+            info "testing/mutations/run.sh"
+            FIPS_MUTATION_FENCE_BIN="$fence_bin" with_fd_limit bash "$SCRIPT_DIR/mutations/run.sh" 2>&1 \
+                || lane_rc=1
+        fi
+        [[ -n "$fence_dir" ]] && rm -rf "$fence_dir"
+        record "mutations" "$lane_rc"
     fi
 
     # The root crate's optional features add code the default-feature run

@@ -348,8 +348,9 @@ build stage builds the `.deb` right after `nft-syntax`, in the pinned
 container (`packaging/debian/build-deb-container.sh`), records it as
 `deb-build`, and writes it to `deploy/fips_<version>_<arch>.deb` in the
 checkout, with `deploy/ci-deb.txt` holding its sha256 and path. Every later
-stage that needs it takes that one package: dns-resolver, deb-install and
-rpm-install. A failed package build stops the run there, as the release
+stage that needs it takes that one package: dns-resolver, deb-install,
+rpm-install, and the mutation lane, whose normal-build fence reads the
+package's `fips`. A failed package build stops the run there, as the release
 build did. The integration build is the run's other release-profile build,
 and the release compile (`release-test-compile`) runs under the
 `integration` profile, which inherits `release` unchanged, so it shares that
@@ -471,7 +472,8 @@ assertion, or an anchor for a test that predates the marker); a
 `pass` line holds when the test passes. Every named test must also pass
 with no switch. Before any line, a preflight checks that every switch has a
 manifest line and a site, a fence requires the switches to be absent
-from a normal build of `fips`, and a self-check on two planted switches
+from a normal build of `fips` (here, the `fips` in the run's `.deb`), and a
+self-check on two planted switches
 shows the script tells a red test from a green one. It runs in the
 unit-test stage, here (recorded as `mutations`) and in GitHub CI's Linux
 job, after the known-defect lane. On a host whose build has no BLE

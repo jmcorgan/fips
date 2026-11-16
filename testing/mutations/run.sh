@@ -14,8 +14,9 @@
 #      variant, and every variant has a manifest line and a `node_fault!`
 #      site. The exception is the self-check's switches (SELF below):
 #      neither may have a manifest line, and PlantedGreen may have no site.
-#   2. The normal-build fence: builds the `fips` binary as a user would and
-#      requires the name FIPS_NODE_FAULTS to appear in it 0 times (not in
+#   2. The normal-build fence: builds the `fips` binary as a user would (or
+#      reads FIPS_MUTATION_FENCE_BIN) and requires the name FIPS_NODE_FAULTS
+#      to appear in it 0 times (not in
 #      the explorer-only mode, below). Then
 #      builds both library test binaries once with testing/lib/test-verdict.sh
 #      and checks that every test the manifest or the self-check names
@@ -60,6 +61,13 @@
 # Environment:
 #   FIPS_MUTATION_TIMEOUT  seconds per test run (default 120)
 #   FIPS_MUTATION_ONLY     run only the break of this name (for trying one)
+#   FIPS_MUTATION_FENCE_BIN  a fips binary for the normal-build fence to read
+#                          instead of building one; testing/ci-local.sh passes
+#                          the one from the .deb its build stage made, which is
+#                          what users install. A path that is not an
+#                          executable exits 2. GitHub's test-mutations job
+#                          starts before its package exists and builds its own,
+#                          which the check treats the same.
 #   FIPS_MUTATION_EXPLORERS  1 to build the root crate's library tests with
 #                          its `explorers` feature and run every line; only
 #                          to build with it and run just the lines whose
@@ -237,7 +245,35 @@ start_all=$(date +%s)
 # A failed build or a missing binary exits 2 and is never read as a count,
 # since a failed build leaves the previous binary in place.
 fence() {
-    local fence_json fence_bin fence_count
+    local fence_bin fence_count
+    if [[ -n "${FIPS_MUTATION_FENCE_BIN:-}" ]]; then
+        fence_bin="$FIPS_MUTATION_FENCE_BIN"
+        if [[ ! -f "$fence_bin" || ! -x "$fence_bin" ]]; then
+            echo "mutation-lane: fence: $fence_bin is not an executable" >&2
+            exit 2
+        fi
+        echo "mutation-lane: the fence reads $fence_bin"
+    else
+        fence_build
+    fi
+    fence_count=$(grep -a -c FIPS_NODE_FAULTS "$fence_bin")
+    case $? in
+        0 | 1) ;;
+        *) echo "mutation-lane: fence: could not read $fence_bin" >&2; exit 2 ;;
+    esac
+    if [[ "$fence_count" != 0 ]]; then
+        miss "fence: FIPS_NODE_FAULTS appears $fence_count time(s) in the normal build $fence_bin"
+        echo "mutation-lane: the switches reach a normal build; no test was run"
+        exit 1
+    fi
+    echo "   fence $fence_bin: FIPS_NODE_FAULTS appears 0 times"
+    return 0
+}
+
+# Build the normal fips binary for the fence and set the caller's fence_bin
+# to it.
+fence_build() {
+    local fence_json
     echo "mutation-lane: building the normal fips binary for the fence"
     fence_json=$(cargo build -p fips-mesh --bin fips --message-format=json) || {
         echo "mutation-lane: fence: the normal build of fips failed" >&2
@@ -258,19 +294,9 @@ for line in sys.stdin:
         echo "mutation-lane: fence: the build named no fips binary" >&2
         exit 2
     fi
-    fence_count=$(grep -a -c FIPS_NODE_FAULTS "$fence_bin")
-    case $? in
-        0 | 1) ;;
-        *) echo "mutation-lane: fence: could not read $fence_bin" >&2; exit 2 ;;
-    esac
-    if [[ "$fence_count" != 0 ]]; then
-        miss "fence: FIPS_NODE_FAULTS appears $fence_count time(s) in the normal build $fence_bin"
-        echo "mutation-lane: the switches reach a normal build; no test was run"
-        exit 1
-    fi
-    echo "   fence $fence_bin: FIPS_NODE_FAULTS appears 0 times"
     return 0
 }
+
 # The explorer-only mode leaves the fence out: the plain lane runs it on the
 # same tree.
 if [[ "$EXPLORERS" == only ]]; then
