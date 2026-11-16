@@ -1112,24 +1112,6 @@ pub(super) async fn cleanup_nodes(nodes: &mut [TestNode]) {
     }
 }
 
-// ===== Main Convergence Test =====
-
-/// Integration test: 100 nodes with random connectivity converge to a
-/// consistent spanning tree with the correct root.
-#[tokio::test]
-async fn test_spanning_tree_convergence_100_nodes() {
-    let _guard = lock_large_network_test().await;
-
-    const NUM_NODES: usize = 100;
-    const TARGET_EDGES: usize = 250;
-    const SEED: u64 = 42;
-
-    let edges = generate_random_edges(NUM_NODES, TARGET_EDGES, SEED);
-    let mut nodes = run_tree_test(NUM_NODES, &edges, true).await;
-    verify_tree_convergence(&nodes);
-    cleanup_nodes(&mut nodes).await;
-}
-
 // ===== Topology Variant Tests =====
 
 /// Ring topology: 5 nodes in a cycle.

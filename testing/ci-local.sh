@@ -368,8 +368,9 @@ CHAOS_SUITES=(
 #   - smoke-10: a no-stressor 10-node tree-convergence sanity check (netem
 #     off, no ping). The convergence logic it exercised is covered in-process,
 #     faster and deterministically, by the loopback spanning-tree harness
-#     (src/node/tests/spanning_tree.rs: ring/star/chain/100-node/disconnected)
-#     plus end-to-end datagram delivery (src/node/tests/forwarding.rs). Real-
+#     (src/node/tests/spanning_tree.rs: ring/star/chain/disconnected;
+#     bloom.rs: 100-node convergence) plus end-to-end datagram delivery
+#     (src/node/tests/forwarding.rs). Real-
 #     UDP convergence smoke still runs via static-mesh and the other chaos
 #     scenarios' baseline assertions, so no Docker coverage is lost.
 #

@@ -963,28 +963,12 @@ fn dropped_inside_the_drain(c: &AfterCycle, refused_before: u64) -> Vec<String> 
 }
 
 /// Under 10 s after B's last cutover or adoption, A's rekey msg1 is dropped
-/// while A is live, and the session B is draining stays registered.
-#[tokio::test]
-async fn a_peers_rekey_msg1_inside_10_s_of_our_last_cutover_is_dropped_and_leaves_the_draining_session_registered()
- {
-    let mut found = Vec::new();
-    for (last, b_dialled) in cycle_cases() {
-        let mut c = after_cycle(last, b_dialled, None).await;
-        let msg1 = peer_rekeys(&mut c).await;
-        let refused_before = refused(&c.nodes[c.b]);
-        c.nodes[c.b].node.handle_msg1(msg1).await;
-        found.extend(dropped_inside_the_drain(&c, refused_before));
-        assert_coherent(&mut c.nodes, "the end of the test").await;
-        cleanup_nodes(&mut c.nodes).await;
-    }
-    assert!(found.is_empty(), "{}", found.join("\n"));
-}
-
-/// A's rekey msg1, dropped under 10 s after B's last cutover or adoption, is
-/// resent once B's session and drain read 12 s. B recorded the msg1 it
-/// dropped, so the resend is refused as answered before: B arms nothing and
-/// answers nothing. A's attempt ends at its deadline, and its next attempt
-/// carries a fresh msg1, which B answers as the 12 s case above does.
+/// while A is live, the session B is draining stays registered, and the pair
+/// stays coherent. The msg1 is resent once B's session and drain read 12 s.
+/// B recorded the msg1 it dropped, so the resend is refused as answered
+/// before: B arms nothing and answers nothing. A's attempt ends at its
+/// deadline, and its next attempt carries a fresh msg1, which B answers as
+/// the 12 s case above does.
 #[tokio::test]
 async fn a_peers_rekey_msg1_dropped_inside_10_s_of_our_cutover_is_refused_again_when_resent_after_10_s()
  {
@@ -998,10 +982,10 @@ async fn a_peers_rekey_msg1_dropped_inside_10_s_of_our_cutover_is_refused_again_
         let dropped = dropped_inside_the_drain(&c, refused_before);
         if !dropped.is_empty() {
             found.extend(dropped);
-            assert_coherent(&mut c.nodes, "the end of the test").await;
             cleanup_nodes(&mut c.nodes).await;
             continue;
         }
+        assert_coherent(&mut c.nodes, "the dropped msg1").await;
 
         {
             let p = c.nodes[c.b].node.get_peer_mut(&c.a_addr).unwrap();
