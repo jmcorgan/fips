@@ -16,18 +16,24 @@ use alloc::vec::Vec;
 
 use super::super::super::model::history::{Addr, Event, Hs};
 use super::super::super::model::judge::Class;
-use super::super::explore::{Act, apply, reached, replay};
+#[cfg(feature = "slow-explorers")]
+use super::super::explore::reached;
+use super::super::explore::{Act, apply, replay};
 use super::super::oracle::{Breach, every_step, heal, healed, scripted};
 use super::super::shadow::{Entry, Rec};
+#[cfg(feature = "slow-explorers")]
 use super::super::starts::Start;
 use super::super::starts::{B, Do, UDP, Want, age, flipped, home, run, second, settle, starts};
 use super::super::world::{Pkt, World};
+#[cfg(feature = "slow-explorers")]
 use super::Mode;
+#[cfg(feature = "slow-explorers")]
 use super::explore::{chosen, pairing, swept};
 use super::feeds::{arrive, paired, peer};
 
 /// The sweep at Off with Off of the start named `name` alone, with every
 /// breach it finds.
+#[cfg(feature = "slow-explorers")]
 fn sweep_off(name: &str) -> Vec<alloc::string::String> {
     swept(
         &chosen(super::starts::off(), |s| s.name == name),
@@ -36,10 +42,12 @@ fn sweep_off(name: &str) -> Vec<alloc::string::String> {
 }
 
 /// The wall step start alone, from the starts of one pairing.
+#[cfg(feature = "slow-explorers")]
 const WALL: &str = "wall step inside the heard floor";
 
 /// What is wrong with the reach of the wall step start, alone, at the
 /// pairing whose starts `starts` gives and whose label is `label`.
+#[cfg(feature = "slow-explorers")]
 fn reach_wall(starts: Vec<Start>, label: &str) -> Vec<alloc::string::String> {
     let st: Vec<Start> = starts.into_iter().filter(|s| s.name == WALL).collect();
     assert_eq!(st.len(), 1, "the wall step start is one start");
@@ -109,48 +117,56 @@ fn every_start_settles_scripted_on_with_on() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+#[cfg(feature = "slow-explorers")]
 #[test]
 fn the_reach_of_start_14_stays_within_its_cap_off_with_off() {
     let wrong = reach_wall(super::starts::off(), &pairing(Mode::Off, Mode::Off));
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+#[cfg(feature = "slow-explorers")]
 #[test]
 fn the_reach_of_start_14_stays_within_its_cap_on_with_on() {
     let wrong = reach_wall(super::starts::on(), &pairing(Mode::On, Mode::On));
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+#[cfg(feature = "slow-explorers")]
 #[test]
 fn the_reach_of_start_14_stays_within_its_cap_on_with_off() {
     let wrong = reach_wall(super::starts::on_off(), &pairing(Mode::On, Mode::Off));
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+#[cfg(feature = "slow-explorers")]
 #[test]
 fn the_reach_of_start_14_stays_within_its_cap_off_with_on() {
     let wrong = reach_wall(super::starts::off_on(), &pairing(Mode::Off, Mode::On));
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+#[cfg(feature = "slow-explorers")]
 #[test]
 fn the_sweep_of_start_14_keeps_the_properties_off_with_off() {
     let wrong = sweep_off(WALL);
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+#[cfg(feature = "slow-explorers")]
 #[test]
 fn the_sweep_of_the_drain_start_keeps_the_properties_off_with_off() {
     let wrong = sweep_off("crossing during a rekey's drain");
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+#[cfg(feature = "slow-explorers")]
 #[test]
 fn the_sweep_of_start_10_keeps_the_properties_off_with_off() {
     let wrong = sweep_off("stored msg2 whose send failed, then a resend");
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+#[cfg(feature = "slow-explorers")]
 #[test]
 fn the_sweep_of_start_12_keeps_the_properties_on_with_on() {
     let wrong = swept(

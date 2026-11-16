@@ -3,9 +3,10 @@
 //! tables. Tests of one module's private items sit beside these as
 //! `tests/<module>.rs`, attached from that module.
 
+// The `slow-explorers` feature (see the crate's Cargo.toml) gates the
+// interleaving explorer, and `slow-tests` the guard-switch meta-test.
+#[cfg(feature = "slow-explorers")]
 mod explore;
-// The `slow-tests` feature (see the crate's Cargo.toml) gates the
-// guard-switch meta-test.
 #[cfg(feature = "slow-tests")]
 mod faults;
 mod fmp;

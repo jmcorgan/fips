@@ -80,13 +80,38 @@ test does not resolve is a miss, so a renamed BLE test is never skipped
 silently. A new BLE line whose test is behind `ble_available` and missing
 from `BLE_ONLY` reds on a host without BLE, the loud direction.
 
+## Lines whose test is a root explorer
+
+The root crate's explorer walks (`node::tests::settle::explore::oracle::`
+and `::parity::`) compile only with its `explorers` feature, and no CI run
+a push starts runs them. Without `FIPS_MUTATION_EXPLORERS=1` the lane
+builds without that feature, and when the build lists no test of one of
+those modules, its lines (`run.sh`'s `EXPLORER_ONLY`) are skipped and
+counted. Each skipped line's test must still be defined as `fn <name>(` in
+its module's file, so a misspelled or renamed name is a miss in every
+build. The lane then prints the switches left with no line to run: as of
+this change `CrossedRunsKeep`, `MoveSkipsWorkerOffer` and
+`WorldSkipsWorkerWait`, which only explorer lines show red, so a run a push
+starts does not show them. With `FIPS_MUTATION_EXPLORERS=1`, which a local
+CI run with the root explorers sets (`testing/ci-local.sh --explorers` or
+`--tier 3`, the nightly run), the lane builds the root crate's library
+tests with the feature and every line must resolve and run.
+
+Next builds no real-node explorer: its handshake is XX and the explorer is
+written for master's IK, so the module is under `#[cfg(any())]`
+(`src/node/tests/settle/explore/README.md`). Its manifest therefore has no
+line whose test is a root explorer, the lane skips nothing, and no switch
+is left without a line to run (`WorldSkipsWorkerWait` does not exist
+here). `--explorers` and `--tier 3` run the core half alone (`ROOT_EXPLORER`
+in `testing/ci-local.sh`), so neither sets `FIPS_MUTATION_EXPLORERS=1`.
+
 ## Running it
 
 `testing/mutations/run.sh` from any directory of a checkout. It runs in
 the unit-test stage of local CI (`testing/ci-local.sh`, recorded as
-`mutations`) and of GitHub CI's Linux job, after the known-defect lane;
-`testing/check-ci-parity.sh` compares integration suites only, so the two
-are kept in step by hand. `FIPS_MUTATION_ONLY=<break>` runs one break.
+`mutations`, at tiers 2 and 3 and in a run with no tier) and GitHub CI's
+`test-mutations` job; `testing/check-ci-parity.sh` holds the two to each
+other. `FIPS_MUTATION_ONLY=<break>` runs one break.
 `FIPS_MUTATION_TIMEOUT` sets the per-test limit (default 120 s).
 
 ## Rules for changing it

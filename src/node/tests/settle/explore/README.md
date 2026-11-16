@@ -27,6 +27,12 @@ starts run on them, each scripted and then varied. The module is
 `node-synthetic` group with the rest of `settle`, since its TCP worlds open
 real sockets.
 
+The walks, `oracle.rs`, `parity.rs` and the reach and walk-bound tests of
+`explore.rs`, are compiled only with the root crate's `explorers` feature
+(`Cargo.toml`). No CI run started by a push runs them; `testing/ci-local.sh
+--explorers` does. The world's own tests and the map of pinned defects run
+in every build.
+
 Where the core's settlement world (`fips-core`, `proto::settle::tests`) runs
 the settlement machines on a model of the network, this runs the node itself:
 real Noise, the real receive dispatch (`process_packet`), and every dial

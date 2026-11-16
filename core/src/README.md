@@ -56,7 +56,11 @@ changing anything here.
   `allocations()` reads, so a test can show a call allocates nothing;
   and `bounded`, which runs jobs each on a thread of its own, at most
   `WORKERS` at once, for the explorers whose nextest `threads-required`
-  in `.config/nextest.toml` counts that many).
+  in `.config/nextest.toml` counts that many; and, under `slow-tests`,
+  `compiled_tests`, the test binary's own list of its tests, and
+  `explorer_only`, which reads the sources to tell a test only the
+  `slow-explorers` build compiles from one that does not exist, both for
+  the guard-switch meta-tests).
   Compiled for tests only.
 
 ## Rules for this level

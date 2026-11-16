@@ -431,6 +431,7 @@ pub fn none(_: &World, _: &[Act]) -> Result<(), String> {
 /// ([`crate::testutil::bounded`]), each until its depth or until it has
 /// seen more states than its cap, returning each start's statistics and
 /// wall time in milliseconds, in the order of `starts`.
+#[cfg(feature = "slow-explorers")]
 pub fn explore_all(
     starts: &[Start],
     depth: impl Fn(&Start) -> usize + Sync,
@@ -451,6 +452,7 @@ pub fn explore_all(
 /// exploration ends as soon as it passes its cap, so a start that grew
 /// fails without exploring the whole of the depth it grew into. Each
 /// start's line is printed with `label` after its name.
+#[cfg(feature = "slow-explorers")]
 pub fn reached(starts: &[Start], label: &str) -> Vec<String> {
     let targets: Vec<_> = starts
         .iter()
@@ -507,6 +509,7 @@ pub fn reached(starts: &[Start], label: &str) -> Vec<String> {
     wrong
 }
 
+#[cfg(feature = "slow-explorers")]
 #[test]
 fn every_named_start_reaches_its_target_depth_over_the_model() {
     let wrong = reached(&super::starts::starts(), "");

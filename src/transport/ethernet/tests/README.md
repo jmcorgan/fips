@@ -66,8 +66,9 @@ source file's private items.
 - The network-namespace tests in `rebind.rs` need root. They are
   `#[ignore]`d, so the normal test run skips them, and
   `testing/root-tests.sh` runs them as one group, with their count; GitHub
-  CI's Linux job and `testing/ci-local.sh --root-tests` run that script under
-  `sudo`. Adding or removing a test there changes the group's count. By hand,
+  CI's `test-root` job and `testing/ci-local.sh --root-tests` run that script
+  under `sudo`, and `ci-local.sh` at every tier as uid 0 in a container.
+  Adding or removing a test there changes the group's count. By hand,
   build with `cargo test --lib --no-run` and run the test binary under `sudo`
   with `--ignored rebind_tests`.
 - `rebind_tests` is declared `#[cfg(all(test, target_os = "linux"))]`, not

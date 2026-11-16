@@ -64,26 +64,26 @@ test-hooks = []
 # which re-run other tests under every fault switch; the path module's runs
 # over simulated hours, a day with a deployed peer (`proto/path/tests/stub.rs`)
 # and an hour of the two-node simulator (`proto/path/tests/sim.rs`); and in
-# settlement the model of the current node explored against itself
-# (`proto/settle/tests/legacy/findings.rs`) and the candidate rules' scripted
-# tests (`proto/settle/tests/candidates.rs`). Off by default so every
-# platform's test run skips them; GitHub CI's Linux job and local CI with
-# --slow-tests turn it on, and the core's clippy passes lint the code it gates
-# either way. The joint world's reach tests, its sweeps at multipath off and at
-# multipath on of the starts that stay cheap there, and the cold start's reach
-# stay in every build, each under nextest's 480 s (.config/nextest.toml).
+# settlement the candidate rules' scripted tests
+# (`proto/settle/tests/candidates.rs`). Off by default so every platform's test
+# run skips them; GitHub CI's Linux job and local CI with --slow-tests or at
+# tier 2 and 3 turn it on, and the core's clippy passes lint the code it gates
+# either way.
 slow-tests = []
-# The settlement explorers that take tens of minutes on a two-core runner:
-# joint nodes against the models of the deployed nodes
-# (`proto/settle/tests/legacy/explore.rs`), the candidate rules (the explored
-# runs in `proto/settle/tests/candidates.rs`), and in the joint world
-# (`proto/settle/tests/joint/explore.rs`) the core's own explorer on joint
-# nodes, the sweeps at multipath on of the starts whose links turn capable and
-# of the starts on real bundles, and the sweeps of the two mixed pairings.
-# Turning it on turns `slow-tests` on too. Local CI with --slow-tests, and so
-# the internal builder, turns it on; GitHub CI runs the other slow suites
-# without it. The root crate's clippy pass with --all-features lints the code
-# it gates.
+# The explorers: every test that walks a state space, a few minutes or tens
+# of minutes each. In the rekey machine the interleaving explorer
+# (`proto/rekey/tests/explore.rs`); in settlement the model's reach
+# (`proto/settle/tests/explore.rs`), the model parties over every start
+# (`proto/settle/tests/oracle.rs`), joint nodes against the models of the
+# deployed nodes (`proto/settle/tests/legacy/explore.rs`) and the model of
+# the current node against itself (`legacy/findings.rs`), the candidate
+# rules' explored runs (`candidates.rs`), and in the joint world
+# (`proto/settle/tests/joint/`) every reach and sweep. Turning it on turns
+# `slow-tests` on too. Off in every CI run started by a push: they run only
+# with `testing/ci-local.sh --explorers` and in the nightly run, `--tier 3`.
+# The root crate's clippy pass with --all-features lints the code it gates.
+# The root crate's real-node explorer is behind its own `explorers` feature,
+# and next does not build it.
 slow-explorers = ["slow-tests"]
 
 [dev-dependencies]

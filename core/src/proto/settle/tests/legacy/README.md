@@ -46,11 +46,9 @@ properties can be checked on it.
   crossed dials now leave the smaller node on the link it dialed, on a
   connectionless and on a connection-oriented transport, and that a
   forward wall step no longer lets a msg1 replace a peering heard just now,
-  since the gates read the peer clock, and, under `slow-tests`,
+  since the gates read the peer clock, and, under `slow-explorers`,
   `MasterParty` explored against itself at each setting on every start but
-  12 with every breach printed, the crossings showing no wrong link, the
-  starts whose links turn capable at multipath on under `slow-explorers`,
-  since each healed leaf there steps a minute of probes.
+  12 with every breach printed, the crossings showing no wrong link.
 
 ## What `master.rs` transcribes
 

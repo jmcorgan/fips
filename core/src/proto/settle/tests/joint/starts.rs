@@ -102,6 +102,7 @@ const ON: &[(&str, usize)] = &[
 ];
 
 /// Each start's cap with node 0 at On and the others at Off, by its name.
+#[cfg(feature = "slow-explorers")]
 const ON_OFF: &[(&str, usize)] = &[
     ("crossing, connectionless", 16_000),
     ("crossing, two transports", 80_200),
@@ -138,6 +139,7 @@ const ON_OFF: &[(&str, usize)] = &[
 ];
 
 /// Each start's cap with node 0 at Off and the others at On, by its name.
+#[cfg(feature = "slow-explorers")]
 const OFF_ON: &[(&str, usize)] = &[
     ("crossing, connectionless", 16_000),
     ("crossing, two transports", 104_200),
@@ -187,12 +189,14 @@ pub fn on() -> Vec<Start> {
 
 /// Every named start with node 0 at On and the other nodes at Off, each
 /// with its cap at that pairing.
+#[cfg(feature = "slow-explorers")]
 pub fn on_off() -> Vec<Start> {
     with(super::on_off, ON_OFF, "on with off")
 }
 
 /// Every named start with node 0 at Off and the other nodes at On, each
 /// with its cap at that pairing.
+#[cfg(feature = "slow-explorers")]
 pub fn off_on() -> Vec<Start> {
     with(super::off_on, OFF_ON, "off with on")
 }

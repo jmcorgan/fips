@@ -7,8 +7,8 @@
 //! the node's veth under the same name, which gives it a new index, or move
 //! it to another namespace and back, which keeps its index. They need
 //! root, so they are `#[ignore]`d and run by `testing/root-tests.sh`, which
-//! GitHub CI's Linux job and `testing/ci-local.sh --root-tests` run under
-//! `sudo`; by hand, run the test binary under `sudo` with `--ignored
+//! GitHub CI's `test-root` job and `testing/ci-local.sh --root-tests` run
+//! under `sudo`, and `ci-local.sh --tier` as uid 0 in a container; by hand, run the test binary under `sudo` with `--ignored
 //! rebind_tests`. macOS (BPF)
 //! is compiled by the cross-check and not run; there the same check would be
 //! a transport on `bridge9`, `ifconfig bridge9 destroy; ifconfig bridge9

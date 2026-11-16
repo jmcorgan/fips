@@ -71,7 +71,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::super::model::history::Hs;
-use super::explore::{Check, Stats, explore, replay};
+use super::explore::replay;
+#[cfg(feature = "slow-explorers")]
+use super::explore::{Check, Stats, explore};
 use super::shadow;
 use super::starts::Start;
 use super::world::{Dir, Kind, Left, Ms, Shape, State, View, World, ends};
@@ -371,6 +373,7 @@ pub fn heal(w: &mut World) {
 
 /// Whether a breach at a healed world is exempt: a split a known shape
 /// left.
+#[cfg(feature = "slow-explorers")]
 pub type Exempt<'a> = &'a (dyn Fn(&World, &Breach) -> bool + Sync);
 
 /// The exemption of the model's convergence with itself: a breach of
@@ -438,6 +441,7 @@ pub fn by_any_shape(w: &World, b: &Breach) -> bool {
 /// oracle at each node with its path, how many healed leaves had a breach
 /// exempted, per shape, and how many explored states showed each pinned
 /// clause of the joint world's oracles.
+#[cfg(feature = "slow-explorers")]
 pub struct Swept {
     /// The explorer's statistics.
     pub stats: Stats,
@@ -452,6 +456,7 @@ pub struct Swept {
 /// Every breach on the path of `st` to depth `depth`, and at its leaves
 /// once healed, with the shortest path to each, keyed by oracle and node;
 /// a breach `exempt` names is counted instead.
+#[cfg(feature = "slow-explorers")]
 pub fn sweep(st: &Start, depth: usize, exempt: Exempt<'_>) -> Swept {
     let found = std::sync::Mutex::new(Vec::new());
     let pins = std::sync::Mutex::new(Vec::<(super::joint::oracle::Pin, usize)>::new());
@@ -525,6 +530,7 @@ pub fn sweep(st: &Start, depth: usize, exempt: Exempt<'_>) -> Swept {
 }
 
 /// Keep the first breach of each oracle at each node.
+#[cfg(feature = "slow-explorers")]
 fn note(f: &mut Vec<(Breach, Vec<super::explore::Act>)>, b: Breach, path: &[super::explore::Act]) {
     if !f
         .iter()
@@ -724,6 +730,7 @@ mod checks {
         );
     }
 
+    #[cfg(feature = "slow-explorers")]
     #[test]
     fn model_parties_settle_on_every_start() {
         // The model with the operator's late-dial rule, as both ends of

@@ -189,9 +189,9 @@ BUILT_HASHES=$(uplift_hashes) || {
 # ── Package ─────────────────────────────────────────────────────────────────
 # Packaging runs no cargo build: the binaries checked above are the ones
 # packaged. A feature build passes --built-with so build-deb.sh marks the
-# version. Letting cargo-deb build again would recompile the root crate from a
-# worktree, whose missing .git/HEAD reruns build.rs every time, and a dirty flag
-# that changed in between would then fail the check below for the wrong reason.
+# version. Letting cargo-deb build again could recompile the root crate, and a
+# dirty flag that changed in between would then fail the check below for the
+# wrong reason.
 deb_args=(--version "$VERSION" --output-dir "$DEST_DIR" --name-file "$NAME_FILE")
 if [ -n "$FEATURES" ]; then
     deb_args+=(--built-with "$FEATURES")

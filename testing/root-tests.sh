@@ -17,8 +17,8 @@
 # The script builds and locates nothing, and needs neither cargo nor git, so
 # it runs wherever the binary and this file are present. It never calls sudo:
 # it must already be running as root, and the caller decides how. GitHub's
-# Linux job and testing/ci-local.sh --root-tests run it under sudo; a
-# container runs it as uid 0.
+# test-root job and testing/ci-local.sh --root-tests run it under sudo;
+# ci-local.sh --tier runs it as uid 0 in a container (testing/root-tests/).
 #
 # A container needs, besides uid 0: the NET_ADMIN and SYS_ADMIN capabilities,
 # /dev/net/tun, an AppArmor profile that allows the network-namespace mount

@@ -14,10 +14,12 @@
 # is `unmarked`, because nothing says it is the reason the test exists.
 #
 # Functions:
-#   test_bins
-#       Builds both library test executables once and sets the associative
-#       array BIN, keyed fips-mesh and fips-core. Returns 2 when the build
-#       fails or a binary is missing (message on stderr).
+#   test_bins [<features>]
+#       Builds both library test executables once, with the cargo features
+#       given (as `--features` takes them, such as fips-mesh/explorers) or
+#       none, and sets the associative array BIN, keyed fips-mesh and
+#       fips-core. Returns 2 when the build fails or a binary is missing
+#       (message on stderr).
 #   verdict <output> <rc> <test path>
 #       Classifies the output and exit status of one test run in its own
 #       process. Prints `<class>`, a tab, the panic location (file:line:col,
@@ -44,11 +46,12 @@
 #       location, is still a problem.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# test_bins: build the two library test binaries and fill BIN.
+# test_bins [<features>]: build the two library test binaries and fill BIN.
 test_bins() {
-    local build_json pkg exe
+    local build_json pkg exe args=(cargo test --workspace --lib --no-run)
     declare -gA BIN=()
-    build_json=$(cargo test --workspace --lib --no-run --message-format=json) || {
+    [[ -n "${1:-}" ]] && args+=(--features "$1")
+    build_json=$("${args[@]}" --message-format=json) || {
         echo "test-verdict: building the library tests failed" >&2
         return 2
     }

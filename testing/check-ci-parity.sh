@@ -57,6 +57,32 @@
 # without one is invisible to a name-list sweep, which is how a real divergence
 # went unnoticed.
 #
+# ── The steps, per tier ──
+# Beyond the suites, every build, lint, guard and unit-test step GitHub runs
+# on a push or a pull request must be a stage of `ci-local.sh --tier 2`, and
+# every stage of that tier a step here, by the table STEPS below, which maps
+# each GitHub job and step to the result ci-local.sh records for it. Tier 2
+# is the tier GitHub mirrors: tier 1 runs only on the internal builder, for
+# branch pushes GitHub never sees, and tier 3 is its nightly run. A job this
+# check does not know, a step in a known job that is neither mapped nor
+# setup, a mapped step that is gone, a tier 2 stage no step maps to, and a
+# mapped stage tier 2 does not run each fail it. So does an exception that
+# no longer matches anything, so the lists below cannot outlive their
+# reason. The exceptions, each only what one system cannot do:
+#   GitHub-only jobs — android-check, test-macos, test-windows, windows-lint:
+#                    native Android, macOS and Windows builds and tests. The
+#                    build job's macOS, Windows and arm64 legs run its mapped
+#                    steps on those platforms.
+#   GitHub-only steps — the test job's retry-flake report: nextest's ci
+#                    profile retries a failing test, and the internal builder
+#                    has no nextest until its host installs it; local CI runs
+#                    nextest's default profile, which does not retry.
+#                    Inside test-root's privileged step, one test runs on
+#                    GitHub only (testing/root-tests/privileged.sh says why).
+#   Local-only stages — cross-check-*: zig compiles of the macOS, Windows
+#                    and FreeBSD targets, which GitHub builds on their own
+#                    runners.
+#
 # Exit 0 = parity clean. Exit 1 = unexpected divergence. Exit 2 = the guard
 # could not run (missing file or missing dependency); never treated as a pass.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -289,10 +315,188 @@ deb_github_only += sorted(
 rpm_local_only = sorted(local_rpm - github_rpm)
 rpm_github_only = sorted(github_rpm - local_rpm)
 
+# ── Steps, per tier ──────────────────────────────────────────────────────────
+import fnmatch
+import subprocess
+
+# Per job, each work step (by name, or by its run line when it has none) and
+# the result ci-local.sh records for the same work.
+STEPS = {
+    "ci-parity": {
+        "Check local and GitHub runners cover the same work": "ci-parity",
+        "Check test log matchers against the strings the crate sources emit": "log-strings",
+        "Check no tested function's exit status is a log call's": "trailing-log",
+        "Check the chaos draws do not depend on Python's hash seed": "sim-schedule",
+        "Check the chaos path assertions against planted input": "sim-assertions",
+        "Check nothing resolves the shared mutable test image": "image-scoping",
+        "Check every action is pinned to a commit SHA": "action-pins",
+        "Check every source comment resolves in-repo": "comment-refs",
+        "Check every ignored test against its inventory": "ignored-tests",
+        "Check no non-test code uses std 64-bit atomics": "portable-atomics",
+        "Check no bind-mount source comes from a bare mktemp": "mount-tmpdir",
+        "Check every CI container, network and volume carries the run label": "ci-labels",
+        "Check the OpenWrt package's shell scripts with shellcheck": "shellcheck",
+        "Run convergence-gate unit tests": "wait-converge",
+        "Run NAT lab relay start and guard unit tests": "relay-verdict",
+        "Run RPM install network budget unit tests": "rpm-budget",
+        "Run container start retry unit tests": "docker-run",
+        "Check the package versions derived for tags and branches": "package-versions",
+        "Check the flaky-test reporter against its fixtures": "nextest-flaky",
+        "Check the node test groups guard against its fixtures": "node-test-groups",
+        "Check every socket node test module is in its nextest group": "node-test-groups",
+        "Check the glibc floor check against its cases": "glibc-floor",
+        "Check ci-local.sh's argument handling": "ci-args",
+        "Check ci-local.sh's plan check against planted results": "ci-plan",
+        "Check the parity check against planted divergences": "ci-parity-test",
+        "Check the firewall suite's table check against its cases": "fw-table",
+        "Check the chaos veth host-command bound against its cases": "veth-host",
+        "Check the Node struct declares no NodeContext field": "node-context-guard",
+    },
+    "fmt": {"cargo fmt --check": "fmt"},
+    "clippy": {
+        "cargo clippy --all-targets --all-features -- -D warnings": "clippy",
+        "Clippy (default features)": "clippy-default-features",
+        "Clippy the no_std core library on its own": "core-fence-lib",
+        "Clippy the no_std core and its tests on their own": "core-fence",
+        "Clippy the no_std core's slow test suites": "core-fence-slow",
+        "Document the no_std core with rustdoc warnings denied": "core-doc",
+        "Build with the tick-body profiler enabled": "build-profiling",
+    },
+    "core-baremetal": {"Build the no_std core for bare-metal targets": "core-baremetal"},
+    "build": {
+        "Validate fips.nft syntax (Linux only)": "nft-syntax",
+        "Build": "build",
+        "Build the integration binaries": "build-integration",
+    },
+    "test": {
+        "Create an address-less interface for the presence probe": "addrless-iface",
+        "Run unit tests": "unit-tests",
+    },
+    "test-core": {
+        "Run the no_std core's tests on their own, with its slow suites": "core-fence-tests",
+        "Run the known-defect lane": "known-defect",
+    },
+    "test-mutations": {"Run the mutation lane": "mutations"},
+    "test-features": {
+        "Create an address-less interface for the presence probe": "addrless-iface",
+        "Run library tests with the optional root features enabled": "unit-tests-profiling",
+        "Check the reach of the live map audit": "audit-reach",
+    },
+    "test-root": {
+        "Run the root-only namespace tests": "root-tests",
+        "Run interface-binding tests with privilege": "privileged-bind",
+    },
+    "test-release": {
+        "Compile the library tests in release mode and run the leg-slot residue test":
+            "release-test-compile",
+    },
+    "test-musl": {
+        "Create an address-less interface for the presence probe": "addrless-iface-musl",
+        "Run library tests": "musl-tests",
+    },
+}
+# Steps that set a job up or report on it, in any job above: no work of their own.
+SETUP = {
+    "Install Python deps", "Install the pinned shellcheck", "Install system dependencies",
+    "Install system dependencies (Linux only)", "Set SOURCE_DATE_EPOCH from git",
+    "Set SOURCE_DATE_EPOCH from git (Unix)", "Set SOURCE_DATE_EPOCH from git (Windows)",
+    "Install Rust toolchain", "Install Rust toolchain (+ bare-metal targets)",
+    "Remove the runner image's own Rust toolchains", "Cache Cargo dependencies",
+    "Cache Cargo registry + build", "Install llvm-ar", "Install cargo-nextest",
+    "Remove a cached nextest report", "SHA-256 hashes (Linux)", "SHA-256 hashes (macOS)",
+    "SHA-256 hashes (Windows)", "Stage the native API examples beside the integration binaries",
+    "Upload Linux binary", "Publish test report (Checks tab)", "Publish test report (run summary)",
+}
+# Jobs compared by suite above, and jobs only GitHub can run, with why.
+SUITE_JOBS = {"openwrt-scripts", "tarball-install", "integration", "deb-package",
+              "dns-resolver", "deb-install", "rpm-install"}
+GITHUB_ONLY_JOBS = {
+    "android-check": "native Android cross-builds",
+    "test-macos": "native macOS unit tests",
+    "test-windows": "native Windows unit tests",
+    "windows-lint": "PowerShell lint on a Windows runner",
+}
+GITHUB_ONLY_STEPS = {
+    ("test", "Report tests that passed only on retry"):
+        "nextest's ci profile retries; the internal builder has no nextest yet",
+}
+LOCAL_ONLY = {"cross-check-*": "zig compiles of targets GitHub builds natively"}
+
+step_problems = []
+github_records = set()
+seen_steps = set()
+used_github_only = set()
+for jid, job in (doc.get("jobs") or {}).items():
+    if jid in SUITE_JOBS or jid in GITHUB_ONLY_JOBS:
+        continue
+    if jid not in STEPS:
+        step_problems.append(f"job {jid} is in no list of this check (STEPS, SUITE_JOBS "
+                             "or GITHUB_ONLY_JOBS), so nothing compares it")
+        continue
+    for st in job.get("steps") or []:
+        key = st.get("name") or (str(st.get("run", "")).strip().splitlines() or [""])[0]
+        if not key or (st.get("uses") and not st.get("name")):
+            continue
+        if key in SETUP:
+            continue
+        if (jid, key) in GITHUB_ONLY_STEPS:
+            used_github_only.add((jid, key))
+            continue
+        if key in STEPS[jid]:
+            github_records.add(STEPS[jid][key])
+            seen_steps.add((jid, key))
+        else:
+            step_problems.append(f"{jid}: step '{key}' maps to no ci-local.sh result "
+                                 "(add it to STEPS, or to an exception with its reason)")
+for jid, steps in STEPS.items():
+    for key in steps:
+        if (jid, key) not in seen_steps and jid in (doc.get("jobs") or {}):
+            step_problems.append(f"{jid}: mapped step '{key}' is no longer in ci.yml")
+for jid in STEPS:
+    if jid not in (doc.get("jobs") or {}):
+        step_problems.append(f"job {jid} is mapped but no longer in ci.yml")
+for k in GITHUB_ONLY_STEPS:
+    if k not in used_github_only:
+        step_problems.append(f"{k[0]}: GitHub-only step '{k[1]}' is no longer in ci.yml")
+for jid in GITHUB_ONLY_JOBS:
+    if jid not in (doc.get("jobs") or {}):
+        step_problems.append(f"GitHub-only job {jid} is no longer in ci.yml")
+
+plan = subprocess.run(["bash", ci_local_path, "--tier", "2", "--plan"],
+                      capture_output=True, text=True,
+                      env={k: v for k, v in __import__("os").environ.items()
+                           if k != "FIPS_CI_TIER"})
+if plan.returncode != 0:
+    print(f"check-ci-parity: ci-local.sh --tier 2 --plan failed: {plan.stderr.strip()}",
+          file=sys.stderr)
+    sys.exit(2)
+tier2 = {l.strip() for l in plan.stdout.splitlines() if l.strip() and not l.startswith("#")}
+if not tier2:
+    print("check-ci-parity: ci-local.sh --tier 2 --plan listed nothing", file=sys.stderr)
+    sys.exit(2)
+suite_records = (set(local)
+                 | {"chaos-" + e.split()[0] for e in arrays.get("CHAOS_SUITES", [])}
+                 | {e.split()[0] for e in arrays.get("DEB_INSTALL_SUITES", [])}
+                 | {e.split()[0] for e in arrays.get("RPM_INSTALL_SUITES", [])})
+local_steps = tier2 - suite_records
+used_local_only = set()
+for r in sorted(local_steps):
+    for pat in LOCAL_ONLY:
+        if fnmatch.fnmatch(r, pat):
+            used_local_only.add(pat)
+local_steps = {r for r in local_steps if not any(fnmatch.fnmatch(r, p) for p in LOCAL_ONLY)}
+for r in sorted(local_steps - github_records):
+    step_problems.append(f"tier 2 stage {r} has no GitHub step mapped to it")
+for r in sorted(github_records - tier2):
+    step_problems.append(f"GitHub runs the work of {r}, which ci-local.sh --tier 2 does not")
+for pat in LOCAL_ONLY:
+    if pat not in used_local_only:
+        step_problems.append(f"local-only stage {pat} matches no tier 2 stage")
+
 problems = (local_only or github_only or chaos_local_only or chaos_github_only
             or chaos_flag_drift or deb_local_only or deb_github_only
             or rpm_local_only or rpm_github_only
-            or dispatch_uncovered or malformed)
+            or dispatch_uncovered or malformed or step_problems)
 
 if problems:
     print("CI parity FAILED: the two runners do not cover the same work.\n")
@@ -337,6 +541,10 @@ if problems:
         print("  Matrix legs this guard cannot identify:")
         for n in malformed:
             print(f"    - {n}")
+    if step_problems:
+        print("  Steps that do not match between ci.yml and ci-local.sh --tier 2:")
+        for n in step_problems:
+            print(f"    - {n}")
     if dispatch_uncovered:
         print("  run_suite dispatches these with no backing *_SUITES array, so "
               "this guard\n  cannot see them in the local set:")
@@ -355,6 +563,8 @@ print(f"  {len(github)} suites, {len(github_chaos)} chaos scenarios "
       f"(flags compared), {len(github_deb)} deb-install distros, "
       f"{len(github_rpm)} rpm-install scenarios "
       f"— {total} legs on each side.")
+print(f"  {len(github_records)} build, lint, guard and unit-test results match "
+      "ci-local.sh --tier 2, step for step.")
 for arch, distros in sorted(github_deb_extra.items()):
     legs = "leg" if len(distros) == 1 else "legs"
     print(f"  plus {len(distros)} GitHub-only {arch} install {legs} "

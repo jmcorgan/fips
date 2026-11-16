@@ -306,12 +306,14 @@ push, and local CI with `--slow-tests`. Run all four before sending a
 change here. The repository guards in `testing/` (atomics, comment
 references, log strings) scan `core/src/` as well as `src/`.
 
-The settlement explorers against the deployed models and the candidate
-rules are gated by a second feature, `slow-explorers`, which turns
-`slow-tests` on too. Local CI with `--slow-tests`, and so the internal
-builder, runs them; GitHub CI does not, and the root's `--all-features`
-clippy pass lints them. After a change to the settlement core or its
-explorers, run `cargo test -p fips-core --features slow-explorers`.
+The explorers, every test that walks a state space (the rekey
+interleaving explorer, and settlement's model reach, joint-world reaches
+and sweeps, explored runs against the deployed models and the candidate
+rules), are gated by a second feature, `slow-explorers`, which turns
+`slow-tests` on too. No CI run started by a push runs them: local CI runs
+them only with `--explorers`, and the root's `--all-features` clippy pass
+lints them. After a change to the rekey machine, the settlement core or
+their explorers, run `cargo test -p fips-core --features slow-explorers`.
 
 These checks run on the host, where `std` exists, so they cannot catch
 a dependency that links it. A separate build of the library for two

@@ -108,7 +108,10 @@ oracles.
   nothing and panic nowhere) and then healed to O1. A machine cannot be
   cloned (its leases are linear), so each state is rebuilt by replaying
   its path. Depths are 5 or 6; the scenarios run on threads of their own,
-  four at a time (`bounded` in `core/src/testutil.rs`).
+  four at a time (`bounded` in `core/src/testutil.rs`). Compiled only with
+  the crate's `slow-explorers` feature, with the simulator's steps only it
+  uses; no CI run started by a push runs it, and local CI runs it with
+  `--explorers`.
 - `regress.rs`: scripted schedules of historical defects and adversarial
   traces, each run with a zero O2 bound and each asserting that it reached
   the state it targets, so a schedule that drifts tests nothing loudly.
@@ -141,7 +144,15 @@ oracles.
   switches on and must fail; each named test runs once with none and must
   pass; a switch with no row fails the test. Compiled only with the
   crate's `slow-tests` feature, since it re-runs the slowest tests many
-  times; GitHub CI's Linux job runs it on every push.
+  times; GitHub CI's Linux job runs it on every push. Which tests the build
+  compiles it reads from the test binary's own list: without
+  `slow-explorers` it leaves out a row's explorers, and leaves a row whose
+  every test is an explorer to the explorers' build, printing those rows;
+  with it, every named test must be compiled. A named test it does not
+  compile counts as an explorer only where the sources show it behind
+  `slow-explorers` (`crate::testutil::explorer_only`), so a misspelled or
+  renamed name fails in every build. `testing/ci-local.sh --explorers`
+  runs it in the explorers' build too.
 - `candidates.rs`, `ladder.rs`, `lease.rs`, `params.rs`, `reason.rs`,
   `record.rs`, `resolve.rs`: tests of one module's private items, each
   attached from that module with `#[path]`, so their names are

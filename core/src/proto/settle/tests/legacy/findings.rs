@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use super::super::super::model::history::Event;
 use super::super::super::model::judge::Gate;
 use super::super::explore::{apply, replay};
-#[cfg(feature = "slow-tests")]
+#[cfg(feature = "slow-explorers")]
 use super::super::joint::explore::CAPABLE;
 use super::super::oracle::{Breach, Oracle, every_step, follow, scripted};
 use super::super::shadow::{Entry, Rec, Refusal};
@@ -240,7 +240,7 @@ fn against_a_model_of_master_a_forward_wall_step_does_not_let_a_msg1_replace_a_p
 /// a finding. Returns the starts carrying one of the two defects that do
 /// not show it, and the two crossings, starts 1 and 3, where a node is on
 /// the wrong link.
-#[cfg(feature = "slow-tests")]
+#[cfg(feature = "slow-explorers")]
 fn against_itself(setting: &str, mk: Maker, chosen: impl Fn(&Start) -> bool) -> Vec<String> {
     use super::super::oracle::sweep;
     use super::super::world::World;
@@ -308,7 +308,7 @@ fn against_itself(setting: &str, mk: Maker, chosen: impl Fn(&Start) -> bool) -> 
     missing
 }
 
-#[cfg(feature = "slow-tests")]
+#[cfg(feature = "slow-explorers")]
 #[test]
 fn the_model_of_master_against_itself_on_every_start_shows_the_two_defects_and_no_wrong_link() {
     // At multipath on, the starts whose links turn capable step a minute of

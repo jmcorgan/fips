@@ -5,6 +5,35 @@
 # Usage: ./ci-local.sh [options]
 #
 # Options:
+#   --tier <1|2|3>       Run one CI tier, as the internal builder does. Each
+#                        tier is a fixed set of stages; --plan prints it.
+#                          1  every branch push: the guards, the build stage
+#                             with the bare-metal and cross-target checks, the
+#                             unit tests (the core without its slow suites),
+#                             the known-defect lane, the profiling rerun, the
+#                             release compile and the root tests. No
+#                             mutation lane and no integration suites.
+#                          2  trunk tips and landing candidates: tier 1, the
+#                             core's slow suites, the mutation lane, the musl
+#                             unit tests and every integration suite.
+#                          3  the nightly run of each trunk tip: tier 2, the
+#                             explorers (on next the core half alone; see
+#                             --explorers), a chaos batch of each
+#                             CI scenario and the long scenarios no other run
+#                             takes. --with-tor adds the Tor suites.
+#                        Under a tier the root tests run in a container
+#                        (run_root_tests), never under sudo, and the
+#                        environment switches below (FIPS_CI_BAREMETAL,
+#                        FIPS_CI_SLOW_TESTS, FIPS_CI_ROOT_TESTS) are ignored.
+#                        It cannot be combined with an option that changes
+#                        what runs: only -j and --plan, and --with-tor at tier
+#                        3. FIPS_CI_TIER=<n> in the environment does the same.
+#                        No tier runs the explorers from a push: tier 3 is
+#                        the nightly run.
+#   --plan               With --tier, print the stages the run would record,
+#                        in order, and exit without running anything. A green
+#                        tier run fails if what it recorded differs from this
+#                        list, so the list is what runs.
 #   --build-only         Only run build + clippy (and the cross-target check,
 #                        with --cross-check)
 #   --test-only          Only run unit tests (skip build, skip integration)
@@ -17,14 +46,26 @@
 #                        llvm-ar. When asked for, a missing prerequisite fails
 #                        the run. FIPS_CI_BAREMETAL=1 in the environment turns
 #                        it on too. GitHub CI runs it on every push.
-#   --slow-tests         Also run fips-core's slow test suite (the
-#                        guard-switch meta-test) in the core's own test run.
-#                        Off by default: it takes minutes, and GitHub CI's
-#                        Linux job runs it on every push. The settlement
-#                        explorers against the deployed models and the
-#                        candidate rules run with it here and nowhere else.
-#                        FIPS_CI_SLOW_TESTS=1 in the environment turns it on
-#                        too.
+#   --slow-tests         Also run fips-core's slow test suites (among them
+#                        the guard-switch meta-tests) in the core's own test
+#                        run. Off by default: they take minutes, and GitHub
+#                        CI's Linux job runs them on every push. The explorers
+#                        are not among them (--explorers). FIPS_CI_SLOW_TESTS=1
+#                        in the environment turns it on too.
+#   --explorers[=core|root]
+#                        Also run the explorers, after the unit tests: the
+#                        tests fips-core compiles only with its slow-explorers
+#                        feature (recorded as core-explorers) and those the
+#                        root crate compiles only with its explorers feature
+#                        (root-explorers). Each half runs exactly the tests
+#                        its feature adds, read from the two builds' test
+#                        lists, and the two run side by side. =core or =root
+#                        runs one half. Off by default, and no CI run started
+#                        by a push turns it on: they take hours. Cannot be
+#                        combined with --build-only, which skips the unit-test
+#                        stage. Next builds no real-node explorer, so here
+#                        --explorers runs the core half alone and =root is
+#                        refused (ROOT_EXPLORER below).
 #   --cross-check        Also compile the macOS, Windows and FreeBSD targets in
 #                        the build stage (testing/cross-check/check.sh). Off
 #                        by default: it needs zig. When asked for, a missing
@@ -49,8 +90,8 @@
 #                        Cannot be combined with --only, --build-only,
 #                        --test-only, --skip-integration, --cross-check,
 #                        --baremetal (or FIPS_CI_BAREMETAL=1), --slow-tests
-#                        (or FIPS_CI_SLOW_TESTS=1) or --root-tests (or
-#                        FIPS_CI_ROOT_TESTS=1).
+#                        (or FIPS_CI_SLOW_TESTS=1), --explorers or
+#                        --root-tests (or FIPS_CI_ROOT_TESTS=1).
 #   -j, --jobs <N>       Max parallel chaos scenarios (default: 4)
 #   --list               List available integration suites
 #   --check-parity       Verify this suite set matches ci.yml's integration
@@ -161,8 +202,10 @@
 #   0   — all stages passed
 #   1   — one or more stages failed
 #   2   — usage error (unknown option, missing value, unknown --rerun suite,
-#         an option --rerun cannot be combined with, or --build-only with
-#         --root-tests); nothing ran
+#         an option --rerun cannot be combined with, --build-only with
+#         --root-tests or --explorers, a tier other than 1, 2 or 3, an
+#         option --tier cannot be combined with, or --plan without --tier);
+#         nothing ran
 #   130 — interrupted by SIGINT  (128 + 2;  run was cancelled, not a failure)
 #   143 — terminated by SIGTERM  (128 + 15; run was cancelled, not a failure)
 #
@@ -180,10 +223,13 @@
 # ── CI parity invariant ─────────────────────────────────────────────────────
 # This local default suite set and the GitHub integration matrix
 # (.github/workflows/ci.yml) MUST run the same integration suites, EXCEPT for
-# the deliberate local-only entries below. Adding a suite to one runner
-# without the other means "local green" and "GitHub green" stop being
-# equivalent. testing/check-ci-parity.sh enforces this and fails on drift; it
-# runs as the first stage of every local run, before the build.
+# the deliberate local-only entries below, and tier 2 (--tier 2) MUST run the
+# same build, lint, guard and unit-test steps GitHub runs on a push, EXCEPT
+# for what one runner cannot do (check-ci-parity.sh's header lists those).
+# Adding a suite or a step to one runner without the other means "local green"
+# and "GitHub green" stop being equivalent. testing/check-ci-parity.sh
+# enforces both and fails on drift; it runs as the first stage of every local
+# run, before the build.
 #
 # Deliberate local-only (NOT on the GitHub gate), with reason:
 #   tor-socks5     — requires live Tor network; opt-in via --with-tor,
@@ -227,12 +273,50 @@ SKIP_INTEGRATION=false
 SKIP_CHAOS=false
 BAREMETAL=false
 SLOW_TESTS=false
+# Which explorer halves run: empty for none, or core, root or all.
+EXPLORERS=""
+# Whether this tree builds the root crate's real-node explorer. Next does not:
+# its handshake is XX and the explorer is written for master's IK, so the
+# module is under #[cfg(any())] (src/node/tests/settle/mod.rs) and the
+# explorers feature adds no test. Here --explorers and tier 3 run the core
+# half alone, and --explorers=root is refused.
+ROOT_EXPLORER=false
 CROSS_CHECK=false
 ROOT_TESTS=false
+# How the root tests run: sudo (--root-tests, by hand) or container (--tier).
+ROOT_MODE=sudo
 WITH_TOR=false
 ONLY_SUITE=""
 RERUN=false
 ONLY_GIVEN=false
+# The tier asked for, if any, and whether only its plan is wanted.
+TIER=""
+PLAN=false
+# Options given on the command line that choose what runs, which --tier
+# refuses; the environment switches are not among them.
+GIVEN=()
+# Stages a tier adds to what the options above give.
+MUTATIONS=true
+MUSL=false
+NIGHTLY=false
+# Stages that were due but could not run on this host, each with its reason.
+SKIPPED=()
+# The image the root tests run in under a tier, built from
+# testing/root-tests/Dockerfile when the host lacks it.
+ROOT_IMAGE="${FIPS_ROOT_TESTS_IMAGE:-fips-root-tests:trixie-1}"
+# How long the root tests' container may run, in seconds.
+ROOT_TIMEOUT=1200
+# The Rust target of the musl unit tests.
+MUSL_TARGET=x86_64-unknown-linux-musl
+# Runs of each CI chaos scenario in the nightly batch, and the long
+# scenarios only the nightly run takes, each "display-name scenario
+# [--flag value ...]" as in CHAOS_SUITES.
+NIGHTLY_CHAOS_RUNS=3
+NIGHTLY_LONG=(
+    "dead-grace-long dead-grace-long"
+    "maelstrom maelstrom"
+    "maelstrom-sparse maelstrom-sparse"
+)
 
 # All integration suites matching ci.yml
 STATIC_SUITES=(static-mesh static-chain)
@@ -424,6 +508,141 @@ need_value() {
     return 0
 }
 
+# ── Stages and plan ────────────────────────────────────────────────────────
+
+# The static guards, in the order run_guards runs them: each entry is the
+# function and the result it records.
+GUARDS=(
+    "run_ci_parity ci-parity"
+    "run_log_strings log-strings"
+    "run_trailing_log trailing-log"
+    "run_chaos_schedule sim-schedule"
+    "run_simassert sim-assertions"
+    "run_image_scoping image-scoping"
+    "run_action_pins action-pins"
+    "run_comment_refs comment-refs"
+    "run_ignored_tests ignored-tests"
+    "run_portable_atomics portable-atomics"
+    "run_mount_tmpdir mount-tmpdir"
+    "run_ci_labels ci-labels"
+    "run_shellcheck shellcheck"
+    "run_wait_converge wait-converge"
+    "run_relay_verdict_test relay-verdict"
+    "run_rpm_budget_test rpm-budget"
+    "run_dockerrun docker-run"
+    "run_package_versions package-versions"
+    "run_nextest_flaky nextest-flaky"
+    "run_node_test_groups node-test-groups"
+    "run_glibc_floor glibc-floor"
+    "run_ciargs ci-args"
+    "run_ciplan ci-plan"
+    "run_paritytest ci-parity-test"
+    "run_fwtable fw-table"
+    "run_veth_host veth-host"
+)
+
+# The nightly chaos runs, one entry per line in CHAOS_SUITES' form: each CI
+# scenario NIGHTLY_CHAOS_RUNS times, as batch<i>-<name>, then the long
+# scenarios. The teardown derives their host interface names from the same
+# list.
+nightly_chaos() {
+    local entry i parts
+    for entry in "${CHAOS_SUITES[@]}"; do
+        read -ra parts <<< "$entry"
+        for (( i = 1; i <= NIGHTLY_CHAOS_RUNS; i++ )); do
+            echo "batch$i-${parts[0]} ${parts[*]:1}"
+        done
+    done
+    printf '%s\n' "${NIGHTLY_LONG[@]}"
+    return 0
+}
+
+# The results a green run with the current options records, in the order it
+# records them, one per line, after a comment line naming the tier. Lines
+# starting with # are notes. It reads the same switches and arrays the run
+# does, and a green tier run is held to it (check_plan).
+print_plan() {
+    local g t entry s
+    echo "# ci-local.sh --tier $TIER: the results a green run records, in order"
+    for g in "${GUARDS[@]}"; do echo "${g#* }"; done
+    printf '%s\n' nft-syntax build fmt clippy clippy-default-features \
+        core-fence-lib core-fence core-fence-slow core-doc
+    [[ "$BAREMETAL" == true ]] && echo core-baremetal
+    if [[ "$CROSS_CHECK" == true ]]; then
+        for t in $(bash "$SCRIPT_DIR/cross-check/check.sh" --list); do
+            echo "cross-check-$t"
+        done
+    fi
+    printf '%s\n' build-profiling node-context-guard unit-tests core-fence-tests
+    [[ "$SLOW_TESTS" == true ]] && echo "# core-fence-tests runs with fips-core's slow-tests feature"
+    echo known-defect
+    [[ "$MUTATIONS" == true ]] && echo mutations
+    printf '%s\n' unit-tests-profiling audit-reach release-test-compile
+    if [[ "$MUSL" == true ]]; then
+        echo musl-tests
+        echo addrless-iface-musl
+        echo "# musl-tests and addrless-iface-musl are skipped, with the reason, on a host without the $MUSL_TARGET target or musl-gcc"
+    fi
+    [[ "$EXPLORERS" == all || "$EXPLORERS" == core ]] && echo core-explorers
+    [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]] && echo root-explorers
+    if [[ "$ROOT_TESTS" == true ]]; then
+        echo root-tests
+        echo privileged-bind
+        [[ "$ROOT_MODE" == container ]] && echo addrless-iface
+    fi
+    if [[ "$SKIP_INTEGRATION" != true ]]; then
+        printf '%s\n' openwrt-scripts tarball-install build-integration "${STATIC_SUITES[@]}" \
+            "${GATEWAY_SUITES[@]}" "${FIREWALL_SUITES[@]}" "${IFACE_BINDING_SUITES[@]}"
+        for s in "${NAT_SUITES[@]}"; do echo "nat-$s"; done
+        printf '%s\n' "${NOSTR_RELAY_SUITES[@]}" "${STUN_FAULTS_SUITES[@]}" \
+            "${MEDIUM_CHANGE_SUITES[@]}"
+        for entry in "${CHAOS_SUITES[@]}"; do echo "chaos-${entry%% *}"; done
+        printf '%s\n' "${SIDECAR_SUITES[@]}" "${NATIVE_API_SUITES[@]}" "${MDNS_SUITES[@]}" \
+            "${DNS_RESOLVER_SUITES[@]}" "${DEB_INSTALL_SUITES[@]}" "${RPM_INSTALL_SUITES[@]}"
+        [[ "$WITH_TOR" == true ]] && printf '%s\n' "${TOR_SUITES[@]}"
+    fi
+    if [[ "$NIGHTLY" == true ]]; then
+        while read -r entry; do echo "chaos-${entry%% *}"; done < <(nightly_chaos)
+    fi
+    return 0
+}
+
+# The halves --explorers and tier 3 run: all, or core where this tree builds
+# no real-node explorer (ROOT_EXPLORER).
+all_explorers() {
+    if [[ "$ROOT_EXPLORER" == true ]]; then echo all; else echo core; fi
+    return 0
+}
+
+# Set the switches for $TIER (see --tier in the usage).
+apply_tier() {
+    if [[ "${FIPS_CI_BAREMETAL:-}" == 1 || "${FIPS_CI_SLOW_TESTS:-}" == 1 \
+            || "${FIPS_CI_ROOT_TESTS:-}" == 1 ]]; then
+        echo "ci-local.sh: --tier $TIER decides what runs; the FIPS_CI_* switches in the environment are ignored" >&2
+    fi
+    BAREMETAL=true
+    CROSS_CHECK=true
+    ROOT_TESTS=true
+    ROOT_MODE=container
+    SLOW_TESTS=false
+    MUTATIONS=false
+    MUSL=false
+    SKIP_INTEGRATION=true
+    EXPLORERS=""
+    NIGHTLY=false
+    if [[ "$TIER" -ge 2 ]]; then
+        SLOW_TESTS=true
+        MUTATIONS=true
+        MUSL=true
+        SKIP_INTEGRATION=false
+    fi
+    if [[ "$TIER" -eq 3 ]]; then
+        EXPLORERS=$(all_explorers)
+        NIGHTLY=true
+    fi
+    return 0
+}
+
 # ── Parse arguments ────────────────────────────────────────────────────────
 
 # The environment switch is for runners that cannot pass --baremetal, such as
@@ -437,20 +656,30 @@ fi
 if [[ "${FIPS_CI_ROOT_TESTS:-}" == 1 ]]; then
     ROOT_TESTS=true
 fi
+TIER="${FIPS_CI_TIER:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --build-only)       BUILD_ONLY=true; shift ;;
-        --test-only)        TEST_ONLY=true; shift ;;
-        --skip-integration) SKIP_INTEGRATION=true; shift ;;
-        --skip-chaos)       SKIP_CHAOS=true; shift ;;
-        --baremetal)        BAREMETAL=true; shift ;;
-        --slow-tests)       SLOW_TESTS=true; shift ;;
-        --cross-check)      CROSS_CHECK=true; shift ;;
-        --root-tests)       ROOT_TESTS=true; shift ;;
-        --with-tor)         WITH_TOR=true; shift ;;
-        --only)             need_value "$@"; ONLY_SUITE="$2"; ONLY_GIVEN=true; shift 2 ;;
-        --rerun)            need_value "$@"; ONLY_SUITE="$2"; RERUN=true; shift 2 ;;
+        --build-only)       BUILD_ONLY=true; GIVEN+=("$1"); shift ;;
+        --test-only)        TEST_ONLY=true; GIVEN+=("$1"); shift ;;
+        --skip-integration) SKIP_INTEGRATION=true; GIVEN+=("$1"); shift ;;
+        --skip-chaos)       SKIP_CHAOS=true; GIVEN+=("$1"); shift ;;
+        --baremetal)        BAREMETAL=true; GIVEN+=("$1"); shift ;;
+        --slow-tests)       SLOW_TESTS=true; GIVEN+=("$1"); shift ;;
+        --explorers)        EXPLORERS=$(all_explorers); GIVEN+=("$1"); shift ;;
+        --explorers=*)
+            EXPLORERS="${1#*=}"
+            GIVEN+=(--explorers)
+            [[ "$EXPLORERS" == core || "$EXPLORERS" == root ]] \
+                || usage_error "--explorers takes core or root, not: ${EXPLORERS:-nothing}"
+            shift ;;
+        --cross-check)      CROSS_CHECK=true; GIVEN+=("$1"); shift ;;
+        --root-tests)       ROOT_TESTS=true; GIVEN+=("$1"); shift ;;
+        --with-tor)         WITH_TOR=true; GIVEN+=("$1"); shift ;;
+        --only)             need_value "$@"; ONLY_SUITE="$2"; ONLY_GIVEN=true; GIVEN+=("$1"); shift 2 ;;
+        --rerun)            need_value "$@"; ONLY_SUITE="$2"; RERUN=true; GIVEN+=("$1"); shift 2 ;;
+        --tier)             need_value "$@"; TIER="$2"; shift 2 ;;
+        --plan)             PLAN=true; shift ;;
         -j|--jobs)          need_value "$@"; PARALLEL_JOBS="$2"; shift 2 ;;
         --list)             list_suites ;;
         --check-parity)     exec "$SCRIPT_DIR/check-ci-parity.sh" ;;
@@ -460,6 +689,25 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# A tier is a fixed set of stages, so an option that changes what runs is
+# refused rather than quietly dropped or added; the environment switches are
+# overridden instead, because the builder exports them for every run.
+if [[ -n "$TIER" ]]; then
+    [[ "$TIER" == 1 || "$TIER" == 2 || "$TIER" == 3 ]] \
+        || usage_error "--tier takes 1, 2 or 3, not: $TIER"
+    for _opt in "${GIVEN[@]}"; do
+        [[ "$_opt" == --with-tor && "$TIER" == 3 ]] && continue
+        usage_error "--tier $TIER cannot be combined with $_opt"
+    done
+    apply_tier
+elif [[ "$PLAN" == true ]]; then
+    usage_error "--plan needs --tier"
+fi
+if [[ "$PLAN" == true ]]; then
+    print_plan
+    exit 0
+fi
+
 # --rerun is checked once the whole line is read, so the option order does not
 # matter and nothing is built for a bad request.
 if [[ "$RERUN" == true ]]; then
@@ -467,7 +715,8 @@ if [[ "$RERUN" == true ]]; then
     for _opt in only:"$ONLY_GIVEN" build-only:"$BUILD_ONLY" \
             test-only:"$TEST_ONLY" skip-integration:"$SKIP_INTEGRATION" \
             cross-check:"$CROSS_CHECK" baremetal:"$BAREMETAL" \
-            slow-tests:"$SLOW_TESTS" root-tests:"$ROOT_TESTS"; do
+            slow-tests:"$SLOW_TESTS" root-tests:"$ROOT_TESTS" \
+            explorers:"$([[ -n "$EXPLORERS" ]] && echo true)"; do
         [[ "${_opt#*:}" == true ]] \
             && usage_error "--rerun cannot be combined with --${_opt%%:*}"
     done
@@ -476,6 +725,13 @@ fi
 # run asked for both would otherwise exit 0 without having run them.
 if [[ "$BUILD_ONLY" == true && "$ROOT_TESTS" == true ]]; then
     usage_error "--root-tests cannot be combined with --build-only"
+fi
+# The explorers run after the unit tests, for the same reason.
+if [[ "$BUILD_ONLY" == true && -n "$EXPLORERS" ]]; then
+    usage_error "--explorers cannot be combined with --build-only"
+fi
+if [[ "$ROOT_EXPLORER" != true && "$EXPLORERS" == root ]]; then
+    usage_error "--explorers=root: this tree builds no real-node explorer (src/node/tests/settle/mod.rs), so there is no root half"
 fi
 
 # ── Results tracking ──────────────────────────────────────────────────────
@@ -660,6 +916,11 @@ ci_teardown() {
     for _entry in "${CHAOS_SUITES[@]}"; do
         _suffixes+=("$(ci_chaos_suffix "${_entry%% *}")")
     done
+    if [[ "$NIGHTLY" == true ]]; then
+        while read -r _entry; do
+            _suffixes+=("$(ci_chaos_suffix "${_entry%% *}")")
+        done < <(nightly_chaos)
+    fi
     #    The NAT lab's host veths (vn{a,b}{token}{0,1}) carry the RUN-wide
     #    suffix, not any chaos scenario's, so its token appears in no suffix
     #    above and the reaper's NAT shape would match nothing at all. This is
@@ -828,8 +1089,7 @@ run_build() {
     # gives the library its dev-dependencies' features (secp256k1's rand and
     # std): --lib lints the library with its [dependencies] features alone, and
     # --all-targets type-checks the tests. Mirrored in .github/workflows/ci.yml;
-    # check-ci-parity.sh compares integration suites only and would not catch a
-    # stage added to one runner and not the other.
+    # check-ci-parity.sh holds each such step to its counterpart.
     info "cargo clippy -p fips-core --lib -- -D warnings"
     if cargo clippy -p fips-core --lib -- -D warnings 2>&1; then
         record "core-fence-lib" 0
@@ -846,7 +1106,7 @@ run_build() {
         return 1
     fi
 
-    # The slow test suite is linted on every run, though it runs only with
+    # The slow test suites are linted on every run, though they run only with
     # --slow-tests. Mirrored in .github/workflows/ci.yml.
     info "cargo clippy -p fips-core --all-targets --features slow-tests -- -D warnings"
     if cargo clippy -p fips-core --all-targets --features slow-tests -- -D warnings 2>&1; then
@@ -859,8 +1119,7 @@ run_build() {
     # The core's API documentation, with rustdoc's warnings denied, so a
     # broken intra-doc link or a malformed doc comment fails the run rather
     # than leaving `cargo doc` to warn. Mirrored in .github/workflows/ci.yml;
-    # check-ci-parity.sh compares integration suites only and would not catch
-    # a step added to one runner and not the other.
+    # check-ci-parity.sh holds the two to each other.
     info "RUSTDOCFLAGS='-D warnings' cargo doc -p fips-core --no-deps"
     if RUSTDOCFLAGS='-D warnings' cargo doc -p fips-core --no-deps 2>&1; then
         record "core-doc" 0
@@ -876,8 +1135,8 @@ run_build() {
     # thing. Opt-in here (--baremetal or FIPS_CI_BAREMETAL=1), since it needs
     # the two targets, clang and llvm-ar, and nothing is recorded when off; a
     # landing or merge-up on a trunk path runs it explicitly. GitHub CI runs
-    # it on every push. check-ci-parity.sh compares integration suites only
-    # and would not catch a stage added to one runner and not the other.
+    # it on every push. check-ci-parity.sh holds the two to each other at
+    # tier 2.
     if [[ "$BAREMETAL" == true ]]; then
         info "testing/build-core-baremetal.sh (fips-core for thumbv7em-none-eabihf, riscv32imac-unknown-none-elf)"
         if "$SCRIPT_DIR/build-core-baremetal.sh" 2>&1; then
@@ -907,30 +1166,14 @@ run_build() {
         return 1
     fi
 
-    # Guard: the effectively-immutable state lives solely in NodeContext. The
-    # Node struct must not re-declare a bundled field (config/identity/
-    # startup_epoch/started_at/is_leaf_only/node_profile/max_*) — a shadow field
-    # would silently reopen dual-store divergence between the struct and the
-    # context. Checks the struct *declaration*, so it is wrap-insensitive.
-    # Captured before matching: under pipefail, grep -q exiting at its match
-    # killed awk with SIGPIPE before its last write, so the guard never fired.
-    # An empty capture means the struct was not found and the guard would
-    # check nothing, so that fails too.
+    # Guard: the effectively-immutable state lives solely in NodeContext
+    # (testing/check-node-context.sh). Mirrored in ci.yml's ci-parity job.
     info "node-context single-store guard"
-    local node_decl
-    node_decl=$(awk '/^pub struct Node \{/,/^\}/' src/node/mod.rs) || node_decl=""
-    if [[ -z "$node_decl" ]]; then
-        fail "no 'pub struct Node' declaration found in src/node/mod.rs, so the single-store guard checked nothing"
-        record "node-context-guard" 1
-        return 1
-    fi
-    if grep -qE '^[[:space:]]+(config|identity|startup_epoch|started_at|is_leaf_only|node_profile|max_connections|max_peers|max_links):' \
-        <<<"$node_decl"; then
-        fail "Node struct re-declares a bundled immutable field; it must live solely in NodeContext"
-        record "node-context-guard" 1
-        return 1
-    else
+    if bash "$SCRIPT_DIR/check-node-context.sh" 2>&1; then
         record "node-context-guard" 0
+    else
+        record "node-context-guard" 1
+        return 1
     fi
 }
 
@@ -940,7 +1183,7 @@ run_build() {
 # cannot be installed is a failure: check.sh exits 2 naming what is missing,
 # and that is recorded against each target, since none was checked.
 # Deliberately local-only: GitHub CI builds and tests on real macOS, Windows
-# and FreeBSD runners, and check-ci-parity.sh compares integration suites only.
+# and FreeBSD runners, and check-ci-parity.sh lists these stages as local-only.
 run_cross_check() {
     local check="$SCRIPT_DIR/cross-check/check.sh" targets=() t rc any=0
     if [[ "$CROSS_CHECK" != true ]]; then
@@ -1018,14 +1261,12 @@ run_tests() {
     # The no_std core's tests under the core's own feature resolution, so a
     # test whose result depends on a feature only the root crate enables runs
     # at least once without it. Mirrored in .github/workflows/ci.yml, which
-    # always runs the slow suite here; locally it needs --slow-tests. The
-    # settlement explorers against the deployed models and the candidate
-    # rules (`slow-explorers`, which turns `slow-tests` on too) run only
-    # here, under --slow-tests or FIPS_CI_SLOW_TESTS=1, which the internal
-    # builder sets.
+    # always runs the slow suites here; locally they need --slow-tests (or
+    # FIPS_CI_SLOW_TESTS=1, which the internal builder sets). The explorers
+    # are not among them: they run in run_explorers, only with --explorers.
     local core_test=(cargo test -p fips-core)
     if [[ "$SLOW_TESTS" == true ]]; then
-        core_test+=(--features slow-explorers)
+        core_test+=(--features slow-tests)
     fi
     info "${core_test[*]}"
     if with_fd_limit "${core_test[@]}" 2>&1; then
@@ -1050,12 +1291,20 @@ run_tests() {
     # testing/mutations/manifest.txt names for it, at their assertion of the
     # behaviour it breaks, and every named test must pass with no switch. It
     # also checks that no switch reaches a normal build of fips. Mirrored in
-    # .github/workflows/ci.yml.
-    info "testing/mutations/run.sh"
-    if with_fd_limit bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
-        record "mutations" 0
-    else
-        record "mutations" 1
+    # .github/workflows/ci.yml. Tier 1 leaves it out: it has found coverage
+    # gaps, never a product defect, and tier 2 runs it before a trunk moves.
+    # Its lines whose test only the root crate's explorers feature compiles
+    # run only in a run with the root explorers (--explorers, --tier 3),
+    # which builds the lane with that feature; elsewhere they are skipped.
+    if [[ "$MUTATIONS" == true ]]; then
+        local lane_explorers=""
+        [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]] && lane_explorers=1
+        info "testing/mutations/run.sh${lane_explorers:+ (FIPS_MUTATION_EXPLORERS=1)}"
+        if FIPS_MUTATION_EXPLORERS="$lane_explorers" with_fd_limit bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
+            record "mutations" 0
+        else
+            record "mutations" 1
+        fi
     fi
 
     # The root crate's optional features add code the default-feature run
@@ -1097,9 +1346,8 @@ run_tests() {
     # residue test, which is release-only because only an optimised build
     # leaves the slot in a state worth measuring; the grep fails the stage if
     # that test did not run, since a name filter that matches nothing passes.
-    # Mirrored in .github/workflows/ci.yml; check-ci-parity.sh compares
-    # integration suites only and would not catch a stage added to one runner
-    # and not the other.
+    # Mirrored in .github/workflows/ci.yml; check-ci-parity.sh holds each such
+    # step to its counterpart.
     local residue_test="peer::machine::tests::take_leg_leaves_no_session_keys_in_the_slot_it_empties"
     local release_log
     release_log=$(mktemp "/tmp/ci-release-lib-tests.XXXXXX")
@@ -1112,21 +1360,67 @@ run_tests() {
     fi
     rm -f "$release_log"
 
+    run_musl
+    run_explorers
     run_root_tests
 }
 
-# With --root-tests, run the root-only namespace tests through
-# testing/root-tests.sh, which holds the filters and counts GitHub's Linux job
-# runs too, and record one result, root-tests. The binary is built and located
-# as the runner user and only the script runs under sudo -n, as on GitHub, so
-# a run that cannot sudo without a password fails with sudo's own message
-# instead of waiting for one. Off by default, and then nothing is recorded.
-run_root_tests() {
-    local bin
-    [[ "$ROOT_TESTS" == true ]] || return 0
-    info "cargo test -p fips-mesh --lib --no-run (for testing/root-tests.sh)"
-    bin=$(cargo test -p fips-mesh --lib --no-run --message-format=json \
-        | python3 -c '
+# Note a stage that was due but cannot run on this host, with the reason; the
+# summary lists it, and check_plan does not count it as missing.
+skip_stage() {
+    info "SKIP $1: $2"
+    SKIPPED+=("$1: $2")
+    return 0
+}
+
+# The library tests built for musl, as GitHub CI's musl job runs them: the one
+# leg on another libc, where getifaddrs implementations differ. Tiers 2 and 3
+# only. The test binary links musl statically and runs on this host. A host
+# without the Rust target or musl-gcc (the musl-tools package) skips the
+# stage with that reason, since installing them is the host's business.
+run_musl() {
+    local libdir
+    [[ "$MUSL" == true ]] || return 0
+    libdir=$(rustc --print target-libdir --target "$MUSL_TARGET" 2>/dev/null) || libdir=""
+    if [[ -z "$libdir" ]] || ! compgen -G "$libdir/libstd-*.rlib" >/dev/null; then
+        skip_stage musl-tests "the $MUSL_TARGET Rust target is not installed (rustup target add $MUSL_TARGET)"
+        skip_stage addrless-iface-musl "the $MUSL_TARGET Rust target is not installed"
+        return 0
+    fi
+    if ! command -v musl-gcc >/dev/null 2>&1; then
+        skip_stage musl-tests "musl-gcc is not installed (the musl-tools package)"
+        skip_stage addrless-iface-musl "musl-gcc is not installed"
+        return 0
+    fi
+    info "cargo test --lib --target $MUSL_TARGET"
+    if with_fd_limit cargo test --lib --target "$MUSL_TARGET" 2>&1; then
+        record "musl-tests" 0
+    else
+        record "musl-tests" 1
+    fi
+    # The address-less interface test against musl's getifaddrs, the reason
+    # the musl leg exists, with the fixture GitHub's musl job makes. The
+    # static binary runs in the root tests' container, as the glibc one does.
+    local bin rc=0
+    bin=$(lib_test_exe fips cargo test -p fips-mesh --lib --target "$MUSL_TARGET")
+    if [[ -z "$bin" || ! -x "$bin" ]]; then
+        fail "could not build or locate the musl fips-mesh library test binary"
+        record "addrless-iface-musl" 1
+        return 0
+    fi
+    info "testing/root-tests/addrless-iface.sh $bin in $ROOT_IMAGE"
+    root_container "$bin" sh /opt/fips/root-tests/addrless-iface.sh "$bin" 2>&1 || rc=$?
+    record "addrless-iface-musl" "$rc"
+    return 0
+}
+
+# The executable cargo builds for the library target named $1, for the cargo
+# test command line that follows (run with --no-run and JSON messages added);
+# empty when there is none. Cargo's own output goes to stderr.
+lib_test_exe() {
+    local target="$1"
+    shift
+    "$@" --no-run --message-format=json | python3 -c '
 import json, sys
 exe = ""
 for line in sys.stdin:
@@ -1135,21 +1429,207 @@ for line in sys.stdin:
     except ValueError:
         continue
     if msg.get("reason") == "compiler-artifact" and msg.get("executable") \
-            and "lib" in msg["target"]["kind"] and msg["target"]["name"] == "fips":
+            and "lib" in msg["target"]["kind"] and msg["target"]["name"] == sys.argv[1]:
         exe = msg["executable"]
 print(exe)
-')
+' "$target"
+    return 0
+}
+
+# One half of the explorers: run exactly the tests the package's library
+# compiles only with the feature $4, returning their status; $1 names the
+# half in what it prints, and the caller records it. $2 is the package, $3 its
+# library target, $4 the feature and $5 the features of the build it is
+# compared with (empty for the default). The names come from the two builds'
+# own --list, so no list here follows the gates. An empty difference fails:
+# it would mean the feature gates nothing, and a run of no tests passes. So
+# does a result line whose passed and ignored counts do not add up to the
+# names asked for. Any further arguments name tests the base build compiles
+# too that run again in the feature's build; each must be in its list.
+run_explorer_half() {
+    local record_name="$1" pkg="$2" target="$3" feature="$4" base="$5"
+    local again=("${@:6}") t listed
+    local base_args=(cargo test -p "$pkg" --lib) exe base_exe names log rc=0
+    [[ -n "$base" ]] && base_args+=(--features "$base")
+    base_exe=$(lib_test_exe "$target" "${base_args[@]}")
+    exe=$(lib_test_exe "$target" cargo test -p "$pkg" --lib --features "$feature")
+    if [[ -z "$base_exe" || -z "$exe" ]]; then
+        fail "[$record_name] could not build or locate the $pkg library test binaries"
+        return 1
+    fi
+    listed=$("$exe" --list --format terse | sed -n 's/: test$//p' | sort)
+    mapfile -t names < <(comm -13 \
+        <("$base_exe" --list --format terse | sed -n 's/: test$//p' | sort) \
+        <(printf '%s\n' "$listed"))
+    if [[ ${#names[@]} -eq 0 ]]; then
+        fail "[$record_name] the $feature feature adds no test to $pkg, so there is nothing to run"
+        return 1
+    fi
+    for t in "${again[@]}"; do
+        if ! grep -qxF -- "$t" <<<"$listed"; then
+            fail "[$record_name] $pkg's $feature build has no test $t"
+            return 1
+        fi
+        names+=("$t")
+    done
+    info "[$record_name] cargo test -p $pkg --lib --features $feature -- --exact <the $((${#names[@]} - ${#again[@]})) tests $feature adds, and ${#again[@]} run again>"
+    log=$(mktemp "/tmp/ci-$record_name.XXXXXX")
+    with_fd_limit cargo test -p "$pkg" --lib --features "$feature" -- --exact "${names[@]}" 2>&1 \
+        | tee "$log"
+    rc=${PIPESTATUS[0]}
+    if [[ $rc -eq 0 ]] && ! python3 - "${#names[@]}" "$log" <<'PY'
+import re, sys
+want, path = int(sys.argv[1]), sys.argv[2]
+m = None
+for line in open(path, errors="replace"):
+    m = re.match(r"test result: ok\. (\d+) passed; \d+ failed; (\d+) ignored;", line) or m
+sys.exit(0 if m and int(m.group(1)) + int(m.group(2)) == want else 1)
+PY
+    then
+        fail "[$record_name] the run did not report all ${#names[@]} tests it was given"
+        rc=1
+    fi
+    rm -f "$log"
+    return "$rc"
+}
+
+# The guard-switch meta-tests of fips-core. The slow suites run them without
+# the explorers, which leaves out every row test only the explorers' build
+# compiles; the core half runs them again in that build, so those rows run.
+GUARD_META=(
+    proto::settle::tests::faults::run::every_guard_switch_turns_each_test_it_names_red_and_each_passes_with_none
+    proto::rekey::tests::faults::every_guard_switch_turns_each_test_it_names_red_and_each_passes_with_none
+)
+
+# With --explorers, the explorers' two halves: fips-core's slow-explorers
+# tests, and its guard-switch meta-tests (GUARD_META), against its
+# slow-tests build, and the root crate's explorers walks against its default
+# build. Next has only the core half (ROOT_EXPLORER), so EXPLORERS is never
+# root or all here. Where both run, they run side by side, each in a
+# subshell with its output held until it ends, so the two do not interleave;
+# the parent records each half's status, since a subshell's record() dies
+# with it. Off by default, and then nothing is recorded.
+run_explorers() {
+    local halves=() h pids=() logs=() i rc
+    case "$EXPLORERS" in
+        "")   return 0 ;;
+        core) halves=(core) ;;
+        root) halves=(root) ;;
+        *)    halves=(core root) ;;
+    esac
+    for h in "${halves[@]}"; do
+        logs+=("$(mktemp "/tmp/ci-explorers-$h.XXXXXX")")
+        if [[ "$h" == core ]]; then
+            ( run_explorer_half core-explorers fips-core fips_core slow-explorers slow-tests \
+                "${GUARD_META[@]}" ) >"${logs[-1]}" 2>&1 &
+        else
+            ( run_explorer_half root-explorers fips-mesh fips explorers "" ) \
+                >"${logs[-1]}" 2>&1 &
+        fi
+        pids+=($!)
+    done
+    for i in "${!halves[@]}"; do
+        rc=0
+        wait "${pids[$i]}" || rc=$?
+        echo "--- ${halves[$i]}-explorers output ---"
+        sed 's/.*\r//' "${logs[$i]}"
+        echo "---"
+        rm -f "${logs[$i]}"
+        record "${halves[$i]}-explorers" "$rc"
+    done
+    return 0
+}
+
+# With --root-tests or a tier, run the root-only namespace tests through
+# testing/root-tests.sh, which holds the filters and counts GitHub's test-root
+# job runs too, recorded as root-tests, then the interface-binding tests with
+# privilege (testing/root-tests/privileged.sh, privileged-bind), as that job
+# does. Under a tier the address-less interface fixture and its test run too
+# (testing/root-tests/addrless-iface.sh, addrless-iface), as GitHub's Linux
+# unit-test job runs them; they need an interface made as root, which only
+# the container gives without sudo. The binary is built and located
+# as the runner user. Under a tier the script runs as uid 0 in a container
+# (root_container), so the run needs docker but no privilege of its own: the
+# internal builder runs every pushed branch, and passwordless sudo there would
+# make every branch push root on the host. With --root-tests alone it runs
+# under sudo -n, as on GitHub, so a run that cannot sudo without a password
+# fails with sudo's own message instead of waiting for one. Off by default,
+# and then nothing is recorded.
+run_root_tests() {
+    local bin rc=0
+    [[ "$ROOT_TESTS" == true ]] || return 0
+    info "cargo test -p fips-mesh --lib --no-run (for testing/root-tests.sh)"
+    bin=$(lib_test_exe fips cargo test -p fips-mesh --lib)
     if [[ -z "$bin" || ! -x "$bin" ]]; then
         fail "could not build or locate the fips-mesh library test binary"
         record "root-tests" 1
         return 1
     fi
-    info "sudo -n bash testing/root-tests.sh $bin"
-    if sudo -n bash "$SCRIPT_DIR/root-tests.sh" "$bin" 2>&1; then
-        record "root-tests" 0
+    if [[ "$ROOT_MODE" == container ]]; then
+        info "testing/root-tests.sh $bin in $ROOT_IMAGE"
+        root_container "$bin" bash /opt/fips/root-tests.sh "$bin" 2>&1 || rc=$?
+        record "root-tests" "$rc"
+        rc=0
+        info "testing/root-tests/privileged.sh $bin --netns in $ROOT_IMAGE"
+        root_container "$bin" sh /opt/fips/root-tests/privileged.sh "$bin" --netns 2>&1 || rc=$?
+        record "privileged-bind" "$rc"
+        rc=0
+        info "testing/root-tests/addrless-iface.sh $bin in $ROOT_IMAGE"
+        root_container "$bin" sh /opt/fips/root-tests/addrless-iface.sh "$bin" 2>&1 || rc=$?
+        record "addrless-iface" "$rc"
     else
-        record "root-tests" 1
+        info "sudo -n bash testing/root-tests.sh $bin"
+        sudo -n bash "$SCRIPT_DIR/root-tests.sh" "$bin" 2>&1 || rc=$?
+        record "root-tests" "$rc"
+        rc=0
+        info "sudo -n sh testing/root-tests/privileged.sh $bin"
+        sudo -n sh "$SCRIPT_DIR/root-tests/privileged.sh" "$bin" 2>&1 || rc=$?
+        record "privileged-bind" "$rc"
     fi
+    return 0
+}
+
+# Make sure the root tests' image is on this host: the image ROOT_IMAGE names,
+# or, when the host lacks it, one built under that name from
+# testing/root-tests/Dockerfile, which holds what the tests need besides the
+# binary (ip, nft, sysctl). Unlabelled, like the other shared images: the
+# teardown keeps it for the next run.
+root_image() {
+    docker image inspect "$ROOT_IMAGE" >/dev/null 2>&1 && return 0
+    info "building $ROOT_IMAGE from testing/root-tests/Dockerfile"
+    docker build --quiet -t "$ROOT_IMAGE" "$SCRIPT_DIR/root-tests" >/dev/null || return 1
+    return 0
+}
+
+# Run a command as uid 0 in a throwaway container of ROOT_IMAGE with what the
+# root tests need, as testing/root-tests.sh's header lists it: NET_ADMIN and
+# SYS_ADMIN, /dev/net/tun, AppArmor and the /proc/sys paths unconfined, and no
+# network, so nothing the tests do reaches the host's. $1 is the test binary,
+# mounted read-only at its own path; testing/root-tests.sh is at
+# /opt/fips/root-tests.sh and testing/root-tests/ at /opt/fips/root-tests;
+# the rest is the command. Bounded by ROOT_TIMEOUT,
+# after which the container is removed; the run labels let the teardown reap
+# it if this run is killed first. Returns the command's status, or 2 when the
+# image cannot be had.
+root_container() {
+    local bin="$1" name="fipsci-root-${CI_RUN_ID}" rc=0
+    shift
+    if ! root_image; then
+        fail "the root tests' image $ROOT_IMAGE is not on this host and could not be built"
+        return 2
+    fi
+    timeout --kill-after=30 "$ROOT_TIMEOUT" docker run --rm --name "$name" \
+        --label "$CI_LABEL" --label "$CI_LABEL_RUN" \
+        --network none --cap-add NET_ADMIN --cap-add SYS_ADMIN --device /dev/net/tun \
+        --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
+        -v "$bin:$bin:ro" -v "$SCRIPT_DIR/root-tests.sh:/opt/fips/root-tests.sh:ro" \
+        -v "$SCRIPT_DIR/root-tests:/opt/fips/root-tests:ro" \
+        "$ROOT_IMAGE" "$@" || rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        fail "the root tests' container ran past ${ROOT_TIMEOUT} s and was stopped"
+        docker rm -f "$name" >/dev/null 2>&1 || true
+    fi
+    return "$rc"
 }
 
 # ── Stage 3: Integration Tests ─────────────────────────────────────────────
@@ -1348,7 +1828,7 @@ run_gateway() {
         # Phase 1's mesh evidence and the containers' whole logs land here.
         # Kept on a failure, since compose down below discards the logs.
         local evidence
-        evidence=$(mktemp -d "/tmp/ci-gateway-evidence${FIPS_CI_NAME_SUFFIX:-}.XXXXXX")
+        evidence=$(mktemp -d "/tmp/ci-gateway-evidence${FIPS_CI_NAME_SUFFIX:-}.XXXXXX") # mount-tmpdir: gateway-test.sh writes logs into it, never a bind mount
         info "[gateway] Running gateway test"
         if FIPS_GW_EVIDENCE_DIR="$evidence" bash testing/static/scripts/gateway-test.sh; then
             rc=0
@@ -1366,7 +1846,7 @@ run_gateway() {
     # compose down does not remove an external network, so drop it explicitly.
     docker compose -f "$compose" -f "$ext" --profile gateway down --volumes --remove-orphans 2>/dev/null
     docker network rm "$FIPS_GW_LAN_NET" >/dev/null 2>&1 || true
-    record "gateway" $rc
+    record "gateway" "$rc"
 }
 
 # Run sidecar test
@@ -1381,7 +1861,7 @@ run_sidecar() {
         rc=1
     fi
 
-    record "sidecar" $rc
+    record "sidecar" "$rc"
 }
 
 # Run the dynamic interface binding integration test.
@@ -1653,7 +2133,7 @@ run_nostr_publish_consume() {
     bash testing/nat/scripts/nostr-relay-test.sh 2>&1 || rc=1
 
     ci_release_nat_networks
-    record "nostr-publish-consume" $rc
+    record "nostr-publish-consume" "$rc"
 }
 
 # Run the Nostr open-discovery startup scenario (opt-in, --only).
@@ -1678,7 +2158,7 @@ run_nostr_open_discovery() {
     bash testing/nat/scripts/nostr-open-discovery-test.sh 2>&1 || rc=1
 
     ci_release_nat_networks
-    record "nostr-open-discovery" $rc
+    record "nostr-open-discovery" "$rc"
 }
 
 # Run the STUN fault-injection integration test.
@@ -1704,7 +2184,7 @@ run_stun_faults() {
     bash testing/nat/scripts/stun-faults-test.sh 2>&1 || rc=1
 
     ci_release_nat_networks
-    record "stun-faults" $rc
+    record "stun-faults" "$rc"
 }
 
 # Run the native datagram API harness.
@@ -1925,6 +2405,79 @@ run_tor_directory() {
     fi
 }
 
+# Run chaos scenarios in parallel, at most PARALLEL_JOBS at once, and record
+# each. Each argument is one entry in CHAOS_SUITES' form: "display-name
+# scenario [--flag value ...]".
+run_chaos_set() {
+    info "Running $# chaos scenarios (max $PARALLEL_JOBS parallel)"
+    local pids=() entry
+    local suite_names=()
+    local running=0
+
+    for entry in "$@"; do
+        # Parse: "display-name scenario [flags...]"
+        read -ra parts <<< "$entry"
+        local name="${parts[0]}"
+        local args=("${parts[@]:1}")
+
+        # No --subnet: the sim claims a free /24 itself (sim/netclaim.py).
+        # This used to pass 10.30.${chaos_idx}.0/24, which uniquified the
+        # children of ONE run against each other and was byte-identical
+        # between runs -- so two concurrent ci-local runs both walked
+        # 10.30.0 through 10.30.12 and collided on every one. A claim makes
+        # the daemon the arbiter, so an overlap is impossible rather than
+        # merely unlikely. The range still sits in 10.30.0.0/16, clear of
+        # docker's default pool (172.17-31 / 192.168) and of the
+        # fixed-subnet suites in 172.x.
+
+        # Throttle: wait for a slot
+        while [[ $running -ge $PARALLEL_JOBS ]]; do
+            wait -n -p done_pid 2>/dev/null || true
+            running=$((running - 1))
+        done
+
+        # Run in background, capture output to temp file
+        local logfile
+        logfile=$(mktemp "/tmp/ci-chaos-${name}.XXXXXX")
+        (
+            run_chaos "$name" "${args[@]}" >"$logfile" 2>&1
+        ) &
+        pids+=($!)
+        CI_CHAOS_PIDS+=("$!")
+        suite_names+=("$name:$logfile")
+        running=$((running + 1))
+    done
+
+    # Wait for all and collect results
+    for i in "${!pids[@]}"; do
+        local pid="${pids[$i]}"
+        local entry="${suite_names[$i]}"
+        local scenario="${entry%%:*}"
+        local logfile="${entry#*:}"
+
+        if wait "$pid" 2>/dev/null; then
+            record "chaos-$scenario" 0
+        else
+            record "chaos-$scenario" 1
+            # The whole log, not its tail: the child printed the results
+            # directory into it, and this is the only place that reaches
+            # the run log. The sed keeps the last frame of each line the
+            # progress display redraws with carriage returns.
+            echo "--- chaos-$scenario output ---"
+            sed 's/.*\r//' "$logfile" 2>/dev/null || true
+            echo "---"
+        fi
+        rm -f "$logfile"
+    done
+    # All chaos children have been waited on; clear so a later signal does
+    # not try to kill already-reaped PIDs.
+    CI_CHAOS_PIDS=()
+    # The next sequential suite's window starts here, not at the last
+    # suite before the chaos block.
+    load_mark barrier
+    return 0
+}
+
 # Determine which suites to run and execute them
 run_integration() {
     stage "Stage 3: Integration Tests"
@@ -2026,72 +2579,7 @@ run_integration() {
 
     # Chaos scenarios (parallel, throttled)
     if [[ "$SKIP_CHAOS" != true ]]; then
-        info "Running ${#CHAOS_SUITES[@]} chaos scenarios (max $PARALLEL_JOBS parallel)"
-        local pids=()
-        local suite_names=()
-        local running=0
-
-        for entry in "${CHAOS_SUITES[@]}"; do
-            # Parse: "display-name scenario [flags...]"
-            read -ra parts <<< "$entry"
-            local name="${parts[0]}"
-            local args=("${parts[@]:1}")
-
-            # No --subnet: the sim claims a free /24 itself (sim/netclaim.py).
-            # This used to pass 10.30.${chaos_idx}.0/24, which uniquified the
-            # children of ONE run against each other and was byte-identical
-            # between runs -- so two concurrent ci-local runs both walked
-            # 10.30.0 through 10.30.12 and collided on every one. A claim makes
-            # the daemon the arbiter, so an overlap is impossible rather than
-            # merely unlikely. The range still sits in 10.30.0.0/16, clear of
-            # docker's default pool (172.17-31 / 192.168) and of the
-            # fixed-subnet suites in 172.x.
-
-            # Throttle: wait for a slot
-            while [[ $running -ge $PARALLEL_JOBS ]]; do
-                wait -n -p done_pid 2>/dev/null || true
-                running=$((running - 1))
-            done
-
-            # Run in background, capture output to temp file
-            local logfile
-            logfile=$(mktemp "/tmp/ci-chaos-${name}.XXXXXX")
-            (
-                run_chaos "$name" "${args[@]}" >"$logfile" 2>&1
-            ) &
-            pids+=($!)
-            CI_CHAOS_PIDS+=("$!")
-            suite_names+=("$name:$logfile")
-            running=$((running + 1))
-        done
-
-        # Wait for all and collect results
-        for i in "${!pids[@]}"; do
-            local pid="${pids[$i]}"
-            local entry="${suite_names[$i]}"
-            local scenario="${entry%%:*}"
-            local logfile="${entry#*:}"
-
-            if wait "$pid" 2>/dev/null; then
-                record "chaos-$scenario" 0
-            else
-                record "chaos-$scenario" 1
-                # The whole log, not its tail: the child printed the results
-                # directory into it, and this is the only place that reaches
-                # the run log. The sed keeps the last frame of each line the
-                # progress display redraws with carriage returns.
-                echo "--- chaos-$scenario output ---"
-                sed 's/.*\r//' "$logfile" 2>/dev/null || true
-                echo "---"
-            fi
-            rm -f "$logfile"
-        done
-        # All chaos children have been waited on; clear so a later signal does
-        # not try to kill already-reaped PIDs.
-        CI_CHAOS_PIDS=()
-        # The next sequential suite's window starts here, not at the last
-        # suite before the chaos block.
-        load_mark barrier
+        run_chaos_set "${CHAOS_SUITES[@]}"
     fi
 
     # Sidecar
@@ -2188,6 +2676,45 @@ run_suite() {
     esac
 }
 
+# ── Stage 4: the nightly extras ────────────────────────────────────────────
+
+# Tier 3 only: a batch of every CI chaos scenario, NIGHTLY_CHAOS_RUNS runs of
+# each, then the long scenarios no other run takes (NIGHTLY_LONG), through the
+# same parallel runner as the integration stage. Repeated runs at one tree are
+# where the chaos scenarios have found most of their product defects, and a
+# single pass cannot tell an intermittent defect from a fixed one.
+run_nightly() {
+    local entries=()
+    [[ "$NIGHTLY" == true ]] || return 0
+    stage "Stage 4: Nightly extras"
+    mapfile -t entries < <(nightly_chaos)
+    run_chaos_set "${entries[@]}"
+    return 0
+}
+
+# A green tier run must have recorded exactly what --plan lists for it, less
+# the stages skipped for want of something on this host; otherwise a stage
+# has been added to or dropped from one and not the other, and the plan the
+# builder and the parity check read is no longer what runs. Recorded as
+# plan-match only when it fails.
+check_plan() {
+    local planned recorded name diff
+    planned=$(print_plan | grep -v '^#' | sort)
+    for name in "${SKIPPED[@]}"; do
+        planned=$(grep -vxF -- "${name%%:*}" <<<"$planned")
+    done
+    recorded=$(printf '%s\n' "${!RESULTS[@]}" | sort)
+    if [[ "$planned" == "$recorded" ]]; then
+        info "the run recorded the $(wc -l <<<"$recorded") results --plan lists for tier $TIER"
+        return 0
+    fi
+    diff=$(diff <(echo "$planned") <(echo "$recorded") | sed -n 's/^< /  planned, not recorded: /p; s/^> /  recorded, not planned: /p')
+    fail "what tier $TIER recorded differs from its --plan:"
+    echo "$diff"
+    record "plan-match" 1
+    return 0
+}
+
 # ── Summary ────────────────────────────────────────────────────────────────
 
 print_summary() {
@@ -2206,6 +2733,11 @@ print_summary() {
             python3 "$SCRIPT_DIR/lib/load-annotate.py" "$CI_LOAD_LOG" \
                 --threshold "$CI_LOAD_THRESHOLD" "$name" 2>&1 | sed 's/^/      /'
         fi
+    done
+
+    local skipped
+    for skipped in "${SKIPPED[@]}"; do
+        echo -e "  ${YELLOW}-${RESET} skipped $skipped"
     done
 
     echo ""
@@ -2230,7 +2762,7 @@ run_openwrt_scripts() {
     local rc=0
     info "[openwrt-scripts] Running the OpenWrt maintainer-script scenarios"
     bash "$SCRIPT_DIR/openwrt/maintainer-scripts-test.sh" || rc=$?
-    record "openwrt-scripts" $rc
+    record "openwrt-scripts" "$rc"
     return $rc
 }
 
@@ -2242,7 +2774,7 @@ run_tarball_install() {
     local rc=0
     info "[tarball-install] Running the systemd tarball upgrade scenarios"
     bash "$SCRIPT_DIR/tarball-install/test.sh" || rc=$?
-    record "tarball-install" $rc
+    record "tarball-install" "$rc"
     return $rc
 }
 
@@ -2253,7 +2785,7 @@ run_ci_parity() {
     local rc=0
     info "[ci-parity] Comparing the local suite set against the GitHub matrix"
     "$SCRIPT_DIR/check-ci-parity.sh" || rc=$?
-    record "ci-parity" $rc
+    record "ci-parity" "$rc"
 }
 
 # Nothing may resolve the shared mutable test image. This run does not write
@@ -2264,7 +2796,7 @@ run_image_scoping() {
     local rc=0
     info "[image-scoping] Checking that nothing names the shared test image"
     "$SCRIPT_DIR/check-image-scoping.sh" || rc=$?
-    record "image-scoping" $rc
+    record "image-scoping" "$rc"
 }
 
 # Every third-party action must be referenced by commit SHA. A tag is a mutable
@@ -2274,7 +2806,7 @@ run_action_pins() {
     local rc=0
     info "[action-pins] Checking that every action is pinned to a commit SHA"
     "$SCRIPT_DIR/check-action-pins.sh" || rc=$?
-    record "action-pins" $rc
+    record "action-pins" "$rc"
 }
 
 # Every reference a source comment makes must resolve for a reader who has only
@@ -2286,7 +2818,7 @@ run_comment_refs() {
     local rc=0
     info "[comment-refs] Checking that every source comment resolves in-repo"
     "$SCRIPT_DIR/check-comment-refs.sh" || rc=$?
-    record "comment-refs" $rc
+    record "comment-refs" "$rc"
 }
 
 # Every ignored test must carry a reason and an entry in
@@ -2298,7 +2830,7 @@ run_ignored_tests() {
     local rc=0
     info "[ignored-tests] Checking every ignored test against its inventory"
     python3 "$SCRIPT_DIR/check-ignored-tests.py" || rc=$?
-    record "ignored-tests" $rc
+    record "ignored-tests" "$rc"
     return 0
 }
 
@@ -2309,7 +2841,7 @@ run_portable_atomics() {
     local rc=0
     info "[portable-atomics] Checking that no non-test code uses std 64-bit atomics"
     python3 "$SCRIPT_DIR/check-portable-atomics.py" || rc=$?
-    record "portable-atomics" $rc
+    record "portable-atomics" "$rc"
 }
 
 # No bare mktemp result may become a docker bind-mount source. Under a private
@@ -2321,7 +2853,7 @@ run_mount_tmpdir() {
     local rc=0
     info "[mount-tmpdir] Checking that no bind-mount source comes from a bare mktemp"
     python3 "$SCRIPT_DIR/check-mount-tmpdir.py" || rc=$?
-    record "mount-tmpdir" $rc
+    record "mount-tmpdir" "$rc"
 }
 
 # Every container, network and volume a suite creates must carry the run
@@ -2333,7 +2865,7 @@ run_ci_labels() {
     local rc=0
     info "[ci-labels] Checking that every CI container, network and volume carries the run label"
     python3 "$SCRIPT_DIR/check-ci-labels.py" || rc=$?
-    record "ci-labels" $rc
+    record "ci-labels" "$rc"
 }
 
 # The shell scripts the OpenWrt packages ship, and the nak installer. The
@@ -2356,7 +2888,7 @@ run_shellcheck() {
         rc=2
         fail "[shellcheck] the pinned shellcheck could not be installed; nothing was linted"
     fi
-    record "shellcheck" $rc
+    record "shellcheck" "$rc"
 }
 
 # Every daemon log string a test matches on must still be emitted by src/.
@@ -2366,7 +2898,7 @@ run_log_strings() {
     local rc=0
     info "[log-strings] Checking test log matchers against the strings the crate sources emit"
     python3 "$SCRIPT_DIR/check-log-strings.py" || rc=$?
-    record "log-strings" $rc
+    record "log-strings" "$rc"
 }
 
 # A shell function's exit status is its last command's. One ending in a log
@@ -2379,7 +2911,7 @@ run_trailing_log() {
     local rc=0
     info "[trailing-log] Checking for functions whose status is a log call's"
     python3 "$SCRIPT_DIR/check-trailing-log.py" || rc=$?
-    record "trailing-log" $rc
+    record "trailing-log" "$rc"
 }
 
 # The chaos simulator's seeded draws must not depend on Python's string hash
@@ -2392,7 +2924,7 @@ run_chaos_schedule() {
     local rc=0
     info "[sim-schedule] Checking the chaos draws do not depend on the hash seed"
     python3 "$SCRIPT_DIR/check-chaos-schedule.py" || rc=$?
-    record "sim-schedule" $rc
+    record "sim-schedule" "$rc"
     return 0
 }
 
@@ -2405,7 +2937,7 @@ run_simassert() {
     local rc=0
     info "[sim-assertions] Checking the chaos path assertions against planted input"
     python3 "$SCRIPT_DIR/chaos/sim-assert-test.py" || rc=$?
-    record "sim-assertions" $rc
+    record "sim-assertions" "$rc"
     return 0
 }
 
@@ -2422,7 +2954,7 @@ run_wait_converge() {
     local rc=0
     info "[wait-converge] Running convergence-gate unit tests"
     bash "$SCRIPT_DIR/lib/wait-converge-test.sh" || rc=$?
-    record "wait-converge" $rc
+    record "wait-converge" "$rc"
 }
 
 # Unit tests for the NAT lab's start retry and relay guard. Hermetic: docker
@@ -2434,7 +2966,7 @@ run_relay_verdict_test() {
     local rc=0
     info "[relay-verdict] Running the NAT lab relay start and guard unit tests"
     bash "$SCRIPT_DIR/lib/relay-verdict-test.sh" || rc=$?
-    record "relay-verdict" $rc
+    record "relay-verdict" "$rc"
     return 0
 }
 
@@ -2447,7 +2979,7 @@ run_rpm_budget_test() {
     local rc=0
     info "[rpm-budget] Running the RPM install network budget unit tests"
     bash "$SCRIPT_DIR/rpm-install/budget-test.sh" || rc=$?
-    record "rpm-budget" $rc
+    record "rpm-budget" "$rc"
     return 0
 }
 
@@ -2460,7 +2992,7 @@ run_dockerrun() {
     local rc=0
     info "[docker-run] Running the container start retry unit tests"
     bash "$SCRIPT_DIR/lib/docker-run-test.sh" || rc=$?
-    record "docker-run" $rc
+    record "docker-run" "$rc"
     return 0
 }
 
@@ -2473,7 +3005,7 @@ run_package_versions() {
     local rc=0
     info "[package-versions] Checking the package versions derived for tags and branches"
     bash "$SCRIPT_DIR/check-package-versions.sh" || rc=$?
-    record "package-versions" $rc
+    record "package-versions" "$rc"
 }
 
 # The GitHub unit-test jobs run check-nextest-flaky.sh after nextest to
@@ -2485,7 +3017,7 @@ run_nextest_flaky() {
     local rc=0
     info "[nextest-flaky] Checking the flaky-test reporter against its fixtures"
     bash "$SCRIPT_DIR/nextest-flaky/test.sh" || rc=$?
-    record "nextest-flaky" $rc
+    record "nextest-flaky" "$rc"
 }
 
 # The node test groups in .config/nextest.toml: every test module that opens a
@@ -2504,7 +3036,7 @@ run_node_test_groups() {
     if [[ $rc -eq 0 ]]; then
         python3 "$SCRIPT_DIR/check-node-test-groups.py" || rc=$?
     fi
-    record "node-test-groups" $rc
+    record "node-test-groups" "$rc"
     return 0
 }
 
@@ -2516,7 +3048,7 @@ run_glibc_floor() {
     local rc=0
     info "[glibc-floor] Checking the glibc floor check against its cases"
     bash "$SCRIPT_DIR/glibc-floor/test.sh" || rc=$?
-    record "glibc-floor" $rc
+    record "glibc-floor" "$rc"
 }
 
 # This script's own argument handling: an unknown option or a missing value
@@ -2526,7 +3058,30 @@ run_ciargs() {
     local rc=0
     info "[ci-args] Checking ci-local.sh's argument handling"
     bash "$SCRIPT_DIR/lib/ci-args-test.sh" || rc=$?
-    record "ci-args" $rc
+    record "ci-args" "$rc"
+    return 0
+}
+
+# This script's plan check: a green tier run must record exactly what --plan
+# lists for its tier, less the stages it skipped. Hermetic, about a second.
+# Mirrored in ci.yml's ci-parity job by hand.
+run_ciplan() {
+    local rc=0
+    info "[ci-plan] Checking ci-local.sh's plan check against planted results"
+    bash "$SCRIPT_DIR/lib/ci-plan-test.sh" || rc=$?
+    record "ci-plan" "$rc"
+    return 0
+}
+
+# The parity check itself, against planted divergences in a scratch copy:
+# a step or suite on one runner only, and an exception removed, must each
+# fail it. Hermetic, a few seconds. Mirrored in ci.yml's ci-parity job by
+# hand.
+run_paritytest() {
+    local rc=0
+    info "[ci-parity-test] Checking the parity check against planted divergences"
+    bash "$SCRIPT_DIR/lib/ci-parity-test.sh" || rc=$?
+    record "ci-parity-test" "$rc"
     return 0
 }
 
@@ -2537,7 +3092,7 @@ run_fwtable() {
     local rc=0
     info "[fw-table] Checking the firewall suite's table check against its cases"
     bash "$SCRIPT_DIR/firewall/table-check-test.sh" || rc=$?
-    record "fw-table" $rc
+    record "fw-table" "$rc"
     return 0
 }
 
@@ -2550,7 +3105,7 @@ run_veth_host() {
     local rc=0
     info "[veth-host] Checking the chaos veth host-command bound against its cases"
     bash "$SCRIPT_DIR/chaos/veth-host-test.sh" || rc=$?
-    record "veth-host" $rc
+    record "veth-host" "$rc"
     return 0
 }
 
@@ -2559,30 +3114,10 @@ run_veth_host() {
 # means, whichever subset was asked for. --rerun skips them because it reruns a
 # suite on a tree whose full run already passed them, and says so in its banner.
 run_guards() {
-    run_ci_parity
-    run_log_strings
-    run_trailing_log
-    run_chaos_schedule
-    run_simassert
-    run_image_scoping
-    run_action_pins
-    run_comment_refs
-    run_ignored_tests
-    run_portable_atomics
-    run_mount_tmpdir
-    run_ci_labels
-    run_shellcheck
-    run_wait_converge
-    run_relay_verdict_test
-    run_rpm_budget_test
-    run_dockerrun
-    run_package_versions
-    run_nextest_flaky
-    run_node_test_groups
-    run_glibc_floor
-    run_ciargs
-    run_fwtable
-    run_veth_host
+    local g
+    for g in "${GUARDS[@]}"; do
+        "${g%% *}"
+    done
     return 0
 }
 
@@ -2606,6 +3141,7 @@ main() {
 
     stage "FIPS Local CI"
     info "Project root: $PROJECT_ROOT"
+    [[ -n "$TIER" ]] && info "Tier $TIER"
 
     load_sampler &
     CI_LOAD_PID=$!
@@ -2630,7 +3166,11 @@ main() {
                 if [[ "$SKIP_INTEGRATION" != true ]]; then
                     run_integration
                 fi
+                run_nightly
             fi
+        fi
+        if [[ -n "$TIER" && $OVERALL -eq 0 ]]; then
+            check_plan
         fi
     fi
 

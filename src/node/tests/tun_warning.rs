@@ -8,8 +8,9 @@
 //! Creating a TUN needs root, so the test runs in a network namespace of its
 //! own and is ignored by default, like the namespace tests in
 //! `src/upper/tests/tun.rs`. `testing/root-tests.sh` runs it with
-//! `--ignored`, as root; GitHub's Linux unit-test job runs that script under
-//! `sudo`, and it can be run the same way by hand.
+//! `--ignored`, as root; GitHub's `test-root` job runs that script under
+//! `sudo`, local CI at every tier in a container, and it can be run under
+//! `sudo` by hand.
 //! Linux only.
 
 use super::*;

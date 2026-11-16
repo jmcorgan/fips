@@ -23,7 +23,14 @@
 #      binary lists no test under transport::ble::, and then the lines whose
 #      test is behind `ble_available` (BLE_ONLY below) are skipped, and their
 #      count printed. Where transport::ble:: tests are listed, a BLE line
-#      whose test does not resolve is a miss like any other.
+#      whose test does not resolve is a miss like any other. The tests only
+#      the root crate's `explorers` feature compiles (EXPLORER_ONLY below)
+#      are skipped the same way, by module, when the build lists none of the
+#      module's tests: each skipped line's test must still be defined, as
+#      `fn <name>(`, in its module's file, so a misspelled or renamed name
+#      is a miss in every build. FIPS_MUTATION_EXPLORERS=1 builds with that
+#      feature and skips none of them. The switches left with no line to
+#      run are printed by name.
 #   3. The self-check: each SELF entry runs its planted test with its switch
 #      on and goes through the same `held` decision as a red manifest line
 #      with no anchor; the decision must be the one SELF gives. PlantedRed's
@@ -49,6 +56,11 @@
 # Environment:
 #   FIPS_MUTATION_TIMEOUT  seconds per test run (default 120)
 #   FIPS_MUTATION_ONLY     run only the break of this name (for trying one)
+#   FIPS_MUTATION_EXPLORERS  1 to build the root crate's library tests with
+#                          its `explorers` feature and run every line; the
+#                          nightly run sets it (testing/ci-local.sh with
+#                          --explorers or --tier 3), and no run a push starts
+#                          does
 # FIPS_NODE_FAULTS from the caller's environment is ignored: the lane sets
 # it per run.
 #
@@ -67,6 +79,7 @@ FAULTS="$PROJECT_ROOT/core/src/faults.rs"
 INVENTORY="$PROJECT_ROOT/testing/ignored-tests.txt"
 LIMIT="${FIPS_MUTATION_TIMEOUT:-120}"
 ONLY="${FIPS_MUTATION_ONLY:-}"
+EXPLORERS="${FIPS_MUTATION_EXPLORERS:-}"
 
 cd "$PROJECT_ROOT" || exit 2
 for f in "$MANIFEST" "$FAULTS" "$INVENTORY"; do
@@ -110,6 +123,14 @@ BLE_ONLY=(
     "node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says_with_multipath_on"
     "node::tests::settle::crossing::a_reaped_ble_dial_leaves_the_channel_another_dial_in_flight_uses"
     "node::tests::settle::crossing::a_reaped_ble_dial_leaves_the_channel_another_dial_in_flight_uses_with_multipath_on"
+)
+
+# The fips-mesh tests only the root crate's `explorers` feature compiles:
+# the module prefix (gated in src/node/tests/settle/explore/mod.rs), then
+# the file that defines its tests.
+EXPLORER_ONLY=(
+    "node::tests::settle::explore::oracle:: src/node/tests/settle/explore/oracle.rs"
+    "node::tests::settle::explore::parity:: src/node/tests/settle/explore/parity.rs"
 )
 
 # The manifest's lines: break, expectation, crate, test, anchor.
@@ -217,8 +238,13 @@ if [[ "$fence_count" != 0 ]]; then
 fi
 echo "   fence $fence_bin: FIPS_NODE_FAULTS appears 0 times"
 
-echo "mutation-lane: building the healthy tree"
-test_bins || exit 2
+if [[ "$EXPLORERS" == 1 ]]; then
+    echo "mutation-lane: building the healthy tree, with the root crate's explorers"
+    test_bins fips-mesh/explorers || exit 2
+else
+    echo "mutation-lane: building the healthy tree"
+    test_bins || exit 2
+fi
 
 # 2. Every name resolves. Each binary is listed once, into a variable: a
 # `grep -q` reading the listing through a pipe would stop it early, and
@@ -244,6 +270,40 @@ if ! grep -q '^transport::ble::' <<<"${LISTED[fips-mesh]}"; then
     done
     echo "mutation-lane: this build has no BLE transport (no transport::ble:: test);" \
         "${#SKIP[@]} line(s) whose test is behind ble_available skipped"
+fi
+# The lines skipped in a build without the explorers, each test checked
+# against its module's file instead of the list.
+explorer_skips=0
+if [[ "$EXPLORERS" != 1 ]]; then
+    for entry in "${EXPLORER_ONLY[@]}"; do
+        read -r prefix file <<<"$entry"
+        grep -qF -- "$prefix" <<<"${LISTED[fips-mesh]}" && continue
+        for i in "${!M_BREAK[@]}"; do
+            [[ "${M_CRATE[$i]}" == fips-mesh && "${M_TEST[$i]}" == "$prefix"* ]] || continue
+            [[ -n "${SKIP[$i]:-}" ]] && continue
+            if grep -qE "^[[:space:]]*fn ${M_TEST[$i]#"$prefix"}\(" "$file"; then
+                SKIP[$i]=1
+                explorer_skips=$((explorer_skips + 1))
+            else
+                miss "line $((i + 1)): ${M_TEST[$i]} is defined in no fn of $file"
+                SKIP[$i]=1
+            fi
+        done
+    done
+fi
+if [[ $explorer_skips -gt 0 ]]; then
+    declare -a BARE=()
+    for b in "${M_BREAK[@]}"; do
+        in_list "$b" "${BARE[@]}" && continue
+        runs=false
+        for i in "${!M_BREAK[@]}"; do
+            [[ "${M_BREAK[$i]}" == "$b" && -z "${SKIP[$i]:-}" ]] && { runs=true; break; }
+        done
+        [[ "$runs" == false ]] && BARE+=("$b")
+    done
+    echo "mutation-lane: this build has no explorers (FIPS_MUTATION_EXPLORERS is not 1);" \
+        "$explorer_skips line(s) whose test only the explorers feature compiles skipped;" \
+        "switches with no line left to run: ${BARE[*]:-none}"
 fi
 for i in "${!M_BREAK[@]}"; do
     [[ -n "${SKIP[$i]:-}" ]] && continue
