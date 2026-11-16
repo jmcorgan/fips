@@ -17,7 +17,8 @@
 #                             core's slow suites, the mutation lane, the musl
 #                             unit tests and every integration suite.
 #                          3  the nightly run of each trunk tip: tier 2, both
-#                             halves of the explorers, a chaos batch of each
+#                             halves of the explorers and the mutation lane's
+#                             explorer lines, a chaos batch of each
 #                             CI scenario and the long scenarios no other run
 #                             takes. --with-tor adds the Tor suites.
 #                        Under a tier the root tests run in a container
@@ -60,10 +61,12 @@
 #                        (root-explorers). Each half runs exactly the tests
 #                        its feature adds, read from the two builds' test
 #                        lists, and the two run side by side. =core or =root
-#                        runs one half. Off by default, and no CI run started
-#                        by a push turns it on: they take hours. Cannot be
-#                        combined with --build-only, which skips the unit-test
-#                        stage.
+#                        runs one half. With the root half the mutation lane's
+#                        lines whose test is a root explorer walk run too, as
+#                        a stage of their own (mutations-explorers). Off by
+#                        default, and no CI run started by a push turns it on:
+#                        they take hours. Cannot be combined with
+#                        --build-only, which skips the unit-test stage.
 #   --cross-check        Also compile the macOS, Windows and FreeBSD targets in
 #                        the build stage (testing/cross-check/check.sh). Off
 #                        by default: it needs zig. When asked for, a missing
@@ -562,7 +565,10 @@ print_plan() {
         echo "# musl-tests and addrless-iface-musl are skipped, with the reason, on a host without the $MUSL_TARGET target or musl-gcc"
     fi
     [[ "$EXPLORERS" == all || "$EXPLORERS" == core ]] && echo core-explorers
-    [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]] && echo root-explorers
+    if [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]]; then
+        echo root-explorers
+        echo mutations-explorers
+    fi
     if [[ "$ROOT_TESTS" == true ]]; then
         echo root-tests
         echo privileged-bind
@@ -1262,13 +1268,12 @@ run_tests() {
     # .github/workflows/ci.yml. Tier 1 leaves it out: it has found coverage
     # gaps, never a product defect, and tier 2 runs it before a trunk moves.
     # Its lines whose test only the root crate's explorers feature compiles
-    # run only in a run with the root explorers (--explorers, --tier 3),
-    # which builds the lane with that feature; elsewhere they are skipped.
+    # are skipped here, and run in a stage of their own with the root
+    # explorers (run_lane_explorers), so the nightly can run them apart from
+    # tier 2.
     if [[ "$MUTATIONS" == true ]]; then
-        local lane_explorers=""
-        [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]] && lane_explorers=1
-        info "testing/mutations/run.sh${lane_explorers:+ (FIPS_MUTATION_EXPLORERS=1)}"
-        if FIPS_MUTATION_EXPLORERS="$lane_explorers" with_fd_limit bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
+        info "testing/mutations/run.sh"
+        if with_fd_limit bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
             record "mutations" 0
         else
             record "mutations" 1
@@ -1330,6 +1335,7 @@ run_tests() {
 
     run_musl
     run_explorers
+    run_lane_explorers
     run_root_tests
 }
 
@@ -1504,6 +1510,23 @@ run_explorers() {
         rm -f "${logs[$i]}"
         record "${halves[$i]}-explorers" "$rc"
     done
+    return 0
+}
+
+# With the root explorers (--explorers, --explorers=root or tier 3), the
+# mutation lane's lines whose test only the root crate's explorers feature
+# compiles, built with that feature, recorded as mutations-explorers. The
+# plain lane (mutations) skips those lines and keeps the normal-build fence,
+# so the two stages together run every manifest line once. The lane fails when no line is an explorer walk, so a renamed module
+# cannot turn this stage into a run of nothing.
+run_lane_explorers() {
+    [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]] || return 0
+    info "testing/mutations/run.sh (FIPS_MUTATION_EXPLORERS=only)"
+    if FIPS_MUTATION_EXPLORERS=only with_fd_limit bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
+        record "mutations-explorers" 0
+    else
+        record "mutations-explorers" 1
+    fi
     return 0
 }
 

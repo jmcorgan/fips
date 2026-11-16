@@ -92,10 +92,20 @@ its module's file, so a misspelled or renamed name is a miss in every
 build. The lane then prints the switches left with no line to run: as of
 this change `CrossedRunsKeep`, `MoveSkipsWorkerOffer` and
 `WorldSkipsWorkerWait`, which only explorer lines show red, so a run a push
-starts does not show them. With `FIPS_MUTATION_EXPLORERS=1`, which a local
-CI run with the root explorers sets (`testing/ci-local.sh --explorers` or
-`--tier 3`, the nightly run), the lane builds the root crate's library
-tests with the feature and every line must resolve and run.
+starts does not show them. With `FIPS_MUTATION_EXPLORERS=1` the lane builds
+the root crate's library tests with the feature and every line must resolve
+and run.
+
+`FIPS_MUTATION_EXPLORERS=only` builds with the feature and runs those lines
+alone, 26 of them over 10 switches as of this change: every other line is
+skipped, and the normal-build fence is left out, since the plain lane runs
+it on the same tree. A manifest in which no line's test is in an
+`EXPLORER_ONLY` module fails with exit 1 before anything is built, so a
+renamed module cannot turn the stage into a run of nothing. Local CI runs
+this mode as its own stage, `mutations-explorers`, wherever the root
+explorers run (`testing/ci-local.sh --explorers`, `--tier 3`, the nightly
+run, and its `--part root-explorers`); the plain lane (`mutations`) skips
+those lines, so the two stages together run every line once.
 
 ## Running it
 

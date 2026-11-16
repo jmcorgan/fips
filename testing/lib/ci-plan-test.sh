@@ -116,6 +116,12 @@ run_check
 check "tier 3: a missing explorer half fails" \
     "$(grep -qF 'planned, not recorded: root-explorers' <<<"$OUT" && echo 0 || echo 1)"
 
+load 3
+record_plan mutations-explorers
+run_check
+check "tier 3: a missing mutations-explorers fails" \
+    "$(grep -qF 'planned, not recorded: mutations-explorers' <<<"$OUT" && echo 0 || echo 1)"
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
     echo "All ci-local.sh plan cases passed"

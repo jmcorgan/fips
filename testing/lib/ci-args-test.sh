@@ -172,14 +172,14 @@ expect_plan() {
 }
 expect_plan "--tier 1 --plan" \
     "ci-parity core-baremetal cross-check-x86_64-apple-darwin unit-tests core-fence-tests known-defect release-test-compile root-tests" \
-    "mutations musl-tests build-integration chaos-tcp-mesh core-explorers root-explorers" \
+    "mutations musl-tests build-integration chaos-tcp-mesh core-explorers root-explorers mutations-explorers" \
     --tier 1 --plan
 expect_plan "--tier 2 --plan" \
     "root-tests mutations musl-tests build-integration chaos-tcp-mesh rpm-install" \
-    "core-explorers root-explorers chaos-batch1-tcp-mesh chaos-maelstrom tor-socks5" \
+    "core-explorers root-explorers mutations-explorers chaos-batch1-tcp-mesh chaos-maelstrom tor-socks5" \
     --tier 2 --plan
 expect_plan "--tier 3 --plan" \
-    "mutations musl-tests chaos-tcp-mesh core-explorers root-explorers chaos-batch3-tcp-mesh chaos-maelstrom chaos-maelstrom-sparse chaos-dead-grace-long" \
+    "mutations musl-tests chaos-tcp-mesh core-explorers root-explorers mutations-explorers chaos-batch3-tcp-mesh chaos-maelstrom chaos-maelstrom-sparse chaos-dead-grace-long" \
     "tor-socks5" \
     --tier 3 --plan
 expect_plan "--tier 3 --with-tor --plan" "tor-socks5 tor-directory core-explorers" "" \

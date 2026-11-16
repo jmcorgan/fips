@@ -285,9 +285,10 @@ internal builder runs for each kind of commit:
   slow suites, the mutation lane, the musl unit tests and every integration
   suite. This is the set GitHub's `ci.yml` runs too.
 - **Tier 3, the nightly run of each trunk tip:** tier 2, both halves of the
-  explorers, and the nightly extras: a batch of every CI chaos scenario, three
-  runs each, and the long scenarios no other run takes (`dead-grace-long`,
-  `maelstrom`, `maelstrom-sparse`). `--with-tor` adds the Tor suites.
+  explorers, the mutation lane's explorer lines, and the nightly extras: a
+  batch of every CI chaos scenario, three runs each, and the long scenarios
+  no other run takes (`dead-grace-long`, `maelstrom`, `maelstrom-sparse`).
+  `--with-tor` adds the Tor suites.
 
 No tier a push starts runs the explorers. Under a tier the root tests run in
 a container, the environment switches (`FIPS_CI_BAREMETAL`,
@@ -340,9 +341,10 @@ test run with `slow-explorers` took 123 minutes with the host shared
 (2026-11-15), against under six for the same run with `slow-tests` alone on
 core-vm. The core half also runs fips-core's two guard-switch meta-tests
 again in the explorers' build, the one place the rows whose tests are
-explorers run. With the root half, the mutation lane is built with the root
-crate's `explorers` feature (`FIPS_MUTATION_EXPLORERS=1`) and runs its lines
-whose test is a root explorer, which every other run skips.
+explorers run. With the root half, the mutation lane runs again as a stage of
+its own, `mutations-explorers`: built with the root crate's `explorers`
+feature, it runs only its lines whose test is a root explorer
+(`FIPS_MUTATION_EXPLORERS=only`), which the plain lane skips.
 
 The Linux and musl legs also create an address-less dummy interface
 (`fips-probe0`) and pass its name to the tests as
