@@ -15,6 +15,17 @@
 #                    when the Nostr rendezvous code changes, and is not in
 #                    local CI's default run either.
 #
+# Deliberate nightly-only (in neither runner's push-started set), with reason:
+#   dual-udp-flap, two-bound-udp-bulk, churn-mixed-10, congestion-stress —
+#                    chaos scenarios ci-local.sh runs only in tier 3's chaos
+#                    batch (its NIGHTLY_CHAOS list), the nightly run of each
+#                    trunk tip. GitHub CI has no nightly run, so they run on
+#                    the internal builder alone. The table NIGHTLY_ONLY below
+#                    holds each one's reason; a NIGHTLY_CHAOS entry without
+#                    one, an entry for a scenario NIGHTLY_CHAOS does not
+#                    list, one also in CHAOS_SUITES or on a GitHub leg, and
+#                    one tier 3's chaos part does not batch each fail.
+#
 # Deliberate GitHub-only (NOT in the local run), with reason:
 #   deb-install ubuntu22 on arm64 — the local host is x86_64 and cannot run an
 #                    arm64 package. The GitHub leg installs the arm64 package
@@ -350,6 +361,42 @@ deb_github_only += sorted(
 
 rpm_local_only = sorted(local_rpm - github_rpm)
 rpm_github_only = sorted(github_rpm - local_rpm)
+
+# ── Nightly-only chaos scenarios ─────────────────────────────────────────────
+# By display name, each with why it runs only in the nightly batch. GitHub CI
+# has no nightly run, so these are the one place the two runners' chaos sets
+# differ on purpose.
+NIGHTLY_ONLY = {
+    "dual-udp-flap": "missed its ceiling by tens of ms under load; its interface "
+        "binding is also exercised by forward-only and two-bound-udp",
+    "two-bound-udp-bulk": "its finds came from repeated stability runs, not "
+        "from a per-push gate",
+    "churn-mixed-10": "a pass means only that the mesh formed and nobody "
+        "errored, on thresholds calibrated from 14 runs; its finds came from "
+        "development runs",
+    "congestion-stress": "176 recorded runs met none of its criteria, cause "
+        "unknown",
+}
+nightly_problems = []
+local_nightly = {}
+for entry in bash_array_entries("NIGHTLY_CHAOS"):
+    parts = entry.split()
+    if len(parts) >= 2:
+        local_nightly[parts[0]] = (parts[1], " ".join(parts[2:]))
+chaos_displays = {e.split()[0] for e in arrays.get("CHAOS_SUITES", [])}
+for name, (scenario, flags) in sorted(local_nightly.items()):
+    if name not in NIGHTLY_ONLY:
+        nightly_problems.append(f"{name} is in ci-local.sh's NIGHTLY_CHAOS but has no "
+                                "entry in NIGHTLY_ONLY (add one with its reason)")
+    if name in chaos_displays:
+        nightly_problems.append(f"{name} is in both NIGHTLY_CHAOS and CHAOS_SUITES, so "
+                                "tier 2 runs it too")
+    if scenario in github_chaos and github_chaos[scenario] == flags:
+        nightly_problems.append(f"{name} is nightly-only but a GitHub leg runs scenario "
+                                f"{scenario} on every push")
+for name in sorted(set(NIGHTLY_ONLY) - set(local_nightly)):
+    nightly_problems.append(f"NIGHTLY_ONLY names {name}, which ci-local.sh's "
+                            "NIGHTLY_CHAOS does not list")
 
 # ── Steps, per tier ──────────────────────────────────────────────────────────
 import fnmatch
@@ -940,10 +987,26 @@ for pat in LOCAL_ONLY:
     if pat not in used_local_only:
         step_problems.append(f"local-only stage {pat} matches no tier 2 stage")
 
+# Each nightly-only scenario must still be batched by tier 3's chaos part.
+part = subprocess.run(["bash", ci_local_path, "--tier", "3", "--part", "chaos", "--plan"],
+                      capture_output=True, text=True,
+                      env={k: v for k, v in __import__("os").environ.items()
+                           if k != "FIPS_CI_TIER"})
+if part.returncode != 0:
+    print("check-ci-parity: ci-local.sh --tier 3 --part chaos --plan failed: "
+          f"{part.stderr.strip()}", file=sys.stderr)
+    sys.exit(2)
+batched = {l.strip().split("-", 2)[2] for l in part.stdout.splitlines()
+           if l.startswith("chaos-batch")}
+for name in sorted(local_nightly):
+    if name not in batched:
+        nightly_problems.append(f"{name} is nightly-only but tier 3's chaos part does "
+                                "not batch it")
+
 problems = (local_only or github_only or chaos_local_only or chaos_github_only
             or chaos_flag_drift or deb_local_only or deb_github_only
             or rpm_local_only or rpm_github_only
-            or dispatch_uncovered or malformed or step_problems)
+            or dispatch_uncovered or malformed or step_problems or nightly_problems)
 
 if problems:
     print("CI parity FAILED: the two runners do not cover the same work.\n")
@@ -988,6 +1051,10 @@ if problems:
         print("  Matrix legs this guard cannot identify:")
         for n in malformed:
             print(f"    - {n}")
+    if nightly_problems:
+        print("  Nightly-only chaos scenarios out of place:")
+        for n in nightly_problems:
+            print(f"    - {n}")
     if step_problems:
         print("  Steps that do not match between ci.yml and ci-local.sh --tier 2:")
         for n in step_problems:
@@ -1014,6 +1081,8 @@ print(f"  {len(github_records)} build, lint, guard and unit-test results match "
       "ci-local.sh --tier 2, step for step.")
 print(f"  {len(used_cmds)} mapped steps run what ci-local.sh runs for their result, "
       "and no step runs the explorers.")
+print(f"  plus {len(local_nightly)} nightly-only chaos scenarios, batched by tier 3 "
+      f"alone ({', '.join(sorted(local_nightly))}).")
 for arch, distros in sorted(github_deb_extra.items()):
     legs = "leg" if len(distros) == 1 else "legs"
     print(f"  plus {len(distros)} GitHub-only {arch} install {legs} "

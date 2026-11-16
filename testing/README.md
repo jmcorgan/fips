@@ -303,13 +303,17 @@ internal builder runs for each kind of commit:
   and no integration suites.
 - **Tier 2, trunk tips and landing candidates:** tier 1, with the `.deb`
   built at the start of the build stage, the core's slow suites, the
-  mutation lane, the musl unit tests and every integration suite. This is
-  the set GitHub's `ci.yml` runs too.
+  mutation lane, the musl unit tests and every integration suite but the
+  nightly-only chaos scenarios. This is the set GitHub's `ci.yml` runs too.
 - **Tier 3, the nightly run of each trunk tip:** tier 2, both halves of the
   explorers, the mutation lane's explorer lines, and the nightly extras: a
-  batch of every CI chaos scenario, three runs each, and the long scenarios
-  no other run takes (`dead-grace-long`, `maelstrom`, `maelstrom-sparse`).
-  `--with-tor` adds the Tor suites.
+  batch of every CI chaos scenario, three runs each, the same batch of the
+  nightly-only chaos scenarios (`dual-udp-flap`, `two-bound-udp-bulk`,
+  `churn-mixed-10` and `congestion-stress`, which no tier 1 or tier 2 run
+  and no GitHub job takes), and the long scenarios no other run takes
+  (`dead-grace-long`, `maelstrom`, `maelstrom-sparse`). `--with-tor` adds
+  the Tor suites. The parity check lists the nightly-only scenarios as an
+  exception, since GitHub CI has no nightly run.
 
 No tier a push starts runs the explorers. Under a tier the root tests run in
 a container, the environment switches (`FIPS_CI_BAREMETAL`,

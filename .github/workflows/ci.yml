@@ -45,6 +45,10 @@ env:
 #   tor-socks5     — requires live Tor network; opt-in via --with-tor,
 #                    unreliable on GitHub-hosted runners.
 #   tor-directory  — same; live Tor dependency.
+#   dual-udp-flap, two-bound-udp-bulk, churn-mixed-10, congestion-stress —
+#                    chaos scenarios run only in the nightly run of each
+#                    trunk tip (ci-local.sh --tier 3, NIGHTLY_CHAOS), and
+#                    this workflow has no nightly run.
 #
 # Deliberate GitHub-only: the arm64 install leg (ubuntu22). The local host is
 # x86_64 and has no arm64 execution; the leg is compared by distribution only
@@ -1439,10 +1443,6 @@ jobs:
             type: gateway
             topology: gateway
           # ── Chaos / stochastic scenarios ───────────────────────────────────
-          - suite: churn-mixed-10
-            type: chaos
-            scenario: churn-mixed
-            chaos_flags: "--nodes 10 --duration 120"
           - suite: ethernet-mesh
             type: chaos
             scenario: ethernet-mesh
@@ -1452,9 +1452,6 @@ jobs:
           - suite: dual-path-flap
             type: chaos
             scenario: dual-path-flap
-          - suite: dual-udp-flap
-            type: chaos
-            scenario: dual-udp-flap
           - suite: dual-path-carrier
             type: chaos
             scenario: dual-path-carrier
@@ -1467,18 +1464,12 @@ jobs:
           - suite: two-bound-udp
             type: chaos
             scenario: two-bound-udp
-          - suite: two-bound-udp-bulk
-            type: chaos
-            scenario: two-bound-udp-bulk
           - suite: steady-dual-path
             type: chaos
             scenario: steady-dual-path
           - suite: tcp-mesh
             type: chaos
             scenario: tcp-mesh
-          - suite: congestion-stress
-            type: chaos
-            scenario: congestion-stress
           # ── NAT traversal lab (Nostr/STUN UDP hole punch) ───────────────
           - suite: nat-cone
             type: nat

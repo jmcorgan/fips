@@ -215,6 +215,8 @@ load 3 chaos
 # shellcheck disable=SC2034  # read by the functions loaded from ci-local.sh
 CHAOS_SUITES=()
 # shellcheck disable=SC2034
+NIGHTLY_CHAOS=()
+# shellcheck disable=SC2034
 NIGHTLY_LONG=()
 check "part chaos with no scenario lists nothing of its own" \
     "$(part_has_work && echo 1 || echo 0)"
@@ -226,6 +228,8 @@ check "part chaos as it stands lists something of its own" \
 load 3 chaos
 # shellcheck disable=SC2034  # read by the functions loaded from ci-local.sh
 CHAOS_SUITES=()
+# shellcheck disable=SC2034
+NIGHTLY_CHAOS=()
 # shellcheck disable=SC2034
 NIGHTLY_LONG=()
 stage() { return 0; }

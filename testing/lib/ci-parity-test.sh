@@ -4,10 +4,12 @@
 # cross-check target list) into a scratch tree, plants one divergence, and
 # runs the check there. The healthy copy must pass; a unit-test step or a
 # suite added to ci.yml only, a stage dropped from or added to ci-local.sh's
-# tier 2 only, an exception removed from the check's lists, and a mapped
-# step or a suite leg's step that keeps its name but runs something else,
-# nothing, or the explorers, or cannot fail, and the explorers in a package
-# workflow must each fail it, naming what diverged.
+# tier 2 only, an exception removed from the check's lists, a mapped step
+# or a suite leg's step that keeps its name but runs something else,
+# nothing, or the explorers, or cannot fail, the explorers in a package
+# workflow, and a nightly-only chaos scenario without its reason, back in
+# tier 2 or on GitHub, or out of tier 3's batch must each fail it, naming
+# what diverged.
 #
 # Hermetic: nothing is built or started, and the tree under test is never
 # written. Each case runs the check once, which runs ci-local.sh --tier 2
@@ -331,6 +333,42 @@ fresh && plant .github/workflows/ci.yml \
         continue-on-error: true"
 expect_red "the known-defect lane under continue-on-error" \
     "test-core: mapped step 'Run the known-defect lane' cannot fail its run"
+
+# The nightly-only chaos scenarios: each needs its reason in the check, and
+# must stay out of tier 2 and GitHub and in tier 3's batch.
+fresh && plant testing/check-ci-parity.sh \
+    '    "congestion-stress": "176 recorded runs met none of its criteria, cause "
+        "unknown",' \
+    ''
+expect_red "a nightly-only scenario's exception removed" \
+    "congestion-stress is in ci-local.sh's NIGHTLY_CHAOS but has no entry in NIGHTLY_ONLY"
+
+fresh && plant .github/workflows/ci.yml \
+    "          - suite: tcp-mesh" \
+    "          - suite: dual-udp-flap
+            type: chaos
+            scenario: dual-udp-flap
+          - suite: tcp-mesh"
+expect_red "a nightly-only scenario back on GitHub" \
+    "dual-udp-flap is nightly-only but a GitHub leg runs scenario dual-udp-flap on every push"
+
+fresh && plant testing/ci-local.sh \
+    '    "tcp-mesh tcp-mesh"' \
+    '    "tcp-mesh tcp-mesh"
+    "dual-udp-flap dual-udp-flap"'
+expect_red "a nightly-only scenario back in tier 2" \
+    "dual-udp-flap is in both NIGHTLY_CHAOS and CHAOS_SUITES"
+
+# shellcheck disable=SC2016  # the plant is ci-local.sh's text, not this shell's
+fresh && plant testing/ci-local.sh \
+    '    for entry in "${CHAOS_SUITES[@]}" "${NIGHTLY_CHAOS[@]}"; do
+        read -ra parts <<< "$entry"
+        for (( i = 1;' \
+    '    for entry in "${CHAOS_SUITES[@]}"; do
+        read -ra parts <<< "$entry"
+        for (( i = 1;'
+expect_red "the nightly-only scenarios dropped from tier 3's batch" \
+    "two-bound-udp-bulk is nightly-only but tier 3's chaos part does not batch it"
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

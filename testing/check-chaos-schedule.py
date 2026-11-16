@@ -18,7 +18,7 @@ methods with recorders, drives a few rounds of each, and prints every draw.
 Each manager gets its own stream, so one site's dependence can neither hide
 nor be blamed on another's. Cases:
 
-  ci   churn-mixed at 10 nodes, the invocation local and GitHub CI gate on;
+  ci   churn-mixed at 10 nodes, the invocation the nightly chaos batch runs;
   all  churn-mixed at its own 20 nodes, with ingress policing (four tiers)
        and peer churn turned on, so every known site is exercised. 20 nodes
        is what makes the dial-direction site reliably visible.

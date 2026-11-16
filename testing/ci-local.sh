@@ -23,8 +23,10 @@
 #                          3  the nightly run of each trunk tip: tier 2, both
 #                             halves of the explorers and the mutation lane's
 #                             explorer lines, a chaos batch of each
-#                             CI scenario and the long scenarios no other run
-#                             takes. --with-tor adds the Tor suites.
+#                             CI scenario and of the nightly-only ones
+#                             (NIGHTLY_CHAOS), and the long scenarios no
+#                             other run takes. --with-tor adds the Tor
+#                             suites.
 #                        Under a tier the root tests run in a container
 #                        (run_root_tests), never under sudo, and the
 #                        environment switches below (FIPS_CI_BAREMETAL,
@@ -132,13 +134,15 @@
 #   static-mesh, static-chain, gateway,
 #   firewall, nat-cone, nat-symmetric,
 #   nat-lan, stun-faults,
-#   chaos-churn-mixed-10, chaos-ethernet-mesh,
-#   chaos-ethernet-churn, chaos-tcp-mesh,
-#   chaos-congestion-stress, chaos-dual-path-flap, chaos-dual-udp-flap,
-#   chaos-dual-path-carrier, chaos-forward-only, chaos-loaded-standby,
-#   chaos-two-bound-udp, chaos-two-bound-udp-bulk, chaos-steady-dual-path,
+#   chaos-ethernet-mesh, chaos-ethernet-churn, chaos-tcp-mesh,
+#   chaos-dual-path-flap, chaos-dual-path-carrier, chaos-forward-only,
+#   chaos-loaded-standby, chaos-two-bound-udp, chaos-steady-dual-path,
 #   native-api, mdns, dns-resolver, deb-install, rpm-install,
 #   medium-change
+#
+# Nightly only (tier 3's chaos batch; known to --only and --rerun):
+#   chaos-dual-udp-flap, chaos-two-bound-udp-bulk, chaos-churn-mixed-10,
+#   chaos-congestion-stress
 #
 # Opt-in (require --with-tor; depend on live Tor network):
 #   tor-socks5, tor-directory
@@ -348,6 +352,19 @@ MUSL_TARGET=x86_64-unknown-linux-musl
 # scenarios only the nightly run takes, each "display-name scenario
 # [--flag value ...]" as in CHAOS_SUITES.
 NIGHTLY_CHAOS_RUNS=3
+# Chaos scenarios run only in the nightly batch, NIGHTLY_CHAOS_RUNS times
+# each like the CI scenarios, and in no tier 1 or tier 2 run. Each has a
+# weak or calibrated assertion or found its defects in repeated runs rather
+# than as a gate, a record of load sensitivity, and its decision logic
+# covered in simulated time, so a defect of its kind surfaces at the next
+# nightly rather than at the landing. GitHub CI, which has no nightly run,
+# does not run them (check-ci-parity.sh lists them as an exception).
+NIGHTLY_CHAOS=(
+    "dual-udp-flap dual-udp-flap"
+    "two-bound-udp-bulk two-bound-udp-bulk"
+    "churn-mixed-10 churn-mixed --nodes 10 --duration 120"
+    "congestion-stress congestion-stress"
+)
 NIGHTLY_LONG=(
     "dead-grace-long dead-grace-long"
     "maelstrom maelstrom"
@@ -364,15 +381,11 @@ CHAOS_SUITES=(
     "steady-dual-path steady-dual-path"
     "ethernet-churn ethernet-churn"
     "dual-path-flap dual-path-flap"
-    "dual-udp-flap dual-udp-flap"
     "dual-path-carrier dual-path-carrier"
     "forward-only forward-only"
     "two-bound-udp two-bound-udp"
-    "two-bound-udp-bulk two-bound-udp-bulk"
     "ethernet-mesh ethernet-mesh"
-    "churn-mixed-10 churn-mixed --nodes 10 --duration 120"
     "tcp-mesh tcp-mesh"
-    "congestion-stress congestion-stress"
     "loaded-standby loaded-standby"
 )
 # Scenarios retired 2026-07-23 because their subject was a pure decision the
@@ -486,6 +499,12 @@ list_suites() {
         echo "    chaos-${parts[0]}  (${parts[*]:1})"
     done
     echo ""
+    echo "  Chaos scenarios, nightly only (tier 3's chaos batch):"
+    for entry in "${NIGHTLY_CHAOS[@]}"; do
+        read -ra parts <<< "$entry"
+        echo "    chaos-${parts[0]}  (${parts[*]:1})"
+    done
+    echo ""
     echo "  Native API:"
     for s in "${NATIVE_API_SUITES[@]}"; do echo "    $s"; done
     echo ""
@@ -572,12 +591,12 @@ GUARDS=(
 )
 
 # The nightly chaos runs, one entry per line in CHAOS_SUITES' form: each CI
-# scenario NIGHTLY_CHAOS_RUNS times, as batch<i>-<name>, then the long
-# scenarios. The teardown derives their host interface names from the same
-# list.
+# scenario and each nightly-only one NIGHTLY_CHAOS_RUNS times, as
+# batch<i>-<name>, then the long scenarios. The teardown derives their host
+# interface names from the same list.
 nightly_chaos() {
     local entry i parts
-    for entry in "${CHAOS_SUITES[@]}"; do
+    for entry in "${CHAOS_SUITES[@]}" "${NIGHTLY_CHAOS[@]}"; do
         read -ra parts <<< "$entry"
         for (( i = 1; i <= NIGHTLY_CHAOS_RUNS; i++ )); do
             echo "batch$i-${parts[0]} ${parts[*]:1}"
@@ -1023,7 +1042,7 @@ ci_teardown() {
     #    a bad option, and a sweep that quietly stops reaping is how
     #    interfaces and images would accumulate unnoticed. Let it through.
     local _suffixes=() _entry
-    for _entry in "${CHAOS_SUITES[@]}"; do
+    for _entry in "${CHAOS_SUITES[@]}" "${NIGHTLY_CHAOS[@]}"; do
         _suffixes+=("$(ci_chaos_suffix "${_entry%% *}")")
     done
     if [[ "$NIGHTLY" == true ]]; then
@@ -2966,7 +2985,7 @@ run_suite() {
         chaos-*)
             local chaos_name="${suite#chaos-}"
             local found=false
-            for entry in "${CHAOS_SUITES[@]}"; do
+            for entry in "${CHAOS_SUITES[@]}" "${NIGHTLY_CHAOS[@]}"; do
                 read -ra parts <<< "$entry"
                 if [[ "${parts[0]}" == "$chaos_name" ]]; then
                     run_chaos "$chaos_name" "${parts[@]:1}"
@@ -3006,8 +3025,9 @@ run_suite() {
 
 # ── Stage 4: the nightly extras ────────────────────────────────────────────
 
-# Tier 3 only: a batch of every CI chaos scenario, NIGHTLY_CHAOS_RUNS runs of
-# each, then the long scenarios no other run takes (NIGHTLY_LONG), through the
+# Tier 3 only: a batch of every CI chaos scenario and every nightly-only one
+# (NIGHTLY_CHAOS), NIGHTLY_CHAOS_RUNS runs of each, then the long scenarios no
+# other run takes (NIGHTLY_LONG), through the
 # same parallel runner as the integration stage. Repeated runs at one tree are
 # where the chaos scenarios have found most of their product defects, and a
 # single pass cannot tell an intermittent defect from a fixed one.
