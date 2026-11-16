@@ -109,6 +109,10 @@ KEEP_DIR="${MC_KEEP_DIR:-}"
 LOG_DIR=""
 
 source "$WAIT_LIB"
+# CI_BUILD_PROXY: the builder's apt proxy as build arguments, empty when it
+# offers none.
+# shellcheck source=../../lib/build-proxy.sh
+source "$ROOT_DIR/testing/lib/build-proxy.sh"
 
 PASS=0
 FAIL=0
@@ -707,6 +711,11 @@ main() {
     # shellcheck disable=SC1090
     source "$CONFIG_DIR/npubs.env"
 
+    # The router image is built by `up` otherwise; with an apt proxy it is
+    # built first, so the proxy reaches its build and only its build.
+    if [[ ${#CI_BUILD_PROXY[@]} -gt 0 ]]; then
+        "${COMPOSE[@]}" build "${CI_BUILD_PROXY[@]}" router
+    fi
     echo "Starting topology ..."
     "${COMPOSE[@]}" up -d
 

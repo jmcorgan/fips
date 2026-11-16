@@ -32,8 +32,10 @@ env:
 # set (testing/ci-local.sh) MUST run the same integration suites, EXCEPT for
 # the deliberate local-only entries below, and every build, lint, guard and
 # unit-test step here MUST be a stage of `ci-local.sh --tier 2`, EXCEPT for
-# what one runner cannot do: the Android, macOS and Windows jobs, and the
-# retry-flake report, here; the zig cross-checks there. Adding a suite or a
+# what one runner cannot do: the Android, macOS and Windows jobs, the native
+# release builds of the build job's arm64, macOS and Windows legs, and the
+# retry-flake report, here; the zig cross-checks there. The .deb is the
+# release build on both: deb-package here, deb-build there. Adding a suite or a
 # step to one runner without the other means "local green" and "GitHub green"
 # stop being equivalent.
 # testing/check-ci-parity.sh enforces both and fails on unexpected drift; its
@@ -116,6 +118,8 @@ jobs:
         run: bash testing/check-image-scoping.sh
       - name: Check every action is pinned to a commit SHA
         run: bash testing/check-action-pins.sh
+      - name: Check every CI base image is pinned by digest
+        run: bash testing/check-base-pins.sh
       - name: Check every source comment resolves in-repo
         run: bash testing/check-comment-refs.sh
       - name: Check every ignored test against its inventory
@@ -420,16 +424,21 @@ jobs:
           cache-bin: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
+      # The native release builds of the arm64, macOS and Windows legs.
+      # --bins --examples rather than the bare default: the native datagram
+      # API's example programs must compile in release on every OS. Naming
+      # --bins keeps the daemon and its tools in the build, which --examples
+      # alone would drop. The ubuntu-latest leg skips it: there the .deb
+      # (deb-package) is the release build, as the .deb built at the start of
+      # testing/ci-local.sh's build stage is locally, and the integration build
+      # below compiles the examples in release. testing/check-ci-parity.sh
+      # holds this condition.
       - name: Build
-        # --bins --examples rather than the bare default: the native datagram
-        # API's example programs must compile in release on every OS. Naming
-        # --bins keeps the daemon and its tools in the build, which --examples
-        # alone would drop. The integration image's binaries come from the
-        # integration build below, not this one. Mirrors testing/ci-local.sh.
+        if: matrix.os != 'ubuntu-latest'
         run: cargo build --release --bins --examples
 
       - name: SHA-256 hashes (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.os != 'ubuntu-latest'
         run: sha256sum target/release/fips target/release/fipsctl target/release/fipstop target/release/fips-gateway
 
       - name: SHA-256 hashes (macOS)
@@ -445,8 +454,8 @@ jobs:
       # `integration` profile with the `test-overrides` feature, so the chaos
       # scenarios' test-only configuration keys are honoured. They build in
       # target/integration, so no packaging step, which reads target/release,
-      # can pick one up; the hashes above stay those of the plain release
-      # build. Mirrors testing/scripts/build.sh and testing/ci-local.sh.
+      # can pick one up. Mirrors testing/scripts/build.sh and
+      # testing/ci-local.sh.
       - name: Build the integration binaries
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -461,6 +470,45 @@ jobs:
         run: |
           cp target/integration/examples/native-echo target/integration/native-echo
           cp target/integration/examples/native-surface target/integration/native-surface
+
+      # The integration test images, built once here and handed to every
+      # integration leg, which loads them instead of building its own. Each job
+      # runs on a fresh VM, so the names fips-test:latest and
+      # fips-test-app:latest cannot reach another run; the integration job
+      # checks each loaded image's ID against the one recorded here. Local CI
+      # builds the same images once per run too, within build-integration.
+      - name: Build the integration test images
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          for f in fips fipsctl fipstop fips-gateway native-echo native-surface; do
+            cp "target/integration/$f" "testing/docker/$f"
+            chmod +x "testing/docker/$f"
+          done
+          # Retried: both builds pull from Docker Hub and the Debian mirrors.
+          source testing/lib/image-build.sh
+          retry_build "docker build fips-test" docker build -t fips-test:latest testing/docker
+          retry_build "docker build fips-test-app" docker build -t fips-test-app:latest -f testing/docker/Dockerfile.app testing/docker
+          mkdir -p "$RUNNER_TEMP/fips-test-images"
+          docker image inspect --format '{{.Id}}' fips-test:latest fips-test-app:latest \
+            > "$RUNNER_TEMP/fips-test-images/ids.txt"
+          cat "$RUNNER_TEMP/fips-test-images/ids.txt"
+
+      # An uncompressed tar: the artifact upload compresses it.
+      - name: Save the integration test images
+        if: matrix.os == 'ubuntu-latest'
+        run: docker save -o "$RUNNER_TEMP/fips-test-images/images.tar" fips-test:latest fips-test-app:latest
+
+      - name: Upload the integration test images
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fips-test-images
+          path: |
+            ${{ runner.temp }}/fips-test-images/images.tar
+            ${{ runner.temp }}/fips-test-images/ids.txt
+          if-no-files-found: error
+          retention-days: 1
 
       # Upload the Linux binary so integration jobs can use it without rebuilding
       - name: Upload Linux binary
@@ -943,17 +991,20 @@ jobs:
       # Debug-only helpers (anything behind #[cfg(debug_assertions)]) vanish in
       # a release build, so a test calling one without the same gate breaks a
       # build no other job performs: every other unit-test job compiles the
-      # test target in debug. Compile it in release here. Of what it builds,
-      # run only the leg-slot residue test, which is release-only because only
-      # an optimised build leaves the slot in a state worth measuring; the grep
-      # fails the step if that test did not run, since a name filter that
-      # matches nothing passes. Mirrored in testing/ci-local.sh.
+      # test target in debug. Compile it in release here, under the
+      # integration profile, which inherits release unchanged (Cargo.toml)
+      # and is the profile testing/ci-local.sh compiles it with, sharing its
+      # integration build's dependencies. Of what it builds, run only the
+      # leg-slot residue test, which is release-only because only an optimised
+      # build leaves the slot in a state worth measuring; the grep fails the
+      # step if that test did not run, since a name filter that matches
+      # nothing passes. Mirrored in testing/ci-local.sh.
       - name: Compile the library tests in release mode and run the leg-slot residue test
         shell: bash
         env:
           RESIDUE_TEST: peer::machine::tests::take_leg_leaves_no_session_keys_in_the_slot_it_empties
         run: |
-          cargo test --release --lib -- --exact "$RESIDUE_TEST" | tee "$RUNNER_TEMP/release-lib-tests.log"
+          cargo test --profile integration --lib -- --exact "$RESIDUE_TEST" | tee "$RUNNER_TEMP/release-lib-tests.log"
           grep -q '^test result: ok\. 1 passed;' "$RUNNER_TEMP/release-lib-tests.log"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1356,8 +1407,8 @@ jobs:
 # artifact, so it does not wait on the unit tests. Each topology / scenario is
 # a separate matrix entry so they run in parallel.
 #
-# All harnesses share a single Docker image (fips-test:latest) built once
-# in the setup step from testing/docker/.
+# All harnesses share a single Docker image (fips-test:latest), built once in
+# the build job from testing/docker/ and loaded in the setup step.
 # ─────────────────────────────────────────────────────────────────────────────
   integration:
     name: Integration (${{ matrix.suite }})
@@ -1489,8 +1540,17 @@ jobs:
           name: fips-linux
           path: _bin
 
-      # Install binaries to unified docker context and build shared image
-      - name: Install binaries and build Docker image
+      - name: Download the integration test images
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: fips-test-images
+          path: ${{ runner.temp }}/fips-test-images
+
+      # Install binaries to the unified docker context, which the static
+      # compose file still names as a build context, and load the shared
+      # images the build job made, failing if either is not the image it
+      # recorded.
+      - name: Install binaries and load the Docker images
         run: |
           chmod +x _bin/fips _bin/fipsctl
           [ -f _bin/fipstop ] && chmod +x _bin/fipstop || true
@@ -1506,10 +1566,13 @@ jobs:
           chmod +x _bin/native-echo _bin/native-surface
           cp _bin/native-echo testing/docker/native-echo
           cp _bin/native-surface testing/docker/native-surface
-          # Retried: both builds pull from Docker Hub and the Debian mirrors.
-          source testing/lib/image-build.sh
-          retry_build "docker build fips-test" docker build -t fips-test:latest testing/docker
-          retry_build "docker build fips-test-app" docker build -t fips-test-app:latest -f testing/docker/Dockerfile.app testing/docker
+          docker load -i "$RUNNER_TEMP/fips-test-images/images.tar"
+          docker image inspect --format '{{.Id}}' fips-test:latest fips-test-app:latest \
+            > "$RUNNER_TEMP/loaded-ids.txt"
+          if ! diff "$RUNNER_TEMP/fips-test-images/ids.txt" "$RUNNER_TEMP/loaded-ids.txt"; then
+            echo "The loaded test images are not the ones the build job built" >&2
+            exit 1
+          fi
 
       # ── Static topology ────────────────────────────────────────────────────
       - name: Generate configs (static)
@@ -1829,12 +1892,34 @@ jobs:
           path: ${{ runner.temp }}/deb-builder-image.tar
           key: ${{ steps.builder.outputs.key }}
 
+      # The container build's cargo target and registry, carried between
+      # runners like the builder image: keyed on the builder image (base,
+      # toolchain, Dockerfile) and Cargo.lock, falling back to the newest entry
+      # for the same image, and saved only by a push to a trunk. The workflow
+      # has no tag trigger, so no release build restores it. It is saved with
+      # the workspace crates dropped (below), so it holds dependencies only;
+      # build-in-container.sh also cleans the workspace crates and rejects one
+      # cargo calls fresh at every build, so a restored entry cannot carry
+      # another tree's code either way.
+      - name: Restore the .deb build's dependency cache
+        id: deb-deps
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ${{ runner.temp }}/deb-target
+            ${{ runner.temp }}/deb-registry
+          key: deb-deps-${{ steps.builder.outputs.key }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: deb-deps-${{ steps.builder.outputs.key }}-
+
       # The package path is the script's last line of stdout. A leg that
       # produced the other architecture's package goes red here rather than
       # handing an amd64 package to the arm64 install leg.
       - name: Build the .deb in the pinned build container
         timeout-minutes: 30
         shell: bash
+        env:
+          FIPS_DEB_TARGET_VOLUME: ${{ runner.temp }}/deb-target
+          FIPS_DEB_REGISTRY_VOLUME: ${{ runner.temp }}/deb-registry
         run: |
           set -euo pipefail
           bash packaging/debian/build-deb-container.sh --output-dir deploy \
@@ -1869,6 +1954,47 @@ jobs:
         with:
           path: ${{ runner.temp }}/deb-builder-image.tar
           key: ${{ steps.builder.outputs.key }}
+
+      # The container wrote the cache directories as root.
+      - name: Make the .deb dependency cache readable
+        if: >-
+          github.event_name == 'push'
+          && contains(fromJSON('["refs/heads/maint", "refs/heads/master", "refs/heads/next"]'), github.ref)
+          && steps.deb-deps.outputs.cache-hit != 'true'
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/deb-target" "$RUNNER_TEMP/deb-registry"
+
+      # The next build cleans them anyway, so saving them only spends the
+      # repository's cache allowance: this build's fips-core and fips-mesh
+      # output (every name under release/ that starts with fips or libfips,
+      # their fingerprints and build-script output) and every directory
+      # beside release/, which today holds only cargo-deb's stripped copies.
+      # No dependency's name starts with fips (Cargo.lock).
+      - name: Drop the workspace crates from the .deb dependency cache
+        if: >-
+          github.event_name == 'push'
+          && contains(fromJSON('["refs/heads/maint", "refs/heads/master", "refs/heads/next"]'), github.ref)
+          && steps.deb-deps.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          t="$RUNNER_TEMP/deb-target"
+          [ -d "$t/release/deps" ] || { echo "no release build in $t" >&2; exit 1; }
+          find "$t" -mindepth 1 -maxdepth 1 -type d ! -name release -exec rm -rf {} +
+          rm -rf "$t"/release/fips* "$t"/release/libfips* "$t"/release/deps/fips* \
+            "$t"/release/deps/libfips* "$t"/release/.fingerprint/fips-* "$t"/release/build/fips-*
+          du -sh "$t"
+
+      - name: Save the .deb build's dependency cache
+        if: >-
+          github.event_name == 'push'
+          && contains(fromJSON('["refs/heads/maint", "refs/heads/master", "refs/heads/next"]'), github.ref)
+          && steps.deb-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ${{ runner.temp }}/deb-target
+            ${{ runner.temp }}/deb-registry
+          key: deb-deps-${{ steps.builder.outputs.key }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Upload the .deb
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

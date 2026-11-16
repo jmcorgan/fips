@@ -24,7 +24,9 @@ make all        # deb + tarball (default)
 
 `make deb` builds in a container pinned to the oldest supported
 Debian-family distribution, named with the glibc floor in
-[build-floor.env](build-floor.env), and checks the package it produced
+[build-floor.env](build-floor.env), where the image is pinned by digest
+(`FIPS_BUILD_IMAGE`; moving the digest builds a new builder image), and
+checks the package it produced
 against that floor before handing it back. The floor itself is lower than that
 image's glibc: RHEL 9 is the lowest supported distribution project-wide, and
 both families ship these same binaries. Its only host prerequisite is

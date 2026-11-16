@@ -48,6 +48,9 @@ source "$SCRIPT_DIR/../lib/systemd-container.sh"
 source "$SCRIPT_DIR/../lib/systemd-scenario.sh"
 # shellcheck source=SCRIPTDIR/../lib/image-build.sh
 source "$SCRIPT_DIR/../lib/image-build.sh"
+# The pinned base images the inline Dockerfiles below build from.
+# shellcheck source=SCRIPTDIR/../base-images.env
+source "$SCRIPT_DIR/../base-images.env"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=../../packaging/build-floor.env
 source "$REPO_ROOT/packaging/build-floor.env"
@@ -129,8 +132,8 @@ CACHED_METADATA='--setopt=*.metadata_expire=-1'
 
 ALL_SCENARIOS="almalinux9 fedora no-resolver upgrade"
 
-EL9_IMAGE="almalinux:9"
-FEDORA_IMAGE="fedora:44"
+EL9_IMAGE="$ALMALINUX9"
+FEDORA_IMAGE="$FEDORA44"
 
 log()  { echo "=== $*"; }
 pass() { echo "  PASS: $*"; PASS=$((PASS + 1)); }

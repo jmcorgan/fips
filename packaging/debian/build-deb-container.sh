@@ -70,7 +70,17 @@ DOCKERFILE_HASH=$(sha256sum "$SCRIPT_DIR/Dockerfile.build" | cut -c1-12) || DOCK
     exit 2
 }
 
-IMAGE_TAG="fips-deb-builder:${FIPS_BUILD_IMAGE//[:\/]/-}-rust${RUST_TOOLCHAIN}-${DOCKERFILE_HASH}"
+# The floor image as a token for names: its tag, and the first 12 hex digits of
+# its digest when it is pinned by one, since neither ':' nor '@' may appear in
+# an image tag or a volume name.
+BASE_TOKEN="${FIPS_BUILD_IMAGE%%@*}"
+BASE_TOKEN="${BASE_TOKEN//[:\/]/-}"
+if [[ "$FIPS_BUILD_IMAGE" == *@sha256:* ]]; then
+    BASE_DIGEST="${FIPS_BUILD_IMAGE##*@sha256:}"
+    BASE_TOKEN="${BASE_TOKEN}-${BASE_DIGEST:0:12}"
+fi
+
+IMAGE_TAG="fips-deb-builder:${BASE_TOKEN}-rust${RUST_TOOLCHAIN}-${DOCKERFILE_HASH}"
 
 # Before the docker check, so a workflow can key a cache on the tag without
 # docker being involved.
@@ -85,11 +95,16 @@ command -v docker >/dev/null 2>&1 || {
 }
 
 # FIPS_DEB_TARGET_VOLUME and FIPS_DEB_REGISTRY_VOLUME name other volumes, for a
-# test that must not touch the host's. They are set together or not at all:
-# the lock in the target volume is what serializes use of the registry volume,
-# so a registry shared with other builds must come with their target volume.
-# Checked before the image is built, so a wrong setting fails at once.
-VOL_SUFFIX="${FIPS_BUILD_IMAGE//[:\/]/-}"
+# test that must not touch the host's, or, as absolute paths, host directories
+# that are bind-mounted instead, which is how GitHub's deb-package job carries
+# the dependency build between runners in its cache (the container writes
+# them as root). They are set together or not at all: the lock in the target
+# volume is what serializes use of the registry volume, so a registry shared
+# with other builds must come with their target volume. Either way the
+# workspace crates are cleaned and a fresh one rejected at every build
+# (build-in-container.sh), so neither can carry another tree's code. Checked
+# before the image is built, so a wrong setting fails at once.
+VOL_SUFFIX="$BASE_TOKEN"
 if [ -n "${FIPS_DEB_TARGET_VOLUME:-}" ] && [ -n "${FIPS_DEB_REGISTRY_VOLUME:-}" ]; then
     TARGET_VOLUME=$FIPS_DEB_TARGET_VOLUME
     REGISTRY_VOLUME=$FIPS_DEB_REGISTRY_VOLUME
@@ -100,6 +115,13 @@ else
     echo "build-deb-container: set FIPS_DEB_TARGET_VOLUME and FIPS_DEB_REGISTRY_VOLUME together or not at all" >&2
     exit 2
 fi
+# A host directory is made here, as the caller, rather than left to the
+# daemon, which would make it as root.
+for _vol in "$TARGET_VOLUME" "$REGISTRY_VOLUME"; do
+    if [[ "$_vol" == /* ]]; then
+        mkdir -p "$_vol" || exit 2
+    fi
+done
 
 # A problem with the image archive is a warning, not a failure: the archive only
 # saves time, and failing a release over a bad cache entry would hold the tag
@@ -137,6 +159,7 @@ if [ "$BUILT_IMAGE" -eq 1 ]; then
     # Retried because the build pulls the floor image and fetches apt packages,
     # rustup and crates, any of which can fail for a few seconds at a time.
     retry_build "docker build $IMAGE_TAG" docker build \
+        "${CI_BUILD_PROXY[@]}" \
         --build-arg "BASE=$FIPS_BUILD_IMAGE" \
         --build-arg "RUST_TOOLCHAIN=$RUST_TOOLCHAIN" \
         -t "$IMAGE_TAG" \

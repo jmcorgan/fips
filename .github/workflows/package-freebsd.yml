@@ -74,27 +74,55 @@ jobs:
       - name: Set SOURCE_DATE_EPOCH from git
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
+      # The VM's cargo registry and dependency builds, carried between runs
+      # in .freebsd-cargo/ (ignored by git), which the rsync sync and copyback
+      # move in and out of the VM with the workspace. Keyed on Cargo.lock and
+      # the toolchain pin, falling back to the newest entry. Never on a tag: a
+      # published package is always built from nothing, and a tag run neither
+      # restores nor saves. Saved only by a push to a trunk. The workspace
+      # crates are cleaned before the save, so an entry holds dependencies
+      # only.
+      - name: Restore the FreeBSD cargo cache
+        id: freebsd-cargo
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: .freebsd-cargo
+          key: freebsd-cargo-15.1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: freebsd-cargo-15.1-
+
       - name: Build and smoke-install in FreeBSD VM
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1
         env:
           FREEBSD_PACKAGE_VERSION: ${{ needs.determine-versioning.outputs.freebsd_package_version }}
+          FREEBSD_CARGO_CACHE: ${{ !startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
         with:
           release: "15.1"
           usesh: true
           sync: rsync
           copyback: true
           mem: 6144
-          envs: "SOURCE_DATE_EPOCH CARGO_TERM_COLOR FREEBSD_PACKAGE_VERSION"
+          envs: "SOURCE_DATE_EPOCH CARGO_TERM_COLOR FREEBSD_PACKAGE_VERSION FREEBSD_CARGO_CACHE"
           prepare: |
             pkg install -y curl
           run: |
             set -e
 
+            # Off a tag, cargo's home and the target directory come from
+            # .freebsd-cargo/, the cache restored above, and every later path
+            # stays where it was.
+            if [ "$FREEBSD_CARGO_CACHE" = 1 ]; then
+              export CARGO_HOME="$PWD/.freebsd-cargo/home"
+              if [ -d .freebsd-cargo/target ]; then
+                mv .freebsd-cargo/target target
+              fi
+            fi
+
             # rustup rather than the ports rust: rust-toolchain.toml pins
             # the toolchain, and rustup honors the pin on first cargo use.
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --default-toolchain none --profile minimal
-            . "$HOME/.cargo/env"
+            . "${CARGO_HOME:-$HOME/.cargo}/env"
 
             cargo build --release
 
@@ -291,9 +319,28 @@ jobs:
                 | { read -r h; printf '%s  %s\n' "$h" "$(basename "$PKG")"; } \
                 > "$(basename "$PKG").sha256" )
 
-            # The whole workspace is rsynced back to the host; drop the
-            # build tree so the copyback moves megabytes, not gigabytes.
-            rm -rf target
+            # The whole workspace is rsynced back to the host. Off a tag the
+            # dependency builds go back into .freebsd-cargo/ for the cache,
+            # with the workspace crates cleaned first; on a tag the build
+            # tree is dropped so the copyback moves megabytes, not gigabytes.
+            if [ "$FREEBSD_CARGO_CACHE" = 1 ]; then
+              cargo clean --release -p fips-mesh -p fips-core
+              cargo clean -p fips-mesh -p fips-core
+              mkdir -p .freebsd-cargo
+              mv target .freebsd-cargo/target
+            else
+              rm -rf target
+            fi
+
+      - name: Save the FreeBSD cargo cache
+        if: >-
+          github.event_name == 'push'
+          && contains(fromJSON('["refs/heads/maint", "refs/heads/master", "refs/heads/next"]'), github.ref)
+          && steps.freebsd-cargo.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: .freebsd-cargo
+          key: freebsd-cargo-15.1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Resolve FreeBSD asset path
         id: freebsd-assets

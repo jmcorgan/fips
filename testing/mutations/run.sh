@@ -14,8 +14,10 @@
 #      variant, and every variant has a manifest line and a `node_fault!`
 #      site. The exception is the self-check's switches (SELF below):
 #      neither may have a manifest line, and PlantedGreen may have no site.
-#   2. The normal-build fence: builds the `fips` binary as a user would and
-#      requires the name FIPS_NODE_FAULTS to appear in it 0 times. Then
+#   2. The normal-build fence: builds the `fips` binary as a user would (or
+#      reads FIPS_MUTATION_FENCE_BIN) and requires the name FIPS_NODE_FAULTS
+#      to appear in it 0 times (not in
+#      the explorer-only mode, below). Then
 #      builds both library test binaries once with testing/lib/test-verdict.sh
 #      and checks that every test the manifest or the self-check names
 #      resolves. On a host whose build compiles no BLE transport (build.rs
@@ -29,8 +31,11 @@
 #      module's tests: each skipped line's test must still be defined, as
 #      `fn <name>(`, in its module's file, so a misspelled or renamed name
 #      is a miss in every build. FIPS_MUTATION_EXPLORERS=1 builds with that
-#      feature and skips none of them. The switches left with no line to
-#      run are printed by name.
+#      feature and skips none of them. FIPS_MUTATION_EXPLORERS=only builds
+#      with it and runs those lines alone: every other line is skipped, the
+#      fence is left to the plain lane on the same tree, and a manifest with
+#      no such line fails before anything is built. The switches left with no
+#      line to run are printed by name.
 #   3. The self-check: each SELF entry runs its planted test with its switch
 #      on and goes through the same `held` decision as a red manifest line
 #      with no anchor; the decision must be the one SELF gives. PlantedRed's
@@ -56,11 +61,21 @@
 # Environment:
 #   FIPS_MUTATION_TIMEOUT  seconds per test run (default 120)
 #   FIPS_MUTATION_ONLY     run only the break of this name (for trying one)
+#   FIPS_MUTATION_FENCE_BIN  a fips binary for the normal-build fence to read
+#                          instead of building one; testing/ci-local.sh passes
+#                          the one from the .deb its build stage made, which is
+#                          what users install. A path that is not an
+#                          executable exits 2. GitHub's test-mutations job
+#                          starts before its package exists and builds its own,
+#                          which the check treats the same.
 #   FIPS_MUTATION_EXPLORERS  1 to build the root crate's library tests with
-#                          its `explorers` feature and run every line; the
-#                          nightly run sets it (testing/ci-local.sh with
-#                          --explorers or --tier 3), and no run a push starts
-#                          does
+#                          its `explorers` feature and run every line; only
+#                          to build with it and run just the lines whose
+#                          test that feature compiles (EXPLORER_ONLY). The
+#                          nightly run uses only, as its own stage
+#                          (testing/ci-local.sh with --explorers, --tier 3 or
+#                          --part root-explorers), and no run a push starts
+#                          sets it. Any other value exits 2.
 # FIPS_NODE_FAULTS from the caller's environment is ignored: the lane sets
 # it per run.
 #
@@ -82,6 +97,10 @@ ONLY="${FIPS_MUTATION_ONLY:-}"
 EXPLORERS="${FIPS_MUTATION_EXPLORERS:-}"
 
 cd "$PROJECT_ROOT" || exit 2
+case "$EXPLORERS" in
+    "" | 1 | only) ;;
+    *) echo "mutation-lane: FIPS_MUTATION_EXPLORERS takes 1 or only, not: $EXPLORERS" >&2; exit 2 ;;
+esac
 for f in "$MANIFEST" "$FAULTS" "$INVENTORY"; do
     [[ -r "$f" ]] || { echo "mutation-lane: cannot read $f" >&2; exit 2; }
 done
@@ -198,6 +217,24 @@ if [[ $misses -gt 0 ]]; then
     exit 1
 fi
 
+# In the explorer-only mode, the lines whose test is in an EXPLORER_ONLY
+# module, by index; a manifest with none fails here, before any build, since
+# a lane that runs nothing would otherwise pass.
+declare -A PICKED=()
+if [[ "$EXPLORERS" == only ]]; then
+    for i in "${!M_BREAK[@]}"; do
+        [[ "${M_CRATE[$i]}" == fips-mesh ]] || continue
+        for entry in "${EXPLORER_ONLY[@]}"; do
+            read -r prefix _ <<<"$entry"
+            [[ "${M_TEST[$i]}" == "$prefix"* ]] && { PICKED[$i]=1; break; }
+        done
+    done
+    if [[ ${#PICKED[@]} -eq 0 ]]; then
+        echo "mutation-lane: no manifest line's test is an explorer walk; nothing to run"
+        exit 1
+    fi
+fi
+
 start_all=$(date +%s)
 
 # The normal-build fence: the switches must be absent from a normal build.
@@ -206,12 +243,42 @@ start_all=$(date +%s)
 # core's `faults` module and its sites are linked in and the name with them.
 # A failed build or a missing binary exits 2 and is never read as a count,
 # since a failed build leaves the previous binary in place.
-echo "mutation-lane: building the normal fips binary for the fence"
-fence_json=$(cargo build -p fips-mesh --bin fips --message-format=json) || {
-    echo "mutation-lane: fence: the normal build of fips failed" >&2
-    exit 2
+fence() {
+    local fence_bin fence_count
+    if [[ -n "${FIPS_MUTATION_FENCE_BIN:-}" ]]; then
+        fence_bin="$FIPS_MUTATION_FENCE_BIN"
+        if [[ ! -f "$fence_bin" || ! -x "$fence_bin" ]]; then
+            echo "mutation-lane: fence: $fence_bin is not an executable" >&2
+            exit 2
+        fi
+        echo "mutation-lane: the fence reads $fence_bin"
+    else
+        fence_build
+    fi
+    fence_count=$(grep -a -c FIPS_NODE_FAULTS "$fence_bin")
+    case $? in
+        0 | 1) ;;
+        *) echo "mutation-lane: fence: could not read $fence_bin" >&2; exit 2 ;;
+    esac
+    if [[ "$fence_count" != 0 ]]; then
+        miss "fence: FIPS_NODE_FAULTS appears $fence_count time(s) in the normal build $fence_bin"
+        echo "mutation-lane: the switches reach a normal build; no test was run"
+        exit 1
+    fi
+    echo "   fence $fence_bin: FIPS_NODE_FAULTS appears 0 times"
+    return 0
 }
-fence_bin=$(python3 -c '
+
+# Build the normal fips binary for the fence and set the caller's fence_bin
+# to it.
+fence_build() {
+    local fence_json
+    echo "mutation-lane: building the normal fips binary for the fence"
+    fence_json=$(cargo build -p fips-mesh --bin fips --message-format=json) || {
+        echo "mutation-lane: fence: the normal build of fips failed" >&2
+        exit 2
+    }
+    fence_bin=$(python3 -c '
 import json, sys
 for line in sys.stdin:
     try:
@@ -222,23 +289,22 @@ for line in sys.stdin:
             and msg["target"]["name"] == "fips" and "bin" in msg["target"]["kind"]:
         print(msg["executable"])
 ' <<<"$fence_json")
-if [[ -z "$fence_bin" || ! -x "$fence_bin" ]]; then
-    echo "mutation-lane: fence: the build named no fips binary" >&2
-    exit 2
-fi
-fence_count=$(grep -a -c FIPS_NODE_FAULTS "$fence_bin")
-case $? in
-    0 | 1) ;;
-    *) echo "mutation-lane: fence: could not read $fence_bin" >&2; exit 2 ;;
-esac
-if [[ "$fence_count" != 0 ]]; then
-    miss "fence: FIPS_NODE_FAULTS appears $fence_count time(s) in the normal build $fence_bin"
-    echo "mutation-lane: the switches reach a normal build; no test was run"
-    exit 1
-fi
-echo "   fence $fence_bin: FIPS_NODE_FAULTS appears 0 times"
+    if [[ -z "$fence_bin" || ! -x "$fence_bin" ]]; then
+        echo "mutation-lane: fence: the build named no fips binary" >&2
+        exit 2
+    fi
+    return 0
+}
 
-if [[ "$EXPLORERS" == 1 ]]; then
+# The explorer-only mode leaves the fence out: the plain lane runs it on the
+# same tree.
+if [[ "$EXPLORERS" == only ]]; then
+    echo "mutation-lane: explorer lines only; the normal-build fence is the plain lane's, on the same tree"
+else
+    fence
+fi
+
+if [[ -n "$EXPLORERS" ]]; then
     echo "mutation-lane: building the healthy tree, with the root crate's explorers"
     test_bins fips-mesh/explorers || exit 2
 else
@@ -258,6 +324,18 @@ for pkg in fips-mesh fips-core; do
 done
 # The lines skipped on a host with no BLE transport, by index.
 declare -A SKIP=()
+# The explorer-only mode runs the picked lines and no other.
+if [[ "$EXPLORERS" == only ]]; then
+    declare -A SWITCHES=()
+    for i in "${!M_BREAK[@]}"; do
+        if [[ -n "${PICKED[$i]:-}" ]]; then
+            SWITCHES[${M_BREAK[$i]}]=1
+        else
+            SKIP[$i]=1
+        fi
+    done
+    echo "mutation-lane: explorer lines only: ${#PICKED[@]} line(s) over ${#SWITCHES[@]} switch(es)"
+fi
 if ! grep -q '^transport::ble::' <<<"${LISTED[fips-mesh]}"; then
     for i in "${!M_BREAK[@]}"; do
         [[ "${M_CRATE[$i]}" == fips-mesh ]] || continue
@@ -274,7 +352,7 @@ fi
 # The lines skipped in a build without the explorers, each test checked
 # against its module's file instead of the list.
 explorer_skips=0
-if [[ "$EXPLORERS" != 1 ]]; then
+if [[ -z "$EXPLORERS" ]]; then
     for entry in "${EXPLORER_ONLY[@]}"; do
         read -r prefix file <<<"$entry"
         grep -qF -- "$prefix" <<<"${LISTED[fips-mesh]}" && continue
@@ -301,7 +379,7 @@ if [[ $explorer_skips -gt 0 ]]; then
         done
         [[ "$runs" == false ]] && BARE+=("$b")
     done
-    echo "mutation-lane: this build has no explorers (FIPS_MUTATION_EXPLORERS is not 1);" \
+    echo "mutation-lane: this build has no explorers (FIPS_MUTATION_EXPLORERS is unset);" \
         "$explorer_skips line(s) whose test only the explorers feature compiles skipped;" \
         "switches with no line left to run: ${BARE[*]:-none}"
 fi
@@ -420,6 +498,8 @@ done
 # 5. The switches, against the one build.
 for brk in "${BREAKS[@]}"; do
     selected "$brk" || continue
+    # The explorer-only mode passes over the switches it runs no line of.
+    [[ "$EXPLORERS" == only ]] && ! in_list "$brk" "${!SWITCHES[@]}" && continue
     t0=$(date +%s)
     echo "== $brk"
     for i in "${!M_BREAK[@]}"; do

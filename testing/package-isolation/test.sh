@@ -68,6 +68,7 @@ PACKAGE_SCRIPTS=(
     packaging/debian/Dockerfile.build
     testing/check-deb-revision.sh
     testing/lib/image-build.sh
+    testing/lib/build-proxy.sh
 )
 CI_LABEL=com.corganlabs.fips-ci=1
 RUN_LABEL_KEY=com.corganlabs.fips-ci.run

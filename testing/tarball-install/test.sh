@@ -48,6 +48,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../lib/systemd-container.sh"
 # shellcheck source=SCRIPTDIR/../lib/image-build.sh
 source "$SCRIPT_DIR/../lib/image-build.sh"
+# The pinned base images the inline Dockerfiles below build from.
+# shellcheck source=SCRIPTDIR/../base-images.env
+source "$SCRIPT_DIR/../base-images.env"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 IMAGE="fips-tarball-test:debian12"
@@ -102,14 +105,15 @@ build_image() {
     local ctx rc=0
     ctx=$(mktemp -d)
     retry_build "docker build -t $IMAGE" build_inline "$IMAGE" "$(cat <<'DOCKERFILE'
-FROM debian:12
+ARG BASE
+FROM ${BASE}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     systemd iproute2 procps && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
-    )" "$ctx" || rc=$?
+    )" "$ctx" --build-arg "BASE=$DEBIAN12" || rc=$?
     rm -rf "$ctx"
     return "$rc"
 }

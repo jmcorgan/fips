@@ -40,6 +40,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # For CI_LABELS, the labels every resource below carries.
 # shellcheck source=SCRIPTDIR/../lib/image-build.sh
 . "$SCRIPT_DIR/../lib/image-build.sh"
+# The pinned base images the inline Dockerfiles below build from.
+# shellcheck source=SCRIPTDIR/../base-images.env
+. "$SCRIPT_DIR/../base-images.env"
 NET_A="fips-mdns-net-$$"
 NET_B="fips-mdns-net-b-$$"
 NODE_A="fips-mdns-a-$$"
@@ -96,7 +99,8 @@ resolve_image() {
     mkdir -p "$context"
     cp "$bin/fips" "$bin/fipsctl" "$context/"
     cat > "$context/Dockerfile" <<'DOCKERFILE'
-FROM debian:trixie-slim
+ARG BASE
+FROM ${BASE}
 # libdbus-1-3 and libsystemd0 are the daemon's dynamic dependencies.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates libdbus-1-3 libsystemd0 && \
@@ -104,7 +108,8 @@ RUN apt-get update && \
 COPY fips fipsctl /usr/local/bin/
 RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl && mkdir -p /run/fips
 DOCKERFILE
-    docker build -t "$BUILT_IMAGE" "${CI_LABELS[@]}" "$context" --quiet >/dev/null || return 1
+    docker build -t "$BUILT_IMAGE" "${CI_LABELS[@]}" "${CI_BUILD_PROXY[@]}" \
+        --build-arg "BASE=$DEBIAN13_SLIM" "$context" --quiet >/dev/null || return 1
     IMAGE="$BUILT_IMAGE"
     return 0
 }

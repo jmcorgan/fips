@@ -8,16 +8,21 @@
 #   --tier <1|2|3>       Run one CI tier, as the internal builder does. Each
 #                        tier is a fixed set of stages; --plan prints it.
 #                          1  every branch push: the guards, the build stage
-#                             with the bare-metal and cross-target checks, the
+#                             (no release build of its own: the .deb is
+#                             the release build, at tier 2) with the
+#                             bare-metal and cross-target checks, the
 #                             unit tests (the core without its slow suites),
 #                             the known-defect lane, the profiling rerun, the
 #                             release compile and the root tests. No
 #                             mutation lane and no integration suites.
 #                          2  trunk tips and landing candidates: tier 1, the
-#                             core's slow suites, the mutation lane, the musl
-#                             unit tests and every integration suite.
+#                             .deb built at the start of the build stage
+#                             (deb-build, to deploy/), the core's slow
+#                             suites, the mutation lane, the musl unit tests
+#                             and every integration suite.
 #                          3  the nightly run of each trunk tip: tier 2, the
-#                             explorers (on next the core half alone; see
+#                             explorers (on next the core half alone, so not
+#                             the mutation lane's explorer lines either; see
 #                             --explorers), a chaos batch of each
 #                             CI scenario and the long scenarios no other run
 #                             takes. --with-tor adds the Tor suites.
@@ -30,6 +35,25 @@
 #                        3. FIPS_CI_TIER=<n> in the environment does the same.
 #                        No tier runs the explorers from a push: tier 3 is
 #                        the nightly run.
+#   --part <name>        With --tier 3, run one part of the nightly run, so a
+#                        builder can spread it over more than one slot. The
+#                        parts, with --tier 2, record together exactly what
+#                        --tier 3 records (testing/lib/ci-plan-test.sh holds
+#                        them to that), and each runs alone on a fresh
+#                        checkout:
+#                          core-explorers  fips-core's explorer half
+#                          root-explorers  the root crate's explorer half and
+#                                          the mutation lane's explorer lines;
+#                                          refused on next, which has no
+#                                          root half (see --explorers)
+#                          chaos           the integration build, the chaos
+#                                          batch and the long scenarios; with
+#                                          --with-tor, the Tor suites too
+#                        A part runs no guards and no build stage: the
+#                        nightly's tier 2 part runs those on the same tree.
+#                        --plan prints a part's results. -j and --plan
+#                        combine with any part, --with-tor only with chaos.
+#                        A part whose plan lists nothing of its own exits 1.
 #   --plan               With --tier, print the stages the run would record,
 #                        in order, and exit without running anything. A green
 #                        tier run fails if what it recorded differs from this
@@ -60,12 +84,15 @@
 #                        (root-explorers). Each half runs exactly the tests
 #                        its feature adds, read from the two builds' test
 #                        lists, and the two run side by side. =core or =root
-#                        runs one half. Off by default, and no CI run started
-#                        by a push turns it on: they take hours. Cannot be
-#                        combined with --build-only, which skips the unit-test
-#                        stage. Next builds no real-node explorer, so here
-#                        --explorers runs the core half alone and =root is
-#                        refused (ROOT_EXPLORER below).
+#                        runs one half. With the root half the mutation lane's
+#                        lines whose test is a root explorer walk run too, as
+#                        a stage of their own (mutations-explorers). Off by
+#                        default, and no CI run started by a push turns it on:
+#                        they take hours. Cannot be combined with
+#                        --build-only, which skips the unit-test stage. Next
+#                        builds no real-node explorer, so here --explorers
+#                        runs the core half alone, and =root and --part
+#                        root-explorers are refused (ROOT_EXPLORER below).
 #   --cross-check        Also compile the macOS, Windows and FreeBSD targets in
 #                        the build stage (testing/cross-check/check.sh). Off
 #                        by default: it needs zig. When asked for, a missing
@@ -204,7 +231,10 @@
 #   2   — usage error (unknown option, missing value, unknown --rerun suite,
 #         an option --rerun cannot be combined with, --build-only with
 #         --root-tests or --explorers, a tier other than 1, 2 or 3, an
-#         option --tier cannot be combined with, or --plan without --tier);
+#         option --tier cannot be combined with, --plan without --tier, an
+#         unknown --part, --part without --tier 3, --with-tor with a part
+#         other than chaos, or the root explorer half, --explorers=root or
+#         --part root-explorers, on a tree with no real-node explorer);
 #         nothing ran
 #   130 — interrupted by SIGINT  (128 + 2;  run was cancelled, not a failure)
 #   143 — terminated by SIGTERM  (128 + 15; run was cancelled, not a failure)
@@ -264,6 +294,11 @@ fi
 
 cd "$PROJECT_ROOT" || exit 1
 
+# CI_BUILD_PROXY: the builder's apt proxy (FIPS_CI_APT_PROXY) as build
+# arguments for this script's own image builds, and only those.
+# shellcheck source=SCRIPTDIR/lib/build-proxy.sh
+. "$SCRIPT_DIR/lib/build-proxy.sh"
+
 # ── Configuration ──────────────────────────────────────────────────────────
 
 PARALLEL_JOBS=4
@@ -292,6 +327,8 @@ ONLY_GIVEN=false
 # The tier asked for, if any, and whether only its plan is wanted.
 TIER=""
 PLAN=false
+# The part of tier 3 asked for, if any (--part).
+PART=""
 # Options given on the command line that choose what runs, which --tier
 # refuses; the environment switches are not among them.
 GIVEN=()
@@ -302,8 +339,10 @@ NIGHTLY=false
 # Stages that were due but could not run on this host, each with its reason.
 SKIPPED=()
 # The image the root tests run in under a tier, built from
-# testing/root-tests/Dockerfile when the host lacks it.
-ROOT_IMAGE="${FIPS_ROOT_TESTS_IMAGE:-fips-root-tests:trixie-1}"
+# testing/root-tests/Dockerfile when the host lacks it. Tagged by a hash of
+# that file, so a changed Dockerfile is a new tag, built once, rather than an
+# old image a host keeps using because the tag is present.
+ROOT_IMAGE="${FIPS_ROOT_TESTS_IMAGE:-fips-root-tests:$(sha256sum "$SCRIPT_DIR/root-tests/Dockerfile" | cut -c1-12)}"
 # How long the root tests' container may run, in seconds.
 ROOT_TIMEOUT=1200
 # The Rust target of the musl unit tests.
@@ -520,6 +559,7 @@ GUARDS=(
     "run_simassert sim-assertions"
     "run_image_scoping image-scoping"
     "run_action_pins action-pins"
+    "run_base_pins base-pins"
     "run_comment_refs comment-refs"
     "run_ignored_tests ignored-tests"
     "run_portable_atomics portable-atomics"
@@ -553,8 +593,46 @@ nightly_chaos() {
             echo "batch$i-${parts[0]} ${parts[*]:1}"
         done
     done
-    printf '%s\n' "${NIGHTLY_LONG[@]}"
+    # Guarded: printf with no arguments still prints one empty line.
+    (( ${#NIGHTLY_LONG[@]} )) && printf '%s\n' "${NIGHTLY_LONG[@]}"
     return 0
+}
+
+# The results a green run of one part of tier 3 ($PART) records, in the form
+# print_plan uses. With --tier 2, the parts record exactly what tier 3
+# records, and no two share a result but build-integration, which the chaos
+# part builds for itself on a fresh checkout.
+print_part_plan() {
+    local entry
+    echo "# ci-local.sh --tier 3 --part $PART: the results a green run records, in order"
+    case "$PART" in
+        core-explorers)
+            echo core-explorers ;;
+        root-explorers)
+            printf '%s\n' root-explorers mutations-explorers ;;
+        chaos)
+            echo build-integration
+            while read -r entry; do echo "chaos-${entry%% *}"; done < <(nightly_chaos)
+            [[ "$WITH_TOR" == true ]] && printf '%s\n' "${TOR_SUITES[@]}"
+            ;;
+    esac
+    return 0
+}
+
+# The parts this tree's tier 3 splits into, one per line. root-explorers is
+# one only where the tree builds the real-node explorer (ROOT_EXPLORER); on
+# next it is refused, and tier 3 lists neither of its results.
+tier3_parts() {
+    echo core-explorers
+    [[ "$ROOT_EXPLORER" == true ]] && echo root-explorers
+    echo chaos
+    return 0
+}
+
+# Whether the part's plan lists a result of its own, build-integration aside:
+# a part that would record only the shared build has nothing to run.
+part_has_work() {
+    print_part_plan | grep -v '^#' | grep -qvx build-integration
 }
 
 # The results a green run with the current options records, in the order it
@@ -563,9 +641,12 @@ nightly_chaos() {
 # does, and a green tier run is held to it (check_plan).
 print_plan() {
     local g t entry s
+    [[ -n "$PART" ]] && { print_part_plan; return 0; }
     echo "# ci-local.sh --tier $TIER: the results a green run records, in order"
     for g in "${GUARDS[@]}"; do echo "${g#* }"; done
-    printf '%s\n' nft-syntax build fmt clippy clippy-default-features \
+    echo nft-syntax
+    deb_early && echo deb-build
+    printf '%s\n' fmt clippy clippy-default-features \
         core-fence-lib core-fence core-fence-slow core-doc
     [[ "$BAREMETAL" == true ]] && echo core-baremetal
     if [[ "$CROSS_CHECK" == true ]]; then
@@ -584,7 +665,10 @@ print_plan() {
         echo "# musl-tests and addrless-iface-musl are skipped, with the reason, on a host without the $MUSL_TARGET target or musl-gcc"
     fi
     [[ "$EXPLORERS" == all || "$EXPLORERS" == core ]] && echo core-explorers
-    [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]] && echo root-explorers
+    if [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]]; then
+        echo root-explorers
+        echo mutations-explorers
+    fi
     if [[ "$ROOT_TESTS" == true ]]; then
         echo root-tests
         echo privileged-bind
@@ -643,6 +727,41 @@ apply_tier() {
     return 0
 }
 
+# Whether this run builds the .deb at the start of the build stage
+# (deb-build): wherever an integration suite that uses it will run, so tier 2
+# and above, and a run with no tier that runs the integration stage in full or
+# one of the package suites alone. The package is the run's release build:
+# no plain release build is made beside it.
+deb_early() {
+    [[ "$SKIP_INTEGRATION" != true && "$BUILD_ONLY" != true && "$TEST_ONLY" != true \
+        && "$RERUN" != true ]] || return 1
+    case "$ONLY_SUITE" in
+        ""|dns-resolver|deb-install|rpm-install) return 0 ;;
+    esac
+    return 1
+}
+
+# Set the switches for one part of tier 3 ($PART), after apply_tier: only
+# the part's own stages run. The chaos part keeps NIGHTLY on, which the
+# teardown reads to derive the batch's host interface names.
+apply_part() {
+    BAREMETAL=false
+    CROSS_CHECK=false
+    ROOT_TESTS=false
+    SLOW_TESTS=false
+    MUTATIONS=false
+    MUSL=false
+    SKIP_INTEGRATION=true
+    EXPLORERS=""
+    NIGHTLY=false
+    case "$PART" in
+        core-explorers) EXPLORERS=core ;;
+        root-explorers) EXPLORERS=root ;;
+        chaos)          NIGHTLY=true ;;
+    esac
+    return 0
+}
+
 # ── Parse arguments ────────────────────────────────────────────────────────
 
 # The environment switch is for runners that cannot pass --baremetal, such as
@@ -679,6 +798,7 @@ while [[ $# -gt 0 ]]; do
         --only)             need_value "$@"; ONLY_SUITE="$2"; ONLY_GIVEN=true; GIVEN+=("$1"); shift 2 ;;
         --rerun)            need_value "$@"; ONLY_SUITE="$2"; RERUN=true; GIVEN+=("$1"); shift 2 ;;
         --tier)             need_value "$@"; TIER="$2"; shift 2 ;;
+        --part)             need_value "$@"; PART="$2"; shift 2 ;;
         --plan)             PLAN=true; shift ;;
         -j|--jobs)          need_value "$@"; PARALLEL_JOBS="$2"; shift 2 ;;
         --list)             list_suites ;;
@@ -688,6 +808,24 @@ while [[ $# -gt 0 ]]; do
         *)                  usage_error "Unknown option: $1" ;;
     esac
 done
+
+# A part is one share of tier 3, so it needs that tier, and the Tor suites
+# belong to the chaos part alone. The root explorer part is refused where the
+# tree has no root half, before --plan could print a part tier 3 never runs.
+if [[ -n "$PART" ]]; then
+    if [[ "$PART" == root-explorers && "$ROOT_EXPLORER" != true ]]; then
+        usage_error "--part root-explorers: this tree builds no real-node explorer (src/node/tests/settle/mod.rs), so there is no root half"
+    fi
+    if ! tier3_parts | grep -qxF -- "$PART"; then
+        _parts="core-explorers or chaos"
+        [[ "$ROOT_EXPLORER" == true ]] && _parts="core-explorers, root-explorers or chaos"
+        usage_error "--part takes $_parts, not: $PART"
+    fi
+    [[ "$TIER" == 3 ]] || usage_error "--part needs --tier 3"
+    if [[ "$WITH_TOR" == true && "$PART" != chaos ]]; then
+        usage_error "--with-tor combines only with --part chaos"
+    fi
+fi
 
 # A tier is a fixed set of stages, so an option that changes what runs is
 # refused rather than quietly dropped or added; the environment switches are
@@ -700,6 +838,14 @@ if [[ -n "$TIER" ]]; then
         usage_error "--tier $TIER cannot be combined with $_opt"
     done
     apply_tier
+    if [[ -n "$PART" ]]; then
+        apply_part
+        # A part with nothing of its own to run would pass on no results.
+        if ! part_has_work; then
+            echo "ci-local.sh: part $PART lists nothing to run" >&2
+            exit 1
+        fi
+    fi
 elif [[ "$PLAN" == true ]]; then
     usage_error "--plan needs --tier"
 fi
@@ -1003,22 +1149,6 @@ fi
 
 # ── Stage 1: Build ─────────────────────────────────────────────────────────
 
-# The plain release build, as GitHub CI's build job makes it. The integration
-# suites' image is made from run_testbuild's binaries, not these.
-run_release() {
-    info "cargo build --release --bins --examples"
-    # --bins --examples rather than the bare default: the native datagram API's
-    # echo server is a cargo example, and the native-api harness's image needs
-    # it built here rather than separately. Naming --bins keeps the daemon and
-    # its tools in the build, which --examples alone would drop.
-    if cargo build --release --bins --examples 2>&1; then
-        record "build" 0
-        return 0
-    fi
-    record "build" 1
-    return 1
-}
-
 # The integration build every integration suite's image is made from: the
 # release settings under the `integration` profile with the `test-overrides`
 # feature, so the chaos scenarios' test-only configuration keys are honoured.
@@ -1034,6 +1164,10 @@ run_testbuild() {
     record "build-integration" 1
     return 1
 }
+
+# Set to 0 once the build stage's first steps pass: nft-syntax and, where it
+# runs, deb-build. The stages after the build stage run only then.
+BUILD_GATE=1
 
 run_build() {
     stage "Stage 1: Build"
@@ -1052,7 +1186,21 @@ run_build() {
         return 1
     fi
 
-    run_release || return 1
+    # The release build: the .deb, built once here in the pinned container,
+    # written to deploy/ and shared by every later stage that needs it
+    # (dns-resolver, deb-install, rpm-install, the mutation lane's fence),
+    # where GitHub builds it in its deb-package job. A run that uses no
+    # package builds none; the integration build is its release-profile
+    # build.
+    if deb_early; then
+        if build_ci_deb deb-build; then
+            record "deb-build" 0
+        else
+            record "deb-build" "$CI_DEB_RC"
+            return 1
+        fi
+    fi
+    BUILD_GATE=0
 
     info "cargo fmt --check"
     if cargo fmt --check 2>&1; then
@@ -1294,17 +1442,37 @@ run_tests() {
     # .github/workflows/ci.yml. Tier 1 leaves it out: it has found coverage
     # gaps, never a product defect, and tier 2 runs it before a trunk moves.
     # Its lines whose test only the root crate's explorers feature compiles
-    # run only in a run with the root explorers (--explorers, --tier 3),
-    # which builds the lane with that feature; elsewhere they are skipped.
+    # are skipped here, and run in a stage of their own with the root
+    # explorers (run_lane_explorers), so the nightly can run them apart from
+    # tier 2.
+    #
+    # Its normal-build fence reads the fips from the .deb the build stage
+    # made (deb-build), which is what users install, instead of building a
+    # dev fips of its own. The package is unpacked into a private directory,
+    # never bind-mounted, and removed after; one that cannot be unpacked reds
+    # the stage. A run with no package, or a host without dpkg-deb, leaves the
+    # lane to build its own, as GitHub's does.
     if [[ "$MUTATIONS" == true ]]; then
-        local lane_explorers=""
-        [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]] && lane_explorers=1
-        info "testing/mutations/run.sh${lane_explorers:+ (FIPS_MUTATION_EXPLORERS=1)}"
-        if FIPS_MUTATION_EXPLORERS="$lane_explorers" with_fd_limit bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
-            record "mutations" 0
+        local fence_dir="" fence_bin="" lane_rc=0
+        if [[ -n "$CI_DEB_PATH" ]] && command -v dpkg-deb >/dev/null 2>&1; then
+            fence_dir=$(mktemp -d "/tmp/ci-mutation-fence.XXXXXX") # mount-tmpdir: dpkg-deb unpacks the package here, never a bind mount
+            if dpkg-deb -x "$CI_DEB_PATH" "$fence_dir" && [[ -x "$fence_dir/usr/bin/fips" ]]; then
+                fence_bin="$fence_dir/usr/bin/fips"
+                info "the mutation lane's fence reads usr/bin/fips from $CI_DEB_PATH"
+            else
+                fail "could not unpack usr/bin/fips from $CI_DEB_PATH for the mutation lane's fence"
+                lane_rc=1
+            fi
         else
-            record "mutations" 1
+            info "no package in this run; the mutation lane builds its own fips for its fence"
         fi
+        if [[ $lane_rc -eq 0 ]]; then
+            info "testing/mutations/run.sh"
+            FIPS_MUTATION_FENCE_BIN="$fence_bin" with_fd_limit bash "$SCRIPT_DIR/mutations/run.sh" 2>&1 \
+                || lane_rc=1
+        fi
+        [[ -n "$fence_dir" ]] && rm -rf "$fence_dir"
+        record "mutations" "$lane_rc"
     fi
 
     # The root crate's optional features add code the default-feature run
@@ -1342,17 +1510,20 @@ run_tests() {
     # Debug-only helpers (anything behind #[cfg(debug_assertions)]) vanish in a
     # release build, so a test calling one without the same gate breaks a build
     # nothing here ever performs: every run above compiles the test target in
-    # debug. Compile it in release too. Of what it builds, run only the leg-slot
-    # residue test, which is release-only because only an optimised build
-    # leaves the slot in a state worth measuring; the grep fails the stage if
-    # that test did not run, since a name filter that matches nothing passes.
-    # Mirrored in .github/workflows/ci.yml; check-ci-parity.sh holds each such
-    # step to its counterpart.
+    # debug. Compile it in release too, under the integration profile, which
+    # inherits release unchanged (Cargo.toml) and so shares the integration
+    # build's dependencies instead of compiling the release ones again. Of
+    # what it builds, run only the leg-slot residue test, which is
+    # release-only because only an optimised build leaves the slot in a state
+    # worth measuring; the grep fails the stage if that test did not run,
+    # since a name filter that matches nothing passes. Mirrored in
+    # .github/workflows/ci.yml; check-ci-parity.sh holds each such step to its
+    # counterpart.
     local residue_test="peer::machine::tests::take_leg_leaves_no_session_keys_in_the_slot_it_empties"
     local release_log
     release_log=$(mktemp "/tmp/ci-release-lib-tests.XXXXXX")
-    info "cargo test --release --lib -- --exact $residue_test"
-    if with_fd_limit cargo test --release --lib -- --exact "$residue_test" 2>&1 | tee "$release_log" \
+    info "cargo test --profile integration --lib -- --exact $residue_test"
+    if with_fd_limit cargo test --profile integration --lib -- --exact "$residue_test" 2>&1 | tee "$release_log" \
         && grep -q '^test result: ok\. 1 passed;' "$release_log"; then
         record "release-test-compile" 0
     else
@@ -1362,6 +1533,7 @@ run_tests() {
 
     run_musl
     run_explorers
+    run_lane_explorers
     run_root_tests
 }
 
@@ -1508,7 +1680,19 @@ GUARD_META=(
 # root or all here. Where both run, they run side by side, each in a
 # subshell with its output held until it ends, so the two do not interleave;
 # the parent records each half's status, since a subshell's record() dies
-# with it. Off by default, and then nothing is recorded.
+# with it. One half alone (=core, =root, or a part) runs in the foreground
+# with its output streamed, so a builder's log does not sit silent for the
+# hours the core half takes. Off by default, and then nothing is recorded.
+# One explorer half by name, core or root, in a subshell; its status.
+explorer_half() {
+    if [[ "$1" == core ]]; then
+        ( run_explorer_half core-explorers fips-core fips_core slow-explorers slow-tests \
+            "${GUARD_META[@]}" )
+    else
+        ( run_explorer_half root-explorers fips-mesh fips explorers "" )
+    fi
+}
+
 run_explorers() {
     local halves=() h pids=() logs=() i rc
     case "$EXPLORERS" in
@@ -1517,15 +1701,15 @@ run_explorers() {
         root) halves=(root) ;;
         *)    halves=(core root) ;;
     esac
+    if [[ ${#halves[@]} -eq 1 ]]; then
+        rc=0
+        explorer_half "${halves[0]}" || rc=$?
+        record "${halves[0]}-explorers" "$rc"
+        return 0
+    fi
     for h in "${halves[@]}"; do
         logs+=("$(mktemp "/tmp/ci-explorers-$h.XXXXXX")")
-        if [[ "$h" == core ]]; then
-            ( run_explorer_half core-explorers fips-core fips_core slow-explorers slow-tests \
-                "${GUARD_META[@]}" ) >"${logs[-1]}" 2>&1 &
-        else
-            ( run_explorer_half root-explorers fips-mesh fips explorers "" ) \
-                >"${logs[-1]}" 2>&1 &
-        fi
+        explorer_half "$h" >"${logs[-1]}" 2>&1 &
         pids+=($!)
     done
     for i in "${!halves[@]}"; do
@@ -1537,6 +1721,25 @@ run_explorers() {
         rm -f "${logs[$i]}"
         record "${halves[$i]}-explorers" "$rc"
     done
+    return 0
+}
+
+# With the root explorers (--explorers, --explorers=root, tier 3 or the
+# root-explorers part), the mutation lane's lines whose test only the root
+# crate's explorers feature compiles, built with that feature, recorded as
+# mutations-explorers. The plain lane (mutations) skips those lines and keeps
+# the normal-build fence, so the two stages together run every manifest line
+# once. The lane fails when no line is an explorer walk, so a renamed module
+# cannot turn this stage into a run of nothing. Next has no root half
+# (ROOT_EXPLORER) and its manifest no explorer line, so it never runs here.
+run_lane_explorers() {
+    [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]] || return 0
+    info "testing/mutations/run.sh (FIPS_MUTATION_EXPLORERS=only)"
+    if FIPS_MUTATION_EXPLORERS=only with_fd_limit bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
+        record "mutations-explorers" 0
+    else
+        record "mutations-explorers" 1
+    fi
     return 0
 }
 
@@ -1597,7 +1800,7 @@ run_root_tests() {
 root_image() {
     docker image inspect "$ROOT_IMAGE" >/dev/null 2>&1 && return 0
     info "building $ROOT_IMAGE from testing/root-tests/Dockerfile"
-    docker build --quiet -t "$ROOT_IMAGE" "$SCRIPT_DIR/root-tests" >/dev/null || return 1
+    docker build --quiet "${CI_BUILD_PROXY[@]}" -t "$ROOT_IMAGE" "$SCRIPT_DIR/root-tests" >/dev/null || return 1
     return 0
 }
 
@@ -2278,8 +2481,12 @@ run_dns_resolver() {
 DEB_INSTALL_TIMEOUT=${DEB_INSTALL_TIMEOUT:-2400}
 
 # Build the package once per process through the shared container script, for
-# every suite that consumes it: deb-install installs it and dns-resolver runs
-# its binaries. The GitHub workflow builds it once in its own job and hands the
+# every suite that consumes it: deb-install installs it, dns-resolver runs
+# its binaries, rpm-install repackages them and the mutation lane's fence
+# reads its fips. At tier 2 the first caller is the build stage (deb-build).
+# It goes to deploy/ in this checkout, and deploy/ci-deb.txt names it with
+# its sha256, so a builder publishing it need not glob a directory that may
+# hold an older package too. The GitHub workflow builds it once in its own job and hands the
 # artifact to both, so doing the same here keeps the two systems the same work.
 # The first caller builds; later callers get the stored result, a failure
 # included, so a failed build is not retried and reported twice as two builds.
@@ -2287,6 +2494,56 @@ DEB_INSTALL_TIMEOUT=${DEB_INSTALL_TIMEOUT:-2400}
 CI_DEB_DONE=0
 CI_DEB_PATH=""
 CI_DEB_RC=0
+
+# Whether the package $2 is a build of commit $1: a -dev version whose git
+# hash is a prefix of the commit, with no .dirty. A release version carries no
+# hash, so a release tree's package is never kept or reused.
+deb_of_commit() {
+    local key="$1" deb="$2" ver hash
+    ver=$(dpkg-deb -f "$deb" Version 2>/dev/null) || return 1
+    [[ "$ver" == *.dirty* ]] && return 1
+    [[ "$ver" =~ \+git[0-9]{8}\.([0-9a-f]+)- ]] || return 1
+    hash="${BASH_REMATCH[1]}"
+    [[ ${#hash} -ge 7 && "$key" == "$hash"* ]]
+}
+
+# Reuse commit $1's kept package (FIPS_CI_ARTIFACT_DIR): copy it to deploy/
+# and set CI_DEB_PATH. Non-zero when there is none, or it is not a build of
+# the commit.
+reuse_deb() {
+    local key="$1" kept=()
+    command -v dpkg-deb >/dev/null 2>&1 || return 1
+    shopt -s nullglob
+    kept=("$FIPS_CI_ARTIFACT_DIR/$key/deb/"fips_*.deb)
+    shopt -u nullglob
+    [[ ${#kept[@]} -eq 1 ]] || return 1
+    if ! deb_of_commit "$key" "${kept[0]}"; then
+        info "the package kept for $key is not a clean build of it; building"
+        return 1
+    fi
+    mkdir -p "$PROJECT_ROOT/deploy" && cp "${kept[0]}" "$PROJECT_ROOT/deploy/" || return 1
+    CI_DEB_PATH="$PROJECT_ROOT/deploy/$(basename "${kept[0]}")"
+    info "reused the package kept for $key: $CI_DEB_PATH"
+    return 0
+}
+
+# Keep the package $2 for commit $1, only if it is a clean build of it and the
+# commit has none kept yet.
+keep_deb() {
+    local key="$1" deb="$2" dir="$FIPS_CI_ARTIFACT_DIR/$1" tmp
+    command -v dpkg-deb >/dev/null 2>&1 || return 0
+    deb_of_commit "$key" "$deb" || { info "not keeping $deb: it is not a clean build of $key"; return 0; }
+    [[ -e "$dir/deb" ]] && return 0
+    mkdir -p "$dir" || return 0
+    tmp=$(mktemp -d "$dir/.deb.XXXXXX") || return 0 # mount-tmpdir: staging for an atomic rename, never mounted
+    if cp "$deb" "$tmp/" && mv -T "$tmp" "$dir/deb" 2>/dev/null; then
+        info "kept $deb for commit $key in $dir/deb"
+    else
+        rm -rf "$tmp"
+    fi
+    return 0
+}
+
 build_ci_deb() {
     local suite="$1"
     if [[ $CI_DEB_DONE -eq 1 ]]; then
@@ -2298,13 +2555,19 @@ build_ci_deb() {
         return 0
     fi
     CI_DEB_DONE=1
+    local build_log deb rc=0 key
+    key=$(commit_key)
+    if [[ -n "$key" ]] && reuse_deb "$key"; then
+        write_ci_deb
+        return 0
+    fi
     info "[$suite] Building the package in the pinned container"
-    local build_log deb rc=0
     build_log=$(mktemp "/tmp/ci-deb-install-build.XXXXXX")
     # stdout carries the package path on its last line, so it is captured;
     # stderr stays on the console so build progress is still visible live.
     timeout "$DEB_INSTALL_TIMEOUT" \
-        bash packaging/debian/build-deb-container.sh | tee "$build_log" || rc=$?
+        bash packaging/debian/build-deb-container.sh --output-dir "$PROJECT_ROOT/deploy" \
+        | tee "$build_log" || rc=$?
     if [[ $rc -ne 0 ]]; then
         if [[ $rc -eq 124 ]]; then
             echo "  ERROR: the container build exceeded ${DEB_INSTALL_TIMEOUT}s and was killed;" >&2
@@ -2325,6 +2588,15 @@ build_ci_deb() {
         return 1
     fi
     CI_DEB_PATH="$deb"
+    write_ci_deb
+    [[ -n "$key" ]] && keep_deb "$key" "$deb"
+    return 0
+}
+
+# deploy/ci-deb.txt: the run's package, as its sha256 and path.
+write_ci_deb() {
+    printf '%s %s\n' "$(sha256sum "$CI_DEB_PATH" | cut -d' ' -f1)" "$CI_DEB_PATH" \
+        >"$PROJECT_ROOT/deploy/ci-deb.txt"
     return 0
 }
 
@@ -2478,6 +2750,181 @@ run_chaos_set() {
     return 0
 }
 
+# ── A commit's kept artifacts (FIPS_CI_ARTIFACT_DIR) ──────────────────────
+#
+# With FIPS_CI_ARTIFACT_DIR=<dir>, which the internal builder sets, a run of a
+# clean tree keeps what its integration stage built under its commit, and a
+# later run of the same commit (a re-run, a red retry, --rerun, or a nightly
+# chaos part after the commit's tier 2) reuses it instead of building it
+# again:
+#   - the two test images, tagged fips-test:commit-<sha> and
+#     fips-test-app:commit-<sha> and labelled with the commit;
+#   - the integration binaries, in <dir>/<sha>/bin, which the build context
+#     needs beside the images (the chaos runner reads its fips from there);
+#   - the .deb, in <dir>/<sha>/deb.
+# Each is created only when absent and never replaced, and only from a build
+# of exactly that commit with no uncommitted change; a reuse checks it again
+# (the label, the image's fips against the kept one, the package's version
+# against the commit) and builds instead on any mismatch. The suites still
+# start this run's own per-run images, built FROM the commit tags with this
+# run's label, so neither a prune of a commit tag nor the teardown of the run
+# that kept it can remove an image from under a running suite. The teardown
+# never removes a commit tag (ci-cleanup.sh); the builder's prune owns them
+# and <dir>. Unset, nothing is kept or reused.
+CI_COMMIT_LABEL_KEY="com.corganlabs.fips-ci.commit"
+CI_INTEGRATION_BINS=(fips fipsctl fipstop fips-gateway native-echo native-surface)
+
+# The commit whose artifacts this run keeps and reuses, on stdout: HEAD's full
+# sha when FIPS_CI_ARTIFACT_DIR is set and the tree is clean, else nothing,
+# with the reason on stderr.
+commit_key() {
+    [[ -n "${FIPS_CI_ARTIFACT_DIR:-}" ]] || return 0
+    if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null)" ]]; then
+        info "FIPS_CI_ARTIFACT_DIR is set but the tree has uncommitted changes; nothing is kept or reused" >&2
+        return 0
+    fi
+    git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null
+    return 0
+}
+
+# Make image $2, this run's own image of the kept image $1, carrying this run's
+# label. A plain tag would not do: $1 is the image of the run that kept it and
+# carries that run's label, so that run's teardown, which removes every tag of
+# an image with its label but the commit tags, would remove this run's tag with
+# it while this run's suites still start it. The build is a FROM line and two
+# labels on a local image, so it pulls and copies nothing.
+run_image() {
+    printf 'FROM %s\n' "$1" \
+        | docker build -q --label "$CI_LABEL" --label "$CI_LABEL_RUN" -t "$2" - >/dev/null
+}
+
+# Reuse commit $1's kept test images and integration binaries: copy the
+# binaries into this run's build context and make this run's per-run images
+# from the kept ones (run_image). Non-zero, with the reason, when anything is
+# missing or does not match.
+reuse_images() {
+    local key="$1" store="$FIPS_CI_ARTIFACT_DIR/$1/bin" t f want have
+    for t in "fips-test:commit-$key" "fips-test-app:commit-$key"; do
+        have=$(docker image inspect --format "{{index .Config.Labels \"$CI_COMMIT_LABEL_KEY\"}}" \
+            "$t" 2>/dev/null) || have=""
+        if [[ "$have" != "$key" ]]; then
+            info "no reusable $t (absent, or not labelled with this commit); building"
+            return 1
+        fi
+    done
+    for f in "${CI_INTEGRATION_BINS[@]}"; do
+        if [[ ! -x "$store/$f" ]]; then
+            info "the integration binaries kept in $store lack $f; building"
+            return 1
+        fi
+    done
+    want=$(sha256sum "$store/fips" | cut -d' ' -f1)
+    have=$(docker run --rm --label "$CI_LABEL" --label "$CI_LABEL_RUN" --entrypoint sha256sum \
+        "fips-test:commit-$key" /usr/local/bin/fips 2>/dev/null | cut -d' ' -f1)
+    if [[ -z "$want" || "$want" != "$have" ]]; then
+        info "fips-test:commit-$key does not hold the kept fips (sha256 ${have:-unread}, kept $want); building"
+        return 1
+    fi
+    for f in "${CI_INTEGRATION_BINS[@]}"; do
+        cp "$store/$f" "$CI_BUILD_CONTEXT/$f" || return 1
+    done
+    run_image "fips-test:commit-$key" "$CI_IMAGE_TEST" || return 1
+    run_image "fips-test-app:commit-$key" "$CI_IMAGE_APP" || return 1
+    info "reused fips-test:commit-$key, fips-test-app:commit-$key and the integration binaries in $store"
+    return 0
+}
+
+# Keep this run's test images and integration binaries for commit $1, each
+# only if the commit has none kept yet. The binaries go first, so a run that
+# finds the tags finds them too. Checked again for a clean tree, since a
+# suite may have written to it. Two runs of one commit can race here, and
+# their builds need not be byte-identical (they are built in different
+# worktrees), so a run tags its images only when the kept fips is its own:
+# the binaries' rename picks one run, and only that run's images can join
+# them, which a reuse's fips check would otherwise refuse for good.
+keep_images() {
+    local key="$1" dir="$FIPS_CI_ARTIFACT_DIR/$1" tmp f kept own
+    if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null)" ]]; then
+        info "the tree is no longer clean; keeping nothing for commit $key"
+        return 0
+    fi
+    mkdir -p "$dir" || return 0
+    if [[ ! -e "$dir/bin" ]]; then
+        tmp=$(mktemp -d "$dir/.bin.XXXXXX") || return 0 # mount-tmpdir: staging for an atomic rename, never mounted
+        for f in "${CI_INTEGRATION_BINS[@]}"; do
+            cp "$CI_BUILD_CONTEXT/$f" "$tmp/$f" || { rm -rf "$tmp"; return 0; }
+        done
+        mv -T "$tmp" "$dir/bin" 2>/dev/null || rm -rf "$tmp"
+    fi
+    kept=$(sha256sum "$dir/bin/fips" 2>/dev/null | cut -d' ' -f1)
+    own=$(sha256sum "$CI_BUILD_CONTEXT/fips" 2>/dev/null | cut -d' ' -f1)
+    if [[ -z "$own" || "$kept" != "$own" ]]; then
+        info "the fips kept in $dir/bin is another run's build; keeping no images for commit $key"
+        return 0
+    fi
+    docker image inspect "fips-test:commit-$key" >/dev/null 2>&1 \
+        || docker tag "$CI_IMAGE_TEST" "fips-test:commit-$key"
+    docker image inspect "fips-test-app:commit-$key" >/dev/null 2>&1 \
+        || docker tag "$CI_IMAGE_APP" "fips-test-app:commit-$key"
+    info "kept fips-test:commit-$key, fips-test-app:commit-$key and the integration binaries in $dir/bin"
+    return 0
+}
+
+# Make this run's integration build and the two test images every
+# integration suite starts (CI_IMAGE_TEST, CI_IMAGE_APP) from it, recording
+# build-integration and, on a failed image build, docker-build or
+# docker-build-app. Non-zero when either is missing.
+prepare_images() {
+    # Populate THIS run's build context, then install the binaries into it.
+    # Everything but the binaries is copied from the tracked context directory;
+    # the binaries are installed fresh, and a previous run's are deliberately
+    # not carried over, since inheriting them is the failure this scoping
+    # exists to prevent.
+    info "Preparing build context $CI_BUILD_CONTEXT"
+    rm -rf "$CI_BUILD_CONTEXT"
+    mkdir -p "$CI_BUILD_CONTEXT" || { record "docker-build" 1; return 1; }
+    local _f
+    for _f in "$SCRIPT_DIR"/docker/*; do
+        case "$(basename "$_f")" in
+            fips|fipsctl|fipstop|fips-gateway|native-echo|native-surface) continue ;;
+        esac
+        cp -a "$_f" "$CI_BUILD_CONTEXT/" || { record "docker-build" 1; return 1; }
+    done
+
+    # A commit's kept images and binaries stand for this build (above).
+    local key commit_label=()
+    key=$(commit_key)
+    if [[ -n "$key" ]]; then
+        if reuse_images "$key"; then
+            record "build-integration" 0
+            return 0
+        fi
+        commit_label=(--label "$CI_COMMIT_LABEL_KEY=$key")
+    fi
+
+    run_testbuild || return 1
+    info "Installing integration binaries"
+    install_binaries "$CI_BUILD_CONTEXT"
+
+    # Build unified test image once (used by all harnesses). Tag per-run
+    # (fips-test:${run}) so a build killed mid-flight never wedges the next
+    # run's rebuild, and concurrent runs never clobber each other's image.
+    info "Building $CI_IMAGE_TEST Docker image"
+    docker build -t "$CI_IMAGE_TEST" --label "$CI_LABEL" --label "$CI_LABEL_RUN" "${commit_label[@]}" \
+        "${CI_BUILD_PROXY[@]}" "$CI_BUILD_CONTEXT" --quiet \
+        || { record "docker-build" 1; return 1; }
+    docker build -t "$CI_IMAGE_APP" --label "$CI_LABEL" --label "$CI_LABEL_RUN" "${commit_label[@]}" \
+        "${CI_BUILD_PROXY[@]}" -f "$CI_BUILD_CONTEXT/Dockerfile.app" "$CI_BUILD_CONTEXT" --quiet \
+        || { record "docker-build-app" 1; return 1; }
+    [[ -n "$key" ]] && keep_images "$key"
+    # Deliberately NOT retagged to fips-test:latest. Every consumer reads
+    # FIPS_TEST_IMAGE, and a bridge back to the shared mutable name would let a
+    # consumer that does not keep working silently — resolving whichever
+    # concurrent run wrote the tag last, and recording that run's binaries under
+    # this run's commit. Without the bridge a missed consumer fails loudly.
+    return 0
+}
+
 # Determine which suites to run and execute them
 run_integration() {
     stage "Stage 3: Integration Tests"
@@ -2501,40 +2948,7 @@ run_integration() {
         return
     fi
 
-    # Populate THIS run's build context, then install the binaries into it.
-    # Everything but the binaries is copied from the tracked context directory;
-    # the binaries are installed fresh, and a previous run's are deliberately
-    # not carried over, since inheriting them is the failure this scoping
-    # exists to prevent.
-    info "Preparing build context $CI_BUILD_CONTEXT"
-    rm -rf "$CI_BUILD_CONTEXT"
-    mkdir -p "$CI_BUILD_CONTEXT" || { record "docker-build" 1; return; }
-    local _f
-    for _f in "$SCRIPT_DIR"/docker/*; do
-        case "$(basename "$_f")" in
-            fips|fipsctl|fipstop|fips-gateway|native-echo|native-surface) continue ;;
-        esac
-        cp -a "$_f" "$CI_BUILD_CONTEXT/" || { record "docker-build" 1; return; }
-    done
-
-    run_testbuild || return
-    info "Installing integration binaries"
-    install_binaries "$CI_BUILD_CONTEXT"
-
-    # Build unified test image once (used by all harnesses). Tag per-run
-    # (fips-test:${run}) so a build killed mid-flight never wedges the next
-    # run's rebuild, and concurrent runs never clobber each other's image.
-    info "Building $CI_IMAGE_TEST Docker image"
-    docker build -t "$CI_IMAGE_TEST" --label "$CI_LABEL" --label "$CI_LABEL_RUN" "$CI_BUILD_CONTEXT" --quiet \
-        || { record "docker-build" 1; return; }
-    docker build -t "$CI_IMAGE_APP" --label "$CI_LABEL" --label "$CI_LABEL_RUN" \
-        -f "$CI_BUILD_CONTEXT/Dockerfile.app" "$CI_BUILD_CONTEXT" --quiet \
-        || { record "docker-build-app" 1; return; }
-    # Deliberately NOT retagged to fips-test:latest. Every consumer reads
-    # FIPS_TEST_IMAGE, and a bridge back to the shared mutable name would let a
-    # consumer that does not keep working silently — resolving whichever
-    # concurrent run wrote the tag last, and recording that run's binaries under
-    # this run's commit. Without the bridge a missed consumer fails loudly.
+    prepare_images || return
 
     # Single suite mode
     if [[ -n "$ONLY_SUITE" ]]; then
@@ -2692,6 +3106,41 @@ run_nightly() {
     return 0
 }
 
+# One part of tier 3 (--part): only that part's stages, with none of the
+# guards or the build stage, which the nightly's tier 2 part runs on the same
+# tree. The chaos part makes its own integration build and images first, as
+# a fresh checkout has none, and fails before that when it has no scenario.
+run_part() {
+    local entries=()
+    stage "Tier 3, part $PART"
+    case "$PART" in
+        core-explorers)
+            run_explorers ;;
+        root-explorers)
+            run_explorers
+            run_lane_explorers ;;
+        chaos)
+            mapfile -t entries < <(nightly_chaos)
+            if [[ ${#entries[@]} -eq 0 ]]; then
+                fail "part chaos has no scenario to run"
+                record "part-chaos" 1
+                return 1
+            fi
+            prepare_images || return 1
+            run_nightly
+            if [[ "$WITH_TOR" == true ]]; then
+                run_tor_socks5
+                run_tor_directory
+            fi
+            ;;
+        *)
+            fail "unknown part: $PART"
+            record "part" 1
+            return 1 ;;
+    esac
+    return 0
+}
+
 # A green tier run must have recorded exactly what --plan lists for it, less
 # the stages skipped for want of something on this host; otherwise a stage
 # has been added to or dropped from one and not the other, and the plan the
@@ -2704,12 +3153,13 @@ check_plan() {
         planned=$(grep -vxF -- "${name%%:*}" <<<"$planned")
     done
     recorded=$(printf '%s\n' "${!RESULTS[@]}" | sort)
+    local what="tier $TIER${PART:+, part $PART}"
     if [[ "$planned" == "$recorded" ]]; then
-        info "the run recorded the $(wc -l <<<"$recorded") results --plan lists for tier $TIER"
+        info "the run recorded the $(wc -l <<<"$recorded") results --plan lists for $what"
         return 0
     fi
     diff=$(diff <(echo "$planned") <(echo "$recorded") | sed -n 's/^< /  planned, not recorded: /p; s/^> /  recorded, not planned: /p')
-    fail "what tier $TIER recorded differs from its --plan:"
+    fail "what $what recorded differs from its --plan:"
     echo "$diff"
     record "plan-match" 1
     return 0
@@ -2807,6 +3257,19 @@ run_action_pins() {
     info "[action-pins] Checking that every action is pinned to a commit SHA"
     "$SCRIPT_DIR/check-action-pins.sh" || rc=$?
     record "action-pins" "$rc"
+}
+
+# Every base image a CI image builds from, and every third-party image a suite
+# runs, must be pinned by digest, so two runs of one tree build on the same
+# bases and a result standing for another run of the tree stands on what that
+# run would have used. Static, and its fixtures run first; about a second.
+# Mirrored in ci.yml's ci-parity job.
+run_base_pins() {
+    local rc=0
+    info "[base-pins] Checking that every CI base image is pinned by digest"
+    "$SCRIPT_DIR/check-base-pins.sh" || rc=$?
+    record "base-pins" "$rc"
+    return 0
 }
 
 # Every reference a source comment makes must resolve for a reader who has only
@@ -3109,10 +3572,12 @@ run_veth_host() {
     return 0
 }
 
-# Every static guard, in order. Each gates every mode except --rerun: a
-# divergence invalidates any claim that a local run means what a GitHub run
-# means, whichever subset was asked for. --rerun skips them because it reruns a
-# suite on a tree whose full run already passed them, and says so in its banner.
+# Every static guard, in order. Each gates every mode except --rerun and
+# --part: a divergence invalidates any claim that a local run means what a
+# GitHub run means, whichever subset was asked for. --rerun skips them because
+# it reruns a suite on a tree whose full run already passed them, and says so
+# in its banner. A part of tier 3 skips them because the nightly's tier 2 part
+# runs them on the same tree.
 run_guards() {
     local g
     for g in "${GUARDS[@]}"; do
@@ -3141,13 +3606,18 @@ main() {
 
     stage "FIPS Local CI"
     info "Project root: $PROJECT_ROOT"
-    [[ -n "$TIER" ]] && info "Tier $TIER"
+    [[ -n "$TIER" ]] && info "Tier $TIER${PART:+, part $PART}"
 
     load_sampler &
     CI_LOAD_PID=$!
 
     if [[ "$RERUN" == true ]]; then
         run_rerun
+    elif [[ -n "$PART" ]]; then
+        run_part
+        if [[ $OVERALL -eq 0 ]]; then
+            check_plan
+        fi
     else
         # Above the mode branches deliberately, so --only, --test-only and
         # --build-only are gated too (see run_guards).
@@ -3159,7 +3629,7 @@ main() {
             run_build
         else
             run_build
-            if [[ "${RESULTS[build]:-1}" -ne 0 ]]; then
+            if [[ "$BUILD_GATE" -ne 0 ]]; then
                 fail "Build failed, skipping remaining stages"
             else
                 run_tests

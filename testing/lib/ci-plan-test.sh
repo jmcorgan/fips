@@ -5,7 +5,15 @@
 # configuration, stage lists and plan functions, plants a set of recorded
 # results, and runs check_plan on them: the plan itself passes, a missing or
 # an extra result fails and is named, and a skipped stage is not counted as
-# missing.
+# missing. The same holds for each part of tier 3 (--part). The parts, with
+# tier 2, must list exactly what tier 3 lists, each part only results tier 3
+# lists, no two of them the same result but the integration build, and the
+# explorer parts exactly what tier 3 adds to tier 2 besides the chaos part;
+# each failure names the result at fault. The parts are ci-local.sh's own
+# (tier3_parts): on next, which builds no real-node explorer, there is no
+# root-explorers part, and tier 3 lists no mutations-explorers. A part whose
+# plan has nothing of its own is refused, and the chaos part with no
+# scenario fails before it builds anything.
 #
 # Nothing is built or started: the functions are read out of ci-local.sh and
 # run in this shell, and record() is a stand-in that only stores the result.
@@ -38,20 +46,25 @@ check() {
 # helpers and the plan, then check_plan and skip_stage. If any is missing the
 # test cannot run, which is not a pass.
 defs="$(sed -n '/^# ── Configuration/,/^# ── Parse arguments/p' "$CI_LOCAL")
-$(awk '/^(check_plan|skip_stage)\(\) \{/,/^}/' "$CI_LOCAL")"
-for fn in print_plan apply_tier nightly_chaos check_plan skip_stage; do
+$(awk '/^(check_plan|skip_stage|run_part)\(\) \{/,/^}/' "$CI_LOCAL")"
+for fn in print_plan apply_tier nightly_chaos print_part_plan apply_part part_has_work \
+        tier3_parts check_plan skip_stage run_part; do
     if ! grep -q "^$fn() {" <<<"$defs"; then
         echo "ci-plan-test: $fn() not found in $CI_LOCAL; nothing was tested" >&2
         exit 2
     fi
 done
 
-# Load the definitions for tier $1 with no results yet, in this shell.
+# Load the definitions for tier $1, and part $2 if given, with no results
+# yet, in this shell.
 load() {
     eval "$defs"
     # shellcheck disable=SC2034  # read by the functions loaded from ci-local.sh
     TIER="$1"
+    # shellcheck disable=SC2034
+    PART="${2:-}"
     apply_tier 2>/dev/null
+    [[ -n "$PART" ]] && apply_part
     declare -gA RESULTS=()
     record() { RESULTS["$1"]=$2; return 0; }
     return 0
@@ -115,6 +128,133 @@ record_plan core-explorers
 run_check
 check "tier 3: a missing explorer half fails" \
     "$(grep -qF 'planned, not recorded: core-explorers' <<<"$OUT" && echo 0 || echo 1)"
+
+# The root explorer half and the mutation lane's explorer lines go together:
+# where the tree builds the real-node explorer (ROOT_EXPLORER), tier 3 must
+# record mutations-explorers; where it does not, as on next, tier 3 lists
+# neither result.
+load 3
+if [[ "$ROOT_EXPLORER" == true ]]; then
+    record_plan mutations-explorers
+    run_check
+    check "tier 3: a missing mutations-explorers fails" \
+        "$(grep -qF 'planned, not recorded: mutations-explorers' <<<"$OUT" && echo 0 || echo 1)"
+else
+    check "tier 3 with no real-node explorer lists neither root-explorers nor mutations-explorers" \
+        "$(print_plan | grep -qxE 'root-explorers|mutations-explorers' && echo 1 || echo 0)"
+fi
+
+# The parts are read from ci-local.sh, so a tree with no root half is held to
+# its own set: tier 2, core-explorers and chaos.
+load 3
+mapfile -t PARTS < <(tier3_parts)
+check "tier 3 splits into a core explorer part and a chaos part" \
+    "$(printf '%s\n' "${PARTS[@]}" | grep -qx core-explorers && printf '%s\n' "${PARTS[@]}" | grep -qx chaos && echo 0 || echo 1)" \
+    "parts: ${PARTS[*]}"
+for part in "${PARTS[@]}"; do
+    load 3 "$part"
+    record_plan
+    run_check
+    check "part $part: the plan itself passes" \
+        "$(grep -qx 'plan-match=none' <<<"$OUT" && echo 0 || echo 1)"
+    first=$(print_part_plan | grep -v '^#' | grep -vx build-integration | head -n 1)
+    load 3 "$part"
+    record_plan "$first"
+    run_check
+    check "part $part: a missing result fails and is named" \
+        "$(grep -qF "planned, not recorded: $first" <<<"$OUT" && grep -qx 'plan-match=1' <<<"$OUT" && echo 0 || echo 1)"
+    load 3 "$part"
+    record_plan
+    record unit-tests 0
+    run_check
+    check "part $part: an extra result fails and is named" \
+        "$(grep -qF 'recorded, not planned: unit-tests' <<<"$OUT" && grep -qx 'plan-match=1' <<<"$OUT" && echo 0 || echo 1)"
+    load 3 "$part"
+    run_check
+    check "part $part: a run that recorded nothing fails" \
+        "$(grep -qx 'plan-match=1' <<<"$OUT" && echo 0 || echo 1)"
+done
+
+# The plan of tier $1, part $2 (or none), with WITH_TOR $3, sorted, without
+# notes. Run in a subshell, so nothing it loads stays.
+plan_of() {
+    (
+        load "$1" "$2"
+        # shellcheck disable=SC2034  # read by print_plan
+        WITH_TOR="$3"
+        print_plan | grep -v '^#' | sort
+    )
+    return 0
+}
+
+# Hold the parts to tier 3, without and with the Tor suites: tier 2 is the
+# nightly's first part and never takes them.
+for tor in false true; do
+    t3=$(plan_of 3 "" "$tor")
+    t2=$(plan_of 2 "" false)
+    declare -A PLANS=([tier2]="$t2")
+    for part in "${PARTS[@]}"; do
+        PLANS[$part]=$(plan_of 3 "$part" "$tor")
+    done
+    union=$(printf '%s\n' "${PLANS[@]}" | grep -v '^$' | sort -u)
+    problems=()
+    while read -r r; do
+        [[ -n "$r" ]] && problems+=("tier 3 lists $r that no part lists")
+    done < <(comm -23 <(echo "$t3") <(echo "$union"))
+    for part in tier2 "${PARTS[@]}"; do
+        while read -r r; do
+            [[ -n "$r" ]] && problems+=("part $part lists $r, which tier 3 does not")
+        done < <(comm -13 <(echo "$t3") <(echo "${PLANS[$part]}"))
+    done
+    names=(tier2 "${PARTS[@]}")
+    for (( i = 0; i < ${#names[@]}; i++ )); do
+        for (( j = i + 1; j < ${#names[@]}; j++ )); do
+            while read -r r; do
+                [[ -n "$r" && "$r" != build-integration ]] \
+                    && problems+=("parts ${names[$i]} and ${names[$j]} both list $r")
+            done < <(comm -12 <(echo "${PLANS[${names[$i]}]}") <(echo "${PLANS[${names[$j]}]}"))
+        done
+    done
+    explorer_job=$(for part in "${PARTS[@]}"; do
+            [[ "$part" == *-explorers ]] && echo "${PLANS[$part]}"
+        done | grep -v '^$' | sort -u)
+    rest=$(comm -23 <(comm -23 <(echo "$t3") <(echo "$t2")) <(echo "${PLANS[chaos]}"))
+    [[ "$explorer_job" == "$rest" ]] \
+        || problems+=("the explorer parts list $(echo "$explorer_job" | tr '\n' ' ')but tier 3 adds $(echo "$rest" | tr '\n' ' ')besides tier 2 and chaos")
+    for p in "${problems[@]}"; do echo "  $p"; done
+    check "tier 3 with WITH_TOR=$tor: the parts and tier 2 list exactly tier 3, each only its own" \
+        "${#problems[@]}" "${problems[*]:0:3}"
+    unset PLANS
+done
+
+# A part with nothing of its own to run is refused at --plan and at the
+# start of a run: the chaos part with no scenario lists only the shared
+# build.
+load 3 chaos
+# shellcheck disable=SC2034  # read by the functions loaded from ci-local.sh
+CHAOS_SUITES=()
+# shellcheck disable=SC2034
+NIGHTLY_LONG=()
+check "part chaos with no scenario lists nothing of its own" \
+    "$(part_has_work && echo 1 || echo 0)"
+load 3 chaos
+check "part chaos as it stands lists something of its own" \
+    "$(part_has_work && echo 0 || echo 1)"
+
+# The chaos part with no scenario fails before it builds anything.
+load 3 chaos
+# shellcheck disable=SC2034  # read by the functions loaded from ci-local.sh
+CHAOS_SUITES=()
+# shellcheck disable=SC2034
+NIGHTLY_LONG=()
+stage() { return 0; }
+fail() { echo "FAIL $*"; return 0; }
+prepare_images() { echo "prepare_images called"; return 0; }
+run_nightly() { echo "run_nightly called"; return 0; }
+out=$(run_part; echo "rc=$?")
+check "part chaos with no scenario fails before building" \
+    "$(grep -qx 'rc=1' <<<"$out" && grep -qF 'part chaos has no scenario to run' <<<"$out" \
+        && ! grep -q 'called' <<<"$out" && echo 0 || echo 1)" "$(tr '\n' ' ' <<<"$out")"
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

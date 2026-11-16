@@ -265,8 +265,12 @@ matrix, and that every build, lint, guard and unit-test step GitHub runs is a
 stage of `--tier 2` and the reverse, by the check's table of GitHub steps and
 local results; a divergence fails the run. The only exceptions are what one
 runner cannot do, listed by name in the check: the Android, macOS and Windows
-jobs and nextest's retry-flake report on GitHub, the zig cross-checks
-locally. GitHub runs the same check as its own `ci-parity` job.
+jobs, the build job's native release builds on its arm64, macOS and Windows
+legs, and nextest's retry-flake report on GitHub, the zig cross-checks
+locally. On Linux the release build is the `.deb` on both runners: GitHub's
+`deb-package` job, and `deb-build` locally, and the check fails if the build
+job's own release build runs on its `ubuntu-latest` leg too. GitHub runs the
+same check as its own `ci-parity` job.
 `--check-parity` runs it alone (see [check-ci-parity.sh](check-ci-parity.sh)),
 and [`lib/ci-parity-test.sh`](lib/ci-parity-test.sh), another guard, plants
 each kind of divergence in a scratch copy to show the check fails on it.
@@ -281,20 +285,48 @@ internal builder runs for each kind of commit:
   run without its slow suites, the known-defect lane, the profiling rerun and
   its audit reach, the release compile, and the root tests. No mutation lane
   and no integration suites.
-- **Tier 2, trunk tips and landing candidates:** tier 1, with the core's
-  slow suites, the mutation lane, the musl unit tests and every integration
-  suite. This is the set GitHub's `ci.yml` runs too.
+- **Tier 2, trunk tips and landing candidates:** tier 1, with the `.deb`
+  built at the start of the build stage, the core's slow suites, the
+  mutation lane, the musl unit tests and every integration suite. This is
+  the set GitHub's `ci.yml` runs too.
 - **Tier 3, the nightly run of each trunk tip:** tier 2, the explorers (on
-  next the core half alone; see below), and the nightly extras: a batch of
-  every CI chaos scenario, three runs each, and the long scenarios no other
-  run takes (`dead-grace-long`, `maelstrom`, `maelstrom-sparse`).
-  `--with-tor` adds the Tor suites.
+  next the core half alone, and so not the mutation lane's explorer lines;
+  see below), and the nightly extras: a batch of every CI chaos scenario,
+  three runs each, and the long scenarios no other run takes
+  (`dead-grace-long`, `maelstrom`, `maelstrom-sparse`). `--with-tor` adds
+  the Tor suites.
 
 No tier a push starts runs the explorers. Under a tier the root tests run in
 a container, the environment switches (`FIPS_CI_BAREMETAL`,
 `FIPS_CI_SLOW_TESTS`, `FIPS_CI_ROOT_TESTS`) are ignored, and an option that
 changes what runs is refused with exit 2; only `-j`, `--plan` and, at tier 3,
 `--with-tor` combine with it.
+
+Tier 3 is too long for one builder slot, so it also comes in parts, each run
+alone on a fresh checkout by `--tier 3 --part <name>`:
+
+- `testing/ci-local.sh --tier 2`: tier 2, guards and build stage included.
+- `testing/ci-local.sh --tier 3 --part core-explorers`: `core-explorers`.
+- `testing/ci-local.sh --tier 3 --part root-explorers`: `root-explorers` and
+  `mutations-explorers`, on a tree that builds the real-node explorer. Next
+  does not, so there it is refused with exit 2, as `--explorers=root` is.
+- `testing/ci-local.sh --tier 3 --part chaos`: `build-integration`, the
+  chaos batch and the long scenarios (with `--with-tor`, the Tor suites).
+
+Together they record exactly what `--tier 3` records (on next, tier 2 and
+the core explorer and chaos parts), and
+[`lib/ci-plan-test.sh`](lib/ci-plan-test.sh) holds them to that: no result of
+tier 3 is missing from every part, no part lists a result tier 3 does not,
+and no two parts share a result but `build-integration`, which the chaos
+part builds for itself. The on-demand explorer job is the explorer parts,
+which on next is the core part alone. A part runs no guards and no build
+stage, since the nightly's tier 2 part runs those on the same tree; a part
+whose plan lists nothing of its own exits 1, and the chaos part fails
+before building when it has no scenario. A single explorer half streams
+its output as it runs. `-j` and `--plan` combine with any part,
+`--with-tor` only with `chaos`. A builder can test a tree for parts with
+`testing/ci-local.sh --tier 3 --part chaos --plan`, which exits 0 on a tree
+that has them and 2 on one that does not.
 
 `--tier <n> --plan` prints the results a green run of that tier records, in
 order, and exits without running anything. It reads the same switches and
@@ -310,6 +342,78 @@ x86_64-unknown-linux-musl`, as GitHub's musl job does. A host without that
 Rust target or `musl-gcc` (the `musl-tools` package) skips it, prints why,
 and lists it under the summary as skipped; it is not counted against the
 plan.
+
+### The release build and the `.deb`
+
+No run makes a plain `cargo build --release` of its own. Where an integration
+suite that uses the package will run (tier 2 and above, a default run with
+no tier, or `--only` of `dns-resolver`, `deb-install` or `rpm-install`), the
+build stage builds the `.deb` right after `nft-syntax`, in the pinned
+container (`packaging/debian/build-deb-container.sh`), records it as
+`deb-build`, and writes it to `deploy/fips_<version>_<arch>.deb` in the
+checkout, with `deploy/ci-deb.txt` holding its sha256 and path. Every later
+stage that needs it takes that one package: dns-resolver, deb-install,
+rpm-install, and the mutation lane, whose normal-build fence reads the
+package's `fips`. A failed package build stops the run there, as the release
+build did. The integration build is the run's other release-profile build,
+and the release compile (`release-test-compile`) runs under the
+`integration` profile, which inherits `release` unchanged, so it shares that
+build's dependencies; a tree that does not compile is caught by the lints
+and unit tests rather than by a build stage of its own at tier 1. `--rerun`
+has no build stage, so there the first package suite builds the package.
+
+### A commit's kept artifacts (`FIPS_CI_ARTIFACT_DIR`)
+
+With `FIPS_CI_ARTIFACT_DIR=<dir>`, which the internal builder sets, a run of
+a clean tree keeps what it built for the integration stage under its commit:
+the two test images, tagged `fips-test:commit-<sha>` and
+`fips-test-app:commit-<sha>` and labelled `com.corganlabs.fips-ci.commit`,
+the integration binaries in `<dir>/<sha>/bin`, and the `.deb` in
+`<dir>/<sha>/deb`. A later run of the same commit in a fresh worktree with
+the same variable (a re-run, a red retry, `--rerun`, or the nightly's chaos
+part after the commit's tier 2) reuses them and skips the integration build,
+the image builds and the package build, logging `reused ...`. Each is
+created only when absent, never replaced, and only from a clean build of
+exactly that commit; a reuse checks the label, the image's `fips` against
+the kept one and the package's version against the commit, and builds
+instead on any mismatch. The suites still start the run's own per-run
+images, built from the commit tags with the run's own label, so the teardown
+of the run that kept them leaves a reusing run's images alone. Two runs of
+one commit that both keep: the one whose binaries are kept is the only one
+whose images are tagged. The teardown never removes a commit tag
+(`ci-cleanup.sh`); pruning them and `<dir>` is the builder's. Unset, or on a
+tree with uncommitted changes, nothing is kept or reused.
+
+### Base images
+
+Every base image a CI image builds from, and every third-party image a suite
+runs (the Tor relay, strfry, busybox), is pinned by its multi-arch index
+digest, so two runs of one tree build on the same bases and a result that
+stands for another run of the same tree stands on what that run would have
+used. The suite scripts that build from an inline Dockerfile take their
+pins from [`base-images.env`](base-images.env), which also says how to move
+one; the Dockerfiles carry the same pins literally. The guard
+[`check-base-pins.sh`](check-base-pins.sh) (`base-pins`, every tier, and
+GitHub's ci-parity job) fails on a base without a digest, after showing on
+planted fixtures that it can; `check-base-pins.sh --current` prints each
+pin beside the digest the registry serves now.
+
+### An apt proxy for image builds (`FIPS_CI_APT_PROXY`)
+
+A host with an apt cache sets `FIPS_CI_APT_PROXY=http://<host>:<port>`, and
+every image build a CI run makes passes it to `docker build` or `docker
+compose build` as the `http_proxy` build argument, from
+[`lib/build-proxy.sh`](lib/build-proxy.sh): the test image, the root tests'
+image, the package builder, the install and resolver suites' images, the NAT
+and medium-change lab images, and the mdns and native-api images. Docker
+predefines that argument, so no Dockerfile declares it, and it is not
+written into the image, so no running container has it; it is never
+exported and never given to `docker run`, so cargo, rustup and the test
+containers' own traffic do not go through the proxy. Only plain-http
+fetches use it; HTTPS fetches go direct. That is apt's mirrors, but also
+any plain-http dnf or apk mirror the Fedora, AlmaLinux and Alpine images
+fetch from, so the proxy must pass those through rather than serve apt
+alone. Unset or empty, it changes nothing. GitHub never sets it.
 
 ### What only GitHub runs
 
@@ -341,16 +445,19 @@ test run with `slow-explorers` took 123 minutes with the host shared
 (2026-11-15), against under six for the same run with `slow-tests` alone on
 core-vm. The core half also runs fips-core's two guard-switch meta-tests
 again in the explorers' build, the one place the rows whose tests are
-explorers run. With the root half, the mutation lane is built with the root
-crate's `explorers` feature (`FIPS_MUTATION_EXPLORERS=1`) and runs its lines
-whose test is a root explorer, which every other run skips.
+explorers run. With the root half, the mutation lane runs again as a stage of
+its own, `mutations-explorers`: built with the root crate's `explorers`
+feature, it runs only its lines whose test is a root explorer
+(`FIPS_MUTATION_EXPLORERS=only`), which the plain lane skips.
 
 Next builds no real-node explorer: its handshake is XX and the explorer is
 written for master's IK, so the module is under `#[cfg(any())]`
 (`src/node/tests/settle/explore/README.md`) and the root crate's `explorers`
 feature adds no test. On next, `--explorers` and tier 3 therefore run the
-core half alone, and `--explorers=root` is refused (`ROOT_EXPLORER` in
-`ci-local.sh`).
+core half alone, `--explorers=root` and `--part root-explorers` are refused
+(`ROOT_EXPLORER` in `ci-local.sh`), and neither tier 3 nor any part records
+`root-explorers` or `mutations-explorers`. Next's mutation manifest has no
+line whose test is a root explorer, so the plain lane skips nothing.
 
 The Linux and musl legs also create an address-less dummy interface
 (`fips-probe0`) and pass its name to the tests as
@@ -431,7 +538,8 @@ assertion, or an anchor for a test that predates the marker); a
 `pass` line holds when the test passes. Every named test must also pass
 with no switch. Before any line, a preflight checks that every switch has a
 manifest line and a site, a fence requires the switches to be absent
-from a normal build of `fips`, and a self-check on two planted switches
+from a normal build of `fips` (here, the `fips` in the run's `.deb`), and a
+self-check on two planted switches
 shows the script tells a red test from a green one. It runs in the
 unit-test stage, here (recorded as `mutations`) and in GitHub CI's Linux
 job, after the known-defect lane. On a host whose build has no BLE

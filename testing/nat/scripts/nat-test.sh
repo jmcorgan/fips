@@ -523,7 +523,7 @@ run_cone() {
     # reproduces with upstream's own image and config (relay-verdict.sh). A
     # start that fails for any other reason is not retried, and a relay fault
     # after the window still fails the run through assert_relay.
-    retry_build "compose build (cone)" "${COMPOSE[@]}" --profile cone build
+    retry_build "compose build (cone)" "${COMPOSE[@]}" --profile cone build "${CI_BUILD_PROXY[@]}"
     relay_lab_start "$RELAY_CONTAINER" 2 45 start_cone cleanup || {
         dump_cone_diagnostics
         return 1
@@ -580,7 +580,7 @@ run_symmetric() {
     # reproduces with upstream's own image and config (relay-verdict.sh). A
     # start that fails for any other reason is not retried, and a relay fault
     # after the window still fails the run through assert_relay.
-    NAT_MODE_A=symmetric NAT_MODE_B=symmetric retry_build "compose build (symmetric)" "${COMPOSE[@]}" --profile symmetric build
+    NAT_MODE_A=symmetric NAT_MODE_B=symmetric retry_build "compose build (symmetric)" "${COMPOSE[@]}" --profile symmetric build "${CI_BUILD_PROXY[@]}"
     relay_lab_start "$RELAY_CONTAINER" 2 45 start_symmetric cleanup || {
         dump_symmetric_diagnostics
         return 1
@@ -639,7 +639,7 @@ run_lan() {
     # reproduces with upstream's own image and config (relay-verdict.sh). A
     # start that fails for any other reason is not retried, and a relay fault
     # after the window still fails the run through assert_relay.
-    retry_build "compose build (lan)" "${COMPOSE[@]}" --profile lan build
+    retry_build "compose build (lan)" "${COMPOSE[@]}" --profile lan build "${CI_BUILD_PROXY[@]}"
     relay_lab_start "$RELAY_CONTAINER" 2 45 start_lan cleanup || {
         dump_lan_diagnostics
         return 1

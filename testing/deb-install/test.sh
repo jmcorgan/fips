@@ -50,6 +50,9 @@ source "$SCRIPT_DIR/../lib/systemd-container.sh"
 source "$SCRIPT_DIR/../lib/systemd-scenario.sh"
 # shellcheck source=SCRIPTDIR/../lib/image-build.sh
 source "$SCRIPT_DIR/../lib/image-build.sh"
+# The pinned base images the inline Dockerfiles below build from.
+# shellcheck source=SCRIPTDIR/../base-images.env
+source "$SCRIPT_DIR/../base-images.env"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CACHE_DIR="$SCRIPT_DIR/.cache"
 DEB_CACHE_DIR="$CACHE_DIR/deb"
@@ -201,7 +204,7 @@ build_deb() {
 # as a separate package.
 runtime_packages() {
     local base_image="$1"
-    if [ "$base_image" = "ubuntu:22.04" ]; then
+    if [ "$base_image" = "$UBUNTU2204" ]; then
         echo "systemd iproute2 dbus dnsutils procps"
     else
         echo "systemd systemd-resolved iproute2 dbus dnsutils procps"
@@ -1480,13 +1483,13 @@ DOCKERFILE
 # waits for ever on its systemd (252), while on Ubuntu 22.04's (249) the start
 # returns with an error, so only here does the upgrade scenario see the hang.
 test_debian12() {
-    _run_deb_install_scenario debian12 debian:12
-    _run_deb_upgrade_scenario debian12 debian:12
+    _run_deb_install_scenario debian12 "$DEBIAN12"
+    _run_deb_upgrade_scenario debian12 "$DEBIAN12"
 }
-test_debian13() { _run_deb_install_scenario debian13 debian:trixie; }
-test_ubuntu22() { _run_deb_install_scenario ubuntu22 ubuntu:22.04;  }
-test_ubuntu24() { _run_deb_install_scenario ubuntu24 ubuntu:24.04;  }
-test_ubuntu26() { _run_deb_install_scenario ubuntu26 ubuntu:26.04;  }
+test_debian13() { _run_deb_install_scenario debian13 "$DEBIAN13"; }
+test_ubuntu22() { _run_deb_install_scenario ubuntu22 "$UBUNTU2204";  }
+test_ubuntu24() { _run_deb_install_scenario ubuntu24 "$UBUNTU2404";  }
+test_ubuntu26() { _run_deb_install_scenario ubuntu26 "$UBUNTU2604";  }
 
 # ─────────────────────────────────────────────────────────────────────
 # Main

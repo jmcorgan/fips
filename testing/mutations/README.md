@@ -66,7 +66,13 @@ with it, and the whole lane runs against one build.
   `FIPS_NODE_FAULTS` to appear in it 0 times, so a build that let
   `test-hooks` into a normal build, and the switches with it, is a miss. A
   failed build or a missing binary exits 2 and is never read as a count of
-  0.
+  0. `FIPS_MUTATION_FENCE_BIN=<path>` hands it a binary to read instead of
+  building one, and a path that is not an executable exits 2. Local CI
+  passes the `fips` from the `.deb` its build stage made (`deb-build`), a
+  release `--locked` build with no dev-dependency features, which is what
+  users install; a run with no package lets the lane build its own, as
+  GitHub's `test-mutations` job does, since it starts before its package
+  exists.
 
 ## Hosts with no BLE transport
 
@@ -92,10 +98,20 @@ its module's file, so a misspelled or renamed name is a miss in every
 build. The lane then prints the switches left with no line to run: as of
 this change `CrossedRunsKeep`, `MoveSkipsWorkerOffer` and
 `WorldSkipsWorkerWait`, which only explorer lines show red, so a run a push
-starts does not show them. With `FIPS_MUTATION_EXPLORERS=1`, which a local
-CI run with the root explorers sets (`testing/ci-local.sh --explorers` or
-`--tier 3`, the nightly run), the lane builds the root crate's library
-tests with the feature and every line must resolve and run.
+starts does not show them. With `FIPS_MUTATION_EXPLORERS=1` the lane builds
+the root crate's library tests with the feature and every line must resolve
+and run.
+
+`FIPS_MUTATION_EXPLORERS=only` builds with the feature and runs those lines
+alone, 26 of them over 10 switches as of this change: every other line is
+skipped, and the normal-build fence is left out, since the plain lane runs
+it on the same tree. A manifest in which no line's test is in an
+`EXPLORER_ONLY` module fails with exit 1 before anything is built, so a
+renamed module cannot turn the stage into a run of nothing. Local CI runs
+this mode as its own stage, `mutations-explorers`, wherever the root
+explorers run (`testing/ci-local.sh --explorers`, `--tier 3`, the nightly
+run, and its `--part root-explorers`); the plain lane (`mutations`) skips
+those lines, so the two stages together run every line once.
 
 Next builds no real-node explorer: its handshake is XX and the explorer is
 written for master's IK, so the module is under `#[cfg(any())]`
@@ -103,7 +119,10 @@ written for master's IK, so the module is under `#[cfg(any())]`
 line whose test is a root explorer, the lane skips nothing, and no switch
 is left without a line to run (`WorldSkipsWorkerWait` does not exist
 here). `--explorers` and `--tier 3` run the core half alone (`ROOT_EXPLORER`
-in `testing/ci-local.sh`), so neither sets `FIPS_MUTATION_EXPLORERS=1`.
+in `testing/ci-local.sh`), so there is no `mutations-explorers` stage on
+next and `--part root-explorers` is refused. `FIPS_MUTATION_EXPLORERS=only`
+run by hand here exits 1 before building, since no line is an explorer
+walk.
 
 ## Running it
 

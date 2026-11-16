@@ -176,7 +176,7 @@ run_test() {
     cleanup
     "$GENERATE_SCRIPT" "$SCENARIO"
 
-    retry_build "compose build ($PROFILE)" "${COMPOSE[@]}" --profile "$PROFILE" build
+    retry_build "compose build ($PROFILE)" "${COMPOSE[@]}" --profile "$PROFILE" build "${CI_BUILD_PROXY[@]}"
     relay_lab_start "$RELAY_CONTAINER" 0 45 start_relay cleanup || {
         dump_diagnostics
         return 1

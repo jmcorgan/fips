@@ -72,11 +72,16 @@
 #   GitHub-only jobs — android-check, test-macos, test-windows, windows-lint:
 #                    native Android, macOS and Windows builds and tests. The
 #                    build job's macOS, Windows and arm64 legs run its mapped
-#                    steps on those platforms.
+#                    steps on those platforms, and deb-package's arm64 leg
+#                    builds the arm64 package.
 #   GitHub-only steps — the test job's retry-flake report: nextest's ci
 #                    profile retries a failing test, and the internal builder
 #                    has no nextest until its host installs it; local CI runs
 #                    nextest's default profile, which does not retry.
+#                    The build job's Build, the native release build of its
+#                    arm64, macOS and Windows legs. It must not run on
+#                    ubuntu-latest, which this check enforces: there the .deb
+#                    (deb-package, deb-build locally) is the release build.
 #                    Inside test-root's privileged step, one test runs on
 #                    GitHub only (testing/root-tests/privileged.sh says why).
 #   Local-only stages — cross-check-*: zig compiles of the macOS, Windows
@@ -330,6 +335,7 @@ STEPS = {
         "Check the chaos path assertions against planted input": "sim-assertions",
         "Check nothing resolves the shared mutable test image": "image-scoping",
         "Check every action is pinned to a commit SHA": "action-pins",
+        "Check every CI base image is pinned by digest": "base-pins",
         "Check every source comment resolves in-repo": "comment-refs",
         "Check every ignored test against its inventory": "ignored-tests",
         "Check no non-test code uses std 64-bit atomics": "portable-atomics",
@@ -365,9 +371,10 @@ STEPS = {
     "core-baremetal": {"Build the no_std core for bare-metal targets": "core-baremetal"},
     "build": {
         "Validate fips.nft syntax (Linux only)": "nft-syntax",
-        "Build": "build",
         "Build the integration binaries": "build-integration",
+        "Build the integration test images": "build-integration",
     },
+    "deb-package": {"Build the .deb in the pinned build container": "deb-build"},
     "test": {
         "Create an address-less interface for the presence probe": "addrless-iface",
         "Run unit tests": "unit-tests",
@@ -406,9 +413,14 @@ SETUP = {
     "Remove a cached nextest report", "SHA-256 hashes (Linux)", "SHA-256 hashes (macOS)",
     "SHA-256 hashes (Windows)", "Stage the native API examples beside the integration binaries",
     "Upload Linux binary", "Publish test report (Checks tab)", "Publish test report (run summary)",
+    "Resolve the builder image cache key", "Restore the builder image",
+    "Check for a new builder image archive", "Save the builder image", "Upload the .deb",
+    "Save the integration test images", "Upload the integration test images",
+    "Restore the .deb build's dependency cache", "Make the .deb dependency cache readable",
+    "Drop the workspace crates from the .deb dependency cache", "Save the .deb build's dependency cache",
 }
 # Jobs compared by suite above, and jobs only GitHub can run, with why.
-SUITE_JOBS = {"openwrt-scripts", "tarball-install", "integration", "deb-package",
+SUITE_JOBS = {"openwrt-scripts", "tarball-install", "integration",
               "dns-resolver", "deb-install", "rpm-install"}
 GITHUB_ONLY_JOBS = {
     "android-check": "native Android cross-builds",
@@ -419,6 +431,9 @@ GITHUB_ONLY_JOBS = {
 GITHUB_ONLY_STEPS = {
     ("test", "Report tests that passed only on retry"):
         "nextest's ci profile retries; the internal builder has no nextest yet",
+    ("build", "Build"):
+        "native release builds on the arm64, macOS and Windows legs; on "
+        "ubuntu-latest the .deb build (deb-build) is the release build",
 }
 LOCAL_ONLY = {"cross-check-*": "zig compiles of targets GitHub builds natively"}
 
@@ -461,6 +476,15 @@ for k in GITHUB_ONLY_STEPS:
 for jid in GITHUB_ONLY_JOBS:
     if jid not in (doc.get("jobs") or {}):
         step_problems.append(f"GitHub-only job {jid} is no longer in ci.yml")
+# The build job's own release build is GitHub-only only off ubuntu-latest:
+# there the .deb is the release build, as deb-build is locally, so a Build
+# step that ran on that leg too would be work tier 2 does not do.
+for st in ((doc.get("jobs") or {}).get("build") or {}).get("steps") or []:
+    if st.get("name") == "Build":
+        cond = str(st.get("if", ""))
+        if not re.search(r"matrix\.os\s*!=\s*'ubuntu-latest'", cond):
+            step_problems.append("build: step 'Build' runs on ubuntu-latest, where "
+                                 "deb-build is the release build")
 
 plan = subprocess.run(["bash", ci_local_path, "--tier", "2", "--plan"],
                       capture_output=True, text=True,
