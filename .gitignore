@@ -49,3 +49,6 @@ __pycache__/
 # them from the topology before compose starts and leaves them for post-mortem,
 # and the run suffix means each run leaves its own directory behind.
 /testing/medium-change/generated-configs*/
+
+# The FreeBSD package workflow's cargo cache, carried in and out of its VM.
+/.freebsd-cargo/
