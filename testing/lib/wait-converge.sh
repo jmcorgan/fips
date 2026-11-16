@@ -10,7 +10,9 @@
 #       [near_converged_slack] [near_converged_accept_secs]
 #
 # wait_until_connected also sets CONVERGE_OUTCOME / CONVERGE_REACHED /
-# CONVERGE_PENDING; see the block above it.
+# CONVERGE_PENDING; see the block above it. It reads the time only through
+# converge_now and waits only through converge_sleep, so a test can replace
+# both with a fake clock (wait-converge-test.sh does).
 #
 # There was a wait_for_links() here. It was removed rather than kept for
 # symmetry: it had no caller anywhere in the tree on any branch, and its
@@ -19,8 +21,8 @@
 # caller to appear would inherit the hazard below without the reasoning
 # that goes with it. `git log` has the implementation if one is needed.
 
-# Wait until a container has at least min_peers connected peers.
-# Returns 0 on success, 1 on timeout.
+# Wait until a container has at least min_peers connected peers, polling once
+# a second through converge_sleep (below). Returns 0 on success, 1 on timeout.
 #
 # The read below falls back to 0 when the container does not answer, which
 # is safe ONLY because this is a floor: a fallback of 0 reads as "not
@@ -53,7 +55,7 @@ wait_for_peers() {
             echo "  $container: $count peer(s) after ${i}s"
             return 0
         fi
-        sleep 1
+        converge_sleep 1
     done
     echo "  $container: TIMEOUT waiting for $min_peers peer(s) after ${timeout}s"
     return 1
@@ -77,6 +79,21 @@ wait_for_peers() {
 CONVERGE_OUTCOME=""
 CONVERGE_REACHED=0
 CONVERGE_PENDING=0
+
+# The clock wait_until_connected() reads, in whole seconds, and the wait
+# between its polls. Every timing decision the gate makes goes through these
+# two, so a test that redefines both after sourcing this file drives the
+# gate's whole timeline on a fake clock without waiting it out. converge_now
+# is called in a command substitution, so a replacement may read shell state
+# but must not change it; converge_sleep is called directly.
+converge_now() {
+    echo "$SECONDS"
+    return 0
+}
+
+converge_sleep() {
+    sleep "$1"
+}
 
 # Record the verdict of a wait_until_connected() return.
 #
@@ -135,53 +152,55 @@ wait_until_connected() {
     local near_converged_slack="${5:-2}"
     local near_converged_accept_secs="${6:-0}"
 
-    local start_secs=$SECONDS
+    local start_secs now
+    start_secs=$(converge_now)
     local best=-1
-    local last_progress=$SECONDS
+    local last_progress=$start_secs
     local held_for_budget=0
     # Start of the current near-converged hold, or -1 when disarmed. Kept
     # apart from held_for_budget, which is set once and never reset and so
     # cannot measure the hold that ends at the cap. -1 rather than 0 because
-    # SECONDS can legitimately be 0.
+    # the clock can legitimately read 0.
     local hold_start=-1
 
-    while (( SECONDS - start_secs < max_secs )); do
+    while now=$(converge_now); (( now - start_secs < max_secs )); do
         "$ping_fn"
+        now=$(converge_now)
         if (( FAILED == 0 )); then
             _converge_verdict converged
-            echo "  converge: all $PASSED pair(s) reachable after $((SECONDS - start_secs))s"
+            echo "  converge: all $PASSED pair(s) reachable after $((now - start_secs))s"
             return 0
         fi
         if (( PASSED > best )); then
             best=$PASSED
-            last_progress=$SECONDS
+            last_progress=$now
             hold_start=-1
-            echo "  converge: $PASSED reachable, $FAILED pending (progressing) after $((SECONDS - start_secs))s"
-        elif (( SECONDS - last_progress >= stall_secs )); then
+            echo "  converge: $PASSED reachable, $FAILED pending (progressing) after $((now - start_secs))s"
+        elif (( now - last_progress >= stall_secs )); then
             if (( FAILED > near_converged_slack )); then
                 _converge_verdict stalled
-                echo "  converge: STUCK — tree did not converge: $PASSED reachable / $FAILED pending, no progress for ${stall_secs}s (after $((SECONDS - start_secs))s)"
+                echo "  converge: STUCK — tree did not converge: $PASSED reachable / $FAILED pending, no progress for ${stall_secs}s (after $((now - start_secs))s)"
                 return 1
             fi
             if (( hold_start < 0 )); then
-                hold_start=$SECONDS
+                hold_start=$now
             fi
             if (( held_for_budget == 0 )); then
                 held_for_budget=1
-                echo "  converge: near-converged ($PASSED reachable / $FAILED pending <= slack=$near_converged_slack) — holding for full budget, not bailing (after $((SECONDS - start_secs))s)"
+                echo "  converge: near-converged ($PASSED reachable / $FAILED pending <= slack=$near_converged_slack) — holding for full budget, not bailing (after $((now - start_secs))s)"
             fi
         fi
-        sleep "$poll_secs"
+        converge_sleep "$poll_secs"
     done
 
     # The slack test repeats what the loop already guarantees (once the hold
     # is armed, any poll beyond slack exits as stalled), so that acceptance
     # stays tied to slack if the loop's exits are ever reordered.
     if (( near_converged_accept_secs > 0 && hold_start >= 0 \
-        && SECONDS - hold_start >= near_converged_accept_secs \
+        && now - hold_start >= near_converged_accept_secs \
         && FAILED <= near_converged_slack )); then
         _converge_verdict near_converged
-        echo "  converge: near-converged at the cap — $PASSED reachable / $FAILED pending, held $((SECONDS - hold_start))s >= ${near_converged_accept_secs}s; handing to the strict assertion (after ${max_secs}s)"
+        echo "  converge: near-converged at the cap — $PASSED reachable / $FAILED pending, held $((now - hold_start))s >= ${near_converged_accept_secs}s; handing to the strict assertion (after ${max_secs}s)"
         return 0
     fi
 

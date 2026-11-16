@@ -3338,10 +3338,9 @@ run_simassert() {
     return 0
 }
 
-# Unit tests for the convergence gate every static suite waits on. Hermetic —
-# synthetic ping functions against the same SECONDS clock, no containers — but
-# it drives real timeouts, so it costs about 45 seconds rather than the "few
-# seconds" its own header used to claim.
+# Unit tests for the convergence gate every static suite waits on. Hermetic:
+# synthetic ping functions, no containers, and the gate's timeline on a fake
+# clock but for one short case on the real one, so it takes a few seconds.
 #
 # It is here with the other two rather than in the integration stage because it
 # needs nothing built. Note what that buys: wait_until_connected decides whether

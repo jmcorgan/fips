@@ -145,11 +145,10 @@ jobs:
         env:
           SHELLCHECK: ${{ runner.temp }}/shellcheck/shellcheck
         run: bash testing/check-shellcheck.sh
-      # Hermetic: synthetic ping functions, no containers, ~45s. Lives beside
-      # the other two so both runners gate on it identically — putting it in
-      # only one would create exactly the drift check-ci-parity.sh exists to
-      # catch, and it is invisible to that checker either way since it is not
-      # a matrix suite.
+      # Hermetic: synthetic ping functions on a fake clock, no containers, a
+      # few seconds. Lives beside the other two so both runners gate on it
+      # identically — putting it in only one would create exactly the drift
+      # check-ci-parity.sh exists to catch.
       - name: Run convergence-gate unit tests
         run: bash testing/lib/wait-converge-test.sh
       # Hermetic: docker and sleep stubbed, no containers, about a second. Kept
