@@ -456,12 +456,54 @@ pub(super) async fn process_available_packets(nodes: &mut [TestNode]) -> usize {
     count
 }
 
+/// Whether [`drain_all_packets`] may step this thread's test clocks in place
+/// of sleeping on `nodes`: every node's transports are all loopback, and the
+/// test runs on a current-thread runtime.
+///
+/// Loopback delivery is synchronous (see [`make_test_node_with_mtu`] and the
+/// per-pass snapshot in [`process_available_packets`]), so a drain's sleep on
+/// such a set waits for no packet; it only lets rate-limit windows and other
+/// timers pass, and those read `crate::time`, which the step moves. The
+/// clock hooks are thread-local, so a multi-thread runtime, whose workers
+/// would not see the step, keeps the real sleep. So does any set with a real
+/// transport, whose packets arrive through a receive task in real time.
+fn drain_steps(nodes: &[TestNode]) -> bool {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    Handle::current().runtime_flavor() == RuntimeFlavor::CurrentThread
+        && nodes.iter().all(|tn| {
+            tn.node
+                .transports
+                .values()
+                .all(|t| matches!(t, TransportHandle::Loopback(_)))
+        })
+}
+
+/// Wait `d` between the passes of [`drain_all_packets`].
+///
+/// On a set [`drain_steps`] allows, move this thread's clocks as a real sleep
+/// of `d` would and yield once: the wall clock always, and the monotonic
+/// clock unless the test froze it (`crate::time::freeze`), since a frozen
+/// clock does not move while a test sleeps either. Otherwise sleep.
+async fn drain_wait(nodes: &[TestNode], d: Duration) {
+    if !drain_steps(nodes) {
+        tokio::time::sleep(d).await;
+        return;
+    }
+    if !crate::time::is_frozen() {
+        crate::time::advance(d);
+    }
+    crate::time::step_wall(i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    tokio::task::yield_now().await;
+}
+
 /// Drain all packet channels across all nodes until quiescence.
 ///
 /// Processes msg1, msg2, and encrypted frames (including TreeAnnounce)
 /// through the appropriate handlers. Handles rate-limited TreeAnnounce
 /// messages by waiting for the rate limit window to expire and then
-/// flushing pending announces. Returns total packets processed.
+/// flushing pending announces. Returns total packets processed. Each wait is
+/// [`drain_wait`]: on an all-loopback set it steps the test clocks rather
+/// than sleeping.
 ///
 /// If `verbose` is true, prints tree state snapshots after each phase.
 pub(super) async fn drain_all_packets(nodes: &mut [TestNode], verbose: bool) -> usize {
@@ -470,7 +512,7 @@ pub(super) async fn drain_all_packets(nodes: &mut [TestNode], verbose: bool) -> 
     // Phase 1: Fast drain — process packets as fast as they arrive.
     // This handles handshakes (msg1/msg2) and the first wave of TreeAnnounce.
     for _round in 0..200 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        drain_wait(nodes, Duration::from_millis(10)).await;
 
         let count = process_available_packets(nodes).await;
         total += count;
@@ -492,7 +534,7 @@ pub(super) async fn drain_all_packets(nodes: &mut [TestNode], verbose: bool) -> 
     // rate-limited paths. For a chain of depth D, we need D cycles.
     for flush in 0..20 {
         // Wait for rate limit window (500ms) to fully expire
-        tokio::time::sleep(Duration::from_millis(550)).await;
+        drain_wait(nodes, Duration::from_millis(550)).await;
 
         // Flush pending rate-limited tree and filter announces on all nodes
         for tn in nodes.iter_mut() {
@@ -501,7 +543,7 @@ pub(super) async fn drain_all_packets(nodes: &mut [TestNode], verbose: bool) -> 
         }
 
         // Allow flushed packets to arrive
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        drain_wait(nodes, Duration::from_millis(20)).await;
 
         // Process the resulting packets. Processing may trigger new
         // parent switches → new announces, but those to the same peer
@@ -511,7 +553,7 @@ pub(super) async fn drain_all_packets(nodes: &mut [TestNode], verbose: bool) -> 
         // Do a few more quick rounds in case packet processing above
         // triggered non-rate-limited sends (to different peers)
         for _sub in 0..20 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            drain_wait(nodes, Duration::from_millis(10)).await;
             let count = process_available_packets(nodes).await;
             flush_total += count;
             if count == 0 {

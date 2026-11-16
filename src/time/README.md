@@ -32,9 +32,9 @@ traits, is `fips_core::time` (`core/src/time/`).
     wall and monotonic clocks; `freeze`, which starts the process's
     monotonic epoch if nothing has yet, so the frozen instant is never
     before it, then stops the thread's monotonic clock so that only
-    `advance` moves it; and `TestEpoch`
-    with `at::<C>(ms)`, an instant `ms` milliseconds after a clock's
-    fixed test epoch.
+    `advance` moves it; `is_frozen`, whether it is stopped; and
+    `TestEpoch` with `at::<C>(ms)`, an instant `ms` milliseconds after a
+    clock's fixed test epoch.
 - `tests.rs`: the unit tests for `mod.rs`.
 
 ## Rules

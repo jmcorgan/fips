@@ -182,6 +182,12 @@ pub(crate) fn freeze() {
     hooks::FROZEN.with(|f| f.set(Some(StdInstant::now())));
 }
 
+/// Whether this thread's monotonic clock is stopped by [`freeze`].
+#[cfg(test)]
+pub(crate) fn is_frozen() -> bool {
+    hooks::FROZEN.with(|f| f.get().is_some())
+}
+
 /// A clock with a fixed instant to count test times from, so a test can name
 /// an instant in milliseconds whichever clock the code under test runs on.
 #[cfg(test)]

@@ -189,3 +189,12 @@ fn the_std_instant_now_moves_with_the_host_clock_hooks() {
     assert_eq!(mono_now(), frozen + Duration::from_secs(1));
     assert_eq!(StdInstant::from(HostClock.now()), mono_now());
 }
+
+#[test]
+fn freezing_the_monotonic_clock_is_seen_on_its_own_thread_only() {
+    assert!(!is_frozen());
+    freeze();
+    assert!(is_frozen());
+    let other = std::thread::spawn(is_frozen).join().expect("thread ran");
+    assert!(!other, "a freeze reached another thread");
+}
