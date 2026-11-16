@@ -1102,7 +1102,7 @@ impl ActivePeer {
     /// Replace the peer's paths with a single original path on
     /// `(transport_id, addr)`, for tests whose premise is a single-path peer
     /// that has moved to another transport. Production never re-points a
-    /// path; the path switch will move a peer between held paths. The new
+    /// path; the path switch moves a peer between held paths instead. The new
     /// path machine is built as [`unbound_caps`](super::unbound_caps) says,
     /// multipath disabled, as every caller's node runs.
     #[cfg(test)]
