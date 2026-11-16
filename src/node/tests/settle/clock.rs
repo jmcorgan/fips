@@ -30,7 +30,7 @@ use super::super::spanning_tree::{
     TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, restarted_node,
 };
 use super::super::*;
-use super::{loopback_node, tap, with_path};
+use super::{PAST_THE_RESTART_INTERVAL, loopback_node, tap, with_path};
 use crate::testutil::{LogCapture, capture_logs_scoped};
 use crate::transport::TransportId;
 
@@ -456,11 +456,6 @@ async fn a_pending_handshakes_shown_start_and_idle_do_not_move_with_the_monotoni
          moved with the monotonic clock"
     );
 }
-
-/// The restart interval, `EPOCH_RESTART_MIN_INTERVAL_SECS`, plus a second.
-/// A copy of the constant's value, which is private to the handshake
-/// handler.
-const PAST_THE_RESTART_INTERVAL: Duration = Duration::from_secs(15 + 1);
 
 /// Node 0 dials node 1 over loopback and frames flow, so node 1 holds node 0
 /// heard. Returns the nodes and node 0's address, link and index at node 1.

@@ -29,7 +29,7 @@ mod replace;
 
 use super::super::spanning_tree::{TestNode, cleanup_nodes, drain_all_packets, initiate_handshake};
 use super::super::*;
-use super::{heartbeat_reaches, loopback_node};
+use super::{PAST_THE_RESTART_INTERVAL, heartbeat_reaches, loopback_node};
 use crate::node::handlers::path_intake::Feed;
 use crate::node::settle::table::{Cell, DataCell, DataRow, Row, Transition, cell};
 use crate::peer::ActivePeer;
@@ -1023,8 +1023,8 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
         }
         Row::Dampener => {
             let past = crate::time::mono_now()
-                .checked_sub(Duration::from_secs(3600))
-                .unwrap_or_else(crate::time::mono_now);
+                .checked_sub(PAST_THE_RESTART_INTERVAL)
+                .expect("precondition: the monotonic clock reaches back past the restart interval");
             node.restart_dampener.insert(*peer, past);
         }
         Row::Silent => {

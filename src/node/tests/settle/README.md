@@ -24,7 +24,11 @@ files run off, which is what they test.
 - `mod.rs`: the module declarations, the module doc, and the drivers the
   files share: the multipath setting (`with_path`, `loopback_node`), real TCP
   nodes on 127.0.0.1 (`tcp_node`, `tcp_pair`, `tcp_dial`, `resolve_connect`,
-  `pool`), crossed TCP dials (`crossed_tcp`),
+  `pool`), crossed TCP dials (`crossed_tcp`), the age a test backdates a
+  session to for an aged link (`AGED`, kept within a fresh CI runner's
+  uptime), a step just past the restart interval
+  (`PAST_THE_RESTART_INTERVAL`, used by `clock.rs` and to seed an expired
+  dampener in `table/`),
   delivery until idle for loopback and TCP nodes alike (`pump`), a fresh
   heartbeat check (`heartbeat_reaches`), the check that two nodes hold one
   session that carries a heartbeat each way (`settled`), and the wrappers

@@ -56,8 +56,8 @@ use super::super::*;
 use super::audit::{Breach, assert_coherent, audit};
 use super::readings::own_dial;
 use super::{
-    alias, crossed_tcp, heartbeat_reaches, loopback_node, pool, pump, received, resolve_connect,
-    settled, with_path,
+    AGED, alias, crossed_tcp, heartbeat_reaches, loopback_node, pool, pump, received,
+    resolve_connect, settled, with_path,
 };
 use super::{tcp_dial, tcp_pair};
 use crate::proto::fmp::wire::{CommonPrefix, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2};
@@ -1517,7 +1517,7 @@ async fn answered_from(nodes: &mut [TestNode], dialed: TransportAddr, answered: 
         .get_peer_mut(&a)
         .expect("precondition: node 1 holds node 0");
     held.test_backdate_heard(Duration::from_secs(60));
-    held.test_backdate_session_established(Duration::from_secs(600));
+    held.test_backdate_session_established(AGED);
     let msg1 = nodes[1]
         .packet_rx
         .try_recv()
@@ -1754,7 +1754,7 @@ async fn second_ends_pin(on: bool) {
         .get_peer_mut(&s_addr)
         .expect("precondition: the larger node holds the smaller");
     held.test_backdate_heard(Duration::from_secs(60));
-    held.test_backdate_session_established(Duration::from_secs(600));
+    held.test_backdate_session_established(AGED);
     let second = msg1s.next().expect("precondition: the second msg1");
     nodes[l].node.handle_msg1(second).await;
     let msg2s: Vec<ReceivedPacket> = std::iter::from_fn(|| nodes[s].packet_rx.try_recv().ok())
@@ -2121,7 +2121,7 @@ async fn roamed_through(on: bool) {
         .get_peer_mut(&l_addr)
         .expect("precondition: the smaller node holds the larger");
     held.test_backdate_heard(Duration::from_secs(60));
-    held.test_backdate_session_established(Duration::from_secs(600));
+    held.test_backdate_session_established(AGED);
     assert_eq!(
         deliver(&mut nodes[s]).await,
         1,
@@ -2358,7 +2358,7 @@ async fn flying_dial(on: bool) {
         .get_peer_mut(&a)
         .expect("precondition: node 1 holds node 0");
     held.test_backdate_heard(Duration::from_secs(60));
-    held.test_backdate_session_established(Duration::from_secs(600));
+    held.test_backdate_session_established(AGED);
     nodes[1].node.handle_msg1(msg1).await;
     let mut msg2 = nodes[0]
         .packet_rx

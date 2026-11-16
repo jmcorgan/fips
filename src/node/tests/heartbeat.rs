@@ -307,8 +307,10 @@ async fn a_peer_heard_only_under_the_previous_session_after_a_cutover_keeps_it_t
         age_link, cutover, deliver, heartbeat, linked_pair, rekey_config, rekey_to_pending,
     };
 
-    // A rekey interval long enough that no second rekey starts in the run.
-    let after = 300;
+    // A rekey interval long enough that no second rekey starts in the 125 s
+    // run, even at its earliest jitter, and short enough that the backdate
+    // past it stays within a freshly booted runner's clock.
+    let after = 125 + crate::node::REKEY_JITTER_SECS as u64 + 10;
     let mut nodes = linked_pair(rekey_config(after), crate::config::Config::new()).await;
     let a = *nodes[0].node.node_addr();
     let b = *nodes[1].node.node_addr();
