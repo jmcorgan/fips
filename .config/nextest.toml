@@ -57,18 +57,19 @@ retries = 2
 #
 #   node-large      the tests that take lock_large_network_test(): the
 #                   100-node tests, compute-bound and mutually exclusive.
-#   node-synthetic  the node test modules that open a real socket (a UDP, TCP,
-#                   Ethernet or BLE transport, an OS socket, or a node's
-#                   start() or rx loop, which bind through its Config and
-#                   include the control socket's shared default path). Under
-#                   load the loopback stack can drop a lone one-shot msg1 when
-#                   several such tests flood it at once.
+#   node-synthetic  the node test modules that open a real socket (a UDP, TCP
+#                   or Ethernet transport, a BLE transport over a real radio
+#                   backend, an OS socket, or a node's start() or rx loop,
+#                   which bind through its Config and include the control
+#                   socket's shared default path). Under load the loopback
+#                   stack can drop a lone one-shot msg1 when several such
+#                   tests flood it at once.
 #
-# The other node tests use the in-process loopback transport and run in
-# parallel. The node-large override comes first in both profiles: nextest
-# takes the group from the first override that matches, so
-# session::test_session_100_nodes, which sits in a socket module, stays in
-# node-large.
+# The other node tests use the in-process loopback transport, or a BLE
+# transport over the in-process mock radio, and run in parallel. The
+# node-large override comes first in both profiles: nextest takes the group
+# from the first override that matches, so session::test_session_100_nodes,
+# which sits in a socket module, stays in node-large.
 #
 # The module list is the union of what maint, master and next need; a name a
 # branch lacks matches nothing there. testing/check-node-test-groups.py
@@ -85,11 +86,11 @@ filter = 'package(fips-mesh) & test(/^node::tests::(bloom::test_bloom_filter_con
 test-group = 'node-large'
 
 [[profile.default.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|ble_queue|bootstrap|claim_dials|claim_slots|connected_udp|control|crossed_dial|decrypt_forged|decrypt_replay|dial_origin|discovery_msg1_cap|establish_chartests|handshake|handshake_lines|host_link|instr_capture|lan_label|link_setup_diag|netmon|path_intake|path_load|path_padding|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|stored_msg2_install|task_wait|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|bootstrap|claim_dials|claim_slots|connected_udp|control|crossed_dial|decrypt_forged|decrypt_replay|dial_origin|discovery_msg1_cap|establish_chartests|handshake|handshake_lines|host_link|instr_capture|lan_label|link_setup_diag|netmon|path_intake|path_load|path_padding|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|stored_msg2_install|task_wait|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
 
 [[profile.default.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(ble_lifecycle|settle)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(settle)::/)'
 test-group = 'node-synthetic'
 
 [[profile.ci.overrides]]
@@ -97,11 +98,11 @@ filter = 'package(fips-mesh) & test(/^node::tests::(bloom::test_bloom_filter_con
 test-group = 'node-large'
 
 [[profile.ci.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|ble_queue|bootstrap|claim_dials|claim_slots|connected_udp|control|crossed_dial|decrypt_forged|decrypt_replay|dial_origin|discovery_msg1_cap|establish_chartests|handshake|handshake_lines|host_link|instr_capture|lan_label|link_setup_diag|netmon|path_intake|path_load|path_padding|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|stored_msg2_install|task_wait|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|bootstrap|claim_dials|claim_slots|connected_udp|control|crossed_dial|decrypt_forged|decrypt_replay|dial_origin|discovery_msg1_cap|establish_chartests|handshake|handshake_lines|host_link|instr_capture|lan_label|link_setup_diag|netmon|path_intake|path_load|path_padding|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|stored_msg2_install|task_wait|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
 
 [[profile.ci.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(ble_lifecycle|settle)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(settle)::/)'
 test-group = 'node-synthetic'
 
 # The known-slow tests get 480 s instead of 300: the five 100-node tests (the

@@ -108,8 +108,8 @@ expect_red "the mutation lane dropped from tier 2 only" \
     "GitHub runs the work of mutations, which ci-local.sh --tier 2 does not"
 
 fresh && plant testing/ci-local.sh \
-    '    "run_veth_host veth-host"' \
-    '    "run_veth_host veth-host"
+    '    "run_fwtable fw-table"' \
+    '    "run_fwtable fw-table"
     "run_local_guard local-guard"'
 expect_red "a guard added to tier 2 only" \
     "tier 2 stage local-guard has no GitHub step mapped to it"

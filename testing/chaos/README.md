@@ -665,8 +665,10 @@ was, which is the evidence for why a command stalled.
 
 `veth-host-test.sh` tests this against a stand-in docker
 (`veth-host-test/`), with no containers. Both CI runners run it: the GitHub
-CI parity job and `ci-local.sh`'s guards. It takes about a minute and a half,
-most of it a 31 s stall at the real bound.
+CI parity job, and `ci-local.sh` just before the chaos suites (tier 2 and up).
+It takes about a minute. The shipped bound is checked against the 31 s stall
+without waiting it out; the cases that time a helper out run on a shortened
+bound.
 
 ## Creating Custom Scenarios
 

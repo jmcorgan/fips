@@ -181,17 +181,20 @@ async fn test_tcp_mixed_transport_coexistence() {
     cleanup_nodes(&mut nodes).await;
 }
 
-/// A TCP link whose only traffic is heartbeats outlives several inbound idle
+/// A TCP link whose only traffic is heartbeats outlives two inbound idle
 /// deadlines when the deadline is the one the node derives from its own
 /// liveness timers.
 ///
 /// This is the healthy-path check for the idle deadline: it uses the real
 /// derivation (`inbound_idle_timeout`), not a hand-picked value, and
-/// short timers so three deadlines fit in a test. Break-check: give the
-/// listening node's transport an idle deadline below the heartbeat interval
-/// and its inbound connection is dropped, so the inbound count falls to 0.
+/// short timers so two deadlines fit in a test. Two, not one: a deadline
+/// that each frame does not refresh, but one frame does, still lets the
+/// connection outlive the first deadline, and only the second catches it.
+/// Break-check: give the listening node's transport an idle deadline below
+/// the heartbeat interval and its inbound connection is dropped, so the
+/// inbound count falls to 0.
 #[tokio::test]
-async fn tcp_link_kept_alive_only_by_heartbeats_survives_several_idle_deadlines() {
+async fn tcp_link_kept_alive_only_by_heartbeats_survives_two_idle_deadlines() {
     use crate::node::handlers::rekey::inbound_idle_timeout;
 
     let mut config = Config::new();
@@ -227,13 +230,18 @@ async fn tcp_link_kept_alive_only_by_heartbeats_survives_several_idle_deadlines(
         "node 1 should hold one inbound connection"
     );
 
-    // Heartbeats only, for three idle deadlines and a little more.
+    // Heartbeats only, for two idle deadlines and a little more.
     let start = tokio::time::Instant::now();
     let mut processed = 0;
-    while start.elapsed() < idle * 3 + Duration::from_millis(500) {
+    let mut after_first = 0;
+    while start.elapsed() < idle * 2 + Duration::from_millis(500) {
         nodes[0].node.check_link_heartbeats().await;
         nodes[1].node.check_link_heartbeats().await;
-        processed += process_available_packets(&mut nodes).await;
+        let frames = process_available_packets(&mut nodes).await;
+        processed += frames;
+        if start.elapsed() > idle {
+            after_first += frames;
+        }
         assert_eq!(
             inbound(&nodes),
             1,
@@ -243,11 +251,18 @@ async fn tcp_link_kept_alive_only_by_heartbeats_survives_several_idle_deadlines(
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    // Sibling control: heartbeats were actually exchanged, so the kept
-    // connection is not an artefact of nothing having run.
+    // Sibling control: heartbeats were actually exchanged, through the
+    // second deadline as well as the first, so the kept connection is not
+    // an artefact of nothing having run. One heartbeat a second each way
+    // gives about 30 frames, 15 of them after the first deadline; the
+    // floors are half that.
     assert!(
-        processed >= 18,
-        "expected at least one heartbeat per second each way, processed {processed}"
+        processed >= 14,
+        "expected about a heartbeat a second each way, processed {processed}"
+    );
+    assert!(
+        after_first >= 7,
+        "expected heartbeats past the first idle deadline, processed {after_first} there"
     );
     assert!(
         nodes[0].node.get_peer(&addr_1).is_some(),
@@ -269,6 +284,13 @@ async fn tcp_link_kept_alive_only_by_heartbeats_survives_several_idle_deadlines(
 /// `check_link_heartbeats()` removes the peer once the link-dead timeout
 /// passes, so this covers the detection of the dead link as well as the
 /// reconnection.
+///
+/// The link-dead timeout passes on the node's monotonic clock, which the
+/// check reads, by `crate::time::advance` rather than a real wait. What the
+/// real wait also gave the far end, time for its receive loop to read the
+/// close and drop its pooled connection, is waited for in real time and
+/// asserted before the re-handshake, so the new connection never meets the
+/// old one's pool entry.
 #[tokio::test]
 async fn test_tcp_reconnection_after_link_death() {
     // Short timeouts; the link-dead one is set on the built nodes, which
@@ -295,6 +317,15 @@ async fn test_tcp_reconnection_after_link_death() {
         nodes[1].node.get_peer(&addr_0).is_some(),
         "precondition: node 1 holds node 0 before the close"
     );
+    let inbound = |nodes: &[TestNode]| match nodes[1].node.transports.get(&nodes[1].transport_id) {
+        Some(TransportHandle::Tcp(t)) => t.stats().pool_inbound_count(),
+        _ => panic!("node 1 should have its TCP transport"),
+    };
+    assert_eq!(
+        inbound(&nodes),
+        1,
+        "precondition: node 1 holds the inbound connection before the close"
+    );
 
     // Force-close the TCP connection on node 0's side
     let node1_listen_addr = nodes[1].addr.clone();
@@ -305,8 +336,20 @@ async fn test_tcp_reconnection_after_link_death() {
         .unwrap();
     transport.close_connection(&node1_listen_addr).await;
 
-    // Wait for link-dead timeout
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    // Node 1's receive loop reads the close and removes its inbound
+    // connection, which takes real time, not node time.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while inbound(&nodes) > 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        inbound(&nodes),
+        0,
+        "node 1 should have dropped the closed connection before the re-handshake"
+    );
+
+    // Past the 3 s link-dead timeout on the node's clock
+    crate::time::advance(Duration::from_secs(4));
 
     // Trigger dead peer removal on both sides
     nodes[0].node.check_link_heartbeats().await;

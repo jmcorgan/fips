@@ -3,21 +3,22 @@
 #
 # These tests drive the convergence gate with synthetic connectivity
 # checks (ping_fn stand-ins) that report scripted PASSED/FAILED counts
-# keyed off the same SECONDS clock the gate uses. No containers or
-# network are involved, so the suite is hermetic and safe to run in CI.
+# keyed off the same clock the gate uses. No containers or network are
+# involved, so the suite is hermetic and safe to run in CI.
 #
-# It is not fast, though: it drives real timeouts against the real clock
-# and took about 45 seconds when measured 2026-07-23, before case 7 added
-# roughly another minute. The header claimed "a
-# few seconds" from the day it was written until then, which nothing had
-# contradicted because no runner had ever invoked it.
-#
-# The clock both the gate and the traces read is SECONDS, which counts whole
-# seconds, so every timing verdict below needs at least a second of margin
-# and most of the run is that margin. The traces were cut on 2026-10-21 to
-# drop the time no assertion reads (a second climb step in cases 1 and 4, a
-# second of stall in the hard-cap cases, two seconds of climb in 7d) without
-# narrowing any margin. That took it from 133 s to about 116 s.
+# Cases 1 to 7 run on a fake clock: the test replaces the gate's
+# converge_now and converge_sleep (wait-converge.sh) with a counter that
+# each poll's sleep advances, so a case's timeline costs no real time and
+# every poll lands on a whole second, as the real clock's polls do to within
+# its one-second granularity. On the real clock the same cases took about
+# 116 s. A gate that never returns runs the fake clock past FAKE_CAP, which
+# ends that case's subshell with status 3 and reds the case instead of
+# hanging the suite. A gate that polls again without waiting through
+# converge_sleep would never move the fake clock, so every scripted poll
+# checks that the clock moved since the one before and ends the subshell
+# with status 3 if it did not. Case 8 runs the gate on its real clock and sleep, in a
+# child shell under a timeout, so the defaults every suite's gate runs on
+# stay exercised; it takes about three seconds.
 #
 # Run:
 #   ./wait-converge-test.sh
@@ -27,6 +28,23 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/wait-converge.sh"
+
+# The fake clock cases 1 to 7 run on, in place of the gate's own. Every gate
+# call below runs in a subshell, which starts from FAKE_T=0 and whose
+# advances end with it.
+FAKE_T=0
+FAKE_CAP=1000
+converge_now() {
+    echo "$FAKE_T"
+    return 0
+}
+converge_sleep() {
+    FAKE_T=$((FAKE_T + $1))
+    if (( FAKE_T > FAKE_CAP )); then
+        echo "  fake clock: past ${FAKE_CAP}s and the gate has not returned" >&2
+        exit 3
+    fi
+}
 
 RESULTS=()
 FAILURES=0
@@ -51,20 +69,35 @@ check() {
 # clock at suite start. PT (ping-elapsed time) is computed inline in each
 # ping_fn — NOT via a subshell — so the PING_START assignment persists.
 PING_START=-1
+LAST_POLL_T=-1
 reset_ping() {
     PING_START=-1
+    LAST_POLL_T=-1
+}
+
+# Called at the top of every ping_fn. Each case polls every second, so two
+# polls at one fake time mean the gate waited some other way, or not at all,
+# and the fake clock would never reach FAKE_CAP: end the subshell instead.
+poll_tick() {
+    if (( LAST_POLL_T == FAKE_T )); then
+        echo "  fake clock: still at ${FAKE_T}s at the next poll; the gate did not wait through converge_sleep" >&2
+        exit 3
+    fi
+    LAST_POLL_T=$FAKE_T
 }
 
 # --- Synthetic connectivity checks ------------------------------------
 
-# Sets global PT to ping-elapsed seconds. Must be called (not subshelled)
-# at the top of each ping_fn so the first-call timestamp persists.
+# Sets global PT to ping-elapsed seconds on the fake clock. Must be called
+# (not subshelled) at the top of each ping_fn so the first-call timestamp
+# persists.
 PT=0
 set_pt() {
+    poll_tick
     if (( PING_START < 0 )); then
-        PING_START=$SECONDS
+        PING_START=$FAKE_T
     fi
-    PT=$(( SECONDS - PING_START ))
+    PT=$(( FAKE_T - PING_START ))
 }
 
 # Case 1 trace: improves (16 reachable) early, climbs to 19, then holds
@@ -103,6 +136,7 @@ ping_far_stall() {
 # max_secs=5 and stall_secs=2, so the hold arms at t~2 and is ~3s old at the
 # cap.
 ping_never_converges() {
+    poll_tick
     PASSED=19; FAILED=1
 }
 
@@ -187,15 +221,30 @@ HOLD_MSG="holding for full budget"
 STUCK_MSG="STUCK"
 NOCONV_MSG="tree did not converge"
 
-# Run the gate in THIS shell (not a subshell) so the CONVERGE_* verdict
-# globals survive, capturing its output to a file instead. `$(...)` runs the
-# gate in a fork, which discards those assignments — that is why cases 1-4
-# can only assert on text.
+# Run the gate in a subshell, so a gate that never returns ends there when
+# the fake clock passes its cap, with its output in VERDICT_OUT. The subshell
+# hands back the CONVERGE_* verdict globals and GATE_SECS, the fake seconds
+# the gate took, through VERDICT_VARS, which a subshell that never got that
+# far leaves unwritten, so the reset values stand. Cases 1-4 run the gate in
+# `$(...)` instead, which discards those assignments, so they assert on text.
 VERDICT_OUT=$(mktemp)
+VERDICT_VARS=$(mktemp)
 run_gate() {
+    local rc
     reset_ping
-    CONVERGE_OUTCOME=""; CONVERGE_REACHED=-1; CONVERGE_PENDING=-1
-    wait_until_connected "$@" >"$VERDICT_OUT" 2>&1
+    CONVERGE_OUTCOME=""; CONVERGE_REACHED=-1; CONVERGE_PENDING=-1; GATE_SECS=-1
+    : > "$VERDICT_VARS"
+    (
+        wait_until_connected "$@"
+        rc=$?
+        printf 'CONVERGE_OUTCOME=%q\nCONVERGE_REACHED=%q\nCONVERGE_PENDING=%q\nGATE_SECS=%q\n' \
+            "$CONVERGE_OUTCOME" "$CONVERGE_REACHED" "$CONVERGE_PENDING" "$FAKE_T" > "$VERDICT_VARS"
+        exit "$rc"
+    ) >"$VERDICT_OUT" 2>&1
+    rc=$?
+    # shellcheck disable=SC1090  # written just above
+    source "$VERDICT_VARS"
+    return "$rc"
 }
 
 # --- Case 1: near-converged hold --------------------------------------
@@ -214,7 +263,7 @@ echo "-- Case 1b: same trace, slack=0 (old behavior) must bail --"
 reset_ping
 out0=$(wait_until_connected ping_near_converged_hold 20 4 1 0); rc0=$?
 echo "$out0"
-c1b_rc_ok=1; [ "$rc0" -ne 0 ] && c1b_rc_ok=0
+c1b_rc_ok=1; [ "$rc0" -eq 1 ] && c1b_rc_ok=0
 check "case1b: returns 1 with slack=0" "$c1b_rc_ok" "rc=$rc0"
 c1b_stuck_ok=1; echo "$out0" | grep -q "$STUCK_MSG" && c1b_stuck_ok=0
 check "case1b: bailed via STUCK (not hold)" "$c1b_stuck_ok" "expected '$STUCK_MSG' in output"
@@ -222,36 +271,44 @@ check "case1b: bailed via STUCK (not hold)" "$c1b_stuck_ok" "expected '$STUCK_MS
 # --- Case 2: far-from-converged stall (fast-bail) ---------------------
 echo
 echo "== Case 2: far-from-converged stall (fast-bail) =="
-reset_ping
-start=$SECONDS
-out=$(wait_until_connected ping_far_stall 30 4 1 2); rc=$?
-elapsed=$((SECONDS - start))
+run_gate ping_far_stall 30 4 1 2; rc=$?
+elapsed=$GATE_SECS
+out=$(cat "$VERDICT_OUT")
 echo "$out"
-c2_rc_ok=1; [ "$rc" -ne 0 ] && c2_rc_ok=0
+c2_rc_ok=1; [ "$rc" -eq 1 ] && c2_rc_ok=0
 check "case2: returns 1 (stall bail)" "$c2_rc_ok" "rc=$rc"
 c2_stuck_ok=1; echo "$out" | grep -q "$STUCK_MSG" && c2_stuck_ok=0
 check "case2: bailed via STUCK message" "$c2_stuck_ok"
 # Fast-bail: must finish well before the 30s hard cap.
-c2_fast_ok=1; [ "$elapsed" -lt 20 ] && c2_fast_ok=0
+c2_fast_ok=1; [ "$elapsed" -ge 0 ] && [ "$elapsed" -lt 20 ] && c2_fast_ok=0
 check "case2: fast-bail (before hard cap)" "$c2_fast_ok" "elapsed=${elapsed}s < 20s"
+# The fake clock is exact, so pin the poll the bail lands on: the last
+# progress is at t=3 (8 to 10 reachable), and the stall reaches stall_secs=4
+# at t=7. A gate that bailed only once the stall exceeded stall_secs would
+# bail at t=8.
+c2_at_ok=1; [ "$elapsed" -eq 7 ] && c2_at_ok=0
+check "case2: bails on the poll where the stall reaches stall_secs" "$c2_at_ok" "elapsed=${elapsed}s, expected 7s"
 c2_nocap_ok=1; echo "$out" | grep -q "TIMEOUT" || c2_nocap_ok=0
 check "case2: did NOT hit hard-cap TIMEOUT" "$c2_nocap_ok"
 
 # --- Case 3: never converges (hard cap) -------------------------------
 echo
 echo "== Case 3: never converges (hard cap) =="
-reset_ping
-start=$SECONDS
-out=$(wait_until_connected ping_never_converges 5 2 1 2); rc=$?
-elapsed=$((SECONDS - start))
+run_gate ping_never_converges 5 2 1 2; rc=$?
+elapsed=$GATE_SECS
+out=$(cat "$VERDICT_OUT")
 echo "$out"
-c3_rc_ok=1; [ "$rc" -ne 0 ] && c3_rc_ok=0
+c3_rc_ok=1; [ "$rc" -eq 1 ] && c3_rc_ok=0
 check "case3: returns 1 (never converges)" "$c3_rc_ok" "rc=$rc"
 c3_cap_ok=1; echo "$out" | grep -q "TIMEOUT" && c3_cap_ok=0
 check "case3: hit hard-cap TIMEOUT message" "$c3_cap_ok"
 # Hard cap: must run roughly to max_secs (5s), not bail early.
 c3_dur_ok=1; [ "$elapsed" -ge 5 ] && c3_dur_ok=0
 check "case3: ran to hard cap (~max_secs)" "$c3_dur_ok" "elapsed=${elapsed}s >= 5s"
+# Polls fall at t=0 to 4 and the cap at t=5 ends the loop. A gate that also
+# polled at the cap would sleep once more and return at t=6.
+c3_cap_at_ok=1; [ "$elapsed" -eq 5 ] && c3_cap_at_ok=0
+check "case3: no poll at the cap" "$c3_cap_at_ok" "elapsed=${elapsed}s, expected 5s"
 
 # --- Case 4: backward-compat (4 args, default slack=2) ----------------
 echo
@@ -294,13 +351,12 @@ check "case5: refusal names the reason" "$c5_msg_ok"
 c5_notpass_ok=1; [ "$rc" -ne 0 ] && c5_notpass_ok=0
 check "case5: floor of 0 does not report success" "$c5_notpass_ok" "rc=$rc"
 
-start=$SECONDS
-out=$(wait_for_peers stub-container 1 2 2>&1); rc=$?
-elapsed=$((SECONDS - start))
+out=$(wait_for_peers stub-container 1 2 2>&1; rc=$?; echo "fake clock at $FAKE_T"; exit "$rc"); rc=$?
+elapsed=$(sed -n 's/^fake clock at //p' <<<"$out")
 echo "$out"
 c5_floor1_ok=1; [ "$rc" -eq 1 ] && c5_floor1_ok=0
 check "case5: floor of 1 times out rather than being refused" "$c5_floor1_ok" "rc=$rc"
-c5_polled_ok=1; [ "$elapsed" -ge 2 ] && c5_polled_ok=0
+c5_polled_ok=1; [ "${elapsed:-0}" -ge 2 ] && c5_polled_ok=0
 check "case5: floor of 1 polled its full budget" "$c5_polled_ok" "elapsed=${elapsed}s >= 2s"
 
 unset -f docker
@@ -318,7 +374,7 @@ echo "== Case 6: verdict names which condition failed =="
 echo "-- Case 6a: genuinely unconverged tree, hard cap --"
 run_gate ping_never_converges 5 2 1 2; rc=$?
 cat "$VERDICT_OUT"
-c6a_rc_ok=1; [ "$rc" -ne 0 ] && c6a_rc_ok=0
+c6a_rc_ok=1; [ "$rc" -eq 1 ] && c6a_rc_ok=0
 check "case6a: unconverged tree still reds" "$c6a_rc_ok" "rc=$rc"
 c6a_out_ok=1; [ "$CONVERGE_OUTCOME" = "timeout" ] && c6a_out_ok=0
 check "case6a: verdict is timeout" "$c6a_out_ok" "CONVERGE_OUTCOME=$CONVERGE_OUTCOME"
@@ -332,7 +388,7 @@ check "case6a: message says the tree did not converge" "$c6a_msg_ok"
 echo "-- Case 6b: wedged far from convergence, stall bail --"
 run_gate ping_far_stall 30 4 1 2; rc=$?
 cat "$VERDICT_OUT"
-c6b_rc_ok=1; [ "$rc" -ne 0 ] && c6b_rc_ok=0
+c6b_rc_ok=1; [ "$rc" -eq 1 ] && c6b_rc_ok=0
 check "case6b: wedged tree still reds" "$c6b_rc_ok" "rc=$rc"
 c6b_out_ok=1; [ "$CONVERGE_OUTCOME" = "stalled" ] && c6b_out_ok=0
 check "case6b: verdict is stalled" "$c6b_out_ok" "CONVERGE_OUTCOME=$CONVERGE_OUTCOME"
@@ -446,7 +502,7 @@ check "case7h: verdict is timeout" "$c7h_out_ok" "CONVERGE_OUTCOME=$CONVERGE_OUT
 echo "-- Case 7i: hold armed, but shorter than the window when the cap falls --"
 # The hold arms at t~2 (stall_secs after the first reading) and the cap falls
 # at 5, so it is ~3s old against a 10s window: seven seconds of margin, far
-# above SECONDS' one-second granularity. This is the case that carries the
+# above the clock's one-second granularity. This is the case that carries the
 # duration condition; 7d and 7h pass even with it removed if their hold
 # happens not to arm.
 run_gate ping_never_converges 5 2 1 2 10; rc=$?
@@ -458,7 +514,50 @@ check "case7i: verdict is timeout" "$c7i_out_ok" "CONVERGE_OUTCOME=$CONVERGE_OUT
 c7i_hold_ok=1; grep -q "$HOLD_MSG" "$VERDICT_OUT" && c7i_hold_ok=0
 check "case7i: the hold was armed" "$c7i_hold_ok" "expected '$HOLD_MSG' in output"
 
-rm -f "$VERDICT_OUT"
+echo "-- Case 7j: hold exactly as long as the window when the cap falls --"
+# The hold arms at t=2 and the cap falls at 5, so it has lasted exactly the
+# 3 s window, which counts as at least that long. A gate that required the
+# hold to exceed the window would time out here.
+run_gate ping_never_converges 5 2 1 2 3; rc=$?
+cat "$VERDICT_OUT"
+c7j_rc_ok=1; [ "$rc" -eq 0 ] && c7j_rc_ok=0
+check "case7j: a hold equal to the window returns 0" "$c7j_rc_ok" "rc=$rc"
+c7j_out_ok=1; [ "$CONVERGE_OUTCOME" = "near_converged" ] && c7j_out_ok=0
+check "case7j: verdict is near_converged" "$c7j_out_ok" "CONVERGE_OUTCOME=$CONVERGE_OUTCOME"
+
+rm -f "$VERDICT_OUT" "$VERDICT_VARS"
+
+# --- Case 8: the real clock and sleep ------------------------------------
+#
+# Every suite's gate runs on the defaults, $SECONDS and sleep, which the cases
+# above replace. This runs the gate on them in a child shell that sources
+# wait-converge.sh afresh, under a timeout, against a trace that never
+# converges, with a 3 s cap and a 1 s poll. A clock that does not move never
+# reaches the cap, and the timeout ends the shell; a sleep that does not wait
+# polls far more than the four times three seconds allow.
+echo
+echo "== Case 8: the real clock and sleep =="
+# shellcheck disable=SC2016  # the child shell expands these
+real_out=$(timeout 30 bash -c '
+    source "$1"
+    PINGS=0
+    ping_stuck() { PINGS=$((PINGS + 1)); PASSED=19; FAILED=1; }
+    start=$SECONDS
+    wait_until_connected ping_stuck 3 1 1 2
+    rc=$?
+    echo "real clock: rc=$rc outcome=$CONVERGE_OUTCOME pings=$PINGS secs=$((SECONDS - start))"
+' _ "$SCRIPT_DIR/wait-converge.sh" 2>&1); real_rc=$?
+echo "$real_out"
+real_line=$(grep '^real clock: ' <<<"$real_out")
+real_field() { sed -n "s/.* $1=\([^ ]*\).*/\1/p" <<<"$real_line"; }
+c8_done_ok=1; [ "$real_rc" -eq 0 ] && [ -n "$real_line" ] && c8_done_ok=0
+check "case8: the gate returns on the real clock" "$c8_done_ok" "shell rc=$real_rc"
+c8_rc_ok=1; [ "$(real_field rc)" = 1 ] && [ "$(real_field outcome)" = timeout ] && c8_rc_ok=0
+check "case8: it times out at the cap" "$c8_rc_ok" "rc=$(real_field rc) outcome=$(real_field outcome)"
+c8_secs_ok=1; [ "$(real_field secs)" -ge 3 ] 2>/dev/null && c8_secs_ok=0
+check "case8: the cap took real time" "$c8_secs_ok" "secs=$(real_field secs) >= 3"
+c8_pings_ok=1; [ "$(real_field pings)" -ge 2 ] 2>/dev/null && [ "$(real_field pings)" -le 5 ] && c8_pings_ok=0
+check "case8: it slept between polls" "$c8_pings_ok" "pings=$(real_field pings), 2 to 5"
 
 # --- Summary ----------------------------------------------------------
 echo

@@ -19,7 +19,10 @@
 #                             .deb built at the start of the build stage
 #                             (deb-build, to deploy/), the core's slow
 #                             suites, the mutation lane, the musl unit tests
-#                             and every integration suite.
+#                             and every integration suite, with the self-tests
+#                             of the chaos runner's veth setup (veth-host)
+#                             and of the RPM suite's network budget
+#                             (rpm-budget) run beside the suites they serve.
 #                          3  the nightly run of each trunk tip: tier 2, the
 #                             explorers (on next the core half alone, so not
 #                             the mutation lane's explorer lines either; see
@@ -604,7 +607,6 @@ GUARDS=(
     "run_shellcheck shellcheck"
     "run_wait_converge wait-converge"
     "run_relay_verdict_test relay-verdict"
-    "run_rpm_budget_test rpm-budget"
     "run_dockerrun docker-run"
     "run_package_versions package-versions"
     "run_nextest_flaky nextest-flaky"
@@ -614,8 +616,10 @@ GUARDS=(
     "run_ciplan ci-plan"
     "run_paritytest ci-parity-test"
     "run_fwtable fw-table"
-    "run_veth_host veth-host"
 )
+# Two self-tests are not guards: veth-host runs with the chaos suites and
+# rpm-budget before rpm-install (run_integration), since each tests only the
+# harness of the suites it runs beside and takes about a minute.
 
 # The nightly chaos runs, one entry per line in CHAOS_SUITES' form: each CI
 # scenario and each nightly-only one NIGHTLY_CHAOS_RUNS times, as
@@ -714,10 +718,11 @@ print_plan() {
         printf '%s\n' openwrt-scripts tarball-install build-integration "${STATIC_SUITES[@]}" \
             "${GATEWAY_SUITES[@]}" "${FIREWALL_SUITES[@]}" "${IFACE_BINDING_SUITES[@]}"
         for s in "${NAT_SUITES[@]}"; do echo "nat-$s"; done
-        printf '%s\n' "${STUN_FAULTS_SUITES[@]}" "${MEDIUM_CHANGE_SUITES[@]}"
+        printf '%s\n' "${STUN_FAULTS_SUITES[@]}" "${MEDIUM_CHANGE_SUITES[@]}" veth-host
         for entry in "${CHAOS_SUITES[@]}"; do echo "chaos-${entry%% *}"; done
         printf '%s\n' "${NATIVE_API_SUITES[@]}" "${MDNS_SUITES[@]}" \
-            "${DNS_RESOLVER_SUITES[@]}" "${DEB_INSTALL_SUITES[@]}" "${RPM_INSTALL_SUITES[@]}"
+            "${DNS_RESOLVER_SUITES[@]}" "${DEB_INSTALL_SUITES[@]}" rpm-budget \
+            "${RPM_INSTALL_SUITES[@]}"
         [[ "$WITH_TOR" == true ]] && printf '%s\n' "${TOR_SUITES[@]}"
     fi
     if [[ "$NIGHTLY" == true ]]; then
@@ -2987,8 +2992,10 @@ run_integration() {
         run_medium_change
     done
 
-    # Chaos scenarios (parallel, throttled)
+    # Chaos scenarios (parallel, throttled), after the self-test of the
+    # runner's veth setup
     if [[ "$SKIP_CHAOS" != true ]]; then
+        run_veth_host
         run_chaos_set "${CHAOS_SUITES[@]}"
     fi
 
@@ -3004,7 +3011,9 @@ run_integration() {
     # Deb-install multi-distro suite (heavy — builds .deb + per-distro install)
     run_deb_install
 
-    # Rpm-install suite (reuses that .deb's binaries through the release path)
+    # Rpm-install suite (reuses that .deb's binaries through the release
+    # path), after the self-test of its network budget
+    run_rpm_budget_test
     run_rpm_install
 
     # Tor (opt-in via --with-tor; depends on live Tor network)
@@ -3392,13 +3401,12 @@ run_simassert() {
     return 0
 }
 
-# Unit tests for the convergence gate every static suite waits on. Hermetic —
-# synthetic ping functions against the same SECONDS clock, no containers — but
-# it drives real timeouts, so it costs about 45 seconds rather than the "few
-# seconds" its own header used to claim.
+# Unit tests for the convergence gate every static suite waits on. Hermetic:
+# synthetic ping functions, no containers, and the gate's timeline on a fake
+# clock but for one short case on the real one, so it takes a few seconds.
 #
-# It is here with the other two rather than in the integration stage because it
-# needs nothing built. Note what that buys: wait_until_connected decides whether
+# It is a guard rather than in the integration stage because it needs nothing
+# built. Note what that buys: wait_until_connected decides whether
 # every static suite proceeds or gives up, so a regression in it turns those
 # suites' verdicts into noise, and until now nothing ran this at all.
 run_wait_converge() {
@@ -3424,8 +3432,9 @@ run_relay_verdict_test() {
 # Unit tests for the RPM install suite's network budget: dnf-bounded.sh's
 # deadline and its retry after a metadata failure, and retry_build's refusal
 # of a late retry. Hermetic: dnf and the build are stubbed, no containers,
-# about forty seconds. Kept in step with the
-# ci.yml step of the same name by hand, like run_relay_verdict_test.
+# about forty seconds. Run by run_integration just before rpm-install, so a
+# run that does not reach that suite does not spend the time. Kept in step
+# with the ci.yml step of the same name by hand, like run_relay_verdict_test.
 run_rpm_budget_test() {
     local rc=0
     info "[rpm-budget] Running the RPM install network budget unit tests"
@@ -3548,10 +3557,12 @@ run_fwtable() {
 }
 
 # The chaos runner's bound on host `ip` commands in veth setup, against a
-# stand-in docker: a 31 s stall completes, a timed-out helper is removed by
-# name and the command retried once unless it took effect, and an aborted setup
-# prints NOT SCORED. Hermetic, and takes about a minute and a half, most of it
-# the real 31 s stall and the 2 or 3 s bounds of the other cases.
+# stand-in docker: the shipped bound is above a 31 s stall and is the one a
+# host command gets, a timed-out helper is removed by name and the command
+# retried once unless it took effect, and an aborted setup prints NOT SCORED.
+# Hermetic, and takes about a minute, most of it the shortened bound of the
+# cases that time a helper out. Run by run_integration just before the chaos
+# suites, and skipped with them.
 run_veth_host() {
     local rc=0
     info "[veth-host] Checking the chaos veth host-command bound against its cases"

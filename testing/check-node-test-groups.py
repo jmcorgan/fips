@@ -22,13 +22,18 @@ is flagged when its text (signature and body, comments and string contents
 removed) uses a primitive, or calls a flagged function, computed to a fixpoint:
 
   primitives  a non-loopback transport (UdpTransport, TcpTransport,
-              EthernetTransport, Ble*Transport); an OS socket type (UdpSocket,
+              EthernetTransport), or a BLE backend that reaches a real radio
+              (BluerIo, RadioIo); an OS socket type (UdpSocket,
               TcpListener, TcpStream, TcpSocket, socket2, libc::socket); a
               per-peer connected UDP socket (`open_connected_fd(`, which opens
               one, and ConnectedPeerSocket, which only wraps such a socket);
               and `.start()` and `run_rx_loop(` with its variants
               (`run_rx_loop_with_shutdown(` is where the bind happens), which
               bind through the node's Config, the control socket included.
+              A BleTransport is not a primitive: in a test build it runs over
+              MockBleIo unless a real backend is named (DefaultBleTransport
+              is BleTransport<MockBleIo> under cfg(test)), and the mock opens
+              no socket.
   calls       `f(`, `path::f(` and `Type::f(` resolved through the module's own
               functions, its `use` items (aliases, groups and globs) and
               `super`/`self`/`crate::node::tests`/`crate::testutil` paths;
@@ -105,7 +110,8 @@ PRIMITIVES = [
     ("UdpTransport", re.compile(r"\bUdpTransport\b")),
     ("TcpTransport", re.compile(r"\bTcpTransport\b")),
     ("EthernetTransport", re.compile(r"\bEthernetTransport\b")),
-    ("BleTransport", re.compile(r"\bBle\w*Transport\b")),
+    ("BluerIo", re.compile(r"\bBluerIo\b")),
+    ("RadioIo", re.compile(r"\bRadioIo\b")),
     ("UdpSocket", re.compile(r"\bUdpSocket\b")),
     ("TcpListener", re.compile(r"\bTcpListener\b")),
     ("TcpStream", re.compile(r"\bTcpStream\b")),

@@ -145,11 +145,10 @@ jobs:
         env:
           SHELLCHECK: ${{ runner.temp }}/shellcheck/shellcheck
         run: bash testing/check-shellcheck.sh
-      # Hermetic: synthetic ping functions, no containers, ~45s. Lives beside
-      # the other two so both runners gate on it identically — putting it in
-      # only one would create exactly the drift check-ci-parity.sh exists to
-      # catch, and it is invisible to that checker either way since it is not
-      # a matrix suite.
+      # Hermetic: synthetic ping functions on a fake clock, no containers, a
+      # few seconds. Lives beside the other two so both runners gate on it
+      # identically — putting it in only one would create exactly the drift
+      # check-ci-parity.sh exists to catch.
       - name: Run convergence-gate unit tests
         run: bash testing/lib/wait-converge-test.sh
       # Hermetic: docker and sleep stubbed, no containers, about a second. Kept
@@ -159,7 +158,9 @@ jobs:
         run: bash testing/lib/relay-verdict-test.sh
       # Hermetic: dnf and the image build stubbed, no containers, about forty
       # seconds. Kept in step with ci-local.sh's run_rpm_budget_test by hand,
-      # for the same reason as the convergence-gate step above.
+      # for the same reason as the convergence-gate step above. ci-local.sh
+      # runs it just before rpm-install, at tier 2; every run here is tier 2,
+      # and this job is off the critical path, so it stays with the guards.
       - name: Run RPM install network budget unit tests
         run: bash testing/rpm-install/budget-test.sh
       # Hermetic: docker and sleep stubbed, no containers. The native API
@@ -213,7 +214,9 @@ jobs:
       # The chaos runner's veth host-command bound, timeout handling and
       # NOT SCORED verdict, against a stand-in docker. Hermetic; needs jinja2
       # for the runner case. Kept in step with ci-local.sh's run_veth_host by
-      # hand.
+      # hand. ci-local.sh runs it with the chaos suites, at tier 2; every run
+      # here is tier 2, and this job is off the critical path, so it stays
+      # with the guards.
       - name: Check the chaos veth host-command bound against its cases
         run: bash testing/chaos/veth-host-test.sh
 
