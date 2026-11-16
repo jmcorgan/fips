@@ -14,8 +14,11 @@
 # Cases:
 #   healthy               no stall; the pair completes with the same number of
 #                         docker calls as before the bound was changed
-#   stall-31              the move stalls 31 s, at the real bound, and the pair
-#                         completes (the old 30 s bound aborted here)
+#   bound                 the shipped bound, checked without waiting it out:
+#                         HOST_CMD_TIMEOUT_SECS is above the 31 s stall a
+#                         GitHub runner showed (the old 30 s bound aborted
+#                         there), and a host command run with no bound of its
+#                         own hands it to the client's timeout
 #   retry-before-effect   attempt 1 times out before the move; its helper is
 #                         removed by name before it can run, and attempt 2
 #                         moves the link
@@ -33,15 +36,18 @@
 #
 # A helper that must not act until the runner has removed it waits for its
 # own removal (an `after` gate on `rm {self}`), not for a sleep the removal
-# has to beat. Every case but stall-31 shortens the bound through drive.py to
-# SHORT_BOUND, so the suite does not wait out the real bound twice. Every
+# has to beat. Every case that drives setup shortens the bound through drive.py
+# to SHORT_BOUND, so the suite never waits out the real bound. Every
 # host command a case does not stall is an ordinary helper that must still
 # finish inside that bound, and so is attempt 2 of the stalled move in
 # retry-before-effect, late-start and late-lands-first, and the move itself in
 # effect-before-timeout; the fake cannot gate on the runner's own timeout, so
 # the bound is kept wide enough for a heavily loaded host (see the README).
-# stall-31 uses the bound the module ships with. The suite takes about two
-# minutes, a third of it stall-31.
+# bound reads the bound the module ships with. Until 2026-11-16 a stall-31
+# case drove a real 31 s stall at that bound, a third of the suite's time; the
+# timeout handling it shared with the cases above is theirs to check, and what
+# was its own, that the shipped bound sits above the stall and is the one a
+# host command gets, is bound's. The suite takes about a minute.
 # VETH_TEST_BOTH_STALL adds a stall before both-attempts' helpers wait for
 # their removal (default 0 s); 31 shows what a veth.py with the old fixed 30 s
 # bound prints when its setup aborts.
@@ -59,8 +65,12 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SUPPORT="$SCRIPT_DIR/veth-host-test"
-ALL_CASES=(healthy stall-31 retry-before-effect effect-before-timeout late-start late-lands-first
+ALL_CASES=(healthy bound retry-before-effect effect-before-timeout late-start late-lands-first
     both-attempts)
+
+# The longest a host command has been seen to stall, in seconds: one netns
+# move on a GitHub runner took over 30 s (sim/veth.py, HOST_CMD_TIMEOUT_SECS).
+STALL_SECS=31
 
 # The shortened host-command bound, in seconds. An unstalled fake helper
 # takes about 6 s with the test held to 2% of one CPU.
@@ -213,13 +223,41 @@ case_healthy() {
         "$([ "$calls" -eq "$HEALTHY_CALLS" ]; echo $?)" "$calls calls, expected $HEALTHY_CALLS"
 }
 
-case_stall_31() {
-    drive stall-31 "[{\"match\": \"$MOVE_B\", \"attempts\": [1], \"mode\": \"stall-before\", \"secs\": 31}]" '' \
-        pair "$SIM_PARENT"
-    check_pair_done stall-31
-    local runs
-    runs=$(count "^run .*cmd=$MOVE_B" "$STATE/helpers.log")
-    check "stall-31: no second attempt" "$([ "$runs" -eq 1 ]; echo $?)" "$runs helper runs for the move"
+case_bound() {
+    # Runs _run_host with subprocess.run replaced, so nothing is started and
+    # nothing waits: the call hands back the timeout the client would get.
+    OUT="$WORK/out-bound.txt"
+    FIPS_CI_NAME_SUFFIX="-vethtest" timeout 60 python3 - "$SIM_PARENT" > "$OUT" 2>&1 <<'PY'
+import subprocess
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from sim import veth
+
+seen = {}
+
+
+def fake_run(cmd, **kwargs):
+    """Record the client's arguments and report success."""
+    seen.update(kwargs)
+    return subprocess.CompletedProcess(cmd, 0, "", "")
+
+
+veth.subprocess.run = fake_run
+outcome = veth._run_host(["ip", "link", "show"], "fake-sim-image")
+print(f"BOUND shipped={veth.HOST_CMD_TIMEOUT_SECS} used={seen.get('timeout')} outcome={outcome.name}")
+PY
+    echo "  bound check exited $?"
+    local line shipped used
+    line=$(grep '^BOUND ' "$OUT")
+    shipped=$(sed -n 's/.* shipped=\([^ ]*\).*/\1/p' <<<"$line")
+    used=$(sed -n 's/.* used=\([^ ]*\).*/\1/p' <<<"$line")
+    check "bound: the shipped bound is read" "$([ -n "$line" ]; echo $?)" "${line:-$(tail -1 "$OUT")}"
+    check "bound: it is above the ${STALL_SECS} s stall" \
+        "$(python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) > float(sys.argv[2]) else 1)' \
+            "${shipped:-0}" "$STALL_SECS" 2>/dev/null; echo $?)" "shipped=${shipped:-none}"
+    check "bound: a host command gets it" "$([ -n "$used" ] && [ "$used" = "$shipped" ]; echo $?)" \
+        "used=${used:-none}"
 }
 
 # The gate for a helper that may run its command only if the runner never

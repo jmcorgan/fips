@@ -304,7 +304,9 @@ internal builder runs for each kind of commit:
 - **Tier 2, trunk tips and landing candidates:** tier 1, with the `.deb`
   built at the start of the build stage, the core's slow suites, the
   mutation lane, the musl unit tests and every integration suite but the
-  nightly-only chaos scenarios. This is the set GitHub's `ci.yml` runs too.
+  nightly-only chaos scenarios, with the chaos runner's veth host-command
+  test run just before the chaos suites. This is the set GitHub's `ci.yml`
+  runs too, though it runs that test among its guards.
 - **Tier 3, the nightly run of each trunk tip:** tier 2, both halves of the
   explorers, the mutation lane's explorer lines, and the nightly extras: a
   batch of every CI chaos scenario, three runs each, the same batch of the

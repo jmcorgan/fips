@@ -19,7 +19,9 @@
 #                             .deb built at the start of the build stage
 #                             (deb-build, to deploy/), the core's slow
 #                             suites, the mutation lane, the musl unit tests
-#                             and every integration suite.
+#                             and every integration suite, with the self-test
+#                             of the chaos runner's veth setup (veth-host) run
+#                             beside the chaos suites.
 #                          3  the nightly run of each trunk tip: tier 2, both
 #                             halves of the explorers and the mutation lane's
 #                             explorer lines, a chaos batch of each
@@ -587,8 +589,9 @@ GUARDS=(
     "run_ciplan ci-plan"
     "run_paritytest ci-parity-test"
     "run_fwtable fw-table"
-    "run_veth_host veth-host"
 )
+# veth-host is not a guard: it runs with the chaos suites (run_integration),
+# since it tests only their runner's harness and takes about a minute.
 
 # The nightly chaos runs, one entry per line in CHAOS_SUITES' form: each CI
 # scenario and each nightly-only one NIGHTLY_CHAOS_RUNS times, as
@@ -677,7 +680,7 @@ print_plan() {
         printf '%s\n' openwrt-scripts tarball-install build-integration "${STATIC_SUITES[@]}" \
             "${GATEWAY_SUITES[@]}" "${FIREWALL_SUITES[@]}" "${IFACE_BINDING_SUITES[@]}"
         for s in "${NAT_SUITES[@]}"; do echo "nat-$s"; done
-        printf '%s\n' "${STUN_FAULTS_SUITES[@]}" "${MEDIUM_CHANGE_SUITES[@]}"
+        printf '%s\n' "${STUN_FAULTS_SUITES[@]}" "${MEDIUM_CHANGE_SUITES[@]}" veth-host
         for entry in "${CHAOS_SUITES[@]}"; do echo "chaos-${entry%% *}"; done
         printf '%s\n' "${NATIVE_API_SUITES[@]}" "${MDNS_SUITES[@]}" \
             "${DNS_RESOLVER_SUITES[@]}" "${DEB_INSTALL_SUITES[@]}" "${RPM_INSTALL_SUITES[@]}"
@@ -2933,8 +2936,10 @@ run_integration() {
         run_medium_change
     done
 
-    # Chaos scenarios (parallel, throttled)
+    # Chaos scenarios (parallel, throttled), after the self-test of the
+    # runner's veth setup
     if [[ "$SKIP_CHAOS" != true ]]; then
+        run_veth_host
         run_chaos_set "${CHAOS_SUITES[@]}"
     fi
 
@@ -3493,10 +3498,12 @@ run_fwtable() {
 }
 
 # The chaos runner's bound on host `ip` commands in veth setup, against a
-# stand-in docker: a 31 s stall completes, a timed-out helper is removed by
-# name and the command retried once unless it took effect, and an aborted setup
-# prints NOT SCORED. Hermetic, and takes about a minute and a half, most of it
-# the real 31 s stall and the 2 or 3 s bounds of the other cases.
+# stand-in docker: the shipped bound is above a 31 s stall and is the one a
+# host command gets, a timed-out helper is removed by name and the command
+# retried once unless it took effect, and an aborted setup prints NOT SCORED.
+# Hermetic, and takes about a minute, most of it the shortened bound of the
+# cases that time a helper out. Run by run_integration just before the chaos
+# suites, and skipped with them.
 run_veth_host() {
     local rc=0
     info "[veth-host] Checking the chaos veth host-command bound against its cases"

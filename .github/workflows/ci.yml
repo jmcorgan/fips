@@ -212,7 +212,9 @@ jobs:
       # The chaos runner's veth host-command bound, timeout handling and
       # NOT SCORED verdict, against a stand-in docker. Hermetic; needs jinja2
       # for the runner case. Kept in step with ci-local.sh's run_veth_host by
-      # hand.
+      # hand. ci-local.sh runs it with the chaos suites, at tier 2; every run
+      # here is tier 2, and this job is off the critical path, so it stays
+      # with the guards.
       - name: Check the chaos veth host-command bound against its cases
         run: bash testing/chaos/veth-host-test.sh
 
