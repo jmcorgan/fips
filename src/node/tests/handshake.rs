@@ -4300,6 +4300,61 @@ async fn a_dampened_epoch_restart_leaves_the_peer_address_naming_the_peer_link()
     stop_hs(&mut responder).await;
 }
 
+/// The restart dampener measures on the node's monotonic clock: once that
+/// clock has moved past the restart interval since an accepted restart, a
+/// second epoch change is accepted too. A dampener left on the raw clock
+/// would still see the first restart as seconds old and refuse the second.
+#[tokio::test]
+async fn a_second_epoch_restart_past_the_interval_on_the_node_clock_is_accepted() {
+    use fips_core::proto::fmp::EPOCH_RESTART_MIN_INTERVAL_SECS;
+    use std::time::Duration;
+
+    let past_interval = Duration::from_secs(EPOCH_RESTART_MIN_INTERVAL_SECS + 1);
+    let mut initiator = make_hs_node(Config::new()).await;
+    let mut responder = make_hs_node(Config::new()).await;
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+    let peer_addr =
+        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    let indices = |r: &HsNode| {
+        let p = r.node.get_peer(&peer_addr).unwrap();
+        (p.our_index(), p.their_index())
+    };
+
+    // Each round records a different epoch for the peer, so its next
+    // handshake reads as a restart, and lets the peering go quiet past the
+    // interval on the node's clock, so only the dampener can refuse it.
+    for (round, epoch) in [(1u64, [0xEE; 8]), (2, [0xDD; 8])] {
+        responder
+            .node
+            .get_peer_mut(&peer_addr)
+            .unwrap()
+            .set_remote_epoch(Some(epoch));
+        let before = indices(&responder);
+        crate::time::advance(past_interval);
+
+        let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000 + 1000 * round).await;
+        responder.node.handle_msg3(msg3).await;
+
+        assert_ne!(
+            indices(&responder),
+            before,
+            "restart {round} must replace the peering; unchanged indices mean it \
+             was refused, the second one by a dampener that did not see the \
+             node's clock move past the interval"
+        );
+        assert!(
+            responder.node.restart_dampener.contains_key(&peer_addr),
+            "restart {round} must stamp the dampener"
+        );
+    }
+    #[cfg(debug_assertions)]
+    responder.node.debug_assert_peer_maps_coherent();
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
 // ===========================================================================
 // An unreadable msg3 must not cost the pending inbound leg. Nothing ties a
 // msg3 to the leg before the read except the receiver index, which travels in
