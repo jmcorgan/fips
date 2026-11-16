@@ -335,6 +335,7 @@ STEPS = {
         "Check the chaos path assertions against planted input": "sim-assertions",
         "Check nothing resolves the shared mutable test image": "image-scoping",
         "Check every action is pinned to a commit SHA": "action-pins",
+        "Check every CI base image is pinned by digest": "base-pins",
         "Check every source comment resolves in-repo": "comment-refs",
         "Check every ignored test against its inventory": "ignored-tests",
         "Check no non-test code uses std 64-bit atomics": "portable-atomics",

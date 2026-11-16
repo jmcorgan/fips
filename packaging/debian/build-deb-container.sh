@@ -70,7 +70,17 @@ DOCKERFILE_HASH=$(sha256sum "$SCRIPT_DIR/Dockerfile.build" | cut -c1-12) || DOCK
     exit 2
 }
 
-IMAGE_TAG="fips-deb-builder:${FIPS_BUILD_IMAGE//[:\/]/-}-rust${RUST_TOOLCHAIN}-${DOCKERFILE_HASH}"
+# The floor image as a token for names: its tag, and the first 12 hex digits of
+# its digest when it is pinned by one, since neither ':' nor '@' may appear in
+# an image tag or a volume name.
+BASE_TOKEN="${FIPS_BUILD_IMAGE%%@*}"
+BASE_TOKEN="${BASE_TOKEN//[:\/]/-}"
+if [[ "$FIPS_BUILD_IMAGE" == *@sha256:* ]]; then
+    BASE_DIGEST="${FIPS_BUILD_IMAGE##*@sha256:}"
+    BASE_TOKEN="${BASE_TOKEN}-${BASE_DIGEST:0:12}"
+fi
+
+IMAGE_TAG="fips-deb-builder:${BASE_TOKEN}-rust${RUST_TOOLCHAIN}-${DOCKERFILE_HASH}"
 
 # Before the docker check, so a workflow can key a cache on the tag without
 # docker being involved.
@@ -89,7 +99,7 @@ command -v docker >/dev/null 2>&1 || {
 # the lock in the target volume is what serializes use of the registry volume,
 # so a registry shared with other builds must come with their target volume.
 # Checked before the image is built, so a wrong setting fails at once.
-VOL_SUFFIX="${FIPS_BUILD_IMAGE//[:\/]/-}"
+VOL_SUFFIX="$BASE_TOKEN"
 if [ -n "${FIPS_DEB_TARGET_VOLUME:-}" ] && [ -n "${FIPS_DEB_REGISTRY_VOLUME:-}" ]; then
     TARGET_VOLUME=$FIPS_DEB_TARGET_VOLUME
     REGISTRY_VOLUME=$FIPS_DEB_REGISTRY_VOLUME

@@ -15,7 +15,9 @@ networks:
 
 services:
   tor-daemon:
-    image: osminogin/tor-simple:latest
+    # Pinned by digest (the index digest of :latest as of 2026-11-16);
+    # testing/base-images.env says why, and how to move a pin.
+    image: osminogin/tor-simple:latest@sha256:46111caf16b334e556d90d504352adecba78408b68c88c2a3045e475ce857b34
     container_name: tor-daemon${FIPS_CI_NAME_SUFFIX:-}
     restart: "no"
     volumes:

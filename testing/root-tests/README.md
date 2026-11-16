@@ -4,7 +4,8 @@ The container image the root-only unit tests run in under
 `testing/ci-local.sh --tier`. The tests and their counts are in
 [`../root-tests.sh`](../root-tests.sh); this directory holds only the image.
 
-- `Dockerfile`: `debian:trixie-slim` plus `iproute2`, `nftables` and `procps`,
+- `Dockerfile`: `debian:trixie-slim`, pinned by digest (see
+  `../base-images.env`), plus `iproute2`, `nftables` and `procps`,
   the tools `root-tests.sh` checks for (`ip`, `nft`, `sysctl`). Nothing else:
   the `fips-mesh` library test binary is built on the host and mounted in
   read-only at its own path, with `root-tests.sh` at
@@ -23,12 +24,13 @@ Both scripts are POSIX `sh`, since the image's `bash` is not something they
 should need, and both print the test output, then exit 0 only on a pass.
 
 `ci-local.sh` uses the image named by `FIPS_ROOT_TESTS_IMAGE`, by default
-`fips-root-tests:trixie-1`, the tag the internal builder's image has carried
-since it started running the root tests (2026-10-29). When the host does not
-have it, the run builds it from this directory under that tag; the image
-carries no CI labels, so the teardown keeps it for the next run. Bump the tag
-with any change to the Dockerfile, so a host never runs a stale copy under the
-new contents' name.
+`fips-root-tests:<hash>`, where `<hash>` is the first 12 hex digits of the
+Dockerfile's sha256. When the host does not have it, the run builds it from
+this directory under that tag; the image carries no CI labels, so the
+teardown keeps it for the next run. Since the tag follows the Dockerfile, a
+change there builds a new image once, and a host never runs a stale copy
+under the new contents' name. It replaced `fips-root-tests:trixie-1`, which
+the builder may prune.
 
 The container runs as uid 0 with `--network none`, `NET_ADMIN`, `SYS_ADMIN`,
 `/dev/net/tun`, and AppArmor and the `/proc/sys` paths unconfined, the

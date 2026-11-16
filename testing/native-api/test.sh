@@ -57,6 +57,9 @@ GATED_NAME="fips-native-api-gated-$$"
 SURFACE="fips-native-surface-$$"
 # shellcheck source=SCRIPTDIR/../lib/image-build.sh
 . "$SCRIPT_DIR/../lib/image-build.sh"
+# The pinned base images the inline Dockerfiles below build from.
+# shellcheck source=SCRIPTDIR/../base-images.env
+. "$SCRIPT_DIR/../base-images.env"
 # shellcheck source=SCRIPTDIR/../lib/docker-run.sh
 . "$SCRIPT_DIR/../lib/docker-run.sh"
 
@@ -187,7 +190,8 @@ resolve_image() {
     cp "$echo_binary" "$context/native-echo"
     cp "$walk_binary" "$context/native-surface"
     cat > "$context/Dockerfile" <<'DOCKERFILE'
-FROM debian:trixie-slim
+ARG BASE
+FROM ${BASE}
 # libdbus-1-3 and libsystemd0 are the daemon's dynamic dependencies (BLE and
 # journal integration). Without them the binary does not start, and a check
 # that only looks for a socket would read that as a feature failure.
@@ -203,7 +207,7 @@ COPY native-echo /usr/local/bin/native-echo
 COPY native-surface /usr/local/bin/native-surface
 RUN chmod +x /usr/local/bin/fips /usr/local/bin/native-echo /usr/local/bin/native-surface
 DOCKERFILE
-    docker build -t "$BUILT_IMAGE" "${CI_LABELS[@]}" "$context" --quiet >/dev/null
+    docker build -t "$BUILT_IMAGE" "${CI_LABELS[@]}" --build-arg "BASE=$DEBIAN13_SLIM" "$context" --quiet >/dev/null
     local status=$?
     rm -rf "$context"
     [[ $status -ne 0 ]] && return 1

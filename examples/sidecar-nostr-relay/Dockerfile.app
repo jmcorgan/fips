@@ -11,7 +11,10 @@
 ARG STRFRY_IMAGE=ghcr.io/hoytech/strfry:latest
 FROM ${STRFRY_IMAGE} AS strfry
 
-FROM alpine:3.18
+# Pinned by digest (alpine:3.18 as of 2026-11-16), since the NAT test lab
+# builds its relay from this file; testing/base-images.env says why, and how
+# to move a pin.
+FROM alpine:3.18@sha256:de0eb0b3f2a47ba1eb89389859a9bd88b28e82f5826b6969ad604979713c2d4f
 
 RUN apk add --no-cache nginx
 

@@ -358,6 +358,20 @@ build's dependencies; a tree that does not compile is caught by the lints
 and unit tests rather than by a build stage of its own at tier 1. `--rerun`
 has no build stage, so there the first package suite builds the package.
 
+### Base images
+
+Every base image a CI image builds from, and every third-party image a suite
+runs (the Tor relay, strfry, busybox), is pinned by its multi-arch index
+digest, so two runs of one tree build on the same bases and a result that
+stands for another run of the same tree stands on what that run would have
+used. The suite scripts that build from an inline Dockerfile take their
+pins from [`base-images.env`](base-images.env), which also says how to move
+one; the Dockerfiles carry the same pins literally. The guard
+[`check-base-pins.sh`](check-base-pins.sh) (`base-pins`, every tier, and
+GitHub's ci-parity job) fails on a base without a digest, after showing on
+planted fixtures that it can; `check-base-pins.sh --current` prints each
+pin beside the digest the registry serves now.
+
 ### What only GitHub runs
 
 GitHub additionally runs the library tests on macOS and Windows, and on

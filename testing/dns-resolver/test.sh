@@ -39,6 +39,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../lib/systemd-container.sh"
 # shellcheck source=SCRIPTDIR/../lib/image-build.sh
 source "$SCRIPT_DIR/../lib/image-build.sh"
+# The pinned base images the inline Dockerfiles below build from.
+# shellcheck source=SCRIPTDIR/../base-images.env
+source "$SCRIPT_DIR/../base-images.env"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SETUP_SCRIPT="$REPO_ROOT/packaging/common/fips-dns-setup"
 TEARDOWN_SCRIPT="$REPO_ROOT/packaging/common/fips-dns-teardown"
@@ -447,7 +450,8 @@ prepare_binaries() {
 # Debian 12 use.
 build_debian12_resolved() {
     build_image "$1" "$(cat <<'DOCKERFILE'
-FROM debian:12
+ARG BASE
+FROM ${BASE}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     systemd systemd-resolved iproute2 dbus && \
@@ -455,7 +459,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     systemctl enable systemd-resolved
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
-    )"
+    )" --build-arg "BASE=$DEBIAN12"
     return
 }
 
@@ -519,7 +523,8 @@ test_debian13_resolved() {
     log "Debian 13 (trixie) + systemd-resolved (expects global-drop-in)"
 
     build_image "$image" "$(cat <<'DOCKERFILE'
-FROM debian:trixie
+ARG BASE
+FROM ${BASE}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     systemd systemd-resolved iproute2 dbus && \
@@ -527,7 +532,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     systemctl enable systemd-resolved
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
-    )" || { fail "build failed"; return; }
+    )" --build-arg "BASE=$DEBIAN13" || { fail "build failed"; return; }
 
     start_systemd_container "$name" "$image"
     wait_for_systemd "$name"
@@ -549,7 +554,8 @@ test_ubuntu22_resolved() {
     # On Ubuntu 22.04 systemd-resolved is bundled with systemd (not a
     # separate package). Just enable the service.
     build_image "$image" "$(cat <<'DOCKERFILE'
-FROM ubuntu:22.04
+ARG BASE
+FROM ${BASE}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     systemd iproute2 dbus && \
@@ -557,7 +563,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     systemctl enable systemd-resolved
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
-    )" || { fail "build failed"; return; }
+    )" --build-arg "BASE=$UBUNTU2204" || { fail "build failed"; return; }
 
     start_systemd_container "$name" "$image"
     wait_for_systemd "$name"
@@ -577,7 +583,8 @@ test_ubuntu24_resolved() {
     log "Ubuntu 24.04 + systemd-resolved (expects global-drop-in)"
 
     build_image "$image" "$(cat <<'DOCKERFILE'
-FROM ubuntu:24.04
+ARG BASE
+FROM ${BASE}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     systemd systemd-resolved iproute2 dbus && \
@@ -585,7 +592,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     systemctl enable systemd-resolved
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
-    )" || { fail "build failed"; return; }
+    )" --build-arg "BASE=$UBUNTU2404" || { fail "build failed"; return; }
 
     start_systemd_container "$name" "$image"
     wait_for_systemd "$name"
@@ -605,7 +612,8 @@ test_ubuntu26_resolved() {
     log "Ubuntu 26.04 + systemd-resolved (expects global-drop-in)"
 
     build_image "$image" "$(cat <<'DOCKERFILE'
-FROM ubuntu:26.04
+ARG BASE
+FROM ${BASE}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     systemd systemd-resolved iproute2 dbus && \
@@ -613,7 +621,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     systemctl enable systemd-resolved
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
-    )" || { fail "build failed"; return; }
+    )" --build-arg "BASE=$UBUNTU2604" || { fail "build failed"; return; }
 
     start_systemd_container "$name" "$image"
     wait_for_systemd "$name"
@@ -642,7 +650,8 @@ test_dnsmasq() {
     # has no server for is answered locally rather than sent to the host's
     # resolver.
     build_image "$image" "$(cat <<'DOCKERFILE'
-FROM debian:12
+ARG BASE
+FROM ${BASE}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     systemd dnsmasq iproute2 dbus procps dnsutils && \
@@ -652,7 +661,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     echo no-resolv > /etc/dnsmasq.d/00-test.conf
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
-    )" || { fail "build failed"; return; }
+    )" --build-arg "BASE=$DEBIAN12" || { fail "build failed"; return; }
 
     start_systemd_container "$name" "$image"
     wait_for_systemd "$name"
@@ -817,7 +826,8 @@ test_nm_dnsmasq() {
     log "Fedora + NetworkManager + dnsmasq plugin"
 
     build_image "$image" "$(cat <<'DOCKERFILE'
-FROM fedora:latest
+ARG BASE
+FROM ${BASE}
 RUN dnf install -y systemd NetworkManager dnsmasq iproute && \
     dnf clean all && \
     mkdir -p /etc/NetworkManager/conf.d /etc/NetworkManager/dnsmasq.d && \
@@ -827,7 +837,7 @@ RUN dnf install -y systemd NetworkManager dnsmasq iproute && \
     systemctl mask systemd-resolved
 CMD ["/sbin/init"]
 DOCKERFILE
-    )" || { fail "build failed"; return; }
+    )" --build-arg "BASE=$FEDORA45" || { fail "build failed"; return; }
 
     start_systemd_container "$name" "$image"
     wait_for_systemd "$name"
@@ -876,14 +886,15 @@ test_no_resolver() {
     log "Debian 12 bare (no resolver)"
 
     build_image "$image" "$(cat <<'DOCKERFILE'
-FROM debian:12
+ARG BASE
+FROM ${BASE}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     systemd iproute2 dbus && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
-    )" || { fail "build failed"; return; }
+    )" --build-arg "BASE=$DEBIAN12" || { fail "build failed"; return; }
 
     start_systemd_container "$name" "$image"
     wait_for_systemd "$name"
@@ -1354,11 +1365,11 @@ EOF'
 _pkgs_with_resolved="systemd systemd-resolved iproute2 dbus dnsutils libdbus-1-3 procps"
 _pkgs_ubuntu22="systemd iproute2 dbus dnsutils libdbus-1-3 procps"
 
-test_e2e_debian12() { _run_e2e_scenario debian12 debian:12       "$_pkgs_with_resolved"; }
-test_e2e_debian13() { _run_e2e_scenario debian13 debian:trixie   "$_pkgs_with_resolved"; }
-test_e2e_ubuntu22() { _run_e2e_scenario ubuntu22 ubuntu:22.04    "$_pkgs_ubuntu22"; }
-test_e2e_ubuntu24() { _run_e2e_scenario ubuntu24 ubuntu:24.04    "$_pkgs_with_resolved"; }
-test_e2e_ubuntu26() { _run_e2e_scenario ubuntu26 ubuntu:26.04    "$_pkgs_with_resolved"; }
+test_e2e_debian12() { _run_e2e_scenario debian12 "$DEBIAN12"       "$_pkgs_with_resolved"; }
+test_e2e_debian13() { _run_e2e_scenario debian13 "$DEBIAN13"   "$_pkgs_with_resolved"; }
+test_e2e_ubuntu22() { _run_e2e_scenario ubuntu22 "$UBUNTU2204"    "$_pkgs_ubuntu22"; }
+test_e2e_ubuntu24() { _run_e2e_scenario ubuntu24 "$UBUNTU2404"    "$_pkgs_with_resolved"; }
+test_e2e_ubuntu26() { _run_e2e_scenario ubuntu26 "$UBUNTU2604"    "$_pkgs_with_resolved"; }
 
 # ─────────────────────────────────────────────────────────────────────
 # Main

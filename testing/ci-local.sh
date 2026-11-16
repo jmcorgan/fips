@@ -306,8 +306,10 @@ NIGHTLY=false
 # Stages that were due but could not run on this host, each with its reason.
 SKIPPED=()
 # The image the root tests run in under a tier, built from
-# testing/root-tests/Dockerfile when the host lacks it.
-ROOT_IMAGE="${FIPS_ROOT_TESTS_IMAGE:-fips-root-tests:trixie-1}"
+# testing/root-tests/Dockerfile when the host lacks it. Tagged by a hash of
+# that file, so a changed Dockerfile is a new tag, built once, rather than an
+# old image a host keeps using because the tag is present.
+ROOT_IMAGE="${FIPS_ROOT_TESTS_IMAGE:-fips-root-tests:$(sha256sum "$SCRIPT_DIR/root-tests/Dockerfile" | cut -c1-12)}"
 # How long the root tests' container may run, in seconds.
 ROOT_TIMEOUT=1200
 # The Rust target of the musl unit tests.
@@ -525,6 +527,7 @@ GUARDS=(
     "run_simassert sim-assertions"
     "run_image_scoping image-scoping"
     "run_action_pins action-pins"
+    "run_base_pins base-pins"
     "run_comment_refs comment-refs"
     "run_ignored_tests ignored-tests"
     "run_portable_atomics portable-atomics"
@@ -2999,6 +3002,19 @@ run_action_pins() {
     info "[action-pins] Checking that every action is pinned to a commit SHA"
     "$SCRIPT_DIR/check-action-pins.sh" || rc=$?
     record "action-pins" "$rc"
+}
+
+# Every base image a CI image builds from, and every third-party image a suite
+# runs, must be pinned by digest, so two runs of one tree build on the same
+# bases and a result standing for another run of the tree stands on what that
+# run would have used. Static, and its fixtures run first; about a second.
+# Mirrored in ci.yml's ci-parity job.
+run_base_pins() {
+    local rc=0
+    info "[base-pins] Checking that every CI base image is pinned by digest"
+    "$SCRIPT_DIR/check-base-pins.sh" || rc=$?
+    record "base-pins" "$rc"
+    return 0
 }
 
 # Every reference a source comment makes must resolve for a reader who has only

@@ -14,7 +14,7 @@
 # the top of its own git checkout, worktrees and shared clones included, carries
 # the tree's revision and dirty flag. A tree with no git checkout of its own,
 # such as one nested inside another repository, carries none.
-ARG BASE=ubuntu:22.04
+ARG BASE
 FROM ${BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive

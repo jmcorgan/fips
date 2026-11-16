@@ -118,6 +118,8 @@ jobs:
         run: bash testing/check-image-scoping.sh
       - name: Check every action is pinned to a commit SHA
         run: bash testing/check-action-pins.sh
+      - name: Check every CI base image is pinned by digest
+        run: bash testing/check-base-pins.sh
       - name: Check every source comment resolves in-repo
         run: bash testing/check-comment-refs.sh
       - name: Check every ignored test against its inventory
