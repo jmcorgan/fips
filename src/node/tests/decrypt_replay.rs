@@ -81,6 +81,17 @@ const FEED_LIMIT: u64 = 16;
 /// of the loop or the arm reads empty for reasons that are not the loop's.
 const FEEDERS: usize = 2;
 
+/// How many runs' worth of frames the feeders build between them before a
+/// polling run. A feeder that builds each frame as it sends it takes the
+/// allocator once a frame, and musl's allocator is one lock for the whole
+/// process, so other tests allocating at once can hold a feeder below the
+/// loop's rate for a whole run, while the loop only frees. Frames sent while
+/// the arm is not full do not count toward the run, and in a whole musl suite
+/// a run has fed nearly half as many again as it counted, so one run's worth
+/// would leave little to spare. Past its stock a feeder builds each frame as
+/// it sends it.
+const STOCK_RUNS: u64 = 2;
+
 /// How long a polling run may take, far past any host's need.
 const DEADLINE: Duration = Duration::from_secs(60);
 
@@ -95,66 +106,122 @@ enum Arm {
     AppTun,
 }
 
-/// What one attempt to feed an arm did.
-enum Fed {
-    Sent,
-    Full,
-    Closed,
-}
-
-impl Fed {
-    /// What a `try_send` that returned `result` did.
-    fn of<T>(result: Result<(), TrySendError<T>>) -> Self {
-        match result {
-            Ok(()) => Fed::Sent,
-            Err(TrySendError::Full(_)) => Fed::Full,
-            Err(TrySendError::Closed(_)) => Fed::Closed,
-        }
-    }
-}
-
-type Feed = Arc<dyn Fn() -> Fed + Send + Sync>;
-
-/// Give `node` a new channel for `arm`, and return one attempt to feed it.
-fn feed(node: &mut Node, arm: Arm) -> Feed {
-    let (packet_tx, packet_rx) = packet_channel(1024);
-    node.packet_rx = Some(packet_rx);
-    match arm {
-        Arm::Packet => Arc::new(move || {
-            Fed::of(packet_tx.try_send(ReceivedPacket::new(
-                TransportId::new(1),
-                TransportAddr::from_string("feeder"),
-                vec![0xffu8; 40],
-            )))
-        }),
-        Arm::Datagram => {
-            let (tx, rx) = tokio::sync::mpsc::channel(1024);
-            node.supervisor.datagram_rx = Some(rx);
-            let peer = crate::ipv6tun::link::any_key();
-            Arc::new(move || {
-                let _keep = &packet_tx;
-                Fed::of(tx.try_send(crate::ipv6tun::link::Datagram {
-                    peer,
-                    payload: vec![0u8; 40],
-                }))
-            })
-        }
-        Arm::AppTun => {
-            let (tx, rx) = tokio::sync::mpsc::channel(1024);
-            node.supervisor.ipv6tun.install_outbound(rx);
-            Arc::new(move || {
-                let _keep = &packet_tx;
-                Fed::of(tx.try_send(vec![0u8; 40]))
-            })
-        }
-    }
-}
-
 /// How each feeder paces itself: after `burst` frames it sleeps `pause`.
 #[derive(Clone, Copy)]
 struct Pace {
     burst: u64,
     pause: Duration,
+}
+
+/// The counts a polling run's feeders keep, and the flag that stops them.
+#[derive(Clone, Default)]
+struct Tally {
+    /// Frames sent.
+    sent: Arc<AtomicU64>,
+    /// Attempts that found the channel full.
+    full: Arc<AtomicU64>,
+    /// Set when the run is over, to stop the feeders.
+    stop: Arc<AtomicBool>,
+}
+
+/// One feeder thread for `tx`: send `stock`, then frames from `make`, until
+/// `tally` says stop or the channel closes. A frame that finds the channel
+/// full is sent again at the next attempt.
+fn full_feeder<T: Send + 'static>(
+    tx: tokio::sync::mpsc::Sender<T>,
+    stock: Vec<T>,
+    make: impl Fn() -> T + Send + 'static,
+    pace: Option<Pace>,
+    tally: Tally,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut stock = stock.into_iter();
+        let mut held = None;
+        let mut count = 0;
+        while !tally.stop.load(Ordering::Relaxed) {
+            let frame = held.take().or_else(|| stock.next()).unwrap_or_else(&make);
+            match tx.try_send(frame) {
+                Ok(()) => {
+                    tally.sent.fetch_add(1, Ordering::Relaxed);
+                    count += 1;
+                    if let Some(pace) = pace
+                        && count % pace.burst == 0
+                    {
+                        std::thread::sleep(pace.pause);
+                    }
+                }
+                Err(TrySendError::Full(frame)) => {
+                    held = Some(frame);
+                    tally.full.fetch_add(1, Ordering::Relaxed);
+                    std::thread::yield_now();
+                }
+                Err(TrySendError::Closed(_)) => break,
+            }
+        }
+    })
+}
+
+/// [`FEEDERS`] feeder threads for `tx`, each with `stock` frames from `make`
+/// built before it starts.
+fn full_feeders<T: Send + 'static>(
+    tx: tokio::sync::mpsc::Sender<T>,
+    make: impl Fn() -> T + Clone + Send + 'static,
+    stock: u64,
+    pace: Option<Pace>,
+    tally: &Tally,
+) -> Vec<std::thread::JoinHandle<()>> {
+    (0..FEEDERS)
+        .map(|_| {
+            let frames = (0..stock).map(|_| make()).collect();
+            full_feeder(tx.clone(), frames, make.clone(), pace, tally.clone())
+        })
+        .collect()
+}
+
+/// Give `node` a new channel for `arm` and [`FEEDERS`] threads keeping it
+/// full, each with `stock` frames built first. The returned sender keeps the
+/// packet channel open when another arm is fed.
+fn full_feed(
+    node: &mut Node,
+    arm: Arm,
+    stock: u64,
+    pace: Option<Pace>,
+    tally: &Tally,
+) -> (
+    Vec<std::thread::JoinHandle<()>>,
+    Option<crate::transport::PacketTx>,
+) {
+    let (packet_tx, packet_rx) = packet_channel(1024);
+    node.packet_rx = Some(packet_rx);
+    match arm {
+        Arm::Packet => {
+            let packet = || {
+                ReceivedPacket::new(
+                    TransportId::new(1),
+                    TransportAddr::from_string("feeder"),
+                    vec![0xffu8; 40],
+                )
+            };
+            (full_feeders(packet_tx, packet, stock, pace, tally), None)
+        }
+        Arm::Datagram => {
+            let (tx, rx) = tokio::sync::mpsc::channel(1024);
+            node.supervisor.datagram_rx = Some(rx);
+            let peer = crate::ipv6tun::link::any_key();
+            let datagram = move || crate::ipv6tun::link::Datagram {
+                peer,
+                payload: vec![0u8; 40],
+            };
+            let feeders = full_feeders(tx, datagram, stock, pace, tally);
+            (feeders, Some(packet_tx))
+        }
+        Arm::AppTun => {
+            let (tx, rx) = tokio::sync::mpsc::channel(1024);
+            node.supervisor.ipv6tun.install_outbound(rx);
+            let feeders = full_feeders(tx, || vec![0u8; 40], stock, pace, tally);
+            (feeders, Some(packet_tx))
+        }
+    }
 }
 
 /// What a spawned task saw while the loop ran.
@@ -188,38 +255,10 @@ impl Polling {
 /// [`FEED_LIMIT`] times that have gone in at all.
 async fn polled(arm: Arm, pace: Option<Pace>, frames: u64) -> Polling {
     let mut node = make_node();
-    let attempt = feed(&mut node, arm);
-    let sent = Arc::new(AtomicU64::new(0));
-    let full = Arc::new(AtomicU64::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
-    let feeders: Vec<_> = (0..FEEDERS)
-        .map(|_| {
-            let (attempt, sent) = (attempt.clone(), sent.clone());
-            let (full, stop) = (full.clone(), stop.clone());
-            std::thread::spawn(move || {
-                let mut count = 0;
-                while !stop.load(Ordering::Relaxed) {
-                    match attempt() {
-                        Fed::Sent => {
-                            sent.fetch_add(1, Ordering::Relaxed);
-                            count += 1;
-                            if let Some(pace) = pace
-                                && count % pace.burst == 0
-                            {
-                                std::thread::sleep(pace.pause);
-                            }
-                        }
-                        Fed::Full => {
-                            full.fetch_add(1, Ordering::Relaxed);
-                            std::thread::yield_now();
-                        }
-                        Fed::Closed => break,
-                    }
-                }
-            })
-        })
-        .collect();
-    drop(attempt);
+    let tally = Tally::default();
+    let stock = STOCK_RUNS * frames / FEEDERS as u64;
+    let (feeders, keep) = full_feed(&mut node, arm, stock, pace, &tally);
+    let (sent, full) = (tally.sent.clone(), tally.full.clone());
     let mut task = tokio::spawn(async move {
         let mut seen = Polling::default();
         let mut fed = sent.load(Ordering::Relaxed);
@@ -252,10 +291,11 @@ async fn polled(arm: Arm, pace: Option<Pace>, frames: u64) -> Polling {
     let seen = tokio::time::timeout(DEADLINE, run)
         .await
         .expect("precondition: the feeder fed the run's frames in time");
-    stop.store(true, Ordering::Relaxed);
+    tally.stop.store(true, Ordering::Relaxed);
     for feeder in feeders {
         feeder.join().expect("the feeder panicked");
     }
+    drop(keep);
     eprintln!("{arm:?} {seen:?}");
     seen
 }
