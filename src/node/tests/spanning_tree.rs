@@ -967,10 +967,7 @@ pub(super) async fn converge_nodes(
 /// both the bloom-filter and greedy-tree paths, so tests that skip discovery
 /// seed them here.
 pub(super) fn populate_all_coord_caches(nodes: &mut [TestNode]) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    let now_ms = crate::time::wall_ms();
 
     // Collect all coords first to avoid borrow conflicts
     let all_coords: Vec<(NodeAddr, crate::proto::stp::TreeCoordinate)> = nodes

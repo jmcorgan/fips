@@ -32,10 +32,7 @@ use crate::proto::stp::{TreeCoordinate, encode_coords};
 
 /// Wall-clock milliseconds, the clock the warm write and the cache read.
 fn wall_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+    crate::time::wall_ms()
 }
 
 /// The node addresses of `coords`, from the node to the root.

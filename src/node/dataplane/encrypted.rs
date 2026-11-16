@@ -121,6 +121,8 @@ impl Node {
             None => {
                 // The sender's address is not authenticated, so the line is
                 // limited by one node-wide budget rather than per source.
+                // Raw clock on purpose: this budget gates only a log line, and its
+                // constructor stamps raw too, so a test clock hook cannot change an outcome.
                 if tracing::enabled!(tracing::Level::DEBUG)
                     && let Some(suppressed) = self.index_budget.admit(Instant::now())
                 {

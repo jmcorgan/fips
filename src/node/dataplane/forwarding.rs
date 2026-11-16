@@ -142,6 +142,8 @@ impl Node {
                 // metric and rate-limited log at the transit chokepoint.
                 if congested {
                     self.metrics().congestion.congestion_detected.inc();
+                    // Raw clock on purpose: this paces only a log line, so a test clock
+                    // hook cannot change an outcome.
                     let now = Instant::now();
                     let should_log = self
                         .last_congestion_log
@@ -243,7 +245,7 @@ impl Node {
             }
             return;
         }
-        let now = Instant::now();
+        let now = crate::time::mono_now();
         let peers = &self.peers;
         self.coord_hint_budget
             .sweep_departed(now, |peer| peers.contains_key(peer));
@@ -308,10 +310,7 @@ impl Node {
 
         let inner = &datagram.payload[FSP_COMMON_PREFIX_SIZE..];
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = Self::now_ms();
 
         match prefix.phase {
             FSP_PHASE_MSG1 => match SessionSetup::decode(inner) {
@@ -408,7 +407,7 @@ impl Node {
     /// behind a high-fanout peer spend that peer's whole budget on emissions
     /// nothing sends, silencing every other destination behind it.
     fn commit_error_emission(&mut self, from: &NodeAddr) {
-        self.peer_error_budget.commit(from, Instant::now());
+        self.peer_error_budget.commit(from, crate::time::mono_now());
     }
 
     /// Count what the core's per-destination gate decided about one candidate
@@ -444,16 +443,16 @@ impl Node {
         // suppress this signal, and charging a suppressed emission would let a
         // single unroutable destination behind a high-fanout peer burn that
         // peer's whole budget on signals nothing sends.
-        if !self.peer_error_budget.has_token(from, Instant::now()) {
+        if !self
+            .peer_error_budget
+            .has_token(from, crate::time::mono_now())
+        {
             self.metrics().errors.emit_over_peer_budget.inc();
             return;
         }
 
         let my_addr = *self.node_addr();
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = Self::now_ms();
         let default_ttl = self.config().node.session.default_ttl;
 
         // Pure decision: rate-limit gate + PathBroken/CoordsRequired choice +
@@ -548,7 +547,10 @@ impl Node {
         // Peeked, not spent, for the same reason as in `send_routing_error`:
         // the per-destination gate inside the core runs below and may still
         // suppress this signal.
-        if !self.peer_error_budget.has_token(from, Instant::now()) {
+        if !self
+            .peer_error_budget
+            .has_token(from, crate::time::mono_now())
+        {
             self.metrics().errors.emit_over_peer_budget.inc();
             return;
         }

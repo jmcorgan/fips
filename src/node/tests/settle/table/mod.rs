@@ -1022,9 +1022,9 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
             }
         }
         Row::Dampener => {
-            let past = std::time::Instant::now()
+            let past = crate::time::mono_now()
                 .checked_sub(Duration::from_secs(3600))
-                .unwrap_or_else(std::time::Instant::now);
+                .unwrap_or_else(crate::time::mono_now);
             node.restart_dampener.insert(*peer, past);
         }
         Row::Silent => {

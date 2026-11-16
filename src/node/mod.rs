@@ -1162,6 +1162,8 @@ impl Node {
             ble_radio: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: settle::BindMap::default(),
+            // Raw clock on purpose: these budgets gate only log lines and are read
+            // with raw instants too.
             index_budget: diag::LogBudget::new(std::time::Instant::now()),
             version_budget: diag::LogBudget::new(std::time::Instant::now()),
             length_budget: diag::LogBudget::new(std::time::Instant::now()),
@@ -1346,6 +1348,8 @@ impl Node {
             ble_radio: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: settle::BindMap::default(),
+            // Raw clock on purpose: these budgets gate only log lines and are read
+            // with raw instants too.
             index_budget: diag::LogBudget::new(std::time::Instant::now()),
             version_budget: diag::LogBudget::new(std::time::Instant::now()),
             length_budget: diag::LogBudget::new(std::time::Instant::now()),
@@ -2153,6 +2157,8 @@ impl Node {
         self.estimated_mesh_size = Some(union_size);
 
         // Periodic logging (reuse MMP default interval: 30s)
+        // Raw clock on purpose: this paces only a log line, so a test clock
+        // hook cannot change an outcome.
         let now = std::time::Instant::now();
         let should_log = match self.last_mesh_size_log {
             None => true,
@@ -3901,7 +3907,7 @@ impl Node {
     #[cfg(test)]
     pub(in crate::node) fn backdate_hold_for_test(&mut self, by: std::time::Duration) {
         self.routing_hold
-            .observe(!self.peers.is_empty(), std::time::Instant::now());
+            .observe(!self.peers.is_empty(), crate::time::mono_now());
         self.routing_hold.backdate(by);
     }
 
@@ -4102,10 +4108,7 @@ impl Node {
         }
 
         // Look up cached destination coordinates (required by both bloom and tree paths).
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = Self::now_ms();
         let dest_coords = self
             .coord_cache
             .get_and_touch(dest_node_addr, now_ms)?
@@ -4156,10 +4159,7 @@ impl Node {
         dest: &NodeAddr,
         chosen_peer: &NodeAddr,
     ) -> metrics::RouteClass {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = Self::now_ms();
         let dest_coords = self.coord_cache.get(dest, now_ms).cloned();
         routing::classify_forward(
             dest,

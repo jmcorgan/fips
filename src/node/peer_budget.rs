@@ -129,7 +129,7 @@ impl PeerBudget {
             milli_per_ms: u64::from(per_sec),
             capacity: u64::from(burst) * MILLI,
             initial: u64::from(initial.min(burst)) * MILLI,
-            last_sweep: Instant::now(),
+            last_sweep: crate::time::mono_now(),
         }
     }
 

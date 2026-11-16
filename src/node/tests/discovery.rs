@@ -2767,7 +2767,7 @@ fn set_peer_filter(node: &mut Node, peer: &NodeAddr, reaches: &[NodeAddr], seque
 pub(super) fn leave_hold(node: &mut Node) {
     node.backdate_hold_for_test(std::time::Duration::from_secs(60));
     assert!(
-        !node.routing_hold_active(std::time::Instant::now()),
+        !node.routing_hold_active(crate::time::mono_now()),
         "precondition: outside the routing hold"
     );
 }
@@ -2920,7 +2920,7 @@ async fn inside_the_hold_a_bloom_miss_packet_is_held_and_the_tick_releases_it_wi
     let rx = install_tun_channel(&mut node);
     insert_filter_peer(&mut node, &[], false);
     assert!(
-        node.routing_hold_active(std::time::Instant::now()),
+        node.routing_hold_active(crate::time::mono_now()),
         "precondition: inside the routing hold"
     );
     assert_eq!(node.connection_count(), 0, "precondition: no handshake");
@@ -2959,7 +2959,7 @@ async fn a_packet_answered_after_the_hold_also_answers_the_packets_held_for_its_
     let rx = install_tun_channel(&mut node);
     insert_filter_peer(&mut node, &[], false);
     assert!(
-        node.routing_hold_active(std::time::Instant::now()),
+        node.routing_hold_active(crate::time::mono_now()),
         "precondition: inside the routing hold"
     );
     let dest = registered_destination(&mut node);
@@ -3105,7 +3105,7 @@ async fn a_destination_first_held_inside_the_hold_whose_lookup_starts_later_is_a
     let _rx = install_tun_channel(&mut node);
     let dest = registered_destination(&mut node);
     let peer = insert_filter_peer(&mut node, &[], true);
-    assert!(node.routing_hold_active(std::time::Instant::now()));
+    assert!(node.routing_hold_active(crate::time::mono_now()));
     node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     node.backdate_held_for_test(&dest, backdate);
     let first = node.pending_tun_since[&dest].since;
@@ -3130,7 +3130,7 @@ async fn a_destination_first_held_inside_the_hold_whose_lookup_starts_later_is_a
     let _rx = install_tun_channel(&mut node);
     let dest = registered_destination(&mut node);
     insert_filter_peer(&mut node, &[], true);
-    assert!(node.routing_hold_active(std::time::Instant::now()));
+    assert!(node.routing_hold_active(crate::time::mono_now()));
     node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     node.backdate_held_for_test(&dest, backdate);
     let first = node.pending_tun_since[&dest].since;
@@ -3309,7 +3309,7 @@ async fn with_backoff_enabled_inside_the_hold_a_suppressed_retransmit_is_held_wi
     let mut node = make_node_with(config);
     let rx = install_tun_channel(&mut node);
     insert_filter_peer(&mut node, &[], false);
-    assert!(node.routing_hold_active(std::time::Instant::now()));
+    assert!(node.routing_hold_active(crate::time::mono_now()));
     let dest = registered_destination(&mut node);
     let suppressed = node.metrics().lookup.req_backoff_suppressed.get();
 
@@ -3334,7 +3334,7 @@ async fn a_destination_held_inside_the_hold_whose_filter_arrives_before_the_hold
     let mut node = make_node();
     let rx = install_tun_channel(&mut node);
     let peer = insert_filter_peer(&mut node, &[], false);
-    assert!(node.routing_hold_active(std::time::Instant::now()));
+    assert!(node.routing_hold_active(crate::time::mono_now()));
     let dest = registered_destination(&mut node);
     node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     assert_eq!(node.pending_tun_destinations(), 1, "precondition: held");
@@ -3350,7 +3350,7 @@ async fn a_destination_held_inside_the_hold_whose_filter_arrives_before_the_hold
     assert!(drain_tun(&rx).is_empty());
 
     let past_age =
-        std::time::Instant::now() + node.pending_tun_max_age() + std::time::Duration::from_secs(1);
+        crate::time::mono_now() + node.pending_tun_max_age() + std::time::Duration::from_secs(1);
     node.release_stranded_tun_packets(past_age);
     let answers = drain_tun(&rx);
     assert_eq!(answers.len(), 1, "the age bound still releases it");

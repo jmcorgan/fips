@@ -169,3 +169,23 @@ fn advancing_the_monotonic_clock_moves_it_and_not_wall_time() {
     assert!(near(mono_ms(), ms_before + 3_600_000));
     assert!(near(wall_ms(), wall_before));
 }
+
+#[test]
+fn the_std_instant_now_moves_with_the_host_clock_hooks() {
+    let real_before = StdInstant::now();
+    let before = mono_now();
+    assert!(before >= real_before);
+
+    advance(Duration::from_secs(3_600));
+    let moved = mono_now().saturating_duration_since(before);
+    assert!(moved >= Duration::from_secs(3_600));
+    assert!(moved < Duration::from_secs(3_600) + Duration::from_millis(SLACK_MS));
+
+    freeze();
+    let frozen = mono_now();
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(mono_now(), frozen);
+    advance(Duration::from_secs(1));
+    assert_eq!(mono_now(), frozen + Duration::from_secs(1));
+    assert_eq!(StdInstant::from(HostClock.now()), mono_now());
+}

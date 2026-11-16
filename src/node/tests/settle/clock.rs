@@ -502,7 +502,7 @@ async fn restart_msg1(
 
 /// A heard peering whose last frame is older than the restart interval, by
 /// the monotonic clock, is replaced by the peer's restart msg1. Nothing has
-/// stamped the restart dampener, whose clock the test cannot advance.
+/// stamped the restart dampener, which measures on the same monotonic clock.
 #[tokio::test]
 async fn a_heard_peering_quiet_past_the_restart_interval_is_replaced_by_a_restart_msg1() {
     let (mut nodes, a, link, index) = heard_loopback_peering().await;

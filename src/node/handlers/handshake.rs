@@ -27,7 +27,7 @@ use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket, TransportErr
 use crate::utils::index::{IndexError, SessionIndex};
 use fips_core::proto::rekey::{Arrival, Input, Reason, Route};
 use fips_core::time::Clock as _;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// Minimum interval between accepted epoch changes for one peer identity,
@@ -1144,10 +1144,12 @@ impl Node {
                         }
                     })
                     .unwrap_or((u64::MAX, u64::MAX, 0));
-                let dampened = self
-                    .restart_dampener
-                    .get(&peer)
-                    .is_some_and(|t| t.elapsed().as_secs() < EPOCH_RESTART_MIN_INTERVAL_SECS);
+                let dampened = self.restart_dampener.get(&peer).is_some_and(|t| {
+                    crate::time::mono_now()
+                        .saturating_duration_since(*t)
+                        .as_secs()
+                        < EPOCH_RESTART_MIN_INTERVAL_SECS
+                });
                 if peering_idle_ms < min_idle_ms || dampened {
                     // For an unheard peering `idle_ms` is its age since
                     // promotion, not time since the peer was heard.
@@ -1205,9 +1207,10 @@ impl Node {
                 // carried a frame is not that. Stamping it would let two
                 // captured msg1s refuse the genuine peer for the interval.
                 let cutoff = Duration::from_secs(EPOCH_RESTART_MIN_INTERVAL_SECS);
-                self.restart_dampener.retain(|_, t| t.elapsed() < cutoff);
+                self.restart_dampener
+                    .retain(|_, t| crate::time::mono_now().saturating_duration_since(*t) < cutoff);
                 if old_heard {
-                    self.restart_dampener.insert(peer, Instant::now());
+                    self.restart_dampener.insert(peer, crate::time::mono_now());
                 }
 
                 if replacing {

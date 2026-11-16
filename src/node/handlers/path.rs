@@ -443,6 +443,8 @@ impl Node {
                 return;
             }
         };
+        // Raw clock on purpose: this budget gates only a log line, and its
+        // constructor stamps raw too, so a test clock hook cannot change an outcome.
         if !self.config().node.path.enabled
             && tracing::enabled!(tracing::Level::TRACE)
             && let Some(suppressed) = self.msgtype_budget.admit(Instant::now())

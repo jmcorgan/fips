@@ -14,8 +14,12 @@ traits, is `fips_core::time` (`core/src/time/`).
     process's first read, for the cores that still take milliseconds.
     `mono_ms_at(instant)` reads a `HostInstant` on that scale, so a time
     held as an instant compares exactly with one held as milliseconds.
+  - `mono_now()`: now on `HostClock`, as a `std::time::Instant`, for
+    code that stores std instants and measures intervals from them (the
+    routing hold, the restart dampener, the per-peer budgets). Outside
+    tests it is `std::time::Instant::now()`.
   - `wall_ms()`: Unix time in milliseconds. `Node::now_ms` delegates to
-    it.
+    it, and so does the receive stamp on every `ReceivedPacket`.
   - `WallStamp`: Unix milliseconds of an instant, for the control API
     and logs. For a `HostInstant` it is the wall clock now less the
     instant's monotonic age.
@@ -37,7 +41,13 @@ traits, is `fips_core::time` (`core/src/time/`).
 
 - **Read clocks here, at the edge.** Code that decides takes the
   instant as an argument; only the shell calls `HostClock.now()`,
-  `mono_ms()` or `wall_ms()`.
+  `mono_ms()`, `mono_now()` or `wall_ms()`.
+- **Read the node's clocks through here, not through `std::time`.** The
+  test hooks move these functions only, so a stamp taken from
+  `SystemTime::now()` or `Instant::now()` and compared with one taken here
+  drifts apart from it in a test that steps or advances a clock. A site
+  that reads `std::time` directly says at the site why the difference
+  cannot change an outcome.
 - **Monotonic for intervals, wall for stamps.** Timeouts, rate limits
   and schedules measure on `HostClock` or `mono_ms`; wall time is for
   what goes on the wire or is reported as a date.
