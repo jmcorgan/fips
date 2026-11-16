@@ -220,7 +220,12 @@ impl PresenceState {
     #[cfg(test)]
     pub(crate) fn backdate_for_test(&self, by: Duration) {
         let mut since = write(&self.since);
-        *since = since.checked_sub(by).unwrap_or(*since);
+        *since = since.checked_sub(by).unwrap_or_else(|| {
+            panic!(
+                "cannot backdate the presence stamp by {by:?}: the monotonic clock does not \
+                 reach back that far (on Windows it starts at boot)"
+            )
+        });
     }
 
     /// Successful binds since creation (`1` after a clean start).
