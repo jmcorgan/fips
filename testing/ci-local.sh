@@ -8,14 +8,18 @@
 #   --tier <1|2|3>       Run one CI tier, as the internal builder does. Each
 #                        tier is a fixed set of stages; --plan prints it.
 #                          1  every branch push: the guards, the build stage
-#                             with the bare-metal and cross-target checks, the
+#                             (no release build of its own: the .deb is
+#                             the release build, at tier 2) with the
+#                             bare-metal and cross-target checks, the
 #                             unit tests (the core without its slow suites),
 #                             the known-defect lane, the profiling rerun, the
 #                             release compile and the root tests. No
 #                             mutation lane and no integration suites.
 #                          2  trunk tips and landing candidates: tier 1, the
-#                             core's slow suites, the mutation lane, the musl
-#                             unit tests and every integration suite.
+#                             .deb built at the start of the build stage
+#                             (deb-build, to deploy/), the core's slow
+#                             suites, the mutation lane, the musl unit tests
+#                             and every integration suite.
 #                          3  the nightly run of each trunk tip: tier 2, both
 #                             halves of the explorers and the mutation lane's
 #                             explorer lines, a chaos batch of each
@@ -595,7 +599,9 @@ print_plan() {
     [[ -n "$PART" ]] && { print_part_plan; return 0; }
     echo "# ci-local.sh --tier $TIER: the results a green run records, in order"
     for g in "${GUARDS[@]}"; do echo "${g#* }"; done
-    printf '%s\n' nft-syntax build fmt clippy clippy-default-features \
+    echo nft-syntax
+    deb_early && echo deb-build
+    printf '%s\n' fmt clippy clippy-default-features \
         core-fence-lib core-fence core-fence-slow core-doc
     [[ "$BAREMETAL" == true ]] && echo core-baremetal
     if [[ "$CROSS_CHECK" == true ]]; then
@@ -667,6 +673,20 @@ apply_tier() {
         NIGHTLY=true
     fi
     return 0
+}
+
+# Whether this run builds the .deb at the start of the build stage
+# (deb-build): wherever an integration suite that uses it will run, so tier 2
+# and above, and a run with no tier that runs the integration stage in full or
+# one of the package suites alone. The package is the run's release build:
+# no plain release build is made beside it.
+deb_early() {
+    [[ "$SKIP_INTEGRATION" != true && "$BUILD_ONLY" != true && "$TEST_ONLY" != true \
+        && "$RERUN" != true ]] || return 1
+    case "$ONLY_SUITE" in
+        ""|dns-resolver|deb-install|rpm-install) return 0 ;;
+    esac
+    return 1
 }
 
 # Set the switches for one part of tier 3 ($PART), after apply_tier: only
@@ -1069,22 +1089,6 @@ fi
 
 # ── Stage 1: Build ─────────────────────────────────────────────────────────
 
-# The plain release build, as GitHub CI's build job makes it. The integration
-# suites' image is made from run_testbuild's binaries, not these.
-run_release() {
-    info "cargo build --release --bins --examples"
-    # --bins --examples rather than the bare default: the native datagram API's
-    # echo server is a cargo example, and the native-api harness's image needs
-    # it built here rather than separately. Naming --bins keeps the daemon and
-    # its tools in the build, which --examples alone would drop.
-    if cargo build --release --bins --examples 2>&1; then
-        record "build" 0
-        return 0
-    fi
-    record "build" 1
-    return 1
-}
-
 # The integration build every integration suite's image is made from: the
 # release settings under the `integration` profile with the `test-overrides`
 # feature, so the chaos scenarios' test-only configuration keys are honoured.
@@ -1100,6 +1104,10 @@ run_testbuild() {
     record "build-integration" 1
     return 1
 }
+
+# Set to 0 once the build stage's first steps pass: nft-syntax and, where it
+# runs, deb-build. The stages after the build stage run only then.
+BUILD_GATE=1
 
 run_build() {
     stage "Stage 1: Build"
@@ -1118,7 +1126,21 @@ run_build() {
         return 1
     fi
 
-    run_release || return 1
+    # The release build: the .deb, built once here in the pinned container,
+    # written to deploy/ and shared by every later stage that needs it
+    # (dns-resolver, deb-install, rpm-install, the mutation lane's fence),
+    # where GitHub builds it in its deb-package job. A run that uses no
+    # package builds none; the integration build is its release-profile
+    # build.
+    if deb_early; then
+        if build_ci_deb deb-build; then
+            record "deb-build" 0
+        else
+            record "deb-build" "$CI_DEB_RC"
+            return 1
+        fi
+    fi
+    BUILD_GATE=0
 
     info "cargo fmt --check"
     if cargo fmt --check 2>&1; then
@@ -1407,17 +1429,20 @@ run_tests() {
     # Debug-only helpers (anything behind #[cfg(debug_assertions)]) vanish in a
     # release build, so a test calling one without the same gate breaks a build
     # nothing here ever performs: every run above compiles the test target in
-    # debug. Compile it in release too. Of what it builds, run only the leg-slot
-    # residue test, which is release-only because only an optimised build
-    # leaves the slot in a state worth measuring; the grep fails the stage if
-    # that test did not run, since a name filter that matches nothing passes.
-    # Mirrored in .github/workflows/ci.yml; check-ci-parity.sh holds each such
-    # step to its counterpart.
+    # debug. Compile it in release too, under the integration profile, which
+    # inherits release unchanged (Cargo.toml) and so shares the integration
+    # build's dependencies instead of compiling the release ones again. Of
+    # what it builds, run only the leg-slot residue test, which is
+    # release-only because only an optimised build leaves the slot in a state
+    # worth measuring; the grep fails the stage if that test did not run,
+    # since a name filter that matches nothing passes. Mirrored in
+    # .github/workflows/ci.yml; check-ci-parity.sh holds each such step to its
+    # counterpart.
     local residue_test="peer::machine::tests::take_leg_leaves_no_session_keys_in_the_slot_it_empties"
     local release_log
     release_log=$(mktemp "/tmp/ci-release-lib-tests.XXXXXX")
-    info "cargo test --release --lib -- --exact $residue_test"
-    if with_fd_limit cargo test --release --lib -- --exact "$residue_test" 2>&1 | tee "$release_log" \
+    info "cargo test --profile integration --lib -- --exact $residue_test"
+    if with_fd_limit cargo test --profile integration --lib -- --exact "$residue_test" 2>&1 | tee "$release_log" \
         && grep -q '^test result: ok\. 1 passed;' "$release_log"; then
         record "release-test-compile" 0
     else
@@ -2373,8 +2398,12 @@ run_dns_resolver() {
 DEB_INSTALL_TIMEOUT=${DEB_INSTALL_TIMEOUT:-2400}
 
 # Build the package once per process through the shared container script, for
-# every suite that consumes it: deb-install installs it and dns-resolver runs
-# its binaries. The GitHub workflow builds it once in its own job and hands the
+# every suite that consumes it: deb-install installs it, dns-resolver runs
+# its binaries, rpm-install repackages them and the mutation lane's fence
+# reads its fips. At tier 2 the first caller is the build stage (deb-build).
+# It goes to deploy/ in this checkout, and deploy/ci-deb.txt names it with
+# its sha256, so a builder publishing it need not glob a directory that may
+# hold an older package too. The GitHub workflow builds it once in its own job and hands the
 # artifact to both, so doing the same here keeps the two systems the same work.
 # The first caller builds; later callers get the stored result, a failure
 # included, so a failed build is not retried and reported twice as two builds.
@@ -2399,7 +2428,8 @@ build_ci_deb() {
     # stdout carries the package path on its last line, so it is captured;
     # stderr stays on the console so build progress is still visible live.
     timeout "$DEB_INSTALL_TIMEOUT" \
-        bash packaging/debian/build-deb-container.sh | tee "$build_log" || rc=$?
+        bash packaging/debian/build-deb-container.sh --output-dir "$PROJECT_ROOT/deploy" \
+        | tee "$build_log" || rc=$?
     if [[ $rc -ne 0 ]]; then
         if [[ $rc -eq 124 ]]; then
             echo "  ERROR: the container build exceeded ${DEB_INSTALL_TIMEOUT}s and was killed;" >&2
@@ -2420,6 +2450,7 @@ build_ci_deb() {
         return 1
     fi
     CI_DEB_PATH="$deb"
+    printf '%s %s\n' "$(sha256sum "$deb" | cut -d' ' -f1)" "$deb" >"$PROJECT_ROOT/deploy/ci-deb.txt"
     return 0
 }
 
@@ -3306,7 +3337,7 @@ main() {
             run_build
         else
             run_build
-            if [[ "${RESULTS[build]:-1}" -ne 0 ]]; then
+            if [[ "$BUILD_GATE" -ne 0 ]]; then
                 fail "Build failed, skipping remaining stages"
             else
                 run_tests

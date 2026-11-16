@@ -135,6 +135,19 @@ fresh && plant testing/check-ci-parity.sh \
 expect_red "the macOS job exception removed" \
     "job test-macos is in no list of this check"
 
+fresh && plant .github/workflows/ci.yml \
+    "      - name: Build
+        if: matrix.os != 'ubuntu-latest'" \
+    "      - name: Build"
+expect_red "the build job's release build run on ubuntu-latest" \
+    "build: step 'Build' runs on ubuntu-latest, where deb-build is the release build"
+
+fresh && plant testing/ci-local.sh \
+    "    deb_early && echo deb-build" \
+    ""
+expect_red "the .deb build dropped from tier 2 only" \
+    "GitHub runs the work of deb-build, which ci-local.sh --tier 2 does not"
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
     echo "All check-ci-parity.sh cases passed"

@@ -174,12 +174,16 @@ expect_plan() {
 }
 expect_plan "--tier 1 --plan" \
     "ci-parity core-baremetal cross-check-x86_64-apple-darwin unit-tests core-fence-tests known-defect release-test-compile root-tests" \
-    "mutations musl-tests build-integration chaos-tcp-mesh core-explorers root-explorers mutations-explorers" \
+    "mutations musl-tests build-integration chaos-tcp-mesh core-explorers root-explorers mutations-explorers build deb-build" \
     --tier 1 --plan
 expect_plan "--tier 2 --plan" \
-    "root-tests mutations musl-tests build-integration chaos-tcp-mesh rpm-install" \
-    "core-explorers root-explorers mutations-explorers chaos-batch1-tcp-mesh chaos-maelstrom tor-socks5" \
+    "root-tests mutations musl-tests build-integration chaos-tcp-mesh rpm-install deb-build" \
+    "core-explorers root-explorers mutations-explorers chaos-batch1-tcp-mesh chaos-maelstrom tor-socks5 build" \
     --tier 2 --plan
+# The .deb is the release build at tier 2, so it comes first in the build
+# stage, before the lints.
+check "--tier 2 --plan: deb-build comes before fmt" \
+    "$(invoke --tier 2 --plan; d=$(grep -nx deb-build <<<"$OUT" | cut -d: -f1); f=$(grep -nx fmt <<<"$OUT" | cut -d: -f1); [ -n "$d" ] && [ -n "$f" ] && [ "$d" -lt "$f" ] && echo 0 || echo 1)"
 expect_plan "--tier 3 --plan" \
     "mutations musl-tests chaos-tcp-mesh core-explorers root-explorers mutations-explorers chaos-batch3-tcp-mesh chaos-maelstrom chaos-maelstrom-sparse chaos-dead-grace-long" \
     "tor-socks5" \

@@ -265,8 +265,12 @@ matrix, and that every build, lint, guard and unit-test step GitHub runs is a
 stage of `--tier 2` and the reverse, by the check's table of GitHub steps and
 local results; a divergence fails the run. The only exceptions are what one
 runner cannot do, listed by name in the check: the Android, macOS and Windows
-jobs and nextest's retry-flake report on GitHub, the zig cross-checks
-locally. GitHub runs the same check as its own `ci-parity` job.
+jobs, the build job's native release builds on its arm64, macOS and Windows
+legs, and nextest's retry-flake report on GitHub, the zig cross-checks
+locally. On Linux the release build is the `.deb` on both runners: GitHub's
+`deb-package` job, and `deb-build` locally, and the check fails if the build
+job's own release build runs on its `ubuntu-latest` leg too. GitHub runs the
+same check as its own `ci-parity` job.
 `--check-parity` runs it alone (see [check-ci-parity.sh](check-ci-parity.sh)),
 and [`lib/ci-parity-test.sh`](lib/ci-parity-test.sh), another guard, plants
 each kind of divergence in a scratch copy to show the check fails on it.
@@ -281,9 +285,10 @@ internal builder runs for each kind of commit:
   run without its slow suites, the known-defect lane, the profiling rerun and
   its audit reach, the release compile, and the root tests. No mutation lane
   and no integration suites.
-- **Tier 2, trunk tips and landing candidates:** tier 1, with the core's
-  slow suites, the mutation lane, the musl unit tests and every integration
-  suite. This is the set GitHub's `ci.yml` runs too.
+- **Tier 2, trunk tips and landing candidates:** tier 1, with the `.deb`
+  built at the start of the build stage, the core's slow suites, the
+  mutation lane, the musl unit tests and every integration suite. This is
+  the set GitHub's `ci.yml` runs too.
 - **Tier 3, the nightly run of each trunk tip:** tier 2, both halves of the
   explorers, the mutation lane's explorer lines, and the nightly extras: a
   batch of every CI chaos scenario, three runs each, and the long scenarios
@@ -333,6 +338,24 @@ x86_64-unknown-linux-musl`, as GitHub's musl job does. A host without that
 Rust target or `musl-gcc` (the `musl-tools` package) skips it, prints why,
 and lists it under the summary as skipped; it is not counted against the
 plan.
+
+### The release build and the `.deb`
+
+No run makes a plain `cargo build --release` of its own. Where an integration
+suite that uses the package will run (tier 2 and above, a default run with
+no tier, or `--only` of `dns-resolver`, `deb-install` or `rpm-install`), the
+build stage builds the `.deb` right after `nft-syntax`, in the pinned
+container (`packaging/debian/build-deb-container.sh`), records it as
+`deb-build`, and writes it to `deploy/fips_<version>_<arch>.deb` in the
+checkout, with `deploy/ci-deb.txt` holding its sha256 and path. Every later
+stage that needs it takes that one package: dns-resolver, deb-install and
+rpm-install. A failed package build stops the run there, as the release
+build did. The integration build is the run's other release-profile build,
+and the release compile (`release-test-compile`) runs under the
+`integration` profile, which inherits `release` unchanged, so it shares that
+build's dependencies; a tree that does not compile is caught by the lints
+and unit tests rather than by a build stage of its own at tier 1. `--rerun`
+has no build stage, so there the first package suite builds the package.
 
 ### What only GitHub runs
 
