@@ -16,9 +16,9 @@
 # target volume the way every checkout on a host shares
 # fips-deb-target-<image>. Tree 1 is a `git clone -s` of this checkout and
 # tree 2 a `git worktree add` of tree 1. Tree 2 is a worktree on purpose: its
-# .git is a file, so build.rs reruns and the root crate is recompiled on every
-# build, which is how CI worktrees build, and how a root crate comes to be
-# compiled against another tree's copy of a workspace member.
+# .git is a file naming a git directory outside the tree, which is how CI
+# worktrees build, and which the container build must mount for build.rs to
+# read the revision.
 #
 # Each tree is marked before anything is built, so its files are older than
 # any build: `fips --version` gains a line `isolation: root-N core-N`, where

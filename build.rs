@@ -1,23 +1,14 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
     // Git commit hash (short)
-    let git_hash = Command::new("git")
-        .args(["rev-parse", "--short=10", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    let git_hash = git(&["rev-parse", "--short=10", "HEAD"]).unwrap_or_default();
     println!("cargo:rustc-env=FIPS_GIT_HASH={git_hash}");
 
     // Dirty working tree
-    let dirty = Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| !o.stdout.is_empty())
+    let dirty = git(&["status", "--porcelain"])
+        .map(|out| !out.is_empty())
         .unwrap_or(false);
     if dirty {
         println!("cargo:rustc-env=FIPS_GIT_DIRTY=-dirty");
@@ -31,8 +22,7 @@ fn main() {
     }
 
     // Rebuild when commits change
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs/");
+    watch_head();
 
     // Support reproducible builds (Debian packaging)
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
@@ -75,5 +65,75 @@ fn main() {
             "cargo:rustc-link-arg-bin=fips=-Wl,-sectcreate,__TEXT,__info_plist,{}",
             plist.display()
         );
+    }
+}
+
+/// Run git in the package directory and return its trimmed output, or `None`
+/// when git is absent or fails.
+fn git(args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Resolve a path inside the git directory, as `git rev-parse --git-path`
+/// maps it: per-worktree files such as `HEAD` to the worktree's own git
+/// directory, shared ones such as refs to the common directory.
+fn git_path(name: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(git(&["rev-parse", "--git-path", name])?);
+    let root = std::env::var_os("CARGO_MANIFEST_DIR")?;
+    Some(Path::new(&root).join(path))
+}
+
+/// Ask cargo to rerun this script when `path` changes.
+fn rerun_if_changed(path: &Path) {
+    println!("cargo:rerun-if-changed={}", path.display());
+}
+
+/// Emit rerun triggers that fire when the tree moves to another commit.
+///
+/// The paths come from git, because `.git` is a directory in a normal
+/// checkout but a file in a worktree. Only paths that exist are emitted:
+/// cargo counts a missing one as changed, which would rerun the script, and
+/// recompile this crate, on every build. With no git (a source tarball, or a
+/// container that cannot see a worktree's git directory) nothing is watched,
+/// since there is no commit to track.
+fn watch_head() {
+    // A detached HEAD holds the commit itself, so this file alone covers it.
+    let Some(head) = git_path("HEAD").filter(|p| p.is_file()) else {
+        return;
+    };
+    rerun_if_changed(&head);
+
+    let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) else {
+        return;
+    };
+    let Some(loose) = git_path(&branch) else {
+        return;
+    };
+    if loose.is_file() {
+        // A commit rewrites the loose ref.
+        rerun_if_changed(&loose);
+        return;
+    }
+    // The branch is packed. The next commit on it writes a loose ref, which
+    // changes the nearest directory that exists on the way to it.
+    if let Some(refs) = git_path("refs") {
+        let dir = loose
+            .ancestors()
+            .skip(1)
+            .take_while(|p| p.starts_with(&refs))
+            .find(|p| p.is_dir());
+        if let Some(dir) = dir {
+            rerun_if_changed(dir);
+        }
+    }
+    for name in ["packed-refs", "reftable"] {
+        if let Some(path) = git_path(name).filter(|p| p.exists()) {
+            rerun_if_changed(&path);
+        }
     }
 }
