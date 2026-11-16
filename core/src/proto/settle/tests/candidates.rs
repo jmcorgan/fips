@@ -49,8 +49,9 @@
 //! pins of the two cases are run under each candidate as well.
 //!
 //! The explored runs, and everything only they use, need the
-//! `slow-explorers` feature, which only local CI's `--explorers` turns on;
-//! the two scripted tests need only `slow-tests`.
+//! `slow-explorers` feature, which only local CI's `--explorers` and the
+//! nightly run (`--tier 3`) turn on; the two scripted tests need only
+//! `slow-tests`.
 
 use alloc::string::String;
 use alloc::vec::Vec;

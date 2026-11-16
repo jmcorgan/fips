@@ -245,7 +245,11 @@ daemon refuses (three attempts, 2 s apart), and reports a start that never
 succeeds as an `INFRASTRUCTURE:` line naming Docker's error, so a daemon
 refusal under side load is not read as FIPS failing to start. Its hermetic
 test, [`lib/docker-run-test.sh`](lib/docker-run-test.sh), runs in local CI's
-guards and in GitHub CI's ci-parity job.
+guards and in GitHub CI's ci-parity job. `lib/` also holds the hermetic tests
+of `ci-local.sh` itself, which run the same way:
+[`lib/ci-args-test.sh`](lib/ci-args-test.sh) for its options and
+[`lib/ci-plan-test.sh`](lib/ci-plan-test.sh) for its plan check (Tiers,
+below).
 
 ## Running CI locally (`ci-local.sh`)
 
@@ -257,38 +261,88 @@ available suites. Every run starts with a parity check that verifies the
 local suite set covers the same work as the GitHub matrix, per scenario for
 chaos, per distro for deb-install and per scenario for rpm-install, across
 every job that carries a
-matrix; a divergence fails the run. GitHub
-runs the same check as its own `ci-parity` job. `--check-parity` runs it
-alone (see [check-ci-parity.sh](check-ci-parity.sh)).
+matrix, and that every build, lint, guard and unit-test step GitHub runs is a
+stage of `--tier 2` and the reverse, by the check's table of GitHub steps and
+local results; a divergence fails the run. The only exceptions are what one
+runner cannot do, listed by name in the check: the Android, macOS and Windows
+jobs and nextest's retry-flake report on GitHub, the zig cross-checks
+locally. GitHub runs the same check as its own `ci-parity` job.
+`--check-parity` runs it alone (see [check-ci-parity.sh](check-ci-parity.sh)),
+and [`lib/ci-parity-test.sh`](lib/ci-parity-test.sh), another guard, plants
+each kind of divergence in a scratch copy to show the check fails on it.
 
-Note that `ci-local.sh` covers the integration suites and the glibc unit
-tests. GitHub additionally runs the library tests on macOS, Windows and
-**musl** (built for the musl target and run natively); the musl
+### Tiers (`--tier`, `--plan`)
+
+`--tier 1|2|3` (or `FIPS_CI_TIER`) runs one fixed set of stages, the set the
+internal builder runs for each kind of commit:
+
+- **Tier 1, every branch push:** the guards, the build stage with the
+  bare-metal build and the cross-target check, the unit tests with the core
+  run without its slow suites, the known-defect lane, the profiling rerun and
+  its audit reach, the release compile, and the root tests. No mutation lane
+  and no integration suites.
+- **Tier 2, trunk tips and landing candidates:** tier 1, with the core's
+  slow suites, the mutation lane, the musl unit tests and every integration
+  suite. This is the set GitHub's `ci.yml` runs too.
+- **Tier 3, the nightly run of each trunk tip:** tier 2, both halves of the
+  explorers, and the nightly extras: a batch of every CI chaos scenario, three
+  runs each, and the long scenarios no other run takes (`dead-grace-long`,
+  `maelstrom`, `maelstrom-sparse`). `--with-tor` adds the Tor suites.
+
+No tier a push starts runs the explorers. Under a tier the root tests run in
+a container, the environment switches (`FIPS_CI_BAREMETAL`,
+`FIPS_CI_SLOW_TESTS`, `FIPS_CI_ROOT_TESTS`) are ignored, and an option that
+changes what runs is refused with exit 2; only `-j`, `--plan` and, at tier 3,
+`--with-tor` combine with it.
+
+`--tier <n> --plan` prints the results a green run of that tier records, in
+order, and exits without running anything. It reads the same switches and
+suite arrays the run does, and a green tier run is held to it: if the
+results recorded differ from the plan, less a stage skipped for want of
+something on the host, the run fails with `plan-match` naming each
+difference. [`lib/ci-plan-test.sh`](lib/ci-plan-test.sh), one of the guards,
+plants results to show that check passes the plan and fails on a missing or
+an extra result.
+
+The musl stage (`musl-tests`, tiers 2 and 3) runs `cargo test --lib --target
+x86_64-unknown-linux-musl`, as GitHub's musl job does. A host without that
+Rust target or `musl-gcc` (the `musl-tools` package) skips it, prints why,
+and lists it under the summary as skipped; it is not counted against the
+plan.
+
+### What only GitHub runs
+
+GitHub additionally runs the library tests on macOS and Windows, and on
+**musl** in every run (built for the musl target and run natively); the musl
 leg exists because interface presence is built on `getifaddrs`/`ifa_flags`,
 which musl reimplements independently, and OpenWrt is a musl target. A local
-green run does not certify those three. Both runners also run the root
-library tests once more with the root crate's optional features
-(`--features profiling,test-overrides`) enabled.
-GitHub's `core-baremetal` job also builds the `no_std` core for two
-bare-metal targets on every push; a local run does that only with
-`--baremetal` or `FIPS_CI_BAREMETAL=1`.
-GitHub's Linux test job also runs fips-core's slow test suites (the models of
-the deployed releases and the guard-switch meta-test, behind the core's
-`slow-tests` feature) on every push; a local run does that only with
-`--slow-tests` or `FIPS_CI_SLOW_TESTS=1`. Every other platform's test run
-skips them.
+run certifies musl only at tier 2 or 3, and never the other two. Both runners
+also run the root library tests once more with the root crate's optional
+features (`--features profiling,test-overrides`) enabled. GitHub's
+`core-baremetal` job also builds the `no_std` core for two bare-metal targets
+on every push; a local run does that at every tier, or with `--baremetal` or
+`FIPS_CI_BAREMETAL=1`. GitHub's Linux test job also runs fips-core's slow test
+suites (the models of the deployed releases and the guard-switch meta-test,
+behind the core's `slow-tests` feature) on every push; a local run does that
+at tiers 2 and 3, or with `--slow-tests` or `FIPS_CI_SLOW_TESTS=1`. Every other platform's
+test run skips them.
 
 The explorers, every test that walks a state space (the core's
 `slow-explorers` feature and the root crate's `explorers`), run in no CI run
-started by a push, on either runner. A local run takes them only with
-`--explorers`, which runs, after the unit tests, exactly the tests each
-feature adds to its crate's library, the two halves side by side, recorded
-as `core-explorers` and `root-explorers`; `--explorers=core` or `=root` runs
-one half. Each half's names come from the two builds' own test lists, and an
-empty difference fails the half rather than passing on no tests. They take
-hours: on the incus builder the core's whole test run with `slow-explorers`
-took 123 minutes with the host shared (2026-11-15), against under six for
-the same run with `slow-tests` alone on core-vm.
+started by a push, on either runner: only the nightly run, `--tier 3`, and a
+run with `--explorers` take them. `--explorers` runs, after the unit tests,
+exactly the tests each feature adds to its crate's library, the two halves
+side by side, recorded as `core-explorers` and `root-explorers`;
+`--explorers=core` or `=root` runs one half. Each half's names come from the
+two builds' own test lists, and an empty difference fails the half rather than
+passing on no tests. They take hours: on the incus builder the core's whole
+test run with `slow-explorers` took 123 minutes with the host shared
+(2026-11-15), against under six for the same run with `slow-tests` alone on
+core-vm. The core half also runs fips-core's two guard-switch meta-tests
+again in the explorers' build, the one place the rows whose tests are
+explorers run. With the root half, the mutation lane is built with the root
+crate's `explorers` feature (`FIPS_MUTATION_EXPLORERS=1`) and runs its lines
+whose test is a root explorer, which every other run skips.
 
 The Linux and musl legs also create an address-less dummy interface
 (`fips-probe0`) and pass its name to the tests as
@@ -296,8 +350,11 @@ The Linux and musl legs also create an address-less dummy interface
 mechanism rests on that no ordinary test can reach: loopback has addresses, so
 probing it asks whether `getifaddrs` works rather than whether it reports an
 interface that has none — which is exactly what `fips-mesh0` and `fips-ap0`
-are on OpenWrt. Set the variable by hand to run the assertion locally against
-an interface you have created; leave it unset and the assertion does not run.
+are on OpenWrt. Local CI makes the same interface at every tier, in the root
+tests' container (`root-tests/addrless-iface.sh`), and runs that test there
+against the glibc binary and, at tiers 2 and 3, the musl one. Set the
+variable by hand to run the assertion against an interface you have created;
+leave it unset and the assertion does not run.
 
 ### Ignored tests and the known-defect lane
 
@@ -451,11 +508,25 @@ testing/root-tests.sh <bin>
 `<bin>` is the built `fips-mesh` library test executable (cargo's `fips` lib
 target). The script builds nothing and needs no cargo or git, and it never
 calls `sudo`: it must already run as root. GitHub's Linux job builds the binary
-as the runner user and runs the script under `sudo`; `ci-local.sh
---root-tests` (or `FIPS_CI_ROOT_TESTS=1`) does the same under `sudo -n`,
-recorded as `root-tests`, and is off by default because the internal builder
-runs `ci-local.sh` without `sudo` and is to run the script itself in a
-container.
+as the runner user and runs the script under `sudo`. `ci-local.sh --tier`
+runs it as uid 0 in a container of the image in
+[`root-tests/`](root-tests/), with the permissions below and no network,
+recorded as `root-tests`; the run needs docker and no `sudo`, because the
+internal builder runs every pushed branch and will not give pushed code
+passwordless `sudo`. `ci-local.sh --root-tests` (or `FIPS_CI_ROOT_TESTS=1`)
+without a tier runs it under `sudo -n` instead, for a run by hand; it is off
+by default.
+
+Two more steps of GitHub's root and fixture jobs run in the same container
+under a tier: [`root-tests/privileged.sh`](root-tests/privileged.sh), the
+Ethernet and socket-buffer tests with `FIPS_TEST_PRIVILEGED=1`
+(`privileged-bind`), and [`root-tests/addrless-iface.sh`](root-tests/addrless-iface.sh),
+the address-less dummy interface and the test that reads it, against the
+glibc binary (`addrless-iface`) and, at tiers 2 and 3, the musl one
+(`addrless-iface-musl`). One privileged test, which reads
+`net.core.rmem_max` from the host's own network namespace, runs on GitHub
+only; the script names it. `--root-tests` without a tier runs
+`privileged.sh` under `sudo -n` too.
 
 Each filter group passes only when the binary exits 0 and libtest reports
 exactly the group's count passed, since a filter that matches nothing still

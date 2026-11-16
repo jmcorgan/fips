@@ -9,9 +9,9 @@
 //!
 //! The namespace tests need root, so they are `#[ignore]`d.
 //! `testing/root-tests.sh` runs them with `--ignored`, as root; GitHub's
-//! Linux unit-test job runs that script under `sudo` on every push, and local
-//! CI only with `--root-tests`, so locally they are otherwise run by hand
-//! that way. macOS and FreeBSD are not run
+//! `test-root` job runs that script under `sudo` on every push, and local CI
+//! at every tier in a container, or under `sudo` with `--root-tests`; by
+//! hand, run it the same way. macOS and FreeBSD are not run
 //! at all; there the kernel names the device, and after the fix no code
 //! touches an interface by `tun.name` before create. The module is Linux
 //! only.

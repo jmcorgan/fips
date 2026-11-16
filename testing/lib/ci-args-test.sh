@@ -4,7 +4,9 @@
 # still exits 0 with the usage on stdout. --rerun <suite> rejects an unknown
 # suite name and the options it cannot be combined with, before any build;
 # --build-only rejects --root-tests and --explorers, whose stages it would
-# skip; and --explorers= takes only core or root.
+# skip; and --explorers= takes only core or root. --tier takes 1, 2 or 3 and
+# refuses every option that changes what runs; --plan needs a tier and prints
+# that tier's stages, and no tier a push starts (1 or 2) lists an explorer.
 #
 # Every case invokes ci-local.sh with arguments that end during parsing, before
 # the load sampler, traps, containers or any build, so the suite is hermetic and
@@ -21,7 +23,7 @@ set -u
 # The switches ci-local.sh reads from the environment change what a parse
 # rejects first, and the internal builder exports both for its runs. Clear
 # them so every case sees only what it sets itself.
-unset FIPS_CI_BAREMETAL FIPS_CI_SLOW_TESTS
+unset FIPS_CI_BAREMETAL FIPS_CI_SLOW_TESTS FIPS_CI_ROOT_TESTS FIPS_CI_TIER
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CI_LOCAL="$SCRIPT_DIR/../ci-local.sh"
@@ -133,6 +135,66 @@ expect_usage_error "--explorers= with an unknown half" \
     "--explorers takes core or root, not: both" --explorers=both
 expect_usage_error "--explorers= with no half" \
     "--explorers takes core or root, not: nothing" --explorers=
+
+expect_usage_error "--tier without a value" "--tier needs a value" --tier
+expect_usage_error "--tier 4" "--tier takes 1, 2 or 3, not: 4" --tier 4
+expect_usage_error "--tier 0" "--tier takes 1, 2 or 3, not: 0" --tier 0
+expect_usage_error "--tier two" "--tier takes 1, 2 or 3, not: two" --tier two
+FIPS_CI_TIER=9 expect_usage_error "FIPS_CI_TIER=9" "--tier takes 1, 2 or 3, not: 9"
+expect_usage_error "--plan without --tier" "--plan needs --tier" --plan
+for opt in --build-only --test-only --skip-integration --skip-chaos --baremetal \
+        --slow-tests --explorers --explorers=core --cross-check --root-tests \
+        --with-tor --only --rerun; do
+    args=(--tier 2 "$opt")
+    case "$opt" in --only|--rerun) args+=(firewall) ;; esac
+    want="${opt%%=*}"
+    expect_usage_error "--tier 2 with $opt" "--tier 2 cannot be combined with $want" "${args[@]}"
+done
+# The option order does not matter, and tier 3 refuses them too, but for Tor.
+expect_usage_error "--slow-tests before --tier 3" \
+    "--tier 3 cannot be combined with --slow-tests" --slow-tests --tier 3
+expect_usage_error "--tier 1 with --with-tor" \
+    "--tier 1 cannot be combined with --with-tor" --tier 1 --with-tor
+
+# --plan for each tier: exit 0, nothing built (the stubs would exit 97), and
+# the stages that tell the tiers apart.
+expect_plan() {
+    local name="$1" want="$2" refuse="$3"
+    shift 3
+    invoke "$@"
+    check "$name: exits 0" "$([ "$RC" -eq 0 ] && echo 0 || echo 1)" "rc=$RC"
+    local missing=() present=() w
+    for w in $want; do grep -qxF -- "$w" <<<"$OUT" || missing+=("$w"); done
+    for w in $refuse; do grep -qxF -- "$w" <<<"$OUT" && present+=("$w"); done
+    check "$name: lists $want" "${#missing[@]}" "missing: ${missing[*]:-none}"
+    check "$name: does not list $refuse" "${#present[@]}" "present: ${present[*]:-none}"
+    return 0
+}
+expect_plan "--tier 1 --plan" \
+    "ci-parity core-baremetal cross-check-x86_64-apple-darwin unit-tests core-fence-tests known-defect release-test-compile root-tests" \
+    "mutations musl-tests build-integration chaos-tcp-mesh core-explorers root-explorers" \
+    --tier 1 --plan
+expect_plan "--tier 2 --plan" \
+    "root-tests mutations musl-tests build-integration chaos-tcp-mesh rpm-install" \
+    "core-explorers root-explorers chaos-batch1-tcp-mesh chaos-maelstrom tor-socks5" \
+    --tier 2 --plan
+expect_plan "--tier 3 --plan" \
+    "mutations musl-tests chaos-tcp-mesh core-explorers root-explorers chaos-batch3-tcp-mesh chaos-maelstrom chaos-maelstrom-sparse chaos-dead-grace-long" \
+    "tor-socks5" \
+    --tier 3 --plan
+expect_plan "--tier 3 --with-tor --plan" "tor-socks5 tor-directory core-explorers" "" \
+    --plan --with-tor --tier 3
+FIPS_CI_TIER=1 expect_plan "FIPS_CI_TIER=1 --plan" "root-tests" "mutations core-explorers" --plan
+# A tier overrides the builder's environment switches rather than refusing
+# them, and says so.
+FIPS_CI_SLOW_TESTS=1 FIPS_CI_ROOT_TESTS=1 expect_plan "--tier 1 under FIPS_CI_SLOW_TESTS=1" \
+    "root-tests" "mutations" --tier 1 --plan
+check "--tier 1 under FIPS_CI_SLOW_TESTS=1: says the switches are ignored" \
+    "$(grep -qF -- "FIPS_CI_* switches in the environment are ignored" <<<"$ERR" && echo 0 || echo 1)"
+check "--tier 1 --plan: core-fence-tests without slow-tests" \
+    "$(invoke --tier 1 --plan; grep -qF -- "slow-tests feature" <<<"$OUT" && echo 1 || echo 0)"
+check "--tier 2 --plan: core-fence-tests with slow-tests" \
+    "$(invoke --tier 2 --plan; grep -qF -- "core-fence-tests runs with fips-core's slow-tests feature" <<<"$OUT" && echo 0 || echo 1)"
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

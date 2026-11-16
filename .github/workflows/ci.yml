@@ -30,10 +30,14 @@ env:
 # This workflow's integration matrices — the `integration:` job, the
 # `dns-resolver:` job, the `deb-install:` job and the `rpm-install:` job — and the local default suite
 # set (testing/ci-local.sh) MUST run the same integration suites, EXCEPT for
-# the deliberate local-only entries below. Adding a suite to one runner
-# without the other means "local green" and "GitHub green" stop being
-# equivalent.
-# testing/check-ci-parity.sh enforces this and fails on unexpected drift.
+# the deliberate local-only entries below, and every build, lint, guard and
+# unit-test step here MUST be a stage of `ci-local.sh --tier 2`, EXCEPT for
+# what one runner cannot do: the Android, macOS and Windows jobs, and the
+# retry-flake report, here; the zig cross-checks there. Adding a suite or a
+# step to one runner without the other means "local green" and "GitHub green"
+# stop being equivalent.
+# testing/check-ci-parity.sh enforces both and fails on unexpected drift; its
+# STEPS table maps each step here to its local result.
 #
 # Deliberate local-only (NOT on the GitHub gate), with reason:
 #   tor-socks5     — requires live Tor network; opt-in via --with-tor,
@@ -181,6 +185,18 @@ jobs:
       # run_ciargs by hand.
       - name: Check ci-local.sh's argument handling
         run: bash testing/lib/ci-args-test.sh
+      # ci-local.sh's plan check: a green tier run must record what --plan
+      # lists. Hermetic. Kept in step with ci-local.sh's run_ciplan by hand.
+      - name: Check ci-local.sh's plan check against planted results
+        run: bash testing/lib/ci-plan-test.sh
+      # The Node struct re-declares no field NodeContext holds. Static. Kept
+      # in step with ci-local.sh's node-context-guard by hand.
+      - name: Check the Node struct declares no NodeContext field
+        run: bash testing/check-node-context.sh
+      # The parity check against planted divergences in a scratch copy.
+      # Hermetic. Kept in step with ci-local.sh's run_paritytest by hand.
+      - name: Check the parity check against planted divergences
+        run: bash testing/lib/ci-parity-test.sh
       # The firewall suite's table check, against a stand-in docker that is
       # still writing when the match is found. Hermetic. Kept in step with
       # ci-local.sh's run_fwtable by hand.
@@ -233,9 +249,8 @@ jobs:
       # only one of them. The default build is what ships, so lint it
       # explicitly: without this stage, code that compiles only with
       # `profiling` enabled would pass CI while breaking every release build.
-      # Mirrored in testing/ci-local.sh — check-ci-parity.sh compares
-      # integration suites only and will not catch a stage added to one runner
-      # and not the other.
+      # Mirrored in testing/ci-local.sh — check-ci-parity.sh holds each such
+      # step to its counterpart.
       - name: Clippy (default features)
         run: cargo clippy --all-targets -- -D warnings
       # The no_std core fence. A workspace build unifies dependency features
@@ -245,9 +260,8 @@ jobs:
       # tests also gives the library its dev-dependencies' features
       # (secp256k1's rand and std): --lib lints the library with its
       # [dependencies] features alone, and --all-targets type-checks the tests.
-      # Mirrored in testing/ci-local.sh; check-ci-parity.sh compares
-      # integration suites only and would not catch a step added to one runner
-      # and not the other.
+      # Mirrored in testing/ci-local.sh; check-ci-parity.sh holds each such
+      # step to its counterpart.
       - name: Clippy the no_std core library on its own
         run: cargo clippy -p fips-core --lib -- -D warnings
       - name: Clippy the no_std core and its tests on their own
@@ -259,8 +273,7 @@ jobs:
       # The core's API documentation, with rustdoc's warnings denied, so a
       # broken intra-doc link or a malformed doc comment fails the job rather
       # than leaving `cargo doc` to warn. Mirrored in testing/ci-local.sh;
-      # check-ci-parity.sh compares integration suites only and would not
-      # catch a step added to one runner and not the other.
+      # check-ci-parity.sh holds each such step to its counterpart.
       - name: Document the no_std core with rustdoc warnings denied
         run: cargo doc -p fips-core --no-deps
         env:
@@ -279,8 +292,7 @@ jobs:
   # Runs on every push, so this job is the always-on gate: testing/ci-local.sh
   # runs the same script only when asked for (--baremetal or
   # FIPS_CI_BAREMETAL=1), since it needs the targets, clang and llvm-ar.
-  # check-ci-parity.sh compares integration suites only and would not catch a
-  # step added to one runner and not the other.
+  # check-ci-parity.sh holds each such step to its counterpart.
   # ───────────────────────────────────────────────────────────────────────────
   core-baremetal:
     name: Bare-metal core build
@@ -466,21 +478,36 @@ jobs:
           retention-days: 1
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Job 2 – Unit tests
+# Job 2 – Unit tests on Linux, in five parallel jobs
 #
-# Runs `cargo test` on Linux.  Gated on the build matrix completing so we
-# don't waste runner time if compilation is broken.
+# Each is gated on the build matrix completing, so no runner time goes to a
+# tree that does not compile, and each builds what it needs under its own
+# cache entry (see "Cargo cache" above). They were one job, whose 55 to 70
+# minutes set the run's critical path; split, the longest is the nextest run.
+#   test            nextest over the workspace, with the address-less
+#                   interface fixture, the retry-flake report and the junit
+#                   reports
+#   test-core       the no_std core's tests with its slow suites, and the
+#                   known-defect lane
+#   test-mutations  the mutation lane
+#   test-features   the root library tests with the optional root features,
+#                   with the fixture, and the live map audit's reach
+#   test-root       the root-only namespace tests and the interface-binding
+#                   tests with privilege, both run under sudo
+# Every step is the one the single job ran, unchanged. Nothing else waits on
+# them: the integration and .deb jobs need only the build job's artifacts.
 # ─────────────────────────────────────────────────────────────────────────────
   test:
     name: Unit tests
     runs-on: ubuntu-latest
     needs: [build]
     # nextest ends a test that never returns (.config/nextest.toml), but the
-    # `cargo test` steps have no per-test limit, so without this a hang there
-    # holds the runner to GitHub's six-hour default. The slowest green run seen
-    # took 54 minutes on a slow runner with a warm cache, 50 of them in steps
-    # this job still runs, so the bound leaves room for a run that slow and
-    # still ends a hang hours short of the default.
+    # `cargo test` steps of the jobs below have no per-test limit, so without
+    # a bound a hang there holds the runner to GitHub's six-hour default. The
+    # slowest green run of the whole unit-test job, before it was split, took
+    # 54 minutes on a slow runner with a warm cache; each piece is bounded
+    # well past its share of that and still ends a hang hours short of the
+    # default.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -557,6 +584,247 @@ jobs:
           ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
           cargo nextest run --all --profile ci
 
+      # The ci profile retries a failing test, so a test that passed only on
+      # retry leaves the job green. Annotate each one, and list it in the run
+      # summary, so a flake is seen without failing an unrelated run. The
+      # Linux job's two junit reporters ignore nextest's <flakyFailure>
+      # elements, and the macOS and Windows jobs have no reporter at all.
+      - name: Report tests that passed only on retry
+        if: success() || failure()
+        shell: bash
+        run: bash testing/check-nextest-flaky.sh target/nextest/ci/junit.xml
+
+      - name: Publish test report (Checks tab)
+        uses: dorny/test-reporter@df6247429542221bc30d46a036ee47af1102c451 # v2
+        if: always()
+        with:
+          name: Unit Tests
+          path: target/nextest/ci/junit.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: Publish test report (run summary)
+        uses: mikepenz/action-junit-report@db71d41eb79864e25ab0337e395c352e84523afe # v4
+        if: always()
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          check_name: Unit Tests Summary
+          fail_on_failure: false
+
+  test-core:
+    name: Unit tests (core slow suites, known-defect lane)
+    runs-on: ubuntu-latest
+    needs: [build]
+    # See the Linux unit-test job's bound.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ''
+
+      # Only the pinned toolchain may be installed when rust-cache computes its
+      # key; see the script.
+      - name: Remove the runner image's own Rust toolchains
+        shell: bash
+        run: bash .github/scripts/keep-pinned-toolchain.sh
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      # The no_std core's tests under the core's own feature resolution, so a
+      # test whose result depends on a feature only the root crate enables
+      # runs at least once without it. This is the one place the slow suites
+      # run on every push (the models of the deployed releases and the
+      # guard-switch meta-test); the other platforms' jobs skip them. Mirrored
+      # in testing/ci-local.sh, where they run with --slow-tests. The
+      # explorers (the core's `slow-explorers` feature and the root crate's
+      # `explorers`) run in no job here: no CI run started by a push runs
+      # them, and testing/ci-local.sh runs them only with --explorers and in
+      # the nightly run, --tier 3. The
+      # --all-features clippy step lints them.
+      - name: Run the no_std core's tests on their own, with its slow suites
+        run: |
+          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
+          cargo test -p fips-core --features slow-tests
+
+      # Every known-defect test in testing/ignored-tests.txt must still fail,
+      # so the change that fixes one has to un-ignore it. Mirrored in
+      # testing/ci-local.sh.
+      - name: Run the known-defect lane
+        run: |
+          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
+          bash testing/known-defect-lane.sh
+
+  test-mutations:
+    name: Mutation lane
+    runs-on: ubuntu-latest
+    needs: [build]
+    # See the Linux unit-test job's bound.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ''
+
+      # Only the pinned toolchain may be installed when rust-cache computes its
+      # key; see the script.
+      - name: Remove the runner image's own Rust toolchains
+        shell: bash
+        run: bash .github/scripts/keep-pinned-toolchain.sh
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      # Each switch in core/src/faults.rs, turned on in a test process of its
+      # own, must turn red the tests testing/mutations/manifest.txt names for
+      # it at their assertion of the behaviour it breaks, and every named test
+      # must pass with no switch; no switch may reach a normal build of fips.
+      # Mirrored in testing/ci-local.sh.
+      - name: Run the mutation lane
+        run: |
+          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
+          bash testing/mutations/run.sh
+
+  test-features:
+    name: Unit tests (optional root features)
+    runs-on: ubuntu-latest
+    needs: [build]
+    # See the Linux unit-test job's bound.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+
+      # The same address-less interface the musl leg creates. Pinning the
+      # contract on both libcs is what turns "glibc and musl agree about
+      # `getifaddrs`" from an assumption into a checked fact — and makes this
+      # leg fail first if glibc is the one that changes.
+      - name: Create an address-less interface for the presence probe
+        run: |
+          sudo ip link add fips-probe0 type dummy
+          # `addrgenmode none` before bringing it up: the kernel hands an IPv6
+          # link-local to any interface that comes up, and an interface with a
+          # link-local is not address-less — the fixture would have quietly
+          # tested nothing.
+          sudo ip link set fips-probe0 addrgenmode none
+          sudo ip link set fips-probe0 up
+          ip addr show fips-probe0
+          # Fail rather than test the wrong thing if it acquired one anyway.
+          if ip addr show fips-probe0 | grep -qE "inet6? "; then
+            echo "fips-probe0 has an address; it cannot test the address-less case" >&2
+            exit 1
+          fi
+          echo "FIPS_TEST_ADDRLESS_IFACE=fips-probe0" >> "$GITHUB_ENV"
+          # Declare that this runner has fixtures, so a test that depends on
+          # one fails when the fixture is missing instead of skipping silently.
+          echo "FIPS_TEST_REQUIRE_FIXTURES=1" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ''
+
+      # Only the pinned toolchain may be installed when rust-cache computes its
+      # key; see the script.
+      - name: Remove the runner image's own Rust toolchains
+        shell: bash
+        run: bash .github/scripts/keep-pinned-toolchain.sh
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      # The root crate's optional features add code the default-feature run
+      # above never compiles: `profiling` a module, a recorder and a writer
+      # thread, `test-overrides` the honoured test-only configuration keys
+      # and the tests that only a build with it runs. Only the root package
+      # has these features: fips-core's lib test binary is the same with or
+      # without them, and the run above already ran it. Mirrored in
+      # testing/ci-local.sh.
+      #
+      # Being the one run of the root suite as threads in a process, where
+      # each test's thread names it, it also records the reach of the node's
+      # live map audit, which the next step holds to its floors. Mirrored in
+      # testing/ci-local.sh.
+      - name: Run library tests with the optional root features enabled
+        env:
+          FIPS_AUDIT_REACH: ${{ runner.temp }}/audit-reach.txt
+        run: |
+          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
+          cargo test -p fips-mesh --lib --features profiling,test-overrides
+
+      - name: Check the reach of the live map audit
+        run: python3 testing/check-audit-reach.py "${{ runner.temp }}/audit-reach.txt"
+
+  test-root:
+    name: Unit tests (root and privileged)
+    runs-on: ubuntu-latest
+    needs: [build]
+    # See the Linux unit-test job's bound.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      # nftables for the namespace tests run as root below, which count the
+      # packets a test interface sends with an nft counter.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev nftables
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ''
+
+      # Only the pinned toolchain may be installed when rust-cache computes its
+      # key; see the script.
+      - name: Remove the runner image's own Rust toolchains
+        shell: bash
+        run: bash .github/scripts/keep-pinned-toolchain.sh
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
       # The unit tests that need root and network namespaces, which are
       # `#[ignore]`d so the run above skips them: the start-up warning for
       # transports too small for a 1280-byte IPv6 packet, on the path where
@@ -590,49 +858,6 @@ jobs:
             exit 1
           fi
           sudo bash testing/root-tests.sh "$BIN"
-
-      # The ci profile retries a failing test, so a test that passed only on
-      # retry leaves the job green. Annotate each one, and list it in the run
-      # summary, so a flake is seen without failing an unrelated run. The
-      # Linux job's two junit reporters ignore nextest's <flakyFailure>
-      # elements, and the macOS and Windows jobs have no reporter at all.
-      - name: Report tests that passed only on retry
-        if: success() || failure()
-        shell: bash
-        run: bash testing/check-nextest-flaky.sh target/nextest/ci/junit.xml
-
-      # The no_std core's tests under the core's own feature resolution, so a
-      # test whose result depends on a feature only the root crate enables
-      # runs at least once without it. This is the one place the slow suites
-      # run on every push (the models of the deployed releases and the
-      # guard-switch meta-test); the other platforms' jobs skip them. Mirrored
-      # in testing/ci-local.sh, where they run with --slow-tests. The
-      # explorers (the core's `slow-explorers` feature and the root crate's
-      # `explorers`) run in no job here: no CI run started by a push runs
-      # them, and testing/ci-local.sh runs them only with --explorers. The
-      # --all-features clippy step lints them.
-      - name: Run the no_std core's tests on their own, with its slow suites
-        run: |
-          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
-          cargo test -p fips-core --features slow-tests
-
-      # Every known-defect test in testing/ignored-tests.txt must still fail,
-      # so the change that fixes one has to un-ignore it. Mirrored in
-      # testing/ci-local.sh.
-      - name: Run the known-defect lane
-        run: |
-          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
-          bash testing/known-defect-lane.sh
-
-      # Each switch in core/src/faults.rs, turned on in a test process of its
-      # own, must turn red the tests testing/mutations/manifest.txt names for
-      # it at their assertion of the behaviour it breaks, and every named test
-      # must pass with no switch; no switch may reach a normal build of fips.
-      # Mirrored in testing/ci-local.sh.
-      - name: Run the mutation lane
-        run: |
-          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
-          bash testing/mutations/run.sh
 
       # The bind-success half. Every other unit-test leg runs unprivileged, so
       # `PacketSocket::open` cannot succeed on any of them and everything past
@@ -673,45 +898,6 @@ jobs:
           sudo -E env FIPS_TEST_PRIVILEGED=1 "$BIN" transport::ethernet transport::sockbuf --test-threads=1 \
             | tee "$RUNNER_TEMP/privileged-tests.log"
           grep -qE '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/privileged-tests.log"
-
-      - name: Publish test report (Checks tab)
-        uses: dorny/test-reporter@df6247429542221bc30d46a036ee47af1102c451 # v2
-        if: always()
-        with:
-          name: Unit Tests
-          path: target/nextest/ci/junit.xml
-          reporter: java-junit
-          fail-on-error: false
-
-      - name: Publish test report (run summary)
-        uses: mikepenz/action-junit-report@db71d41eb79864e25ab0337e395c352e84523afe # v4
-        if: always()
-        with:
-          report_paths: target/nextest/ci/junit.xml
-          check_name: Unit Tests Summary
-          fail_on_failure: false
-
-      # The root crate's optional features add code the default-feature run
-      # above never compiles: `profiling` a module, a recorder and a writer
-      # thread, `test-overrides` the honoured test-only configuration keys
-      # and the tests that only a build with it runs. Only the root package
-      # has these features: fips-core's lib test binary is the same with or
-      # without them, and the run above already ran it. Mirrored in
-      # testing/ci-local.sh.
-      #
-      # Being the one run of the root suite as threads in a process, where
-      # each test's thread names it, it also records the reach of the node's
-      # live map audit, which the next step holds to its floors. Mirrored in
-      # testing/ci-local.sh.
-      - name: Run library tests with the optional root features enabled
-        env:
-          FIPS_AUDIT_REACH: ${{ runner.temp }}/audit-reach.txt
-        run: |
-          ulimit -Sn "$(bash testing/unit-fd-limit.sh)"
-          cargo test -p fips-mesh --lib --features profiling,test-overrides
-
-      - name: Check the reach of the live map audit
-        run: python3 testing/check-audit-reach.py "${{ runner.temp }}/audit-reach.txt"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job 2a – Library tests in release mode
@@ -911,9 +1097,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build]
     # Its `cargo test` run has no per-test limit, so this bound is all that
-    # ends a hang. The slowest green run seen took 17 minutes; see the Linux
-    # job's bound.
-    timeout-minutes: 35
+    # ends a hang. Green runs have taken 23 to 33 minutes, the slowest within
+    # two minutes of the old 35-minute bound; see the Linux unit-test job's
+    # bound.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -1166,8 +1353,9 @@ jobs:
 # ─────────────────────────────────────────────────────────────────────────────
 # Job 3 – Integration tests (static mesh + chaos simulation)
 #
-# Runs only when both build and test succeed.  Each topology / scenario is a
-# separate matrix entry so they run in parallel.
+# Runs once the build succeeds: it uses only the build job's fips-linux
+# artifact, so it does not wait on the unit tests. Each topology / scenario is
+# a separate matrix entry so they run in parallel.
 #
 # All harnesses share a single Docker image (fips-test:latest) built once
 # in the setup step from testing/docker/.
@@ -1175,7 +1363,7 @@ jobs:
   integration:
     name: Integration (${{ matrix.suite }})
     runs-on: ubuntu-latest
-    needs: [build, test]
+    needs: [build]
     if: ${{ !inputs.skip_integration }}
 
     strategy:
@@ -1594,7 +1782,7 @@ jobs:
   deb-package:
     name: Build .deb${{ matrix.deb_arch == 'arm64' && ' (arm64)' || '' }}
     runs-on: ${{ matrix.os }}
-    needs: [build, test]
+    needs: [build]
     if: ${{ !inputs.skip_integration }}
 
     # The arm64 leg builds natively on an arm runner so the arm64 package the

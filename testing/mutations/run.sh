@@ -57,8 +57,10 @@
 #   FIPS_MUTATION_TIMEOUT  seconds per test run (default 120)
 #   FIPS_MUTATION_ONLY     run only the break of this name (for trying one)
 #   FIPS_MUTATION_EXPLORERS  1 to build the root crate's library tests with
-#                          its `explorers` feature and run every line; no
-#                          run a push starts sets it
+#                          its `explorers` feature and run every line; the
+#                          nightly run sets it (testing/ci-local.sh with
+#                          --explorers or --tier 3), and no run a push starts
+#                          does
 # FIPS_NODE_FAULTS from the caller's environment is ignored: the lane sets
 # it per run.
 #

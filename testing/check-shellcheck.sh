@@ -10,7 +10,10 @@
 # (testing/check-crate.sh), over the FreeBSD package's upgrade test
 # (packaging/freebsd/test-upgrade.sh), which the FreeBSD Package workflow runs
 # in its VM, over the root-only test runner that ci.yml and ci-local.sh
-# run and the internal builder is to run (testing/root-tests.sh), and over
+# run (testing/root-tests.sh) and the two scripts ci-local.sh runs beside it
+# in the root tests' container (testing/root-tests/*.sh), over the
+# node-context guard both runners run (testing/check-node-context.sh), and
+# over
 # the single-test classifier the known-defect lane sources and its fixture
 # test (testing/lib/test-verdict.sh, test-verdict-test.sh).
 #
@@ -34,10 +37,13 @@
 #     preinst as well. On a router they run under busybox ash.
 #   * packaging/freebsd/test-upgrade.sh as POSIX sh with the same
 #     exclusions; it runs under FreeBSD's sh, which supports `local` too.
+#     So are testing/root-tests/privileged.sh and addrless-iface.sh, which
+#     run under the container's dash.
 #   * install-nak.sh, blossom-upload.sh, test-blossom-upload.sh,
 #     keep-pinned-toolchain.sh, build-core-baremetal.sh, the three
 #     testing/cross-check/ scripts, testing/check-crate.sh,
-#     testing/root-tests.sh, testing/install-shellcheck.sh and the two
+#     testing/root-tests.sh, testing/check-node-context.sh,
+#     testing/install-shellcheck.sh and the two
 #     testing/lib/test-verdict scripts as bash, with
 #     no exclusions. They are CI scripts, not shipped ones, and the sh
 #     exclusion set below misfires on bash.
@@ -83,6 +89,8 @@ SH_TARGETS=(
     "$IPK/scripts/postinst"
     "$IPK/scripts/prerm"
     "packaging/freebsd/test-upgrade.sh"
+    "testing/root-tests/privileged.sh"
+    "testing/root-tests/addrless-iface.sh"
 )
 BASH_TARGETS=(
     ".github/scripts/install-nak.sh"
@@ -93,6 +101,7 @@ BASH_TARGETS=(
     "testing/cross-check/check.sh"
     "testing/check-crate.sh"
     "testing/root-tests.sh"
+    "testing/check-node-context.sh"
     "testing/lib/test-verdict.sh"
     "testing/lib/test-verdict-test.sh"
     "testing/mutations/run.sh"

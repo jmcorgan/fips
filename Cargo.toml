@@ -72,7 +72,8 @@ test-overrides = []
 # decrypt-worker tests in `oracle.rs`, the reach and walk-bound tests in
 # `explore.rs`, and the shared schedules in `parity.rs`). Off by default, so
 # no CI run started by a push executes them; `testing/ci-local.sh
-# --explorers` turns it on, as does any `cargo test --features explorers`.
+# --explorers` and the nightly run, `--tier 3`, turn it on, as does any
+# `cargo test --features explorers`.
 # The --all-features clippy pass lints the code it gates. fips-core's
 # explorers are behind its own `slow-explorers` feature.
 explorers = []

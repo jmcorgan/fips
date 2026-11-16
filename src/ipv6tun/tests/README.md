@@ -325,7 +325,8 @@ The others:
   test run skips them; build with `cargo test --lib --no-run` and run the test
   binary under `sudo` with `--ignored`. `testing/root-tests.sh` runs the
   Linux `tun.rs` and `dns` namespace tests that way, called under `sudo` by
-  the Linux unit-test job and by local CI with `--root-tests`; the FreeBSD
+  GitHub CI's `test-root` job and by local CI with `--root-tests`, and as
+  uid 0 in a container by local CI at every tier; the FreeBSD
   package workflow and the macOS unit-test job run the `bsdnet` tests, with
   `--include-ignored`, and the Windows unit-test job, whose runner is
   elevated, the `winnet` ones. Local CI runs no others. They share the
