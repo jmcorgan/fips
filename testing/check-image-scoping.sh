@@ -117,6 +117,12 @@ ALLOWED_REFS=(
     # shared directory but never uses it as a context.
     'interop/build-images.sh::DOCKER_CTX_SRC="$REPO_ROOT/testing/docker"'
 
+    # The parity check's fragments of GitHub's image build step: text it
+    # requires ci.yml's build job to contain, matched as strings. Nothing is
+    # built, tagged or run from them.
+    'check-ci-parity.sh::["docker build -t fips-test:latest testing/docker",'
+    'check-ci-parity.sh::"-f testing/docker/Dockerfile.app testing/docker"],'
+
     # The veth self-test's stand-in docker client: a script it writes into its
     # scratch directory and puts first on PATH. It is a file named docker, not
     # a build context, and no image is built or run.
