@@ -220,7 +220,8 @@ inside the budget, drops every mirror that has failed for it, and points the
 remaining attempts at the rest; a repository it cannot do that for (a metalink,
 or a list it cannot fetch) is retried as it is, and its report says why.
 `budget-test.sh` tests the budget and the mirror exclusion with dnf stubbed, in
-about forty seconds, and both CI runners run it.
+about forty seconds. Both CI runners run it: GitHub's ci-parity job, and
+`ci-local.sh` just before rpm-install, at tier 2 and up.
 
 ### [boringtun/](boringtun/) -- WireGuard Throughput Baseline
 
@@ -305,8 +306,9 @@ internal builder runs for each kind of commit:
   built at the start of the build stage, the core's slow suites, the
   mutation lane, the musl unit tests and every integration suite but the
   nightly-only chaos scenarios, with the chaos runner's veth host-command
-  test run just before the chaos suites. This is the set GitHub's `ci.yml`
-  runs too, though it runs that test among its guards.
+  test run just before the chaos suites and the RPM network budget test just
+  before rpm-install. This is the set GitHub's `ci.yml` runs too, though it
+  runs those two tests among its guards.
 - **Tier 3, the nightly run of each trunk tip:** tier 2, both halves of the
   explorers, the mutation lane's explorer lines, and the nightly extras: a
   batch of every CI chaos scenario, three runs each, the same batch of the

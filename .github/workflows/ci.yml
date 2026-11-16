@@ -158,7 +158,9 @@ jobs:
         run: bash testing/lib/relay-verdict-test.sh
       # Hermetic: dnf and the image build stubbed, no containers, about forty
       # seconds. Kept in step with ci-local.sh's run_rpm_budget_test by hand,
-      # for the same reason as the convergence-gate step above.
+      # for the same reason as the convergence-gate step above. ci-local.sh
+      # runs it just before rpm-install, at tier 2; every run here is tier 2,
+      # and this job is off the critical path, so it stays with the guards.
       - name: Run RPM install network budget unit tests
         run: bash testing/rpm-install/budget-test.sh
       # Hermetic: docker and sleep stubbed, no containers. The native API
