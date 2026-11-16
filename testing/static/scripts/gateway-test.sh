@@ -2137,7 +2137,7 @@ fi
 #
 # The gate reads both the control socket's mappings, a snapshot refreshed
 # on the pool tick, and the kernel's table, which is what decides the rule
-# that matches. A zero SNAT count needs a successful listing; Phase 11 reads
+# that matches. A zero SNAT count needs a successful listing; Phase 12 reads
 # the same pattern expecting one rule per mapping.
 echo ""
 echo "Phase 8b: Inbound port forwards through the LAN masquerade"
@@ -2569,7 +2569,7 @@ else
     check "Gateway shutdown (no completion message in logs)" 1
 fi
 
-# ── Long-lived gateway restart, shared by phases 11 and 12 ───────────────
+# ── Long-lived gateway restart, for phase 12 ─────────────────────────────
 
 # Start the stopped gateway with mappings that outlive the phase, and gate on
 # its readiness. A failure is recorded through check under the label prefix
@@ -2784,155 +2784,6 @@ sys.exit(1 if counts["unplaced"] else 0)
 PYEOF
 }
 
-# Phase 11: NAT rebuild past the default netlink socket limits
-#
-# Every change rebuilds the whole fips_gateway table in one netlink batch.
-# With the default socket buffers that batch failed from about 105 mappings
-# (the acks overflowed the receive buffer, after the commit) and past about
-# 313 (the batch overflowed the send buffer, and nothing was committed).
-# Drive 400 new names through a gateway whose mappings outlive the phase and
-# judge the result on the kernel's own table, which is what a lost rebuild
-# leaves wrong, not on the daemon's debug-level success line. The names go
-# through the pool's rate limit, so the driver retries its refusals. Runs
-# after phase 10, so the gateway container is stopped when it starts, and it
-# leaves it stopped.
-echo ""
-echo "Phase 11: NAT rebuild past default socket limits"
-
-NATBIG_NAMES=400
-NATBIG_CAP=180
-NATBIG_SETTLE=30
-
-natbig_now() {
-    date -u +%s
-}
-
-natbig_slice() {
-    NATBIG_LOG=$(docker logs --timestamps --since "$NATBIG_STARTED" "$GATEWAY" 2>&1)
-}
-
-natbig_allocated() {
-    natbig_slice
-    NATBIG_ALLOCATED=$(grep -c "Allocated virtual IP" <<< "$NATBIG_LOG" || true)
-}
-
-# Rules the kernel holds right now. A failed listing is recorded through
-# NATBIG_RC, never read as a table with no rules.
-natbig_kernel() {
-    NATBIG_RC=0
-    NATBIG_NFT=$(docker exec "$GATEWAY" nft list table inet fips_gateway 2>&1) || NATBIG_RC=$?
-    NATBIG_DNAT=$(dnat_count prerouting fd01::/112 <<< "$NATBIG_NFT" || echo -1)
-    NATBIG_ODNAT=$(dnat_count output fd01::/112 <<< "$NATBIG_NFT" || echo -1)
-    NATBIG_SNAT=$(grep -cE "saddr [0-9a-f:]+ .*snat" <<< "$NATBIG_NFT" || true)
-    NATBIG_MASQ=$(grep -c "masquerade" <<< "$NATBIG_NFT" || true)
-}
-
-natbig_phase() {
-    gw_long_lived_start "NAT batch" || return 0
-    NATBIG_STARTED="$GW_STARTED"
-    local t0="$GW_T0"
-    local baseline="$GW_BASELINE"
-    local target=$((baseline + NATBIG_NAMES))
-    echo "  Baseline allocations after readiness: $baseline; target $target"
-    if [ "$baseline" -ge 1 ]; then
-        check "NAT batch: readiness probe allocated (baseline $baseline)" 0
-    else
-        check "NAT batch: readiness probe allocated (baseline $baseline)" 1
-        return 0
-    fi
-
-    # Names: real keys, since the daemon parses each one as a public key.
-    local names_file have_names
-    names_file=$(mktemp)
-    docker exec "$GATEWAY" bash -c \
-        "for i in \$(seq 1 $NATBIG_NAMES); do fipsctl keygen --stdout; done" \
-        | grep '^npub1' >"$names_file" || true
-    have_names=$(wc -l <"$names_file")
-    if [ "$have_names" -lt "$NATBIG_NAMES" ]; then
-        check "NAT batch: generated $NATBIG_NAMES names (got $have_names)" 1
-        rm -f "$names_file"
-        return 0
-    fi
-
-    local retry_bound
-    retry_bound=$(gw_retry_bound)
-    if [ -z "$retry_bound" ]; then
-        check "NAT batch: MAPPING_RATE read from pool.rs ('$POOL_RATE')" 1
-        rm -f "$names_file"
-        return 0
-    fi
-    gw_install_driver
-    local remaining out rc=0
-    remaining=$((NATBIG_CAP - ($(natbig_now) - t0)))
-    # timeout reads 0 as no limit and refuses a negative duration.
-    if [ "$remaining" -le 0 ]; then
-        check "NAT batch: setup exceeded ${NATBIG_CAP}s cap" 1
-        rm -f "$names_file"
-        return 0
-    fi
-    out=$(docker exec -i "$CLIENT" timeout "$remaining" \
-        python3 /tmp/gw_driver.py "$GW_DNS" "$retry_bound" <"$names_file" 2>&1) || rc=$?
-    rm -f "$names_file"
-    echo "  [$(($(natbig_now) - t0))s] sent $NATBIG_NAMES names: $out (rc=$rc)"
-    natbig_allocated
-    if [ "$rc" -eq 0 ] && [ "$NATBIG_ALLOCATED" -eq "$target" ]; then
-        check "NAT batch: $NATBIG_ALLOCATED live mappings allocated" 0
-    else
-        check "NAT batch: live mappings allocated ($NATBIG_ALLOCATED of $target, rc $rc)" 1
-    fi
-
-    # Settle on the kernel: wait until it holds a DNAT rule per allocation,
-    # or the cap expires. Reaching the cap decides nothing by itself; the
-    # checks below do.
-    local settle=0
-    natbig_kernel
-    while [ "$NATBIG_DNAT" -ne "$NATBIG_ALLOCATED" ] && [ "$settle" -lt "$NATBIG_SETTLE" ]; do
-        sleep 1
-        settle=$((settle + 1))
-        natbig_kernel
-    done
-    # An error logged just after the last commit still counts.
-    sleep 2
-    natbig_kernel
-    natbig_allocated
-    local nat_fail
-    nat_fail=$(grep -c "Failed to add NAT rules" <<< "$NATBIG_LOG" || true)
-    echo "  [$(($(natbig_now) - t0))s] allocated=$NATBIG_ALLOCATED nat_add_fail=$nat_fail" \
-        "table_rc=$NATBIG_RC dnat=$NATBIG_DNAT output_dnat=$NATBIG_ODNAT snat=$NATBIG_SNAT" \
-        "masquerade=$NATBIG_MASQ settle=${settle}s"
-    if [ "$nat_fail" -gt 0 ]; then
-        grep "Failed to add NAT rules" <<< "$NATBIG_LOG" | sed 's/\x1b\[[0-9;]*m//g' \
-            | sed -n '1p;$p' | sed 's/^/    /'
-    fi
-
-    if [ "$nat_fail" -eq 0 ]; then
-        check "NAT batch: no NAT rebuild failed" 0
-    else
-        check "NAT batch: NAT rebuilds failed ($nat_fail)" 1
-    fi
-    if [ "$NATBIG_RC" -eq 0 ]; then
-        check "NAT batch: nft lists the fips_gateway table" 0
-    else
-        check "NAT batch: nft list table failed (rc $NATBIG_RC)" 1
-    fi
-    if [ "$NATBIG_DNAT" -eq "$NATBIG_ALLOCATED" ] && [ "$NATBIG_ODNAT" -eq "$NATBIG_ALLOCATED" ] \
-        && [ "$NATBIG_SNAT" -eq "$NATBIG_ALLOCATED" ]; then
-        check "NAT batch: kernel holds a prerouting DNAT, output DNAT and SNAT rule per mapping ($NATBIG_DNAT)" 0
-    else
-        check "NAT batch: kernel rules (prerouting dnat $NATBIG_DNAT, output dnat $NATBIG_ODNAT, snat $NATBIG_SNAT, allocated $NATBIG_ALLOCATED)" 1
-    fi
-    if [ "$NATBIG_MASQ" -eq 3 ]; then
-        check "NAT batch: LAN fips0, host fips0 and port-forward LAN masquerades present" 0
-    else
-        check "NAT batch: masquerade rules ($NATBIG_MASQ, expected 3: LAN fips0, host fips0, port-forward LAN)" 1
-    fi
-
-    docker stop --time=10 "$GATEWAY" >/dev/null 2>&1 || true
-    echo "  Phase time: $(($(natbig_now) - t0))s"
-}
-
-natbig_phase
-
 # Phase 12: Pool admission limits
 #
 # The pool holds at most MAPPING_CEILING live mappings, and past a burst of
@@ -2943,8 +2794,19 @@ natbig_phase
 # ask for 20 more new names: each replaces the oldest unused mapping, while
 # the mapping that carries traffic is kept and still resolves. Reports rebuild
 # and tick durations on the way up and the shutdown duration at the ceiling.
-# Runs after phase 11, so the gateway container is stopped when it starts,
+# Runs after phase 10, so the gateway container is stopped when it starts,
 # and it leaves it stopped.
+#
+# The fill is also the NAT rebuild check. Every change rebuilds the whole
+# fips_gateway table in one netlink batch. With the default socket buffers
+# that batch failed from about 105 mappings (the acks overflowed the receive
+# buffer, after the commit) and past about 313 (the batch overflowed the send
+# buffer, and nothing was committed). The fill passes both on its way to the
+# ceiling, and the result is judged on the kernel's own table at the ceiling,
+# which is what a lost rebuild leaves wrong, as well as on the absence of NAT
+# failure lines, since the daemon's success line is only at debug level. The
+# table is compared against the live mappings, the ceiling, not against the
+# allocations, which include the ones evicted at the ceiling.
 echo ""
 echo "Phase 12: Pool admission limits"
 
@@ -2953,6 +2815,8 @@ LIMITS_EXTRA=20
 # (ceiling - burst) / rate seconds plus retry pauses, and without them a
 # measurement run reached ceiling + 20 mappings far sooner.
 LIMITS_CAP=300
+# How long the kernel's table may take to hold a rule per live mapping.
+LIMITS_SETTLE=30
 # Shutdown took 2.4 s at 2000 mappings in a measurement run.
 LIMITS_STOP_TIME=30
 limits_now() {
@@ -2961,6 +2825,17 @@ limits_now() {
 
 limits_slice() {
     SLICE=$(docker logs --timestamps --since "$STARTED" "$GATEWAY" 2>&1)
+}
+
+# Rules the kernel holds right now. A failed listing is recorded through
+# LIMITS_RC, never read as a table with no rules.
+limits_kernel() {
+    LIMITS_RC=0
+    LIMITS_NFT=$(docker exec "$GATEWAY" nft list table inet fips_gateway 2>&1) || LIMITS_RC=$?
+    LIMITS_DNAT=$(dnat_count prerouting fd01::/112 <<< "$LIMITS_NFT" || echo -1)
+    LIMITS_ODNAT=$(dnat_count output fd01::/112 <<< "$LIMITS_NFT" || echo -1)
+    LIMITS_SNAT=$(grep -cE "saddr [0-9a-f:]+ .*snat" <<< "$LIMITS_NFT" || true)
+    LIMITS_MASQ=$(grep -c "masquerade" <<< "$LIMITS_NFT" || true)
 }
 
 # Figures below read lines a grep on the slice has already selected, so the
@@ -3085,7 +2960,39 @@ limits_phase() {
         check "Limits: NPUB_B at the ceiling (got '${probe:0:60}', had $GW_PROBE)" 1
     fi
 
-    sleep 1
+    # Settle on the kernel: wait until it holds a DNAT rule per live mapping,
+    # or the bound expires. Reaching the bound decides nothing by itself; the
+    # checks below do.
+    local settle=0
+    limits_kernel
+    while [ "$LIMITS_DNAT" -ne "$ceiling" ] && [ "$settle" -lt "$LIMITS_SETTLE" ]; do
+        sleep 1
+        settle=$((settle + 1))
+        limits_kernel
+    done
+    # An error logged just after the last commit still counts, so the slice
+    # below is read after this pause.
+    sleep 2
+    limits_kernel
+    echo "  Kernel table at the ceiling: table_rc=$LIMITS_RC dnat=$LIMITS_DNAT" \
+        "output_dnat=$LIMITS_ODNAT snat=$LIMITS_SNAT masquerade=$LIMITS_MASQ settle=${settle}s"
+    if [ "$LIMITS_RC" -eq 0 ]; then
+        check "Limits: nft lists the fips_gateway table" 0
+    else
+        check "Limits: nft list table failed (rc $LIMITS_RC)" 1
+    fi
+    if [ "$LIMITS_DNAT" -eq "$ceiling" ] && [ "$LIMITS_ODNAT" -eq "$ceiling" ] \
+        && [ "$LIMITS_SNAT" -eq "$ceiling" ]; then
+        check "Limits: kernel holds a prerouting DNAT, output DNAT and SNAT rule per live mapping ($LIMITS_DNAT)" 0
+    else
+        check "Limits: kernel rules (prerouting dnat $LIMITS_DNAT, output dnat $LIMITS_ODNAT, snat $LIMITS_SNAT, live $ceiling)" 1
+    fi
+    if [ "$LIMITS_MASQ" -eq 3 ]; then
+        check "Limits: LAN fips0, host fips0 and port-forward LAN masquerades present" 0
+    else
+        check "Limits: masquerade rules ($LIMITS_MASQ, expected 3: LAN fips0, host fips0, port-forward LAN)" 1
+    fi
+
     limits_slice
     local allocated reclaimed ceiling_refused rate_refused nat_fail nat_rm_fail ndp_fail evicted
     allocated=$(grep -c "Allocated virtual IP" <<< "$SLICE" || true)
