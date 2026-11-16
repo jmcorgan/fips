@@ -2257,6 +2257,58 @@ async fn a_first_epoch_change_against_a_silent_peering_still_restarts_it() {
     );
 }
 
+/// The restart dampener measures on the node's monotonic clock: once that
+/// clock has moved past the restart interval since an accepted restart, a
+/// second epoch change is accepted too. A dampener left on the raw clock
+/// would still see the first restart as moments old and refuse the second.
+#[tokio::test]
+async fn a_second_epoch_restart_past_the_interval_on_the_node_clock_is_accepted() {
+    // The restart interval, `EPOCH_RESTART_MIN_INTERVAL_SECS`, plus a second.
+    const PAST_THE_INTERVAL: Duration = Duration::from_secs(15 + 1);
+
+    let transport_id = TransportId::new(1);
+    let mut node = make_node();
+    let initiator = make_node();
+    let initiator_addr = node_addr_of(&initiator);
+    let source_addr = TransportAddr::from_string("127.0.0.1:41010");
+
+    // Each round installs a peering at an epoch the genuine msg1 does not
+    // carry, idle past the liveness gate, then moves the node's clock past
+    // the interval, so only the dampener can refuse the restart.
+    for round in 1..=2 {
+        let installed = install_peering_at_a_different_epoch(
+            &mut node,
+            &initiator,
+            transport_id,
+            &source_addr,
+            IDLE_SECS,
+        );
+        crate::time::advance(PAST_THE_INTERVAL);
+        node.handle_msg1(ReceivedPacket::with_timestamp(
+            transport_id,
+            source_addr.clone(),
+            genuine_msg1(&initiator, &node),
+            Node::now_ms(),
+        ))
+        .await;
+
+        let peer = node
+            .get_peer(&initiator_addr)
+            .expect("an accepted restart promotes a peering");
+        assert_ne!(
+            peer.link_id(),
+            installed,
+            "restart {round} must replace the peering; the installed one \
+             still standing means it was refused, the second one by a \
+             dampener that did not see the node's clock move past the interval"
+        );
+        assert!(
+            node.restart_dampener_stamp(&initiator_addr).is_some(),
+            "restart {round} must stamp the dampener"
+        );
+    }
+}
+
 /// A transient send failure during msg2 leaves the half-built link alone.
 ///
 /// The interface under the transport is absent or mid-rebind, and the binder
