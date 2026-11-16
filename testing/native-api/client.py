@@ -45,6 +45,13 @@ Kinds of step:
              Holds every descriptor open for a while, which is what a check that
              reads the daemon's own view of a live flow needs.
 
+  Hold step: {"hold": path, "max": seconds}
+             Holds every descriptor open until a file appears at path, or for
+             max seconds when it never does, and fails nothing either way. The
+             driver creates the file once it has looked at what the held
+             descriptors keep alive, so the hold lasts as long as the check and
+             no longer, and the client still ends on its own and exits cleanly.
+
   Flow step: {"fd": name, ...} operating on a stored descriptor:
                "write": hex, "repeat": n?   send n datagrams of those bytes
                "read": n, "expect_bytes": hex?, "sizes": [..]?
@@ -90,6 +97,9 @@ LISTENER = "listener"
 # never arrives has to end the run red rather than hold it open.
 SETTLE_SECONDS = 5.0
 SETTLE_PAUSE = 0.02
+
+# How often a hold step looks for its release file.
+HOLD_POLL = 0.1
 
 
 def recvfds(sock: socket.socket, bufsize: int, maxfds: int) -> tuple[bytes, list[int]]:
@@ -387,6 +397,18 @@ def run_sleep(step: dict) -> list[str]:
     return []
 
 
+def run_hold(step: dict) -> list[str]:
+    """Hold every descriptor open until the release file appears, or max seconds."""
+    path = step["hold"]
+    deadline = time.monotonic() + float(step["max"])
+    while not os.path.exists(path):
+        if time.monotonic() >= deadline:
+            print(f"hold: no {path} within {step['max']} s; releasing at the limit")
+            break
+        time.sleep(HOLD_POLL)
+    return []
+
+
 def run_flow(client: Client, step: dict) -> list[str]:
     """Operate on a stored descriptor and report what did not hold."""
     name = step["fd"]
@@ -439,6 +461,8 @@ def label_of(step: dict) -> str:
         return f"accept {step['accept']}"
     if "sleep" in step:
         return f"sleep {step['sleep']}"
+    if "hold" in step:
+        return "hold"
     return step.get("command", "?")
 
 
@@ -480,6 +504,8 @@ def main() -> int:
                     problems = run_accept(client, step)
                 elif "sleep" in step:
                     problems = run_sleep(step)
+                elif "hold" in step:
+                    problems = run_hold(step)
                 else:
                     problems = run_rpc(client, step)
             except (OSError, ConnectionError, Protocol, json.JSONDecodeError) as error:
