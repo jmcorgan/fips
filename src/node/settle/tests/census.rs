@@ -91,6 +91,7 @@ const NODE: &[(&str, Held)] = &[
     ("entities_snapshot", Exempt(SNAPSHOT)),
     ("native_snapshot", Exempt(SNAPSHOT)),
     ("ble_radio", Exempt(NODE_WIDE)),
+    ("usb_links", Exempt(NODE_WIDE)),
     (
         "index_allocator",
         Exempt("allocates the indices the rekey machine holds, whose row says when they go"),

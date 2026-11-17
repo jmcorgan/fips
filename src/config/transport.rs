@@ -970,6 +970,67 @@ impl BleConfig {
 }
 
 // ============================================================================
+// USB Transport Configuration
+// ============================================================================
+
+/// Default USB MTU. Matches BLE: the node's TUN MTU is the smallest over the
+/// bound transports, so a larger value buys nothing while another transport
+/// is up; a link's throughput comes from coalescing packets into transfers.
+const DEFAULT_USB_MTU: u16 = 2048;
+
+/// Default URI announced to phones in the accessory handshake.
+const DEFAULT_USB_URI: &str = "https://github.com/jmcorgan/fips";
+
+/// USB transport instance configuration.
+///
+/// A USB link is handed to the transport when a cable is attached (see
+/// [`crate::transport::usb`]); there is nothing to listen on or dial, so the
+/// configuration is small.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbConfig {
+    /// This transport's part in a link's paths (`role: never | backup |
+    /// normal | preferred`). Default: normal. Read only with
+    /// `node.path.enabled`.
+    #[serde(default, skip_serializing_if = "TransportRole::is_default")]
+    pub role: TransportRole,
+
+    /// MTU for USB links. Default: 2048. Capped at one USB transfer (16384).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+
+    /// Act as USB host: watch the bus for phones, switch them into Android
+    /// Open Accessory mode and link with them. Needs a build with the
+    /// `usb-host` feature. Default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<bool>,
+
+    /// Where a phone with no FIPS app is pointed, announced in the accessory
+    /// handshake as the accessory's URI. Default: the FIPS project page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+}
+
+impl UsbConfig {
+    /// MTU for USB links. Default: 2048, never more than one USB transfer.
+    pub fn mtu(&self) -> u16 {
+        self.mtu
+            .unwrap_or(DEFAULT_USB_MTU)
+            .min(crate::transport::usb::USB_TRANSFER_MAX as u16)
+    }
+
+    /// Whether to act as USB host. Default: false.
+    pub fn host(&self) -> bool {
+        self.host.unwrap_or(false)
+    }
+
+    /// The URI announced to phones. Default: the FIPS project page.
+    pub fn uri(&self) -> &str {
+        self.uri.as_deref().unwrap_or(DEFAULT_USB_URI)
+    }
+}
+
+// ============================================================================
 // Nym Transport Configuration
 // ============================================================================
 
@@ -1079,6 +1140,10 @@ pub struct TransportsConfig {
     /// BLE transport instances.
     #[serde(default, skip_serializing_if = "is_transport_empty")]
     pub ble: TransportInstances<BleConfig>,
+
+    /// USB transport instances.
+    #[serde(default, skip_serializing_if = "is_transport_empty")]
+    pub usb: TransportInstances<UsbConfig>,
 }
 
 /// Helper for skip_serializing_if on TransportInstances.
@@ -1095,6 +1160,7 @@ impl TransportsConfig {
             && self.tor.is_empty()
             && self.nym.is_empty()
             && self.ble.is_empty()
+            && self.usb.is_empty()
     }
 
     /// Merge another TransportsConfig into this one.
@@ -1118,6 +1184,9 @@ impl TransportsConfig {
         }
         if !other.ble.is_empty() {
             self.ble = other.ble;
+        }
+        if !other.usb.is_empty() {
+            self.usb = other.usb;
         }
     }
 }
