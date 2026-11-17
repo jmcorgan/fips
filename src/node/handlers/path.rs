@@ -684,7 +684,8 @@ impl Node {
                     from,
                     next,
                     why,
-                } => self.log_state(node_addr, &to, path_id, from, next, why),
+                    timeout,
+                } => self.log_state(node_addr, &to, path_id, (from, next), why, timeout),
                 Output::Capable => info!(
                     peer = %self.peer_display_name(node_addr),
                     "Peer implements multipath"
@@ -755,16 +756,22 @@ impl Node {
         }
     }
 
-    /// Log a change of state of `node_addr`'s path `path_id` at `to`.
+    /// Log a change of state of `node_addr`'s path `path_id` at `to`, from
+    /// the first of `change` to the second. A change a probe's timeout made
+    /// also logs `timeout_ms`, the probe timeout that probe was sent under,
+    /// which the chaos harness reads to place a switch's delay against it;
+    /// every other change leaves the field out.
     fn log_state(
         &self,
         node_addr: &NodeAddr,
         to: &PathRef,
         path_id: u32,
-        from: Option<PathState>,
-        next: Option<PathState>,
+        change: (Option<PathState>, Option<PathState>),
         why: Why,
+        timeout: Option<Duration>,
     ) {
+        let (from, next) = change;
+        let timeout_ms = timeout.map(|t| u64::try_from(t.as_millis()).unwrap_or(u64::MAX));
         debug!(
             peer = %self.peer_display_name(node_addr),
             transport_id = %to.transport,
@@ -773,6 +780,7 @@ impl Node {
             from = ?from,
             next = ?next,
             why = ?why,
+            timeout_ms,
             "Path state changed"
         );
     }
@@ -817,9 +825,10 @@ impl Node {
                     from,
                     next,
                     why,
+                    timeout,
                 } => {
                     if !node_fault!(RenewedStateDropped) {
-                        self.log_state(node_addr, &to, path_id, from, next, why);
+                        self.log_state(node_addr, &to, path_id, (from, next), why, timeout);
                     }
                 }
                 Output::Released { to, driver, keep } => {

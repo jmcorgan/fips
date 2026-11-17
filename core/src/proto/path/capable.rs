@@ -93,6 +93,7 @@ impl<I: Instant> Capability<I> {
             probe_id,
             at: now,
             due: deadline(now, timeout),
+            wait: timeout,
             len: PATH_PROBE_MIN_SIZE,
         };
         self.out = Some((path, sent));

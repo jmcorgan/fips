@@ -1,6 +1,7 @@
 //! The multipath draft's switchover rules at the node, one test per
-//! case: a carrier loss, a failure in one direction, a standby
-//! starved behind the active path's load, a preferred cable, garbage on a
+//! case: a carrier loss, a failure in one direction and the probe timeout
+//! its change of state logs, a standby starved behind the active path's
+//! load, a preferred cable, garbage on a
 //! standby or a second transport, two transports to a peer with one, a
 //! switch during a rekey, the loss of an interface, a `PathClose` from
 //! either end, and a backup wire. Each test runs two loopback nodes with multipath
@@ -265,6 +266,112 @@ async fn a_path_that_stops_carrying_our_frames_but_still_brings_the_peers_is_lef
     assert_eq!(active_of(&nodes[0], &b), (t2(), b2));
     assert!(nodes[0].node.get_peer(&b).is_some(), "A keeps B");
     cleanup_nodes(&mut nodes).await;
+}
+
+/// The "Path state changed" lines among `lines` for the path at
+/// (`transport`, `addr`) going from `from` to `next`.
+fn changes<'a>(
+    lines: &'a [String],
+    transport: TransportId,
+    addr: &TransportAddr,
+    from: &str,
+    next: &str,
+) -> Vec<&'a String> {
+    let fields = [
+        format!("transport_id={transport}"),
+        format!("remote_addr={addr}"),
+        format!("from={from}"),
+        format!("next={next}"),
+    ];
+    lines
+        .iter()
+        .filter(|line| {
+            fields
+                .iter()
+                .all(|field| line.split_whitespace().any(|f| f == field))
+        })
+        .collect()
+}
+
+/// A path left after its probes go unanswered logs its change from Live to
+/// Suspect with `timeout_ms`, the probe timeout the probe that timed out
+/// was sent under: here the 400 ms floor, since the clock is frozen and the
+/// path's round trips are 0. The chaos harness reads the field by that
+/// name to allow a switch's ceiling for a timeout above the floor.
+#[tokio::test]
+async fn a_path_gone_suspect_on_unanswered_probes_logs_the_probe_timeout_it_waited_under() {
+    crate::time::freeze();
+    let (mut nodes, b, _, _) = two_transports(1280).await;
+    let t1 = nodes[0].transport_id;
+    let b1 = nodes[1].addr.clone();
+    swap(&mut nodes).await;
+    assert_eq!(active_of(&nodes[0], &b), (t1, b1.clone()), "precondition");
+
+    // From here every frame to B's first address is lost.
+    delay_loopback_delivery(&nodes[1], None);
+    let (logs, guard) = crate::testutil::capture_logs_scoped();
+    for _ in 0..60 {
+        crate::time::advance(Duration::from_millis(50));
+        nodes[0].node.path_tick().await;
+        swap(&mut nodes).await;
+        if active_of(&nodes[0], &b).0 == t2() {
+            break;
+        }
+    }
+    let lines = logs.lines_with("Path state changed");
+    drop(guard);
+    let moved = active_of(&nodes[0], &b).0 == t2();
+    cleanup_nodes(&mut nodes).await;
+    assert!(moved, "A left p within 3 s of the cut");
+    let suspect = changes(&lines, t1, &b1, "Some(Live)", "Some(Suspect)");
+    assert_eq!(suspect.len(), 1, "{lines:#?}");
+    assert_eq!(
+        crate::testutil::log_field(suspect[0], "why"),
+        Some("Timeout"),
+        "{}",
+        suspect[0]
+    );
+    let floor = PathConfig::draft().timeout.as_millis().to_string();
+    assert_eq!(
+        crate::testutil::log_field(suspect[0], "timeout_ms"),
+        Some(floor.as_str()),
+        "{}",
+        suspect[0]
+    );
+}
+
+/// A path made Suspect by a carrier loss logs the change without
+/// `timeout_ms`: no probe timed out.
+#[tokio::test]
+async fn a_path_gone_suspect_on_a_carrier_loss_logs_no_probe_timeout() {
+    crate::time::freeze();
+    let (mut nodes, b, a2, _) = two_transports(1280).await;
+    let t1 = nodes[0].transport_id;
+    let b1 = nodes[1].addr.clone();
+    settle(&mut nodes, &a2).await;
+    carrier(&mut nodes, t1, true).await;
+    exchange(&mut nodes).await;
+    assert_eq!(active_of(&nodes[0], &b), (t1, b1.clone()), "precondition");
+
+    let (logs, guard) = crate::testutil::capture_logs_scoped();
+    carrier(&mut nodes, t1, false).await;
+    let lines = logs.lines_with("Path state changed");
+    drop(guard);
+    cleanup_nodes(&mut nodes).await;
+    let suspect = changes(&lines, t1, &b1, "Some(Live)", "Some(Suspect)");
+    assert_eq!(suspect.len(), 1, "{lines:#?}");
+    assert_eq!(
+        crate::testutil::log_field(suspect[0], "why"),
+        Some("Carrier"),
+        "{}",
+        suspect[0]
+    );
+    assert_eq!(
+        crate::testutil::log_field(suspect[0], "timeout_ms"),
+        None,
+        "{}",
+        suspect[0]
+    );
 }
 
 /// One step of `step` with the standby starved: the clock moves, both nodes

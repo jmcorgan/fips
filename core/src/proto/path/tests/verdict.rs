@@ -45,6 +45,11 @@ enum Frames {
 /// Lose every probe on `p` from 1 s, with `frames` arriving on `p` from
 /// then, and run to `until` milliseconds. Returns `p`'s state changes.
 fn lose(seed: u64, frames: Frames, until: u64) -> Vec<Timed> {
+    lost(seed, frames, until).changes(&p())
+}
+
+/// As [`lose`], returning the whole log.
+fn lost(seed: u64, frames: Frames, until: u64) -> Log {
     let mut n = two(seed);
     let mut log = Log::default();
     run(&mut n, &mut log, 999, &mut all);
@@ -90,7 +95,21 @@ fn lose(seed: u64, frames: Frames, until: u64) -> Vec<Timed> {
             handle(&mut n, &mut log, out, &mut answers);
         }
     }
-    log.changes(&p())
+    log
+}
+
+/// The probe timeouts `p`'s changes to Suspect for unanswered probes
+/// carried in `log`, each at its instant in milliseconds.
+fn suspect_waits(log: &[(u64, Waited)]) -> Vec<(u64, Duration)> {
+    log.iter()
+        .filter(|(_, (to, from, next, why, _))| {
+            *to == p()
+                && *from == Some(PathState::Live)
+                && *next == Some(PathState::Suspect)
+                && *why == Why::Timeout
+        })
+        .map(|&(at, (_, _, _, _, wait))| (at, wait))
+        .collect()
 }
 
 /// `p` turning Suspect at `at` milliseconds for unanswered probes.
@@ -242,5 +261,154 @@ fn a_probe_sent_after_a_long_round_trip_in_the_window_is_counted_at_three_times_
         changes.iter().find(|(_, s)| *s == PathState::Suspect),
         Some(&(6_100, PathState::Suspect)),
         "defect: a probe sent after a long round trip was not given three times it: {changes:?}"
+    );
+}
+
+#[test]
+fn a_change_to_suspect_carries_the_timeout_its_probe_was_sent_under_and_not_the_held_verdicts_wait()
+{
+    // As the first test: the third probe on p, sent at 1.4 s under the
+    // 400 ms floor, is held to the cap by the datagrams and counted at
+    // 4.4 s. Its due instant then is 3 s from its sending; the change
+    // carries the 400 ms it was sent under, not that.
+    let cap = Config::draft().verdict_cap.as_millis() as u64;
+    let log = lost(71, Frames::Data, 6_000);
+    assert_eq!(
+        log.changes(&p()),
+        suspect(1_400 + cap),
+        "precondition: the verdict was held to the cap"
+    );
+    assert_eq!(
+        suspect_waits(&log.waits),
+        alloc::vec![(1_400 + cap, Duration::from_millis(400))],
+        "defect: the change did not carry the timeout its probe was sent under"
+    );
+}
+
+#[test]
+fn a_change_to_suspect_at_the_floor_carries_the_floor() {
+    let log = lost(73, Frames::None, 6_000);
+    assert_eq!(
+        suspect_waits(&log.waits),
+        alloc::vec![(1_800, Config::draft().timeout)],
+        "defect: a change at the floor did not carry the floor"
+    );
+}
+
+#[test]
+fn every_change_a_probe_timeout_makes_carries_a_timeout_and_no_other_change_does() {
+    // With nothing arriving, p goes Suspect, then Dead after ten more: two
+    // changes for timeouts, each carrying the floor its probe went under.
+    let log = lost(73, Frames::None, 30_000);
+    assert_eq!(
+        log.changes(&p()).iter().map(|c| c.3).collect::<Vec<_>>(),
+        alloc::vec![Why::Timeout, Why::Retired],
+        "precondition: p went Suspect and Dead for unanswered probes"
+    );
+    let waits: Vec<(Why, Duration)> = log.waits.iter().map(|(_, w)| (w.3, w.4)).collect();
+    let floor = Config::draft().timeout;
+    assert_eq!(
+        waits,
+        alloc::vec![(Why::Timeout, floor), (Why::Retired, floor)],
+        "defect: a change for unanswered probes did not carry the floor its probe went under"
+    );
+    // A candidate admitted, probed and answered: changes for no timeout.
+    let mut n = Node::capable(73);
+    let mut log = Log::default();
+    let out = n.candidate(t(2), addr(2));
+    handle(&mut n, &mut log, out, &mut all);
+    assert!(
+        log.states.len() >= 2,
+        "precondition: the candidate was admitted and answered: {:?}",
+        log.states
+    );
+    assert_eq!(
+        log.waits,
+        Vec::new(),
+        "defect: a change no probe timeout made carried a timeout"
+    );
+}
+
+/// A change of p's state at an instant in milliseconds, with the probe
+/// timeout p would give a probe sent then.
+type Seen = (u64, PathState, Duration);
+
+/// Run `two` under `rtt` to `until` milliseconds, and return the changes
+/// that carried a probe timeout and, at each change of p's state, the probe
+/// timeout p would give a probe sent then.
+fn timed(
+    rtt: &dyn Fn(u64, &PathRef) -> Option<u64>,
+    until: u64,
+) -> (Vec<(u64, Waited)>, Vec<Seen>) {
+    let cfg = Config::draft();
+    let mut net = Net::new(rtt);
+    let mut n = two(74);
+    let mut changes: Vec<Seen> = Vec::new();
+    let mut watch = |n: &Node, at: u64| {
+        let s = state(n, &p());
+        if changes.last().is_none_or(|&(_, last, _)| last != s) {
+            let now = path(n, &p()).live().timeout(cfg.timeout, cfg.verdict_cap);
+            changes.push((at, s, now));
+        }
+    };
+    net.run(&mut n, until, &mut watch);
+    (net.waits, changes)
+}
+
+#[test]
+fn a_change_to_suspect_after_a_long_round_trip_in_the_window_carries_three_times_it() {
+    // As the test before: the third lost probe, sent at 3.4 s under 2.7 s,
+    // makes p Suspect at 6.1 s and the change carries 2.7 s.
+    let rtt = |at: u64, to: &PathRef| {
+        if *to != p() {
+            return Some(0);
+        }
+        match at {
+            1_000 => Some(900),
+            a if a >= 3_000 => None,
+            _ => Some(0),
+        }
+    };
+    let (waits, _) = timed(&rtt, 10_000);
+    assert_eq!(
+        suspect_waits(&waits),
+        alloc::vec![(6_100, Duration::from_millis(2_700))],
+        "defect: the change did not carry three times the window's largest round trip"
+    );
+}
+
+#[test]
+fn a_round_trip_learned_after_the_judged_probes_went_does_not_reach_the_timeout_the_change_carries()
+{
+    // Every probe on p from 3 s is lost but the one at 3.0 s, answered
+    // 700 ms later, at 3.7 s, after its 400 ms timeout. The probes at 3.0,
+    // 3.2 and 3.4 s, each sent under the floor, are counted at 3.4, 3.6 and
+    // 3.8 s, so p is Suspect at 3.8 s. The late answer has by then raised
+    // the timeout a probe sent at 3.8 s would get to three times 700 ms;
+    // the change carries the 400 ms the judged probes went under.
+    let rtt = |at: u64, to: &PathRef| {
+        if *to != p() {
+            return Some(0);
+        }
+        match at {
+            3_000 => Some(700),
+            a if a > 3_000 => None,
+            _ => Some(0),
+        }
+    };
+    let (waits, changes) = timed(&rtt, 6_000);
+    let at_suspect = changes
+        .iter()
+        .find(|(_, s, _)| *s == PathState::Suspect)
+        .copied();
+    assert_eq!(
+        at_suspect,
+        Some((3_800, PathState::Suspect, Duration::from_millis(2_100))),
+        "precondition: p went Suspect at 3.8 s after the late answer raised its timeout: {changes:?}"
+    );
+    assert_eq!(
+        suspect_waits(&waits),
+        alloc::vec![(3_800, Duration::from_millis(400))],
+        "defect: the change carried a timeout later than the one its probes were sent under"
     );
 }

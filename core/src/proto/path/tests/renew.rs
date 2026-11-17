@@ -126,6 +126,7 @@ fn logged(out: &[Out]) -> Vec<Logged> {
                 from,
                 next,
                 why,
+                ..
             } = o
             else {
                 return None;
