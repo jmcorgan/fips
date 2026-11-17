@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::config::UsbConfig;
+use crate::peer::PathState;
 use crate::transport::usb::{UsbLink, UsbLinkQueue, UsbTransport};
 use crate::transport::{TransportHandle, TransportId, packet_channel};
 use spanning_tree::{TestNode, cleanup_nodes, process_available_packets};
@@ -104,6 +105,163 @@ async fn a_cable_makes_two_nodes_peers() {
     assert!(
         nodes[1].node.get_peer(&addr_0).is_some(),
         "node 1 should have node 0 as peer"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// Two links joined through relay tasks the test can kill, so the cable can
+/// be pulled: aborting the relays closes both ends, as an unplug does.
+fn cable(a_label: &str, b_label: &str) -> (UsbLink, UsbLink, Vec<tokio::task::JoinHandle<()>>) {
+    use tokio::sync::mpsc;
+    fn relay(
+        mut from: mpsc::Receiver<Vec<u8>>,
+        to: mpsc::Sender<Vec<u8>>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(chunk) = from.recv().await {
+                if to.send(chunk).await.is_err() {
+                    break;
+                }
+            }
+        })
+    }
+    let (a_tx, a_out) = mpsc::channel(8);
+    let (b_in_tx, b_rx) = mpsc::channel(8);
+    let (b_tx, b_out) = mpsc::channel(8);
+    let (a_in_tx, a_rx) = mpsc::channel(8);
+    let relays = vec![relay(a_out, b_in_tx), relay(b_out, a_in_tx)];
+    (
+        UsbLink {
+            label: a_label.into(),
+            rx: a_rx,
+            tx: a_tx,
+        },
+        UsbLink {
+            label: b_label.into(),
+            rx: b_rx,
+            tx: b_tx,
+        },
+        relays,
+    )
+}
+
+/// Pulling the cable removes the peer on both ends within a fast path tick
+/// or two, not after the link-dead timeout: the transport reports the link
+/// closed and the node acts on it.
+#[tokio::test]
+async fn pulling_the_cable_removes_the_peer_at_once() {
+    let (n0, links0) = make_test_node_usb().await;
+    let (n1, links1) = make_test_node_usb().await;
+    let mut nodes = vec![n0, n1];
+
+    let (a, b, relays) = cable("acc0", "host/1-1");
+    links0.push(a);
+    links1.push(b);
+    wait_for_link(&nodes[0], "acc0").await;
+    wait_for_link(&nodes[1], "host/1-1").await;
+    settle(&mut nodes).await;
+    let addr_0 = *nodes[0].node.node_addr();
+    let addr_1 = *nodes[1].node.node_addr();
+    assert!(
+        nodes[0].node.get_peer(&addr_1).is_some(),
+        "peered before the pull"
+    );
+    assert!(
+        nodes[1].node.get_peer(&addr_0).is_some(),
+        "peered before the pull"
+    );
+
+    for relay in relays {
+        relay.abort();
+    }
+    let pulled = std::time::Instant::now();
+    loop {
+        for n in nodes.iter_mut() {
+            n.node.read_closed_links().await;
+        }
+        if nodes[0].node.get_peer(&addr_1).is_none() && nodes[1].node.get_peer(&addr_0).is_none() {
+            break;
+        }
+        assert!(
+            pulled.elapsed() < Duration::from_secs(1),
+            "peers still present a second after the cable was pulled"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The active path, as (transport, address), of `tn`'s link to `peer`.
+fn active_at(tn: &TestNode, peer: &NodeAddr) -> Option<(TransportId, TransportAddr)> {
+    let path = tn.node.get_peer(peer)?.active_path()?;
+    Some((path.transport_id(), path.addr().clone()))
+}
+
+/// A link ending under the active path of a link that holds another Live
+/// path moves the link onto that path at once and keeps the peer and its
+/// session: no removal and no handshake. The ending is reported as a USB
+/// transport reports a pulled cable, here by the loopback test transport.
+#[tokio::test]
+async fn a_closed_link_under_the_active_path_moves_the_link_to_its_other_path() {
+    let (mut nodes, b, _a2, b2) = super::paths::two_transports(1280).await;
+    let t1 = nodes[0].transport_id;
+    let b1 = nodes[1].addr.clone();
+    let t2 = super::paths::t2();
+    assert_eq!(
+        active_at(&nodes[0], &b),
+        Some((t1, b1.clone())),
+        "precondition: p is active"
+    );
+    let session = nodes[0].node.get_peer(&b).unwrap().their_index();
+    assert!(session.is_some(), "precondition: the link has a session");
+
+    super::paths::loopback(&nodes[0], t1).end_link(&b1);
+    nodes[0].node.read_closed_links().await;
+
+    let peer = nodes[0].node.get_peer(&b);
+    assert!(peer.is_some(), "the peer is kept: it has another path");
+    assert_eq!(
+        active_at(&nodes[0], &b),
+        Some((t2, b2.clone())),
+        "the link moved to q at once"
+    );
+    assert_eq!(
+        peer.unwrap().their_index(),
+        session,
+        "the session is kept: no new handshake"
+    );
+    assert_ne!(
+        super::paths::state_at(&nodes[0], &b, t1, &b1),
+        Some(PathState::Live),
+        "p is no longer Live"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// A link ending under a standby path leaves the active path where it is.
+#[tokio::test]
+async fn a_closed_link_under_a_standby_path_leaves_the_active_path() {
+    let (mut nodes, b, _a2, b2) = super::paths::two_transports(1280).await;
+    let t1 = nodes[0].transport_id;
+    let b1 = nodes[1].addr.clone();
+    let t2 = super::paths::t2();
+
+    super::paths::loopback(&nodes[0], t2).end_link(&b2);
+    nodes[0].node.read_closed_links().await;
+
+    assert!(nodes[0].node.get_peer(&b).is_some(), "the peer is kept");
+    assert_eq!(
+        active_at(&nodes[0], &b),
+        Some((t1, b1)),
+        "the active path is unchanged"
+    );
+    assert_ne!(
+        super::paths::state_at(&nodes[0], &b, t2, &b2),
+        Some(PathState::Live),
+        "q is no longer Live"
     );
 
     cleanup_nodes(&mut nodes).await;

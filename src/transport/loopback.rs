@@ -66,6 +66,9 @@ pub struct LoopbackTransport {
     /// test say whether a connection a connection-oriented transport would
     /// hold was kept or closed.
     closed: Mutex<Vec<TransportAddr>>,
+    /// Links a test has ended as though their far end went (a cable
+    /// pulled), until the node takes them with `take_closed_links`.
+    ended: Mutex<Vec<TransportAddr>>,
     /// Carrier a test has set, standing in for an interface-bound
     /// transport's `IFF_RUNNING`. `None`, the default: not bound to an
     /// interface, so no presence is reported.
@@ -119,6 +122,7 @@ impl LoopbackTransport {
             ty: TransportType::LOOPBACK,
             accepts: AtomicBool::new(true),
             closed: Mutex::new(Vec::new()),
+            ended: Mutex::new(Vec::new()),
             carrier: Mutex::new(None),
             unconnected: AtomicBool::new(false),
             unreachable: AtomicBool::new(false),
@@ -220,6 +224,21 @@ impl LoopbackTransport {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(addr.clone());
+    }
+
+    /// End the link to `addr` as though its far end went, as a USB
+    /// transport reports a pulled cable: the node's next read of closed links
+    /// takes it.
+    pub fn end_link(&self, addr: &TransportAddr) {
+        self.ended
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(addr.clone());
+    }
+
+    /// The links ended since the last call.
+    pub fn take_closed_links(&self) -> Vec<TransportAddr> {
+        std::mem::take(&mut *self.ended.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// The addresses the node has asked to close on this transport, in
