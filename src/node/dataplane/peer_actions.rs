@@ -205,13 +205,21 @@ impl Node {
                         // address (for an inbound connection, the initiator's
                         // ephemeral port) would hold the rx loop for up to the
                         // connect timeout.
-                        let send_err = match self.transports.get(&ambient.transport_id) {
-                            Some(transport) => transport
-                                .send_existing(&ambient.remote_addr, &frame)
-                                .await
-                                .err(),
+                        let sent = match self.transports.get(&ambient.transport_id) {
+                            Some(transport) => {
+                                Some(transport.send_existing(&ambient.remote_addr, &frame).await)
+                            }
                             None => None,
                         };
+                        // From its first send on, the stored msg2 answers only
+                        // the msg1 it was written for (the short-circuit in
+                        // `handle_msg1`).
+                        if matches!(sent, Some(Ok(_)))
+                            && let Some(machine) = self.peer_machines.get_mut(&link)
+                        {
+                            machine.note_msg2_sent();
+                        }
+                        let send_err = sent.and_then(Result::err);
                         if let Some(e) = send_err {
                             // A transient refusal is not a failed handshake. The
                             // interface under this transport is absent or

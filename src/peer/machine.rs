@@ -491,6 +491,9 @@ pub(crate) struct PeerMachine {
     /// The framed msg1 an inbound leg was set up by, kept until the work that
     /// follows its promotion records it on the peer.
     held_msg1: Option<Vec<u8>>,
+    /// The stored msg2 of this inbound leg has been sent at least once. From
+    /// then on the msg2 answers only the msg1 it was written for.
+    msg2_sent: bool,
 
     // --- timing (control tier) ---
     last_heartbeat_sent_ms: u64,
@@ -516,6 +519,7 @@ impl PeerMachine {
             pending_msg2_payload: None,
             send_failed: false,
             held_msg1: None,
+            msg2_sent: false,
             last_heartbeat_sent_ms: 0,
             origin: DialOrigin::Addressed,
             held: None,
@@ -536,6 +540,7 @@ impl PeerMachine {
             pending_msg2_payload: None,
             send_failed: false,
             held_msg1: None,
+            msg2_sent: false,
             last_heartbeat_sent_ms: 0,
             origin: DialOrigin::Addressed,
             held: None,
@@ -546,6 +551,16 @@ impl PeerMachine {
     /// the work that follows its promotion.
     pub(crate) fn hold_msg1(&mut self, msg1: Vec<u8>) {
         self.held_msg1 = Some(msg1);
+    }
+
+    /// Record that this inbound leg's stored msg2 has been sent.
+    pub(crate) fn note_msg2_sent(&mut self) {
+        self.msg2_sent = true;
+    }
+
+    /// Whether this inbound leg's stored msg2 has been sent.
+    pub(crate) fn msg2_sent(&self) -> bool {
+        self.msg2_sent
     }
 
     /// Take the framed msg1 this inbound leg was set up by, if one is held.

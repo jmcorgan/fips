@@ -776,7 +776,22 @@ impl Node {
         if let Some(&existing_link_id) = self.links.index().get(&addr_key)
             && let Some(link) = self.links.get(&existing_link_id)
         {
-            if link.direction() == LinkDirection::Inbound {
+            // Once sent, a stored msg2 answers only the msg1 it was written
+            // for. Any other msg1 from this address, such as a fresh dial of
+            // the same peer or a capture spoofed from it, is read and
+            // classified below rather than answered with keys it does not
+            // hold.
+            let own_msg1 = self.peer_machines.get(&existing_link_id).is_none_or(|m| {
+                !m.msg2_sent() || m.conn_msg1_digest() == Some(Msg1Digest::of(&packet.data))
+            });
+            if link.direction() == LinkDirection::Inbound && !own_msg1 {
+                debug!(
+                    remote_addr = %packet.remote_addr,
+                    transport_id = %packet.transport_id,
+                    link_id = %existing_link_id,
+                    "Msg1 from the address of a pending inbound link is not the msg1 its sent msg2 answers, classifying it"
+                );
+            } else if link.direction() == LinkDirection::Inbound {
                 let is_active_peer = self.peers.values().any(|p| p.link_id() == existing_link_id);
                 if !is_active_peer {
                     // Genuinely pending handshake — resend msg2.
@@ -785,6 +800,9 @@ impl Node {
                         if let Some(transport) = self.transports.get(&packet.transport_id) {
                             match transport.send_existing(&packet.remote_addr, &msg2).await {
                                 Ok(_) => {
+                                    if let Some(m) = self.peer_machines.get_mut(&existing_link_id) {
+                                        m.note_msg2_sent();
+                                    }
                                     debug!(
                                         remote_addr = %packet.remote_addr,
                                         transport_id = %packet.transport_id,
