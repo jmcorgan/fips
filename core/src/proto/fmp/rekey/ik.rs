@@ -50,6 +50,15 @@ impl<E> fmt::Debug for FmpIk<E> {
     }
 }
 
+/// Where a rekey msg2 arrived: the link profile's reply route. Past its
+/// budget of refused reads an attempt reads only a msg2 that arrived on
+/// the peer's link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Arrived {
+    /// The msg2 arrived on the peer's established link.
+    pub on_link: bool,
+}
+
 /// The epoch keys of a link: a Noise session authenticating the 16-byte
 /// established-frame header.
 pub type LinkKeys = NoiseKeys<ESTABLISHED_HEADER_SIZE>;
@@ -172,7 +181,7 @@ impl<E: EntropySource + 'static> Profile for FmpIk<E> {
     type Indices = IndexAllocator<E>;
     type Transport = TransportId;
     type Carrier = ();
-    type Route = ();
+    type Route = Arrived;
     type Ext = ();
     type LocalKeys = NodeKeys;
     type Fsp = Infallible;
@@ -248,6 +257,11 @@ impl<E: EntropySource + 'static> Profile for FmpIk<E> {
 
     fn is_probe(_: &[u8]) -> bool {
         false
+    }
+
+    /// A rekey msg2 is capped by where it arrived.
+    fn arrived(route: &Arrived) -> Option<bool> {
+        Some(route.on_link)
     }
 }
 

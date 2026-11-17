@@ -239,6 +239,7 @@ pub fn class(
         Reason::IndexExhausted
         | Reason::HandshakeWrite
         | Reason::ReplyUnauthenticated
+        | Reason::ReplyUnread
         | Reason::LateReply
         | Reason::UnknownAttempt
         | Reason::UnknownIndex

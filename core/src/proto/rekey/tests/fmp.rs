@@ -1223,17 +1223,20 @@ fn every_ik_reply_cell_takes_its_rows_action() {
     let (_, other) = <Ik as Profile>::initiate(&a.local, &b.local.key, Some(101)).expect("writes");
     let tok = read_msg1(&b.local, &other).expect("reads");
     let (_, foreign) = tok.get().answer(&b.local, Some(55)).expect("answers");
-    for bad in [flipped, short, foreign] {
+    // Each refused read is counted against the attempt's budget, and
+    // that count is all it changes.
+    for (n, bad) in [flipped, short, foreign].into_iter().enumerate() {
         assert_eq!(
             a.recv(T + 15, &Msg::Hs(MsgKind::Msg2, bad)),
             vec![Ev::Reject(Reason::ReplyUnauthenticated)]
         );
         assert_eq!(
             a.digest(),
-            before,
+            before.replace("misreads: 0", &format!("misreads: {}", n + 1)),
             "handshake, schedule and deadline unchanged"
         );
     }
+    let before = a.digest();
     let mut stray = m2.clone();
     stray[5..9].copy_from_slice(&7u32.to_le_bytes());
     assert_eq!(
@@ -1694,5 +1697,136 @@ fn a_copy_off_the_link_is_still_refused_as_off_link_and_a_fresh_msg1_on_it_is_st
     assert!(
         evs.iter().any(|e| matches!(e, Ev::Send(MsgKind::Msg2, ..))),
         "a fresh msg1 off a link that cannot be reached is answered as a rekey: {evs:?}"
+    );
+}
+
+/// Refused replies `a` takes at most before it reads only those on the
+/// link: `Config::fmp().reads`.
+const READS: usize = 8;
+
+/// `a`'s rekey of `b` started at `T`, `b`'s genuine msg2, and a reply under
+/// the attempt's index that does not read.
+fn rekey_in_flight() -> (Node<Ik>, Vec<u8>, Vec<u8>) {
+    let (mut a, mut b) = link();
+    a.poll(T);
+    let m1 = last(&mut a.wire, MsgKind::Msg1);
+    b.recv(T + 10, &m1);
+    let m2 = bytes(&last(&mut b.wire, MsgKind::Msg2));
+    let mut forged = m2.clone();
+    let n = forged.len() - 1;
+    forged[n] ^= 1;
+    (a, m2, forged)
+}
+
+/// Step `bytes` into `a` at `now` as a reply that arrived on the link or
+/// off it.
+fn reply(a: &mut Node<Ik>, now: u64, bytes: &[u8], on_link: bool) -> Vec<Ev<u8>> {
+    a.step(
+        now,
+        Input::Reply {
+            bytes,
+            route: on_link,
+        },
+    )
+}
+
+/// The events of a reply that completes `a`'s attempt.
+fn completes() -> Vec<Ev<u8>> {
+    vec![
+        Ev::Unbind(1, 101),
+        Ev::Bind(1, 101, Some(tag(1)), Purpose::Pending),
+    ]
+}
+
+#[test]
+fn refused_replies_from_off_the_link_are_read_only_up_to_the_budget_and_the_genuine_one_completes()
+{
+    let (mut a, m2, forged) = rekey_in_flight();
+    let refused: Vec<Vec<Ev<u8>>> = (0..1_000)
+        .map(|_| reply(&mut a, T + 15, &forged, false))
+        .collect();
+    let read = refused
+        .iter()
+        .filter(|e| **e == vec![Ev::Reject(Reason::ReplyUnauthenticated)])
+        .count();
+    assert!(
+        read <= READS,
+        "defect: {read} forged replies from off the link were read, past the budget of {READS}"
+    );
+    assert_eq!(
+        refused[..READS],
+        vec![vec![Ev::Reject(Reason::ReplyUnauthenticated)]; READS],
+        "the budget is spent on the first {READS}, each read and refused"
+    );
+    assert!(
+        refused[READS..]
+            .iter()
+            .all(|e| *e == vec![Ev::Reject(Reason::ReplyUnread)]),
+        "every reply past the budget from off the link is dropped unread"
+    );
+    assert_eq!(
+        a.m().view().cycle,
+        CycleView::Init,
+        "the attempt is still in flight"
+    );
+    assert_eq!(reply(&mut a, T + 20, &m2, true), completes());
+}
+
+/// Spend `a`'s budget with forged replies from off the link.
+fn spend(a: &mut Node<Ik>, forged: &[u8]) {
+    for _ in 0..READS {
+        assert_eq!(
+            reply(a, T + 15, forged, false),
+            vec![Ev::Reject(Reason::ReplyUnauthenticated)]
+        );
+    }
+}
+
+#[test]
+fn a_reply_on_the_link_is_read_after_the_budget_is_spent() {
+    let (mut a, m2, forged) = rekey_in_flight();
+    spend(&mut a, &forged);
+    assert_eq!(
+        reply(&mut a, T + 15, &forged, false),
+        vec![Ev::Reject(Reason::ReplyUnread)],
+        "the budget is spent"
+    );
+    assert_ne!(
+        reply(&mut a, T + 16, &forged, true),
+        vec![Ev::Reject(Reason::ReplyUnread)],
+        "defect: a reply from the link was dropped unread after the budget was spent"
+    );
+    assert_eq!(
+        reply(&mut a, T + 17, &forged, true),
+        vec![Ev::Reject(Reason::ReplyUnauthenticated)],
+        "a reply from the link is read, and a forged one refused"
+    );
+    assert_eq!(reply(&mut a, T + 20, &m2, true), completes());
+}
+
+#[test]
+fn each_attempt_has_its_own_budget_of_refused_reads() {
+    let (mut a, _, forged) = rekey_in_flight();
+    spend(&mut a, &forged);
+    assert_eq!(
+        reply(&mut a, T + 15, &forged, false),
+        vec![Ev::Reject(Reason::ReplyUnread)],
+        "the first attempt's budget is spent"
+    );
+    // The attempt ends unanswered at its deadline, and the next starts
+    // after the backoff with an index of its own.
+    for s in 1..=30u64 {
+        a.poll(T + s * 1_000);
+    }
+    let evs = a.poll(T + 38_000);
+    let Some(&Ev::Bind(_, index, None, Purpose::Attempt)) = evs.first() else {
+        panic!("a new attempt starts after the backoff: {evs:?}");
+    };
+    let mut again = forged.clone();
+    again[5..9].copy_from_slice(&index.to_le_bytes());
+    assert_eq!(
+        reply(&mut a, T + 38_015, &again, false),
+        vec![Ev::Reject(Reason::ReplyUnauthenticated)],
+        "the new attempt reads a reply from off the link"
     );
 }

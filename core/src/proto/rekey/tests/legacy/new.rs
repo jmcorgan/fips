@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use super::{Class, E, End, Got, Ik, Out, Pkt, Xk};
 use crate::identity::NodeAddr;
 use crate::noise::aead::{Aead, nonce};
-use crate::proto::fmp::rekey::ik::read_msg1;
+use crate::proto::fmp::rekey::ik::{Arrived, read_msg1};
 use crate::proto::fmp::wire::{EncryptedHeader, Msg2Header, build_established_header};
 use crate::proto::fsp::wire::{FSP_FLAG_K, FspEncryptedHeader, build_fsp_header};
 use crate::proto::link::LinkMessageType;
@@ -457,7 +457,14 @@ impl End for NewFmp {
             Some(2) => {
                 match Msg2Header::parse(bytes) {
                     Some(h) if self.bound.contains_key(&h.receiver_idx.as_u32()) => {
-                        self.step(now, Input::Reply { bytes, route: () }, out);
+                        self.step(
+                            now,
+                            Input::Reply {
+                                bytes,
+                                route: Arrived { on_link: true },
+                            },
+                            out,
+                        );
                     }
                     Some(_) | None => self.notes.push(String::from("msg2 for no bound index")),
                 }

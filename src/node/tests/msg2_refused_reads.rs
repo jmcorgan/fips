@@ -4,10 +4,13 @@
 //! A msg2 names the dialling node's pending attempt by the index that travels
 //! in cleartext in msg1, so anyone who saw the msg1 can send msg2s under it.
 //! Nothing short of reading a msg2 tells the responder's from a forgery, and a
-//! forgery must not end the attempt, so every one is read. Each refused read
-//! runs one DH, `ee`; the `es` value msg2 mixes again is the one msg1 already
-//! computed. These tests count the DHs across the refused reads, then deliver
-//! the genuine msg2 and check that it completes the first dial or the rekey.
+//! forgery must not end the attempt, so every one is read: every one of a
+//! first dial's, and every one of a rekey's that arrives on the peer's link,
+//! which is where these tests send them (a rekey reads only a budget of those
+//! from elsewhere; see `rekey_msg2_cap.rs`). Each refused read runs one DH,
+//! `ee`; the `es` value msg2 mixes again is the one msg1 already computed.
+//! These tests count the DHs across the refused reads, then deliver the
+//! genuine msg2 and check that it completes the first dial or the rekey.
 
 use super::*;
 use crate::node::tests::session::{HeldMsg2Pair, build_ipv6_packet, rekey_pair_with_held_msg2};

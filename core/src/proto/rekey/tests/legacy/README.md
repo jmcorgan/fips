@@ -40,8 +40,8 @@ feature: GitHub CI's Linux job runs it on every push, local CI with
   shell that executes the outputs as the root crate's shell will (sends,
   prompts sealed at once, the index map from `Bind` and `Unbind`, leases
   returned on `Release`, and for a session a poll before a setup whenever
-  a deadline or start instant of the machine has come), frames every
-  message with the
+  a deadline or start instant of the machine has come; a link msg2 is
+  handed over as arrived on the link), frames every message with the
   deployed codecs, and for a link keeps the deployed 10 s heartbeat and
   30 s link-dead reap on `view().last_rx`.
 - `fmp.rs`: `FmpPeer`, a deployed node's link to one peer, and the link

@@ -483,6 +483,7 @@ const LINK_AGE: Duration = Duration::from_secs(40);
 /// session: its msg1, `to`'s answer into a responder pending, and the msg2
 /// that completes `from`'s attempt.
 fn rekey_to_pending(from: &mut End, to: &mut End) {
+    use fips_core::proto::fmp::rekey::ik::Arrived;
     use fips_core::proto::rekey::{Arrival, Input, MsgKind};
     let out = from
         .peer
@@ -500,7 +501,7 @@ fn rekey_to_pending(from: &mut End, to: &mut End) {
     let msg2 = sent(&out, MsgKind::Msg2);
     from.step(Input::Reply {
         bytes: &msg2,
-        route: (),
+        route: Arrived { on_link: true },
     });
     assert_eq!(from.peer.pending_role(), Some(Role::Initiator));
     assert_eq!(to.peer.pending_role(), Some(Role::Responder));

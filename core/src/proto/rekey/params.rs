@@ -106,6 +106,13 @@ pub struct Config {
     /// a msg1 that arrived on the established link; one accepted off a
     /// link that cannot be reached is answered on the established link.
     pub arrival: bool,
+    /// The replies an own attempt reads and refuses before it reads only
+    /// one that arrived on the established link, for a profile that caps
+    /// them (the link's IK msg2s): anyone who saw the attempt's msg1 can
+    /// send msg2s under its cleartext index, and each costs a read. 8, the
+    /// node's bound on replayed msg1s per peer, a local choice with no
+    /// measured basis.
+    pub reads: u8,
 }
 
 impl Config {
@@ -137,6 +144,7 @@ impl Config {
             hard: u64::MAX - (1 << 20) + 1,
             delay: Duration::from_secs(2),
             arrival: false,
+            reads: 8,
         }
     }
 

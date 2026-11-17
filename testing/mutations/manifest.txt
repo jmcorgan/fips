@@ -76,8 +76,8 @@ ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dia
 OutputsBeforeInstall	red	fips-mesh	node::tests::decrypt_replay::a_promoted_session_reaches_the_decrypt_workers_with_the_peers_total
 MoveSkipsWorkerOffer	red	fips-mesh	node::tests::settle::explore::oracle::a_crossing_with_the_worker_pool_started_offers_the_moved_session
 MoveSkipsWorkerOffer	red	fips-mesh	node::tests::settle::explore::oracle::a_crossing_with_the_worker_pool_started_offers_the_moved_session_with_multipath_on
-YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::fsp::every_xk_final_cell_takes_its_rows_action	core/src/proto/rekey/tests/fsp.rs:353
-YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::fsp::late_first_handshake_setup_copy_never_moves_the_smaller_node_off_its_confirmed_epoch	core/src/proto/rekey/tests/fsp.rs:1477
+YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::fsp::every_xk_final_cell_takes_its_rows_action	core/src/proto/rekey/tests/fsp.rs:373
+YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::fsp::late_first_handshake_setup_copy_never_moves_the_smaller_node_off_its_confirmed_epoch	core/src/proto/rekey/tests/fsp.rs:1497
 YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::sim::crossing_runs_converge_with_only_the_tie_break_outcomes	reported FinalNoAttempt
 YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::sim::clean_runs_rotate_on_cadence_with_no_reject_abandon_revert_or_assumed_cutover	reported FinalNoAttempt
 YieldKeepsOwnAttempt	red	fips-mesh	node::tests::session::simultaneous_initiation_converges_with_no_rekey_armed	no setup may reach an established end
@@ -428,3 +428,9 @@ RedialNoSessionReopen	red	fips-mesh	node::tests::roam_rekey_unseen::a_rekey_msg1
 RedialNoSessionReopen	red	fips-mesh	node::tests::roam_rekey_unseen::a_rekey_msg1_from_an_address_the_responder_has_not_seen_keeps_end_to_end_traffic_flowing_both_ways_multipath_on
 RedialSkipsAcl	red	fips-mesh	node::tests::roam_gates::a_redial_from_an_identity_the_acl_denies_is_refused_before_an_index_is_allocated
 RedialKeptAtDisconnect	red	fips-mesh	node::tests::roam_gates::an_admin_disconnect_of_the_held_peer_drops_its_pending_redial_and_a_later_frame_promotes_nothing
+CapIgnored	red	fips-core	proto::rekey::tests::fmp::refused_replies_from_off_the_link_are_read_only_up_to_the_budget_and_the_genuine_one_completes
+CapIgnored	red	fips-mesh	node::tests::rekey_msg2_cap::a_spray_of_forged_rekey_msg2s_costs_at_most_its_budget_of_reads_and_the_genuine_one_completes
+CapIgnored	red	fips-mesh	node::tests::rekey_msg2_cap::a_spray_of_forged_rekey_msg2s_costs_at_most_its_budget_of_reads_and_the_genuine_one_completes_with_multipath_on
+CapDropsOnLink	red	fips-core	proto::rekey::tests::fmp::a_reply_on_the_link_is_read_after_the_budget_is_spent
+CapDropsOnLink	red	fips-mesh	node::tests::rekey_msg2_cap::the_genuine_rekey_msg2_from_the_established_link_is_read_after_the_budget_is_spent
+CapDropsOnLink	red	fips-mesh	node::tests::rekey_msg2_cap::the_genuine_rekey_msg2_from_the_established_link_is_read_after_the_budget_is_spent_with_multipath_on

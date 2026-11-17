@@ -18,7 +18,10 @@ steps it with every frame its decrypt workers do not take.
   at its answer, the initiator cuts over at the next poll, frames found by
   receiver index, a Heartbeat as the prompt. It writes msg1 and msg2 in
   the 114- and 69-byte link framing (`proto::fmp::wire`) around the Noise
-  IK messages, reads a msg2 on a fork of the attempt's handshake, and
+  IK messages, reads a msg2 on a fork of the attempt's handshake (its
+  route, `Arrived`, says whether it came on the peer's link, so an
+  attempt that has refused its budget of reads drops one from off the
+  link unread), and
   binds every epoch to `LinkKeys` (a Noise session authenticating the
   16-byte established header). Also `read_msg1`, the node-level read of a
   peer's msg1 under this node's static key, which mints the replayable

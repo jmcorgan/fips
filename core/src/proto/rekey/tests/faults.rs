@@ -629,6 +629,17 @@ const ROWS: &[Row] = &[
         &[(SIM, "simulator_replay_from_a_seed_is_byte_identical")],
     ),
     (
+        &[Fault::CapIgnored],
+        &[(
+            FMP,
+            "refused_replies_from_off_the_link_are_read_only_up_to_the_budget_and_the_genuine_one_completes",
+        )],
+    ),
+    (
+        &[Fault::CapDropsOnLink],
+        &[(FMP, "a_reply_on_the_link_is_read_after_the_budget_is_spent")],
+    ),
+    (
         &[Fault::TriggerForced],
         &[(
             FMP,

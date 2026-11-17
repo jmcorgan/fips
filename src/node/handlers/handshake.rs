@@ -15,7 +15,7 @@ use crate::peer::machine::{
     PeerMachine, PeerState, TimerKind,
 };
 use crate::peer::{LinkCaps, Match, PathCaps};
-use crate::proto::fmp::rekey::ik::read_msg1;
+use crate::proto::fmp::rekey::ik::{Arrived, read_msg1};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::proto::fmp::{
     EphemeralDigest, EstablishSnapshot, EstablishView, InboundDecision, InboundReject, LegStamp,
@@ -1674,35 +1674,13 @@ impl Node {
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return LinkVerdict::Done;
         };
-        // On this peer's link: from a path the peer holds that is proven at
-        // this end (Live or acked; the original path is both), or, on a link
-        // whose peer is not capable, from a pair the peer holds no path for
-        // that a link index entry maps to its link. That is FRC-1201
-        // Section 5.7's setup address, such as the address the link was set
-        // up at after its one path followed the peer elsewhere, or a
-        // hostname-keyed dial address beside a numeric current address. On a
-        // link whose peer is capable such a pair is off the link (multipath
-        // draft Section 5.10). A held path still Probing is treated as no
-        // path, even where a link index entry maps its pair to the link:
-        // the machine then refuses the msg1 while the established link is
-        // reachable and accepts it once the link is down. `proven` keeps
-        // whether the pair is a proven path, for the answer's route below;
-        // the link step does not change the peer's paths.
-        let (on_link, proven) = self.peers.get(peer).map_or((false, false), |p| {
-            match p.path_match(packet.transport_id, &packet.remote_addr) {
-                Match::Proven { .. } => (true, true),
-                Match::Unproven => (false, false),
-                Match::None => (
-                    !p.bundle().is_some_and(|b| b.capable())
-                        && self
-                            .links
-                            .index()
-                            .get(&(packet.transport_id, packet.remote_addr.clone()))
-                            == Some(&p.link_id()),
-                    false,
-                ),
-            }
-        });
+        // A held path still Probing is treated as no path, even where a
+        // link index entry maps its pair to the link: the machine then
+        // refuses the msg1 while the established link is reachable and
+        // accepts it once the link is down. `proven` keeps whether the pair
+        // is a proven path, for the answer's route below; the link step
+        // does not change the peer's paths.
+        let (on_link, proven) = self.link_arrival(peer, packet);
         // Only a heard peering is redialed (operator decision, 2026-11-17):
         // a fresh msg1 off the link of an unheard one keeps the replacement
         // at the msg1 and its floors.
@@ -1928,15 +1906,47 @@ impl Node {
         }
     }
 
+    /// Whether `packet` arrived on `peer`'s link, and whether its pair is a
+    /// path of the peer's proven at this end. On the link: from a path the
+    /// peer holds that is proven at this end (Live or acked; the original
+    /// path is both), or, on a link whose peer is not capable, from a pair
+    /// the peer holds no path for that a link index entry maps to its
+    /// link. That is FRC-1201 Section 5.7's setup address, such as the
+    /// address the link was set up at after its one path followed the peer
+    /// elsewhere, or a hostname-keyed dial address beside a numeric current
+    /// address. On a link whose peer is capable such a pair is off the link
+    /// (multipath draft Section 5.10). A same-epoch msg1 and a rekey msg2
+    /// are placed by this one rule.
+    fn link_arrival(&self, peer: &NodeAddr, packet: &ReceivedPacket) -> (bool, bool) {
+        self.peers.get(peer).map_or((false, false), |p| {
+            match p.path_match(packet.transport_id, &packet.remote_addr) {
+                Match::Proven { .. } => (true, true),
+                Match::Unproven => (false, false),
+                Match::None => (
+                    !p.bundle().is_some_and(|b| b.capable())
+                        && self
+                            .links
+                            .index()
+                            .get(&(packet.transport_id, packet.remote_addr.clone()))
+                            == Some(&p.link_id()),
+                    false,
+                ),
+            }
+        })
+    }
+
     /// Hand `packet`'s msg2, which names `peer`'s index, to that peer's link
     /// rekey machine: it completes the own rekey whose attempt the index
-    /// names, or changes nothing, each counted and logged.
+    /// names, or changes nothing, each counted and logged. Where it arrived
+    /// goes with it: once the attempt has read and refused its budget of
+    /// msg2s, the machine reads only one that arrived on the link.
     async fn msg2_to_link(&mut self, peer: &NodeAddr, packet: &ReceivedPacket) {
+        let (on_link, _) = self.link_arrival(peer, packet);
         let Some(out) = self.step_link(
             peer,
             Input::Reply {
                 bytes: &packet.data,
-                route: (),
+                route: Arrived { on_link },
             },
         ) else {
             return;
@@ -1965,6 +1975,20 @@ impl Node {
                     );
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                }
+                // The attempt has read and refused its budget of msg2s, and
+                // this one came from off the peer's link, so it was dropped
+                // unread. The peer's msg2 from its link is still read, and a
+                // msg1 resend draws a lost one again.
+                Reason::ReplyUnread => {
+                    debug!(
+                        peer = %self.peer_display_name(peer),
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        "Rekey msg2 from off the link after the refused-read budget, dropping unread"
+                    );
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::OffLink));
                 }
                 // A duplicate or late copy of a msg2 that already completed,
                 // or one for an attempt already given up.
@@ -2053,7 +2077,8 @@ impl Node {
         // transport, for another reason: a msg2 that does not authenticate
         // leaves the attempt in place. A rekey msg2 is accepted from any
         // transport: the link is established, and `peers_by_index` is keyed
-        // by the index alone.
+        // by the index alone; past its budget of refused reads, the rekey
+        // reads only one that arrived on the link.
         let key = (packet.transport_id, header.receiver_idx.as_u32());
         let setup = self.pending_outbound.get(&key).copied();
         let link_id = match setup {

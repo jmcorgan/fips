@@ -575,7 +575,7 @@ impl Machines {
 
     /// A msg2 routed to this machine by its receiver index.
     pub fn reply(&mut self, kit: &mut Kit, now: Ms, bytes: &[u8]) -> Vec<Event> {
-        self.step(kit, now, Input::Reply { bytes, route: () })
+        self.step(kit, now, Input::Reply { bytes, route: true })
     }
 
     /// A frame routed to this machine by its receiver index, on the slow

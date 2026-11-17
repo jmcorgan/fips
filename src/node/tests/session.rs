@@ -1428,7 +1428,7 @@ pub(super) async fn aged_link_pair(
 }
 
 /// A two-node pair caught mid FMP rekey, with node 1's msg2 held back from
-/// node 0. Built by [`rekey_pair_with_held_msg2`].
+/// node 0. Built by [`rekey_pair_with_held_msg2`] or [`held_msg2_pair`].
 pub(super) struct HeldMsg2Pair {
     pub(super) nodes: Vec<TestNode>,
     pub(super) node0_addr: NodeAddr,
@@ -1452,6 +1452,18 @@ pub(super) struct HeldMsg2Pair {
 /// returns. Both directions are shown to decode before the rekey, so a later
 /// delivery failure is the rekey's and not the harness's.
 pub(super) async fn rekey_pair_with_held_msg2() -> HeldMsg2Pair {
+    held_pair(None).await
+}
+
+/// [`rekey_pair_with_held_msg2`] with `node.path.enabled` set to `multipath`
+/// on both nodes.
+pub(super) async fn held_msg2_pair(multipath: bool) -> HeldMsg2Pair {
+    held_pair(Some(multipath)).await
+}
+
+/// [`rekey_pair_with_held_msg2`], with `node.path.enabled` set on both nodes
+/// when `multipath` names a setting and left at its default when not.
+async fn held_pair(multipath: Option<bool>) -> HeldMsg2Pair {
     use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG2};
     use crate::transport::ReceivedPacket;
 
@@ -1464,6 +1476,10 @@ pub(super) async fn rekey_pair_with_held_msg2() -> HeldMsg2Pair {
     let mut cfg1 = crate::config::Config::new();
     cfg1.node.rekey.after_secs = u64::MAX;
     cfg1.node.rekey.after_messages = u64::MAX;
+    if let Some(enabled) = multipath {
+        cfg0.node.path.enabled = enabled;
+        cfg1.node.path.enabled = enabled;
+    }
 
     // Age both sessions past both rekey gates: node 0's jittered time trigger,
     // and node 1's 30 s floor below which a msg1 is a duplicate, not a rekey.

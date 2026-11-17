@@ -169,6 +169,9 @@ enum Change<'a, P: Profile> {
         proof: ReplyProof<P>,
         route: P::Route,
     },
+    /// The own attempt's reply was read and refused: count it against the
+    /// attempt's budget of refused reads.
+    Misread,
     /// Hold a new candidate, evicting one first in a first handshake.
     Candidate {
         hs: Box<P::Hs>,
@@ -719,8 +722,27 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 Cycle::Idle | Cycle::Init(_) | Cycle::PendR(_) => Reason::UnknownAttempt,
             });
         };
+        // Past the budget of refused reads, a reply is read only when it
+        // arrived on the established link; a forger who saw the msg1 can
+        // send replies from anywhere, and the peer's from its link is
+        // always read.
+        let arrived = P::arrived(&route);
+        let spent =
+            a.misreads >= self.params.cfg.reads && !(fault!(CapIgnored) || node_fault!(CapIgnored));
+        let dropped = match arrived {
+            Some(on_link) => !on_link || fault!(CapDropsOnLink) || node_fault!(CapDropsOnLink),
+            None => false,
+        };
+        if spent && dropped {
+            return Change::Reject(Reason::ReplyUnread);
+        }
+        let refused = if arrived.is_some() {
+            Change::Misread
+        } else {
+            Change::Reject(Reason::ReplyUnauthenticated)
+        };
         let Ok(read) = P::reply(&a.hs, env.local, bytes) else {
-            return Change::Reject(Reason::ReplyUnauthenticated);
+            return refused;
         };
         let bond = if fault!(BondAfterEpoch) {
             Bond::Key(read.done.remote)
@@ -732,7 +754,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 proof: ReplyProof::new(done, read.fin),
                 route,
             },
-            Err(_) => Change::Reject(Reason::ReplyUnauthenticated),
+            Err(_) => refused,
         }
     }
 
@@ -1189,6 +1211,12 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 on_link,
             } => self.respond(now, tok, yield_own, on_link, env, out),
             Change::Reply { proof, route } => self.reply(now, proof, route, env, out),
+            Change::Misread => {
+                if let Cycle::Init(a) = &mut self.cycle {
+                    a.misreads = a.misreads.saturating_add(1);
+                }
+                out.push(Output::Reject(Reason::ReplyUnauthenticated));
+            }
             Change::Candidate {
                 hs,
                 msg1,
@@ -1370,6 +1398,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
             ladder: Ladder::new(now, sched),
             deadline: later(now, deadline),
             resent: false,
+            misreads: 0,
         });
         self.mem.due = false;
     }

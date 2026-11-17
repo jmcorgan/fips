@@ -247,7 +247,9 @@ pub enum HandshakeReject {
     /// [`HandshakeStats::answered_before`](crate::node::stats::HandshakeStats).
     AnsweredBefore,
     /// Inbound same-epoch msg1 refused because it arrived off the peer's
-    /// established link while that link works. Tracked via
+    /// established link while that link works, or inbound rekey msg2
+    /// dropped unread because it arrived off the link after the rekey had
+    /// read and refused its budget of msg2s. Tracked via
     /// [`HandshakeStats::off_link`](crate::node::stats::HandshakeStats).
     OffLink,
     /// A redial refused because another redial of the same peer is pending

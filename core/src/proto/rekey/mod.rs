@@ -22,7 +22,8 @@
 //! changes the machine, and builds no output until the row's checks have
 //! all passed. Every commit a network input causes, except a bounded
 //! candidate, carries a proof only this module tree can make, so input that
-//! has not authenticated changes nothing but the candidate list.
+//! has not authenticated changes nothing but the candidate list and an own
+//! attempt's count of refused replies.
 //!
 //! The module is hidden from the crate's documentation: nothing outside
 //! `fips-core` calls it yet. The transition tables it implements are in

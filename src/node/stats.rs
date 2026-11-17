@@ -197,7 +197,8 @@ pub struct HandshakeStats {
     /// msg1s, since a genuine peer does not resend a msg1 once answered.
     pub answered_before: u64,
     /// Inbound same-epoch msg1 refused because it arrived off the peer's
-    /// working established link.
+    /// working established link, or inbound rekey msg2 dropped unread from
+    /// off the link once the rekey had read and refused its budget of msg2s.
     pub off_link: u64,
     /// Redials refused while another redial of the peer was pending and
     /// under 1 s old.

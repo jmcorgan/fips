@@ -77,6 +77,7 @@ mod rekey_attempt_ceiling;
 mod rekey_clock;
 mod rekey_cutover_ceiling;
 mod rekey_cutover_index;
+mod rekey_msg2_cap;
 mod rekey_parity;
 mod restart_dial;
 mod roam_gates;

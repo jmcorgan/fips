@@ -153,6 +153,12 @@ impl<E: EntropySource + 'static> Profile for FspXk<E> {
             msg_type == SessionMessageType::CoordsWarmup.to_byte()
         })
     }
+
+    /// A session's acks are never capped: a session rekey takes no link
+    /// msg2.
+    fn arrived(_: &TreeCoordinate) -> Option<bool> {
+        None
+    }
 }
 
 #[cfg(test)]

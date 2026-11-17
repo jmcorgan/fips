@@ -451,6 +451,16 @@ faults! {
     /// An operator disconnect of a held peer leaves its pending redial, so
     /// the redial's first frame promotes the peer again.
     RedialKeptAtDisconnect,
+    /// A link rekey reads every msg2 under its attempt's index, however
+    /// many it has refused, as before the cap: a party that saw the rekey's
+    /// msg1 makes it read as many forged msg2s as it sends. The node half
+    /// of the rekey machine's switch of the same name.
+    CapIgnored,
+    /// Past its budget of refused reads a link rekey drops a msg2 from the
+    /// established link unread too, so a forger who spends the budget
+    /// keeps the peer's genuine msg2 from completing the rekey. The node
+    /// half of the rekey machine's switch of the same name.
+    CapDropsOnLink,
 }
 
 impl Fault {

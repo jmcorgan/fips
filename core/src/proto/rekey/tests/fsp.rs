@@ -294,6 +294,26 @@ fn every_xk_ack_cell_takes_its_rows_action() {
 }
 
 #[test]
+fn a_session_rekey_reads_every_msg2_whatever_the_link_cap() {
+    let (mut a, mut b) = session();
+    a.poll(T);
+    b.recv(T + 10, &last(&mut a.wire, MsgKind::Setup));
+    let ack = bytes(&last(&mut b.wire, MsgKind::Ack));
+    let mut bad = ack.clone();
+    bad[3] ^= 1;
+    let reads = Config::fsp().reads;
+    for n in 0..=usize::from(reads) * 4 {
+        assert_eq!(
+            a.recv(T + 20, &Msg::Hs(MsgKind::Ack, bad.clone())),
+            vec![Ev::Reject(Reason::ReplyUnauthenticated)],
+            "forged ack {n} is read and refused: a session counts none"
+        );
+    }
+    a.recv(T + 21, &Msg::Hs(MsgKind::Ack, ack));
+    assert_eq!(a.m().view().cycle, CycleView::PendI(Wait::Evidence));
+}
+
+#[test]
 fn completion_with_another_static_installs_nothing() {
     let (mut a, mut b) = session();
     // The larger node holds its own completed attempt and a candidate.

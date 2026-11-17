@@ -58,9 +58,11 @@ builds, and changes no line of the core, the machine or the bundle.
   this one's rekey machine shows and a copy of its record, leaving it as
   it is, with the same core input as `held`; `close` closes both at
   removal, the bundle first; `msg1`,
-  `reply`, `frame`, `poll`, `trigger`, `account` and `path` step them,
-  and `message` decodes a path message the peer sent, after its frame was
-  accounted, and steps it into the bundle;
+  `reply`, `frame`, `poll`, `trigger`, `account` and `path` step them
+  (`reply` hands every msg2 over as arrived on the link, so the rekey's
+  cap on refused reads drops none), and `message` decodes a path
+  message the peer sent, after its frame was accounted, and steps it
+  into the bundle;
   `seal` seals a frame; `active` is the peer's address as the node
   treats it, the bundle's active path. Each returns what the machines
   asked for as `Event`s, in order: a prompt is sealed and a released

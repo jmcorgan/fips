@@ -21,14 +21,16 @@ the exemption that module's README states.
   at msg3 and cuts over there, the initiator probes and waits for
   evidence, frames found by trial, a `CoordsWarmup` as the prompt (and a
   probe when sealed under a pending epoch), candidates per carrier, the
-  silence trigger and an RTT-scaled setup ladder. Its `Wire` values are
-  the bare 33-, 57- and 73-byte Noise XK messages; the shell wraps each in
-  `SessionSetup`, `SessionAck` or `SessionMsg3` with the coordinates it
-  has when it sends, so a resent setup carries current coordinates around
-  identical Noise bytes. Epochs bind to `SessionKeys`, a Noise session
-  authenticating the 12-byte encrypted-message header; coordinates
-  between that header and the ciphertext stay outside the AEAD.
-- `tests/`: the profile's conformance test; its README describes it.
+  silence trigger and an RTT-scaled setup ladder. Its acks are never
+  capped by where they arrived: the cap on refused reads is the link's.
+  Its `Wire` values are the bare 33-, 57- and 73-byte Noise XK messages;
+  the shell wraps each in `SessionSetup`, `SessionAck` or `SessionMsg3`
+  with the coordinates it has when it sends, so a resent setup carries
+  current coordinates around identical Noise bytes. Epochs bind to
+  `SessionKeys`, a Noise session authenticating the 12-byte
+  encrypted-message header; coordinates between that header and the
+  ciphertext stay outside the AEAD.
+- `tests/`: the profile's conformance tests; its README describes them.
 
 ## Rules
 
