@@ -36,6 +36,7 @@ from .assertions import (
     evaluate_rescue,
     evaluate_reverse_heard,
     evaluate_switch_latency,
+    switch_timeouts,
     evaluate_tree_parents,
     dropped_senders,
     switch_delays,
@@ -272,9 +273,12 @@ class SimRunner:
                 self.schedule.records if self.schedule else [],
                 self.topology.container_name,
             )
-            uncarried = uncarried_downs(downs, result.path_lines, self._downaddrs(downs))
+            addrs = self._downaddrs(downs)
+            uncarried = uncarried_downs(downs, result.path_lines, addrs)
+            timeouts = switch_timeouts(downs, result.path_switches, result.path_lines, addrs)
             outcomes.append(evaluate_switch_latency(
                 a.switch_latency, downs, result.path_switches, senders, uncarried,
+                timeouts,
             ))
         if a.max_stall is not None:
             restarts = self.traffic_mgr.restarts if self.traffic_mgr else 0

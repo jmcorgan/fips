@@ -95,10 +95,15 @@ assertions:
     min_sessions_ok: 2
 
   # Every flap, at both ends, within the K-timeout bound,
-  # 3 x 200 + 400 + 50 + 250 = 1300 ms.
+  # 3 x 200 + 400 + 50 + 250 = 1300 ms. The 400 ms is the probe timeout's
+  # floor; a host load that stretches the round trips lengthens the timeout
+  # the node is entitled to wait, so each end's ceiling takes the part of
+  # the timeout it logged at the switch above 400 ms. That is 0 on an
+  # unloaded host, where the ceiling stays 1300 ms.
   switch_latency:
     max_ms: 1300
     each_end: true
+    timeout_allowance: true
 
   # Each flap moves both ends off the cable and back (4); the first move
   # onto the cable at each end (2). Three or four flaps in 180 s, so the

@@ -535,7 +535,8 @@ CMDS = {
     ("ci-parity", "Check the chaos draws do not depend on Python's hash seed"):
         ["testing/check-chaos-schedule.py"],
     ("ci-parity", "Check the chaos path assertions against planted input"):
-        ["testing/chaos/sim-assert-test.py", "testing/chaos/sim-links-test.py"],
+        ["testing/chaos/sim-assert-test.py", "testing/chaos/sim-links-test.py",
+         "testing/chaos/sim-allowance-test.py"],
     ("ci-parity", "Check the chaos compose file pins each node's worker pools"):
         ["testing/chaos/sim-compose-test.py"],
     ("ci-parity", "Check nothing resolves the shared mutable test image"):

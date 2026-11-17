@@ -405,7 +405,8 @@ against planted input:
 assertions:
   path_switches: {min_total: 4, per_flap: 4, extra: 2}  # or max_total
   switch_latency: {max_ms: 1300, each_end: true}  # signalled_ms: tighter;
-                                    # sender_ms: a oneway down's dropped sender
+                                    # sender_ms: a oneway down's dropped sender;
+                                    # timeout_allowance: true, see below
   max_promotions: {per_node: 1}     # a second promotion is a re-peering
   max_dials: 0                      # no dial after a node's first promotion
   max_stall: {max_secs: 2}          # longest zero-byte run at a receiver;
@@ -490,8 +491,22 @@ own sends are dropped; the other end and both ends of any other down keep
 which the down's path (the veth, by the other end's veth address or MAC) did
 not carry the link when it went down is not measured: its next switch is not
 one the down caused, so the run fails on that precondition, naming the end,
-the down and the address the link was on. `paths_live`
-and `max_dials` read `debug` lines, so a scenario declaring them must set
+the down and the address the link was on. With `timeout_allowance: true` an
+end's ceiling for a down grows by the probe timeout the node had in force
+when the down's path went Suspect, less its 400 ms floor: the `timeout_ms` of
+that end's "Path state changed" line from `Some(Live)` to `Some(Suspect)` for
+`why=Timeout`, on the down's path (by the same veth address or MAC), between
+the down's stamp and the end's first switch after it or the next down,
+whichever comes first. On an unloaded host the timeout is the floor and the
+ceiling is `max_ms` exactly; an end with no such line gets no allowance, and
+the line says so. The value is the timeout the probe was sent under: a
+verdict the node held for the peer's arriving session data waits past it, up
+to the 3 s verdict cap, and earns no allowance for that wait. The verdict
+prints each end's base, allowance and the timeout it came from. It reads
+`debug` lines, so loading refuses it without
+`fips::node::handlers::path=debug`; `testing/chaos/sim-allowance-test.py`
+tests it against planted lines. `paths_live` and `max_dials` read `debug`
+lines, so a scenario declaring them must set
 `fips::node::handlers::path=debug` and `fips::node::lifecycle=debug` in
 `logging.rust_log`; loading refuses it otherwise.
 

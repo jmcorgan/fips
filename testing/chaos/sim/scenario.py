@@ -488,13 +488,18 @@ class SwitchLatencyAssertion:
     other end, and both ends of a two-way down, keep ``max_ms``.
     ``signalled_ms``, when set, is a tighter ceiling on each end's first
     switch, for a down the node has a signal for rather than only probe
-    timeouts.
+    timeouts. ``timeout_allowance``, when true, adds to an end's ceiling
+    the part above the 400 ms floor of the probe timeout it had in force
+    when the down's path went Suspect, read from that change's
+    ``timeout_ms``; 0 at the floor, so an unloaded host is held to the
+    ceiling as written.
     """
 
     max_ms: int = 1000
     each_end: bool = False
     signalled_ms: int | None = None
     sender_ms: int | None = None
+    timeout_allowance: bool = False
 
 
 @dataclass
@@ -749,7 +754,7 @@ _ASSERTION_KEYS = {
     "path_switches": {"min_total", "max_total", "per_flap", "extra"},
     "active_timeouts": {"within_ms"},
     "max_promotions": {"per_node"},
-    "switch_latency": {"max_ms", "each_end", "signalled_ms", "sender_ms"},
+    "switch_latency": {"max_ms", "each_end", "signalled_ms", "sender_ms", "timeout_allowance"},
     "max_stall": {"max_secs", "stream"},
     "paths_live": {"min", "configured", "within_secs"},
     "lanes": {"cross_arrival", "stable"},
@@ -1482,6 +1487,11 @@ def _parsepaths(asrt: dict, s: Scenario):
         each = sl.get("each_end", False)
         if not isinstance(each, bool):
             raise ValueError(f"{where}.each_end: must be true or false, got {each!r}")
+        allow = sl.get("timeout_allowance", False)
+        if not isinstance(allow, bool):
+            raise ValueError(
+                f"{where}.timeout_allowance: must be true or false, got {allow!r}"
+            )
         signalled = sl.get("signalled_ms")
         sender = sl.get("sender_ms")
         s.assertions.switch_latency = SwitchLatencyAssertion(
@@ -1494,6 +1504,7 @@ def _parsepaths(asrt: dict, s: Scenario):
             sender_ms=(
                 _count(sender, f"{where}.sender_ms", 1) if sender is not None else None
             ),
+            timeout_allowance=allow,
         )
     if "max_stall" in asrt:
         ms = asrt["max_stall"]
@@ -1629,6 +1640,15 @@ def _checklevels(s: Scenario):
                 f"assertions.{key} reads debug lines of {target}, which "
                 f"logging.rust_log '{s.logging.rust_log}' does not emit. Add "
                 f"'{target}=debug' (or wider) to rust_log, or drop the assertion."
+            )
+    sl = s.assertions.switch_latency
+    if sl and sl.timeout_allowance:
+        target = "fips::node::handlers::path"
+        if not log_enables(s.logging.rust_log, target, "debug"):
+            raise ValueError(
+                f"assertions.switch_latency.timeout_allowance reads debug lines of "
+                f"{target}, which logging.rust_log '{s.logging.rust_log}' does not "
+                f"emit. Add '{target}=debug' (or wider) to rust_log, or drop it."
             )
     if s.assertions.path_switches or s.assertions.switch_latency:
         if not log_enables(s.logging.rust_log, "fips::node::handlers::path", "info"):
