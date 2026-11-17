@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use super::shell::*;
 use crate::proto::fmp::wire::FRAME_OVERHEAD;
+use crate::proto::path::Input;
 use crate::proto::path::wire::{PATH_PROBE_MIN_SIZE, PathAck};
 use crate::proto::path::{Output, PathState, Refusal, Why};
 use crate::testutil::{FixedEntropy, TestInstant};
@@ -361,6 +362,44 @@ fn a_probe_beyond_the_path_limits_creates_no_path_and_gets_no_answer() {
     assert_eq!(refusals(&out), [(pair(t(1), addr(5)), Refusal::Full)]);
     assert_eq!(n.b.paths().len(), 4);
     assert_eq!(n.b.paths().find(t(1), &addr(5)), None);
+}
+
+/// A pair its transport reports gone for good (a USB attachment that
+/// ended) gives up its place toward the limits at once, so the next
+/// attachment's path is admitted; the other paths are untouched, and a
+/// report for a pair holding no path changes nothing.
+/// Mutation: leave the gone pair's path held.
+#[test]
+fn a_pair_gone_for_good_frees_its_place_toward_the_limits() {
+    let mut n = Node::capable(23);
+    for k in 2..=4u8 {
+        n.probe(t(1), addr(k), probe_from(0x20 + u32::from(k), 1, 27));
+    }
+    assert_eq!(n.b.paths().len(), 4);
+    let out = n.probe(t(1), addr(5), probe_from(0x25, 1, 27));
+    assert_eq!(refusals(&out), [(pair(t(1), addr(5)), Refusal::Full)]);
+
+    n.step(Input::Gone {
+        transport: t(1),
+        addr: addr(3),
+    });
+    assert_eq!(n.b.paths().len(), 3);
+    assert_eq!(n.b.paths().find(t(1), &addr(3)), None);
+    assert!(
+        n.b.paths().find(t(1), &addr(1)).is_some(),
+        "the original path stays"
+    );
+    assert_eq!(n.b.paths().active_index(), Some(0));
+
+    n.step(Input::Gone {
+        transport: t(1),
+        addr: addr(9),
+    });
+    assert_eq!(n.b.paths().len(), 3, "a pair with no path changes nothing");
+
+    let out = n.probe(t(1), addr(5), probe_from(0x25, 2, 27));
+    assert!(refusals(&out).is_empty(), "{out:?}");
+    assert!(n.b.paths().find(t(1), &addr(5)).is_some());
 }
 
 #[test]
