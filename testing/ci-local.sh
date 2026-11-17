@@ -3337,13 +3337,16 @@ run_chaos_schedule() {
 
 # The chaos assertions that read path lines, flap stamps and iperf3 results,
 # each fed planted input and checked for its verdict, so every one is shown
-# able to fail and to pass without a container. Hermetic and a few seconds.
-# Mirrored in ci.yml's ci-parity job by hand. Not named chaos-*, which this
-# script and the load annotation read as a scenario suite.
+# able to fail and to pass without a container; and the link manager's down,
+# fed a slow stand-in install, checked to cut both directions at once.
+# Hermetic and a few seconds. Mirrored in ci.yml's ci-parity job by hand. Not
+# named chaos-*, which this script and the load annotation read as a
+# scenario suite.
 run_simassert() {
     local rc=0
     info "[sim-assertions] Checking the chaos path assertions against planted input"
     python3 "$SCRIPT_DIR/chaos/sim-assert-test.py" || rc=$?
+    python3 "$SCRIPT_DIR/chaos/sim-links-test.py" || rc=$?
     record "sim-assertions" "$rc"
     return 0
 }
