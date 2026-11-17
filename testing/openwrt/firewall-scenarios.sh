@@ -2536,10 +2536,22 @@ no_touch_begin() {
 		harness_fail "cannot install $1 as /etc/fips/fips.yaml"
 	printf '#!/bin/sh\necho "$0 $*" >> %s\n' "$FIPSLOG" > /etc/init.d/fips &&
 		chmod 0755 /etc/init.d/fips || harness_fail "cannot install the fips init script stub"
-	printf '#!/bin/sh\nwhile :; do sleep 1; done\n' > "$WORK/fips" && chmod 0755 "$WORK/fips" ||
-		harness_fail "cannot write the stand-in daemon"
+	# The stand-in waits in the shell's own read on a fifo it holds open at both
+	# ends, so it never forks: a sleep loop's child is named fips until it
+	# execs sleep, and pidof then sees two processes.
+	rm -f "$WORK/fips.fifo"
+	mkfifo "$WORK/fips.fifo" &&
+		printf '#!/bin/sh\nexec 3<>%s\nread -r _ <&3\n' "$WORK/fips.fifo" > "$WORK/fips" &&
+		chmod 0755 "$WORK/fips" || harness_fail "cannot write the stand-in daemon"
 	"$WORK/fips" >/dev/null 2>&1 &
 	echo $! > "$DAEMONPID"
+	# $! names the forked harness shell until it execs the stand-in.
+	local n=0
+	until [ "$(cat "/proc/$!/comm" 2>/dev/null)" = fips ]; do
+		n=$((n + 1))
+		[ "$n" -le 10 ] || harness_fail "the stand-in daemon did not start"
+		sleep 1
+	done
 }
 
 # fips.yaml still holds the bytes it held before the helper ran.

@@ -40,6 +40,18 @@ use crate::proto::link::LinkMessageType;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::{TransportHandle, TransportId};
 
+/// How far a test backdates a session to stand for one on an aged link:
+/// just past FMP's 30 s link age, which a link inherits from its session
+/// when backdated, so a fresh msg1 on it is a rekey and not a replacement.
+/// Kept small on purpose: Windows' monotonic clock starts at boot and
+/// cannot reach back past it, and a unit test can run a few minutes after a
+/// CI runner boots.
+pub(super) const AGED: Duration = Duration::from_secs(31);
+
+/// The restart interval, `EPOCH_RESTART_MIN_INTERVAL_SECS`, plus a second.
+pub(super) const PAST_THE_RESTART_INTERVAL: Duration =
+    Duration::from_secs(fips_core::proto::fmp::EPOCH_RESTART_MIN_INTERVAL_SECS + 1);
+
 /// `config` with multipath set as `on`. Every test here states the setting
 /// it runs instead of taking the daemon's default, so a change of default
 /// changes none of them.

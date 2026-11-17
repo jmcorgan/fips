@@ -432,15 +432,22 @@ jobs:
       - name: Set SOURCE_DATE_EPOCH from git
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
+      # The version testing/install-shellcheck.sh pins, as ci.yml,
+      # package-openwrt.yml and ci-local.sh use, not the runner image's, so an
+      # image update cannot change what the lint below reports.
+      - name: Install the pinned shellcheck
+        shell: bash
+        run: bash testing/install-shellcheck.sh "$RUNNER_TEMP/shellcheck"
+
       - name: Lint the install smoke test
-        # Same arrangement as package-openwrt.yml's install-nak.sh lint: the
-        # script does not ship in the package, so the guards for shipped sh
-        # scripts do not apply. It is plain sh because pfSense has no bash.
+        # The script does not ship in the package, so the guards for shipped
+        # sh scripts do not apply. It is plain sh because pfSense has no bash.
+        shell: bash
+        env:
+          SHELLCHECK: ${{ runner.temp }}/shellcheck/shellcheck
         run: |
-          if ! command -v shellcheck >/dev/null 2>&1; then
-            sudo apt-get install -y --no-install-recommends shellcheck
-          fi
-          shellcheck --shell=sh testing/pfsense-install-smoke.sh
+          "$SHELLCHECK" --version
+          "$SHELLCHECK" --shell=sh testing/pfsense-install-smoke.sh
 
       - name: Build and check the pfSense package in a FreeBSD VM
         uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1

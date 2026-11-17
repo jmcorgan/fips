@@ -15,8 +15,8 @@
 # above L2 to FIPS. Run once per radio: dual-band routers can mesh on both
 # bands at once (2.4 GHz reaches further, 5 GHz carries more). FIPS sends on
 # one at a time; the other band stands by and takes over if the one in use
-# stops answering, with no new handshake where both routers set
-# node.path.enabled: true.
+# stops answering, with no new handshake where both routers run multipath,
+# which is on by default.
 #
 #   - encryption 'none'  — the mesh is OPEN on purpose. FIPS's Noise
 #     handshake authenticates and encrypts every peer link, so SAE would

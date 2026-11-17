@@ -55,8 +55,8 @@ use super::super::*;
 use super::audit::assert_coherent;
 use super::readings::own_dial;
 use super::{
-    alias, crossed_tcp, heartbeat_reaches, loopback_node, pool, pump, received, resolve_connect,
-    settled,
+    AGED, alias, crossed_tcp, heartbeat_reaches, loopback_node, pool, pump, received,
+    resolve_connect, settled,
 };
 use super::{tcp_dial, tcp_pair, with_path};
 use crate::proto::fmp::wire::{PHASE_MSG1, PHASE_MSG2, PHASE_MSG3};
@@ -575,7 +575,7 @@ async fn answered_from(nodes: &mut [TestNode], dialed: TransportAddr, answered: 
         .get_peer_mut(&a)
         .expect("precondition: node 1 holds node 0");
     held.test_backdate_heard(Duration::from_secs(60));
-    held.test_backdate_session_established(Duration::from_secs(600));
+    held.test_backdate_session_established(AGED);
     let msg1 = nodes[1]
         .packet_rx
         .try_recv()
@@ -951,7 +951,7 @@ async fn roamed_through(on: bool) {
         .get_peer_mut(&l_addr)
         .expect("precondition: the smaller node holds the larger");
     held.test_backdate_heard(Duration::from_secs(60));
-    held.test_backdate_session_established(Duration::from_secs(600));
+    held.test_backdate_session_established(AGED);
     assert_eq!(
         deliver(&mut nodes[s]).await,
         1,
@@ -1256,7 +1256,7 @@ async fn flying_dial(on: bool) {
         .get_peer_mut(&a)
         .expect("precondition: node 1 holds node 0");
     held.test_backdate_heard(Duration::from_secs(60));
-    held.test_backdate_session_established(Duration::from_secs(600));
+    held.test_backdate_session_established(AGED);
     nodes[1].node.handle_msg1(msg1).await;
     let mut msg2 = nodes[0]
         .packet_rx

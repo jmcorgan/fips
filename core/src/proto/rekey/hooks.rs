@@ -23,6 +23,20 @@ use super::machine::Rekey;
 use super::profile::Profile;
 use crate::time::{Clock, Duration, Instant};
 
+/// `at` moved back by `age`, or a panic naming `what` when the clock cannot
+/// reach that far back. A monotonic clock may start at boot, as Windows'
+/// does, so a backdate longer than the host's uptime cannot be made;
+/// leaving the instant where it was would let the test run on in a state it
+/// did not ask for and fail somewhere that does not name the cause.
+fn back<I: Instant>(at: I, age: Duration, what: &str) -> I {
+    at.checked_sub(age).unwrap_or_else(|| {
+        panic!(
+            "cannot backdate {what} by {age:?}: the monotonic clock does not reach back that far \
+             (on Windows it starts at boot); backdate just past what the test needs"
+        )
+    })
+}
+
 /// Inspection the root crate's session tests use.
 impl<P: Profile, C: Clock> Rekey<P, C> {
     /// Stop the time and message triggers from starting another rekey, as
@@ -41,7 +55,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
     #[doc(hidden)]
     pub fn backdate_started(&mut self, age: Duration) {
         if let Some(cur) = self.cur.as_mut() {
-            cur.started = cur.started.checked_sub(age).unwrap_or(cur.started);
+            cur.started = back(cur.started, age, "the session start");
             self.mem.link_since = self.mem.link_since.min(cur.started);
         }
     }
@@ -50,7 +64,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
     #[doc(hidden)]
     pub fn backdate_base(&mut self, age: Duration) {
         if let Some(base) = self.cur.as_mut().and_then(|cur| cur.base.as_mut()) {
-            *base = base.checked_sub(age).unwrap_or(*base);
+            *base = back(*base, age, "the timestamp base");
         }
     }
 
@@ -59,7 +73,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
     #[doc(hidden)]
     pub fn backdate_drain(&mut self, age: Duration) {
         if let Some(d) = self.drain.as_mut() {
-            d.deadline = d.deadline.checked_sub(age).unwrap_or(d.deadline);
+            d.deadline = back(d.deadline, age, "the drain deadline");
         }
     }
 
@@ -69,10 +83,10 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
     #[doc(hidden)]
     pub fn backdate_pending(&mut self, age: Duration) {
         if let Some(ep) = self.epoch_mut(Slot::Pending) {
-            ep.started = ep.started.checked_sub(age).unwrap_or(ep.started);
+            ep.started = back(ep.started, age, "the pending install");
         }
         if let super::cycle::Cycle::PendR(p) = &mut self.cycle {
-            p.deadline = p.deadline.checked_sub(age).unwrap_or(p.deadline);
+            p.deadline = back(p.deadline, age, "the responder hold");
         }
     }
 
@@ -81,7 +95,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
     #[doc(hidden)]
     pub fn backdate_dampening(&mut self, age: Duration) {
         if let Some(until) = self.mem.damp.as_mut() {
-            *until = until.checked_sub(age).unwrap_or(*until);
+            *until = back(*until, age, "the dampening end");
         }
     }
 

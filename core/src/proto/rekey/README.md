@@ -71,7 +71,8 @@ handshakes) between two machines on each.
 - `hooks.rs`: built only for tests and behind `test-hooks`: `quiet`,
   which stops the time and message triggers as the largest configured
   thresholds would; the link shell's test seams, which move a machine's
-  stamps back in time, force the key-epoch bit and the peer's startup
+  stamps back in time (panicking, rather than leaving a stamp where it
+  was, when the host's clock cannot reach that far back), force the key-epoch bit and the peer's startup
   epoch, start an own rekey without its trigger or through it (`trigger`,
   a poll with the time trigger brought to its instant, so every other
   condition of a start still decides), offer the current epoch

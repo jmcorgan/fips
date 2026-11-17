@@ -21,7 +21,7 @@ use super::super::spanning_tree::{
     restarted_node,
 };
 use super::super::*;
-use super::{TcpConfig, TcpTransport, TransportHandle, TransportId, with_path};
+use super::{AGED, TcpConfig, TcpTransport, TransportHandle, TransportId, with_path};
 use crate::peer::PathState;
 use crate::proto::fmp::wire::{PHASE_MSG1, PHASE_MSG2, PHASE_MSG3};
 use crate::transport::ConnectionState;
@@ -47,7 +47,7 @@ pub(in crate::node::tests) async fn own_dial(nodes: &mut [TestNode]) {
         .get_peer_mut(&dialler)
         .expect("precondition: the answering node holds the dialler");
     held.test_backdate_heard(Duration::from_secs(60));
-    held.test_backdate_session_established(Duration::from_secs(600));
+    held.test_backdate_session_established(AGED);
     for (at, want) in [(l, PHASE_MSG1), (s, PHASE_MSG2), (l, PHASE_MSG3)] {
         while let Ok(packet) = nodes[at].packet_rx.try_recv() {
             if phase(&packet) == Some(want) {

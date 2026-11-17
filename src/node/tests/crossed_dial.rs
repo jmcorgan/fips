@@ -134,6 +134,29 @@ fn take(rx: &mut UnboundedReceiver<ReceivedPacket>) -> Vec<ReceivedPacket> {
     packets
 }
 
+/// Point the loopback address `addr`, a tap standing for an address of
+/// `tn`'s, at `tn`'s own receive queue, and move what is already queued at
+/// the tap there, so a delivery that reads only the nodes' queues reaches
+/// `tn` at `addr`.
+fn route_tap(tn: &TestNode, addr: &TransportAddr, tap: &mut UnboundedReceiver<ReceivedPacket>) {
+    let entry = LOOPBACK_REGISTRY
+        .lock()
+        .unwrap()
+        .get(&tn.addr)
+        .expect("the node's loopback address is registered")
+        .clone();
+    LOOPBACK_REGISTRY
+        .lock()
+        .unwrap()
+        .insert(addr.clone(), entry.clone());
+    for packet in take(tap) {
+        entry
+            .1
+            .send(packet)
+            .expect("the node's receive queue is open");
+    }
+}
+
 /// The handshake phase of `packet`, if its prefix parses.
 pub(super) fn phase(packet: &ReceivedPacket) -> Option<u8> {
     CommonPrefix::parse(&packet.data).map(|p| p.phase)
@@ -582,11 +605,18 @@ async fn check_move(crossed: Crossed) {
     );
     // The smaller node keeps the inbound link it was promoted on as the
     // larger node's record: off the pair it moved to when the msg2 came from
-    // another address, at it when it came from the first. Frames the smaller
-    // node sends on another transport land in `tap`, which the audit's
-    // delivery does not read, so that move is not audited here.
+    // another address, at it when it came from the first. The audit's
+    // delivery reads only the nodes' own queues, so the tap the smaller node
+    // moved to is first pointed at the larger node, whose second address it
+    // stands for: with multipath on, the smaller node's active path to the
+    // larger one stays there. Frames the smaller node sends on another
+    // transport also land in `tap`, which this does not route, so that move
+    // is not audited here.
     match dial {
-        Dial::OtherAddress => assert_coherent(&mut nodes, "the end of the move").await,
+        Dial::OtherAddress => {
+            route_tap(&nodes[l], &to.1, &mut tap);
+            assert_coherent(&mut nodes, "the end of the move").await
+        }
         Dial::AnsweredFromFirst => assert_coherent(&mut nodes, "the end of the move").await,
         Dial::OtherTransport => {}
     }

@@ -1158,7 +1158,7 @@ async fn left_dialled_once(name: &str, cfg_s: fn() -> Config, cfg_l: fn() -> Con
 #[tokio::test]
 async fn a_beacon_at_the_pair_a_crossed_move_left_is_dialled_once_and_leaves_one_peering_with_multipath_off_at_both_ends()
  {
-    left_dialled_once("off at both", Config::new, Config::new).await;
+    left_dialled_once("off at both", disabled, disabled).await;
 }
 
 /// As above, with multipath on at the smaller node and off at the larger,
@@ -1167,14 +1167,14 @@ async fn a_beacon_at_the_pair_a_crossed_move_left_is_dialled_once_and_leaves_one
 #[tokio::test]
 async fn a_beacon_at_the_pair_a_crossed_move_left_is_dialled_once_and_leaves_one_peering_with_multipath_on_at_the_smaller_and_off_at_the_larger()
  {
-    left_dialled_once("on at the smaller, off at the larger", enabled, Config::new).await;
+    left_dialled_once("on at the smaller, off at the larger", enabled, disabled).await;
 }
 
 /// As above, with multipath off at the smaller node and on at the larger.
 #[tokio::test]
 async fn a_beacon_at_the_pair_a_crossed_move_left_is_dialled_once_and_leaves_one_peering_with_multipath_off_at_the_smaller_and_on_at_the_larger()
  {
-    left_dialled_once("off at the smaller, on at the larger", Config::new, enabled).await;
+    left_dialled_once("off at the smaller, on at the larger", disabled, enabled).await;
 }
 
 /// The control, with multipath on at both ends. Its entry assertion covers
