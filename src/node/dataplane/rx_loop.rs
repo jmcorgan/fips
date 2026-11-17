@@ -604,94 +604,7 @@ impl Node {
                     // The whole-tick span below measures the body alone.
                     let instr_on = crate::instr::gate();
                     crate::instr::tick_entry(instr_on, deadline.into_std(), std::time::Instant::now());
-                    instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::WholeTick, {
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckTimeouts,
-                        self.check_timeouts().await);
-                        // Discard flows the rx_loop announced and a listener's
-                        // own task never took, and release native datagrams
-                        // held for destinations with no session or lookup.
-                        // Cheap: it walks only the pending flow map, which the
-                        // backlog bounds, and the held-datagram map, which
-                        // `pending_max_destinations` bounds.
-                        self.native_expire();
-                        let now_ms = Self::now_ms();
-                        let session_now = Self::session_now();
-                        let peering_now = Self::peering_now();
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ReloadPeerAcl,
-                        self.reload_peer_acl().await);
-                        // The host map hot-reloads on the same tick as the ACL. It
-                        // is polled separately from `reload_peer_acl` because the
-                        // ACL's embedded alias reloader and this snapshot are
-                        // distinct resources; the `path_mtu_lookup` cache and the
-                        // `nostr_rendezvous` subsystem are deliberately excluded
-                        // from `Reloadable` since neither reloads from a backing
-                        // file (see `node::reloadable`). The `path_mtu_lookup`
-                        // cache is nevertheless swept on this tick, by
-                        // `purge_expired_path_mtu` below: that is expiry, not
-                        // reload.
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ReloadHostMap,
-                        self.reload_host_map().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollPendingConnects,
-                        self.poll_pending_connects().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollNostrRendezvous,
-                        self.poll_nostr_rendezvous().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollLanRendezvous,
-                        self.poll_lan_rendezvous().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::DrivePeerTimers,
-                        self.drive_peer_timers(Self::interval_ms()).await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollSessionRekeys,
-                        self.poll_session_rekeys(session_now).await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PurgeIdleSessions,
-                        self.purge_idle_sessions(session_now));
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PurgeExpiredPathMtu,
-                        self.purge_expired_path_mtu(now_ms));
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ProcessPendingRetries,
-                        self.process_pending_retries(peering_now).await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckTreeState,
-                        self.check_tree_state().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckBloomState,
-                        self.check_bloom_state().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ComputeMeshSize,
-                        self.compute_mesh_size());
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::RecordStatsHistory,
-                        self.record_stats_history());
-                        // Catches any change to the node's egress limit that
-                        // no transport-change site saw, within one tick.
-                        self.publish_mtu();
-                        self.sweep_identities();
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckMmpReports,
-                        self.check_mmp_reports().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckSessionMmpReports,
-                        self.check_session_mmp_reports().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckLinkHeartbeats,
-                        self.check_link_heartbeats().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollLinkRekeys,
-                        self.poll_link_rekeys().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckPendingLookups,
-                        self.check_pending_lookups(now_ms).await);
-                        // After CheckPendingLookups so a probe's resolve stage
-                        // observes this tick's lookup progress rather than the
-                        // previous tick's.
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollProbes,
-                        self.poll_probes().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollTransportDiscovery,
-                        self.poll_transport_discovery().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::SampleTransportCongestion,
-                        self.sample_transport_congestion());
-                        #[cfg(any(target_os = "linux", target_os = "macos"))]
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ActivateConnectedUdpSessions,
-                        self.activate_connected_udp_sessions().await);
-                        // Crypto worker threads that exited since the last tick.
-                        #[cfg(unix)]
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollWorkerLiveness,
-                        self.poll_worker_liveness());
-                        // Debug-build sweep of the peer-lifecycle map invariant
-                        // (leaked machines / machine-less legs); two map scans,
-                        // compiled out of release builds.
-                        #[cfg(debug_assertions)]
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::DebugAssertPeerMapsCoherent,
-                        self.debug_assert_peer_maps_coherent());
-                    });
+                    self.tick(instr_on).await;
                     crate::instr::tick_gauges(instr_on, self.peers.len() as u64);
                 }
                 // Shutdown signal → enter the bounded drain in place, ONCE.
@@ -741,6 +654,215 @@ impl Node {
 
         info!("RX event loop stopped (channel closed)");
         Ok(())
+    }
+
+    /// One pass of the receive loop's timers, in their production order:
+    /// the body of the loop's tick arm, timed as one whole-tick step.
+    ///
+    /// `instr_on` is the instrumentation gate, read once per tick by the
+    /// caller. The path machines run on their own timer arm and are not part
+    /// of this pass. Tests that drive a node on a frozen clock call this, so
+    /// they run every timer the daemon runs, in its order. On the loopback
+    /// transport `activate_connected_udp_sessions` finds no connected socket
+    /// to activate and does nothing.
+    pub(in crate::node) async fn tick(&mut self, instr_on: bool) {
+        instr_step!(
+            instr_on,
+            crate::instr::Domain::Tick,
+            crate::instr::Step::WholeTick,
+            {
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::CheckTimeouts,
+                    self.check_timeouts().await
+                );
+                // Discard flows the rx_loop announced and a listener's
+                // own task never took, and release native datagrams
+                // held for destinations with no session or lookup.
+                // Cheap: it walks only the pending flow map, which the
+                // backlog bounds, and the held-datagram map, which
+                // `pending_max_destinations` bounds.
+                self.native_expire();
+                let now_ms = Self::now_ms();
+                let session_now = Self::session_now();
+                let peering_now = Self::peering_now();
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::ReloadPeerAcl,
+                    self.reload_peer_acl().await
+                );
+                // The host map hot-reloads on the same tick as the ACL. It
+                // is polled separately from `reload_peer_acl` because the
+                // ACL's embedded alias reloader and this snapshot are
+                // distinct resources; the `path_mtu_lookup` cache and the
+                // `nostr_rendezvous` subsystem are deliberately excluded
+                // from `Reloadable` since neither reloads from a backing
+                // file (see `node::reloadable`). The `path_mtu_lookup`
+                // cache is nevertheless swept on this tick, by
+                // `purge_expired_path_mtu` below: that is expiry, not
+                // reload.
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::ReloadHostMap,
+                    self.reload_host_map().await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::PollPendingConnects,
+                    self.poll_pending_connects().await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::PollNostrRendezvous,
+                    self.poll_nostr_rendezvous().await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::PollLanRendezvous,
+                    self.poll_lan_rendezvous().await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::DrivePeerTimers,
+                    self.drive_peer_timers(Self::interval_ms()).await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::PollSessionRekeys,
+                    self.poll_session_rekeys(session_now).await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::PurgeIdleSessions,
+                    self.purge_idle_sessions(session_now)
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::PurgeExpiredPathMtu,
+                    self.purge_expired_path_mtu(now_ms)
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::ProcessPendingRetries,
+                    self.process_pending_retries(peering_now).await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::CheckTreeState,
+                    self.check_tree_state().await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::CheckBloomState,
+                    self.check_bloom_state().await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::ComputeMeshSize,
+                    self.compute_mesh_size()
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::RecordStatsHistory,
+                    self.record_stats_history()
+                );
+                // Catches any change to the node's egress limit that
+                // no transport-change site saw, within one tick.
+                self.publish_mtu();
+                self.sweep_identities();
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::CheckMmpReports,
+                    self.check_mmp_reports().await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::CheckSessionMmpReports,
+                    self.check_session_mmp_reports().await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::CheckLinkHeartbeats,
+                    self.check_link_heartbeats().await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::PollLinkRekeys,
+                    self.poll_link_rekeys().await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::CheckPendingLookups,
+                    self.check_pending_lookups(now_ms).await
+                );
+                // After CheckPendingLookups so a probe's resolve stage
+                // observes this tick's lookup progress rather than the
+                // previous tick's.
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::PollProbes,
+                    self.poll_probes().await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::PollTransportDiscovery,
+                    self.poll_transport_discovery().await
+                );
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::SampleTransportCongestion,
+                    self.sample_transport_congestion()
+                );
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::ActivateConnectedUdpSessions,
+                    self.activate_connected_udp_sessions().await
+                );
+                // Crypto worker threads that exited since the last tick.
+                #[cfg(unix)]
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::PollWorkerLiveness,
+                    self.poll_worker_liveness()
+                );
+                // Debug-build sweep of the peer-lifecycle map invariant
+                // (leaked machines / machine-less legs); two map scans,
+                // compiled out of release builds.
+                #[cfg(debug_assertions)]
+                instr_step!(
+                    instr_on,
+                    crate::instr::Domain::Tick,
+                    crate::instr::Step::DebugAssertPeerMapsCoherent,
+                    self.debug_assert_peer_maps_coherent()
+                );
+            }
+        );
     }
 
     /// Process a single received packet.
