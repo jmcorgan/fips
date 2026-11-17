@@ -531,12 +531,13 @@ pub struct ErrorSignalStatsSnapshot {
     pub mtu_exceeded_uncorroborated: u64,
 }
 
-/// Encrypted-frame drops made before any peer is resolved, one counter per
-/// [`DataplaneReject`](crate::node::reject::DataplaneReject) variant.
+/// Encrypted-frame drops made before the frame is authenticated, one counter
+/// per [`DataplaneReject`](crate::node::reject::DataplaneReject) variant.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DataplaneStatsSnapshot {
     pub unknown_index: u64,
     pub orphaned_index: u64,
+    pub decrypt_queue_full: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

@@ -422,11 +422,12 @@ pub enum TransportReject {
 
 /// Encrypted-frame rejection reasons.
 ///
-/// Each variant is a drop in `src/node/dataplane/encrypted.rs` that returns
-/// before the frame's peer is resolved, so nothing on the peer counts it:
-/// not the decrypt-failure count, not link statistics. Without these the
-/// side of a diverged link whose index the peer still addresses is silent.
-/// Recorded on the
+/// Each variant is a drop in `src/node/dataplane/encrypted.rs` on the receive
+/// hot path, made before the frame is authenticated, so it cannot be charged
+/// to a peer and nothing on the peer counts it: not the decrypt-failure count,
+/// not link statistics. Without these the side of a diverged link whose index
+/// the peer still addresses is silent, as is a decrypt worker that has fallen
+/// behind. Recorded on the
 /// [`DataplaneMetrics`](crate::node::metrics::DataplaneMetrics) family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -442,6 +443,11 @@ pub enum DataplaneReject {
     /// drop. Tracked via
     /// [`DataplaneMetrics::orphaned_index`](crate::node::metrics::DataplaneMetrics).
     OrphanedIndex,
+    /// An encrypted frame for a session a decrypt worker holds was dropped
+    /// because that worker's queue was full: the worker has fallen behind the
+    /// receive loop. Tracked via
+    /// [`DataplaneMetrics::decrypt_queue_full`](crate::node::metrics::DataplaneMetrics).
+    DecryptQueueFull,
 }
 
 #[cfg(test)]
