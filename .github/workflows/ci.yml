@@ -118,6 +118,10 @@ jobs:
       # pyyaml. Kept in step with ci-local.sh's run_simassert by hand.
       - name: Check the chaos path assertions against planted input
         run: python3 testing/chaos/sim-assert-test.py
+      # Hermetic: renders the chaos compose file for every scenario; needs
+      # pyyaml and jinja2. Kept in step with ci-local.sh's run_simcompose by hand.
+      - name: Check the chaos compose file pins each node's worker pools
+        run: python3 testing/chaos/sim-compose-test.py
       - name: Check nothing resolves the shared mutable test image
         run: bash testing/check-image-scoping.sh
       - name: Check every action is pinned to a commit SHA

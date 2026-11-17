@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from jinja2 import Template
 
@@ -17,6 +18,19 @@ from .topology import SimTopology
 # still builds it. Read at import, which is safe because the simulation always
 # starts as a child process with the environment already set.
 FIPS_SIM_IMAGE = os.environ.get("FIPS_TEST_IMAGE", "fips-test:latest")
+
+# The size of each node's encrypt and decrypt worker pools. Left unset, the
+# node sizes both by the host's CPU count, and each decrypt worker holds about
+# 51 MiB from startup whatever the load (its bounded channel is allocated in
+# full), so on the 20-CPU builder every node sat at about 1.05 GiB. Two
+# nightly chaos parts whose long scenarios overlapped needed more memory than
+# the host had, and the kernel's OOM killer took nodes from both runs. Pinned,
+# a node holds about 0.23 GiB on any host, and no scenario's behaviour turns
+# on the CPU count of the host that runs it. FIPS_ENCRYPT_WORKERS and
+# FIPS_DECRYPT_WORKERS in the simulation's own environment override the
+# default, for A/B runs as in testing/static/docker-compose.yml.
+WORKER_ENV = ("FIPS_ENCRYPT_WORKERS", "FIPS_DECRYPT_WORKERS")
+WORKERS_DEFAULT = 4
 
 # Jinja2 template for the compose file.
 # Uses a pre-built image instead of per-service build to support large topologies.
@@ -47,6 +61,9 @@ x-fips-common: &fips-common
     - RUST_LOG={{ rust_log }}
     - RUST_BACKTRACE=1
     - FIPS_TEST_MODE=chaos
+{%- for name, count in workers.items() %}
+    - {{ name }}={{ count }}
+{%- endfor %}
 
 services:
 {% for node in nodes %}
@@ -71,6 +88,25 @@ services:
 {% endfor %}
 """
 )
+
+
+def worker_counts() -> dict[str, int]:
+    """Each worker-pool variable and the count every node is given.
+
+    An override that is not a count is refused here rather than passed on:
+    the node reads one it cannot parse as unset, which would quietly bring
+    back the CPU-count default.
+    """
+    counts = {}
+    for name in WORKER_ENV:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            counts[name] = WORKERS_DEFAULT
+        elif re.fullmatch(r"[0-9]+", raw):
+            counts[name] = int(raw)
+        else:
+            raise ValueError(f"{name}={raw!r} is not a worker count")
+    return counts
 
 
 def generate_compose(
@@ -107,6 +143,7 @@ def generate_compose(
         resolv_conf=resolv_conf,
         topology=topology,
         laned=laned,
+        workers=worker_counts(),
     )
 
     path = os.path.join(output_dir, "docker-compose.yml")

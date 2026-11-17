@@ -411,6 +411,7 @@ STEPS = {
         "Check no tested function's exit status is a log call's": "trailing-log",
         "Check the chaos draws do not depend on Python's hash seed": "sim-schedule",
         "Check the chaos path assertions against planted input": "sim-assertions",
+        "Check the chaos compose file pins each node's worker pools": "sim-compose",
         "Check nothing resolves the shared mutable test image": "image-scoping",
         "Check every action is pinned to a commit SHA": "action-pins",
         "Check every CI base image is pinned by digest": "base-pins",
@@ -535,6 +536,8 @@ CMDS = {
         ["testing/check-chaos-schedule.py"],
     ("ci-parity", "Check the chaos path assertions against planted input"):
         ["testing/chaos/sim-assert-test.py"],
+    ("ci-parity", "Check the chaos compose file pins each node's worker pools"):
+        ["testing/chaos/sim-compose-test.py"],
     ("ci-parity", "Check nothing resolves the shared mutable test image"):
         ["testing/check-image-scoping.sh"],
     ("ci-parity", "Check every action is pinned to a commit SHA"):

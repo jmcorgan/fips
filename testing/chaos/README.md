@@ -670,6 +670,22 @@ It takes about a minute. The shipped bound is checked against the 31 s stall
 without waiting it out; the cases that time a helper out run on a shortened
 bound.
 
+## Node worker pools
+
+The compose file gives every node `FIPS_ENCRYPT_WORKERS` and
+`FIPS_DECRYPT_WORKERS`, 4 each by default (`WORKERS_DEFAULT` in
+`sim/compose.py`). Unset, the node sizes both pools by the host's CPU count,
+and each decrypt worker holds about 51 MiB from startup, so a node on a
+20-CPU host sat at about 1.05 GiB whatever its load. Two nightly chaos runs
+whose long scenarios overlapped needed more memory than the builder had, and
+the kernel's OOM killer stopped nodes in both. At 4 a node holds about
+0.23 GiB on any host, and a scenario no longer behaves differently with the
+CPU count of the host that runs it. Either variable set in the environment
+`chaos.sh` runs in replaces the default for every node, for an A/B run; a
+value that is not a whole number stops the run. `sim-compose-test.py`
+renders the compose file for every scenario and fails when a node is not
+given both counts. Both CI runners run it as a guard.
+
 ## Creating Custom Scenarios
 
 1. Copy an existing scenario from `scenarios/`.

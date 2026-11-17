@@ -569,6 +569,7 @@ GUARDS=(
     "run_trailing_log trailing-log"
     "run_chaos_schedule sim-schedule"
     "run_simassert sim-assertions"
+    "run_simcompose sim-compose"
     "run_image_scoping image-scoping"
     "run_action_pins action-pins"
     "run_base_pins base-pins"
@@ -3344,6 +3345,20 @@ run_simassert() {
     info "[sim-assertions] Checking the chaos path assertions against planted input"
     python3 "$SCRIPT_DIR/chaos/sim-assert-test.py" || rc=$?
     record "sim-assertions" "$rc"
+    return 0
+}
+
+# The compose file the chaos simulator writes, rendered for every scenario and
+# read back: each node must be given fixed worker-pool sizes, since the node's
+# own default follows the host's CPU count and at 20 CPUs held about 1 GiB a
+# node, enough for two overlapping nightly chaos parts to run the builder out
+# of memory. Hermetic, about ten seconds. Mirrored in ci.yml's ci-parity job
+# by hand. Not named chaos-*, as for sim-assertions.
+run_simcompose() {
+    local rc=0
+    info "[sim-compose] Checking the chaos compose file pins each node's worker pools"
+    python3 "$SCRIPT_DIR/chaos/sim-compose-test.py" || rc=$?
+    record "sim-compose" "$rc"
     return 0
 }
 
