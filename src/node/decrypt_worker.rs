@@ -14,8 +14,8 @@
 //! Three message types travel through the per-worker `crossbeam_channel`:
 //!
 //! - **`RegisterSession`** — sent once on the first successful legacy
-//!   decrypt for a session. Hands the worker an owned snapshot of the
-//!   recv cipher + replay window for both FMP and FSP layers.
+//!   decrypt for a session. Hands the worker an owned, boxed snapshot of
+//!   the recv cipher + replay window for the FMP layer.
 //! - **`Job`** — per-packet bulk decrypt + deliver. The worker looks
 //!   up the session in its local HashMap; if absent (registration
 //!   hasn't arrived yet, or session was unregistered), the packet is
@@ -60,7 +60,28 @@ use tracing::{debug, trace, warn};
 
 use crate::noise::ReplayWindow;
 
+/// Slots in each decrypt worker's queue.
+///
+/// The value came in with the worker pool, from upstream, with no recorded
+/// reason. The queue adds no capacity under sustained overload: a job that
+/// finds it full is dropped, at any depth, and counted as
+/// `dataplane.decrypt_queue_full`. What the depth sets is how long a worker
+/// can stall, descheduled while the receive loop keeps dispatching to it,
+/// before drops start, and how much queueing delay stands in front of them.
+/// The backlog that can reach one worker in such a stall is that of every
+/// link hashed to it; per link, a full default receive buffer holds about
+/// 4400 of the smallest frames, and the peer's encrypt queue and this node's
+/// packet channel add up to 1024 each.
+///
+/// The channel allocates every slot when it is created, so a worker holds
+/// this many times the size of [`WorkerMsg`] plus a word from startup, idle
+/// or not.
 pub(crate) const WORKER_CHANNEL_CAP: usize = 32768;
+
+/// The queue between the receive loop and one decrypt worker.
+fn worker_channel() -> (Sender<WorkerMsg>, Receiver<WorkerMsg>) {
+    bounded(WORKER_CHANNEL_CAP)
+}
 
 /// Owning recv-side state for one established FMP session. Lives
 /// **inside the worker thread that owns this session** — never
@@ -211,16 +232,17 @@ pub(crate) enum DecryptWorkerEvent {
 /// `UnregisterSession` are control plane events sent at session
 /// establishment / teardown.
 ///
-/// The `Job` variant is intentionally much larger than the control
-/// variants (it carries the whole packet buffer + cipher clone). The
-/// alternative — boxing `Job` — adds a per-packet alloc on the hot
-/// path, which is the exact thing this module is designed to avoid.
-#[allow(clippy::large_enum_variant)]
+/// Every slot of a worker's channel is the size of the largest variant, and
+/// every slot is allocated when the channel is created. The session a
+/// registration carries (a cipher key and a replay window) is over ten times
+/// the size of a `Job`, so it is boxed, and a slot is the size of a `Job`.
+/// That costs one allocation per registration. `Job` stays inline: boxing it
+/// would add an allocation per packet.
 pub(crate) enum WorkerMsg {
     Job(DecryptJob),
     RegisterSession {
         cache_key: u32,
-        state: OwnedSessionState,
+        state: Box<OwnedSessionState>,
     },
     UnregisterSession {
         cache_key: u32,
@@ -280,12 +302,7 @@ impl DecryptWorkerPool {
         spawn: impl FnMut(usize, Receiver<WorkerMsg>) -> std::io::Result<std::thread::JoinHandle<()>>,
     ) -> Self {
         Self {
-            workers: Arc::new(WorkerSet::start(
-                "decrypt",
-                n,
-                || bounded::<WorkerMsg>(WORKER_CHANNEL_CAP),
-                spawn,
-            )),
+            workers: Arc::new(WorkerSet::start("decrypt", n, worker_channel, spawn)),
         }
     }
 
@@ -370,6 +387,7 @@ impl DecryptWorkerPool {
     #[must_use = "registration may have failed under queue pressure; caller must gate its own session-registered flag on the returned bool"]
     pub fn register_session(&self, cache_key: u32, state: OwnedSessionState) -> bool {
         let idx = self.worker_idx_for(cache_key);
+        let state = Box::new(state);
         match self
             .workers
             .sender(idx)
@@ -429,7 +447,7 @@ fn handle_msg(idx: usize, sessions: &mut HashMap<u32, OwnedSessionState>, msg: W
         }
         WorkerMsg::RegisterSession { cache_key, state } => {
             trace!(worker = idx, ?cache_key, "DecryptWorker: register session");
-            sessions.insert(cache_key, state);
+            sessions.insert(cache_key, *state);
         }
         WorkerMsg::UnregisterSession { cache_key } => {
             trace!(
@@ -1113,3 +1131,7 @@ mod pool_tests {
         assert_eq!(pool.liveness().refused_dispatches(), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "tests/decrypt_worker.rs"]
+mod slot_tests;
