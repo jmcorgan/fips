@@ -1,0 +1,868 @@
+//! The USB host side: find phones, switch them into Android Open Accessory
+//! mode, and turn each accessory into a [`UsbLink`].
+//!
+//! Runs where this node can be USB host — a desktop, or a phone holding the
+//! host role of a USB-C cable — over [`nusb`]. The phone needs nothing but an
+//! app that answers the accessory: AOA is driven entirely from this side with
+//! vendor control requests on the default endpoint, and the phone re-appears
+//! on the bus as a Google accessory device (`18d1:2d00`–`2d05`) with one
+//! vendor interface carrying a bulk IN and a bulk OUT endpoint.
+//!
+//! ## Which devices are asked
+//!
+//! Only devices that look like a phone: one exposing an MTP or PTP interface
+//! (still-image class, or Android's vendor-class MTP interface) or adb. An
+//! Android phone exposes one of these in every USB mode, "No data transfer"
+//! included, while keyboards, hubs, disks and serial adapters do not, so
+//! nothing else is sent vendor requests it never asked for. A device that
+//! does not answer the AOA protocol query is left alone until it is next
+//! plugged in.
+//!
+//! ## Asking a phone once
+//!
+//! Each AOA start makes the phone leave the bus and come back as an
+//! accessory, and Android runs its accessory dialogs again each time it does.
+//! A phone can be offered more than once for one plug: an embedder may hand
+//! the same device over from several triggers (the attach intent, a
+//! permission grant, a scan on resume), and a phone may come back briefly as
+//! an ordinary device while it switches. So a switch is claimed per phone in
+//! [`Switches`], keyed by its serial number: a phone that is not an accessory
+//! is not asked again while a switch of it runs or within
+//! [`SWITCH_COOLDOWN`] of one, and an accessory that comes up with that
+//! serial ends the claim, so a replug later is asked afresh.
+//!
+//! ## Zero-length packets
+//!
+//! The phone reads the accessory in 16 KiB buffers, and a read completes on a
+//! full buffer or a short packet. A transfer that is an exact multiple of the
+//! packet size but shorter than the buffer ends on neither, so it is followed
+//! by a zero-length packet. A full 16 KiB transfer is not: it fills the
+//! buffer, and a zero-length packet after it would surface on the phone as an
+//! empty read.
+
+use std::collections::HashMap;
+#[cfg(not(target_os = "android"))]
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+#[cfg(not(target_os = "android"))]
+use futures::StreamExt;
+use nusb::descriptors::TransferType;
+#[cfg(not(target_os = "android"))]
+use nusb::hotplug::HotplugEvent;
+use nusb::transfer::{
+    Buffer, Bulk, ControlIn, ControlOut, ControlType, Direction, In, Out, Recipient,
+};
+#[cfg(not(target_os = "android"))]
+use nusb::{DeviceId, DeviceInfo};
+use tokio::sync::mpsc;
+#[cfg(not(target_os = "android"))]
+use tokio::task::JoinSet;
+use tracing::{debug, info, warn};
+
+use super::link::{USB_TRANSFER_MAX, UsbLink, UsbLinkQueue, gather};
+
+/// Google's vendor id, which every device in accessory mode presents.
+const AOA_VID: u16 = 0x18d1;
+
+/// Accessory-mode product ids: accessory, with adb, and the audio variants.
+const AOA_PIDS: std::ops::RangeInclusive<u16> = 0x2d00..=0x2d05;
+
+/// AOA vendor requests.
+const AOA_GET_PROTOCOL: u8 = 51;
+const AOA_SEND_STRING: u8 = 52;
+const AOA_START: u8 = 53;
+
+/// The identity this host announces. An app accepts the accessory by
+/// matching manufacturer and model in its accessory filter, so these are
+/// fixed for every FIPS host: any FIPS node can link with any FIPS app.
+pub const AOA_MANUFACTURER: &str = "FIPS";
+/// See [`AOA_MANUFACTURER`].
+pub const AOA_MODEL: &str = "fips-link";
+const AOA_DESCRIPTION: &str = "FIPS mesh link";
+const AOA_VERSION: &str = "1";
+const AOA_SERIAL: &str = "fips";
+
+/// Timeout for each AOA control request. A phone answers in milliseconds.
+const CONTROL_TIMEOUT: Duration = Duration::from_millis(1000);
+
+/// How long after a phone is asked to become an accessory a device with its
+/// serial that is not yet an accessory is left alone, unless the accessory
+/// came up meanwhile. A phone that switches is back as an accessory within a
+/// couple of seconds; one that is replugged sooner than this after a switch
+/// that never came up waits out the rest of it.
+pub(crate) const SWITCH_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// The phones asked to become an accessory, by key (serial number, else
+/// label), with when each was claimed. Shared by the bus watcher and the
+/// embedder's handovers, cheap to clone.
+#[derive(Clone, Default)]
+pub(crate) struct Switches(Arc<std::sync::Mutex<HashMap<String, Instant>>>);
+
+impl Switches {
+    /// Claim the switch of the phone `key` at `now`: `false` if a switch of
+    /// it is running or was claimed less than [`SWITCH_COOLDOWN`] ago.
+    pub(crate) fn claim(&self, key: &str, now: Instant) -> bool {
+        let mut claims = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        claims.retain(|_, at| now.saturating_duration_since(*at) < SWITCH_COOLDOWN);
+        if claims.contains_key(key) {
+            return false;
+        }
+        claims.insert(key.to_string(), now);
+        true
+    }
+
+    /// The claimed switch of `key` was sent at `now`: the cooldown runs from
+    /// the start request, not from the claim.
+    pub(crate) fn sent(&self, key: &str, now: Instant) {
+        let mut claims = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = claims.get_mut(key) {
+            *at = now;
+        }
+    }
+
+    /// End the claim of `key`: its switch failed or never happened, or the
+    /// phone is an accessory now, so its next appearance as a phone is asked.
+    pub(crate) fn release(&self, key: &str) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+}
+
+/// The key a phone's switch is claimed under: its serial number, which it
+/// keeps across leaving and rejoining the bus, or `label` for a device with
+/// none.
+fn switch_key(serial: Option<&str>, label: &str) -> String {
+    match serial.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(serial) => format!("serial:{serial}"),
+        None => format!("label:{label}"),
+    }
+}
+
+/// Run `switch` for the phone `key` unless a switch of it is claimed, and
+/// keep the claim only if the start request went out.
+async fn switch_once<F>(switches: &Switches, key: &str, label: &str, switch: F) -> bool
+where
+    F: std::future::Future<Output = Result<bool, String>>,
+{
+    if !switches.claim(key, Instant::now()) {
+        debug!(device = %label, key = %key, "USB host: already asked to become an accessory; not asking again");
+        return false;
+    }
+    match switch.await {
+        Ok(true) => {
+            switches.sent(key, Instant::now());
+            info!(device = %label, "USB host: asked device to become an accessory");
+            true
+        }
+        Ok(false) => {
+            switches.release(key);
+            debug!(device = %label, "USB host: device does not speak AOA");
+            false
+        }
+        Err(e) => {
+            switches.release(key);
+            debug!(device = %label, error = %e, "USB host: AOA switch failed");
+            false
+        }
+    }
+}
+
+/// The most times one plug of a phone is asked to become an accessory.
+const SWITCH_ASKS: usize = 3;
+
+/// Ask the opened phone `dev` to become an accessory, and ask it again if,
+/// a [`SWITCH_COOLDOWN`] after the request, it is still here as the same
+/// device: a phone that switches leaves the bus, so this one did not. That
+/// happens when the phone could not start accessory mode — Android opens
+/// its accessory device to start it, which fails while an app still holds
+/// it from an earlier session — and nothing else would ask again before a
+/// replug. A phone that did not switch showed no accessory dialog, so
+/// asking again shows none twice. At most [`SWITCH_ASKS`] asks per plug.
+async fn switch_until_gone(
+    dev: &nusb::Device,
+    switches: &Switches,
+    key: &str,
+    label: &str,
+    uri: &str,
+) {
+    for ask in 1..=SWITCH_ASKS {
+        if !switch_once(switches, key, label, switch_device(dev, uri)).await {
+            return;
+        }
+        tokio::time::sleep(SWITCH_COOLDOWN + Duration::from_millis(500)).await;
+        if !still_here(dev).await {
+            return;
+        }
+        if ask < SWITCH_ASKS {
+            info!(device = %label, ask, "USB host: device did not become an accessory; asking again");
+        } else {
+            warn!(device = %label, "USB host: device did not become an accessory; giving up until it is replugged");
+        }
+    }
+}
+
+/// Whether the phone `dev` still answers as the device it was opened as.
+async fn still_here(dev: &nusb::Device) -> bool {
+    dev.control_in(
+        ControlIn {
+            control_type: ControlType::Vendor,
+            recipient: Recipient::Device,
+            request: AOA_GET_PROTOCOL,
+            value: 0,
+            index: 0,
+            length: 2,
+        },
+        CONTROL_TIMEOUT,
+    )
+    .await
+    .is_ok()
+}
+
+/// The least time between two resets of one phone (see [`recover`]), so a
+/// phone whose links keep failing is not reset in a tight loop.
+#[cfg(not(target_os = "android"))]
+const RECOVER_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// How long after a link that heard nothing ends the accessory is opened
+/// again.
+#[cfg(not(target_os = "android"))]
+const REOPEN_DELAY: Duration = Duration::from_secs(5);
+
+/// When each phone, by switch key, was last reset to recover its link.
+#[cfg(not(target_os = "android"))]
+#[derive(Clone, Default)]
+struct Resets(Arc<std::sync::Mutex<HashMap<String, Instant>>>);
+
+#[cfg(not(target_os = "android"))]
+impl Resets {
+    /// Claim a reset of `key` at `now`: `false` if one was made less than
+    /// [`RECOVER_COOLDOWN`] ago.
+    fn claim(&self, key: &str, now: Instant) -> bool {
+        let mut resets = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        resets.retain(|_, at| now.saturating_duration_since(*at) < RECOVER_COOLDOWN);
+        if resets.contains_key(key) {
+            return false;
+        }
+        resets.insert(key.to_string(), now);
+        true
+    }
+}
+
+/// Bulk IN transfers kept queued, so the phone never waits on this side to
+/// ask for the next one.
+const IN_FLIGHT: usize = 4;
+
+/// Bulk OUT transfers allowed in flight before the writer waits.
+const OUT_IN_FLIGHT: usize = 2;
+
+/// How long the writer may take to finish once the reader has ended.
+const OUT_DRAIN: Duration = Duration::from_secs(1);
+
+/// Link queue depth between the pumps and the transport.
+const PUMP_QUEUE_DEPTH: usize = 8;
+
+#[cfg(not(target_os = "android"))]
+/// Watch the bus for phones and accessories until the task is aborted,
+/// queueing a link for every accessory that comes up.
+///
+/// `uri` is announced in the AOA handshake: a phone with no app that accepts
+/// the accessory offers it to the user, so it should say where to get one.
+pub(crate) async fn run(links: Arc<UsbLinkQueue>, uri: String, switches: Switches) {
+    // Watch before listing, so a device plugged in between the two is seen.
+    let mut watch = match nusb::watch_devices() {
+        Ok(watch) => watch,
+        Err(e) => {
+            warn!(error = %e, "USB host: cannot watch for devices; host role disabled");
+            return;
+        }
+    };
+    let mut tasks = JoinSet::new();
+    // Devices already handled since they were plugged in: being switched,
+    // linked, or found not to speak AOA. Forgotten when they go away.
+    let mut handled: HashSet<DeviceId> = HashSet::new();
+    let resets = Resets::default();
+
+    match nusb::list_devices().await {
+        Ok(devices) => {
+            for device in devices {
+                consider(
+                    device,
+                    &mut handled,
+                    &mut tasks,
+                    &links,
+                    &uri,
+                    &switches,
+                    &resets,
+                );
+            }
+        }
+        Err(e) => warn!(error = %e, "USB host: cannot list devices"),
+    }
+    info!("USB host: watching for phones");
+
+    loop {
+        tokio::select! {
+            event = watch.next() => match event {
+                Some(HotplugEvent::Connected(device)) => {
+                    consider(device, &mut handled, &mut tasks, &links, &uri, &switches, &resets);
+                }
+                Some(HotplugEvent::Disconnected(id)) => {
+                    handled.remove(&id);
+                }
+                None => break,
+            },
+            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+/// Act on a device: open it as a link if it is an accessory, ask it to
+/// become one if it looks like a phone, otherwise nothing.
+fn consider(
+    device: DeviceInfo,
+    handled: &mut HashSet<DeviceId>,
+    tasks: &mut JoinSet<()>,
+    links: &Arc<UsbLinkQueue>,
+    uri: &str,
+    switches: &Switches,
+    resets: &Resets,
+) {
+    if handled.contains(&device.id()) {
+        return;
+    }
+    let label = label_of(&device);
+    let key = switch_key(device.serial_number(), &label);
+    if is_accessory(&device) {
+        handled.insert(device.id());
+        switches.release(&key);
+        let links = Arc::clone(links);
+        let resets = resets.clone();
+        tasks.spawn(async move {
+            // A link that ends without a word from the phone is opened again
+            // while the device is on the bus: the app on the phone may have
+            // had the accessory closed when this side opened it, and opens it
+            // again later with nothing on the bus to say so. Opening is
+            // invisible to the phone, so a phone with no app costs nothing.
+            loop {
+                let dev = match device.open().await {
+                    Ok(dev) => dev,
+                    Err(e) => {
+                        debug!(link = %label, error = %e, "USB host: cannot open accessory; gone?");
+                        return;
+                    }
+                };
+                match open_link(dev.clone(), &label).await {
+                    Ok((link, pumps)) => {
+                        info!(link = %label, "USB host: accessory opened");
+                        links.push(link);
+                        let heard = pumps.await.unwrap_or(false);
+                        if heard {
+                            recover(&dev, &label, &key, &resets).await;
+                            return;
+                        }
+                        debug!(link = %label, "USB host: accessory link ended without a word from the phone; opening it again");
+                    }
+                    Err(e) => {
+                        warn!(link = %label, error = %e, "USB host: cannot open accessory");
+                        return;
+                    }
+                }
+                drop(dev);
+                tokio::time::sleep(REOPEN_DELAY).await;
+            }
+        });
+    } else if looks_like_phone(&device) {
+        handled.insert(device.id());
+        let uri = uri.to_string();
+        let switches = switches.clone();
+        tasks.spawn(async move {
+            match device.open().await {
+                Ok(dev) => switch_until_gone(&dev, &switches, &key, &label, &uri).await,
+                Err(e) => {
+                    debug!(device = %label, error = %e, "USB host: cannot open device to switch it")
+                }
+            }
+        });
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn is_accessory(device: &DeviceInfo) -> bool {
+    device.vendor_id() == AOA_VID && AOA_PIDS.contains(&device.product_id())
+}
+
+#[cfg(not(target_os = "android"))]
+/// Whether `device` exposes an interface only a phone-like device has: MTP
+/// or PTP (still-image class, or Android's vendor-class MTP interface) or
+/// adb. A vendor-class interface with protocol `ff` — a serial adapter's,
+/// typically — does not count.
+fn looks_like_phone(device: &DeviceInfo) -> bool {
+    device.interfaces().any(|i| {
+        let (class, subclass, protocol) = (i.class(), i.subclass(), i.protocol());
+        class == 0x06
+            || (class == 0xff && subclass == 0x42)
+            || (class == 0xff && subclass == 0xff && protocol == 0x00)
+    })
+}
+
+#[cfg(not(target_os = "android"))]
+/// A stable name for the device's position on the bus: bus id and port path.
+fn label_of(device: &DeviceInfo) -> String {
+    let ports: Vec<String> = device.port_chain().iter().map(|p| p.to_string()).collect();
+    format!("host/{}-{}", device.bus_id(), ports.join("."))
+}
+
+/// Take a device the embedder opened as USB host — on Android, through
+/// `UsbDeviceConnection` — and link with it: open it if it is already an
+/// accessory, otherwise ask it to become one. A device that switches leaves
+/// the bus and comes back as an accessory, which the embedder hands over
+/// again.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) async fn adopt(
+    fd: std::os::fd::OwnedFd,
+    label: String,
+    links: Arc<UsbLinkQueue>,
+    uri: String,
+    switches: Switches,
+) {
+    let dev = match nusb::Device::from_fd(fd).await {
+        Ok(dev) => dev,
+        Err(e) => {
+            warn!(device = %label, error = %e, "USB host: cannot use handed-over device");
+            return;
+        }
+    };
+    let desc = dev.device_descriptor();
+    let serial = match desc.serial_number_string_index() {
+        Some(index) => dev
+            .get_string_descriptor(
+                index,
+                nusb::descriptors::language_id::US_ENGLISH,
+                CONTROL_TIMEOUT,
+            )
+            .await
+            .ok(),
+        None => None,
+    };
+    let key = switch_key(serial.as_deref(), &label);
+    if desc.vendor_id() == AOA_VID && AOA_PIDS.contains(&desc.product_id()) {
+        switches.release(&key);
+        match open_link(dev, &label).await {
+            Ok((link, _pumps)) => {
+                info!(link = %label, "USB host: accessory opened");
+                links.push(link);
+            }
+            Err(e) => warn!(link = %label, error = %e, "USB host: cannot open accessory"),
+        }
+    } else {
+        switch_until_gone(&dev, &switches, &key, &label, &uri).await;
+    }
+}
+
+/// Run the AOA handshake on an opened device. `Ok(false)` when it does not
+/// support AOA.
+async fn switch_device(dev: &nusb::Device, uri: &str) -> Result<bool, String> {
+    let version = dev
+        .control_in(
+            ControlIn {
+                control_type: ControlType::Vendor,
+                recipient: Recipient::Device,
+                request: AOA_GET_PROTOCOL,
+                value: 0,
+                index: 0,
+                length: 2,
+            },
+            CONTROL_TIMEOUT,
+        )
+        .await
+        .map_err(|e| format!("get protocol: {e}"))?;
+    let protocol = match version.as_slice() {
+        [lo, hi, ..] => u16::from_le_bytes([*lo, *hi]),
+        _ => 0,
+    };
+    if protocol < 1 {
+        return Ok(false);
+    }
+
+    let strings = [
+        AOA_MANUFACTURER,
+        AOA_MODEL,
+        AOA_DESCRIPTION,
+        AOA_VERSION,
+        uri,
+        AOA_SERIAL,
+    ];
+    for (index, string) in strings.iter().enumerate() {
+        let mut data = string.as_bytes().to_vec();
+        data.push(0);
+        dev.control_out(
+            ControlOut {
+                control_type: ControlType::Vendor,
+                recipient: Recipient::Device,
+                request: AOA_SEND_STRING,
+                value: 0,
+                index: index as u16,
+                data: &data,
+            },
+            CONTROL_TIMEOUT,
+        )
+        .await
+        .map_err(|e| format!("send string {index}: {e}"))?;
+    }
+    dev.control_out(
+        ControlOut {
+            control_type: ControlType::Vendor,
+            recipient: Recipient::Device,
+            request: AOA_START,
+            value: 0,
+            index: 0,
+            data: &[],
+        },
+        CONTROL_TIMEOUT,
+    )
+    .await
+    .map_err(|e| format!("start: {e}"))?;
+    Ok(true)
+}
+
+#[cfg(not(target_os = "android"))]
+/// A link with an accessory has ended and the phone may still be on the bus,
+/// still in accessory mode: the app on it restarted, or the node closed the
+/// link. Nothing on the bus changes then, so nothing would bring the link
+/// back short of a replug. Reset the device instead, which is that replug:
+/// the phone leaves the bus and returns, is asked to become an accessory
+/// again or comes back as one, and its app is offered the accessory anew.
+///
+/// Only a link the phone sent something on gets here, so a phone with no
+/// app that takes the accessory is not reset over and over; and a phone is
+/// reset at most once per [`RECOVER_COOLDOWN`]. A phone that was unplugged
+/// fails the reset, which is the end of it.
+async fn recover(dev: &nusb::Device, label: &str, key: &str, resets: &Resets) {
+    if !resets.claim(key, Instant::now()) {
+        debug!(link = %label, "USB host: accessory link ended; reset too recently to reset again");
+        return;
+    }
+    match dev.reset().await {
+        Ok(()) => {
+            info!(link = %label, "USB host: accessory link ended; reset the device to link again")
+        }
+        Err(e) => debug!(link = %label, error = %e, "USB host: accessory link ended; device gone"),
+    }
+}
+
+/// Claim the accessory interface of an opened device and start the pumps
+/// that carry its bulk endpoints to and from a link.
+///
+/// The accessory interface is the vendor-class one with a bulk endpoint each
+/// way; an accessory with adb also has adb's, which is told apart by its
+/// subclass.
+///
+/// Also returns a task that ends when both pumps have stopped — the device
+/// went, or the link was dropped — with whether the phone sent anything.
+pub(crate) async fn open_link(
+    dev: nusb::Device,
+    label: &str,
+) -> Result<(UsbLink, tokio::task::JoinHandle<bool>), String> {
+    let (number, ep_in, ep_out) = {
+        let config = dev
+            .active_configuration()
+            .map_err(|e| format!("configuration: {e}"))?;
+        let mut found = None;
+        for interface in config.interfaces() {
+            for alt in interface.alt_settings() {
+                if alt.class() != 0xff || alt.subclass() == 0x42 {
+                    continue;
+                }
+                let bulk = |dir: Direction| {
+                    alt.endpoints()
+                        .find(|ep| {
+                            ep.transfer_type() == TransferType::Bulk && ep.direction() == dir
+                        })
+                        .map(|ep| ep.address())
+                };
+                if let (Some(i), Some(o)) = (bulk(Direction::In), bulk(Direction::Out)) {
+                    found = Some((alt.interface_number(), i, o));
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        found.ok_or("no accessory interface")?
+    };
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let interface = dev.detach_and_claim_interface(number).await;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let interface = dev.claim_interface(number).await;
+    let interface = interface.map_err(|e| format!("claim interface {number}: {e}"))?;
+
+    let ep_in = interface
+        .endpoint::<Bulk, In>(ep_in)
+        .map_err(|e| format!("bulk in: {e}"))?;
+    let ep_out = interface
+        .endpoint::<Bulk, Out>(ep_out)
+        .map_err(|e| format!("bulk out: {e}"))?;
+
+    let (in_tx, in_rx) = mpsc::channel(PUMP_QUEUE_DEPTH);
+    let (out_tx, out_rx) = mpsc::channel(PUMP_QUEUE_DEPTH);
+    let pump_label = label.to_string();
+    let pumps = tokio::spawn(async move {
+        let mut out = tokio::spawn(pump_out(ep_out, out_rx, pump_label.clone()));
+        let heard = pump_in(ep_in, in_tx, pump_label).await;
+        // The reader ends when the link is dropped or the device goes. A
+        // phone that closed the accessory reads nothing, so the writer's
+        // queued transfers would wait forever: give it a moment to finish,
+        // then drop it, which cancels them.
+        if tokio::time::timeout(OUT_DRAIN, &mut out).await.is_err() {
+            out.abort();
+        }
+        heard
+    });
+    Ok((
+        UsbLink {
+            label: label.to_string(),
+            rx: in_rx,
+            tx: out_tx,
+        },
+        pumps,
+    ))
+}
+
+/// Keep [`IN_FLIGHT`] reads queued on the bulk IN endpoint and pass what
+/// each brings to the link, until the device goes or the link is dropped.
+async fn pump_in(
+    mut ep: nusb::Endpoint<Bulk, In>,
+    to_link: mpsc::Sender<Vec<u8>>,
+    label: String,
+) -> bool {
+    let mut heard = false;
+    for _ in 0..IN_FLIGHT {
+        ep.submit(Buffer::new(USB_TRANSFER_MAX));
+    }
+    loop {
+        // A phone whose app closed the accessory sends nothing and fails no
+        // transfer, so the link being dropped must end this too.
+        let done = tokio::select! {
+            done = ep.next_complete() => done,
+            () = to_link.closed() => break,
+        };
+        if let Err(e) = done.status {
+            debug!(link = %label, error = %e, "USB host: bulk in ended");
+            break;
+        }
+        heard |= done.actual_len > 0;
+        if done.actual_len > 0
+            && to_link
+                .send(done.buffer[..done.actual_len].to_vec())
+                .await
+                .is_err()
+        {
+            break;
+        }
+        ep.submit(Buffer::new(USB_TRANSFER_MAX));
+    }
+    ep.cancel_all();
+    heard
+}
+
+/// Write what the link queues to the bulk OUT endpoint, joined into transfers
+/// of up to 16 KiB, with a zero-length packet where the phone's read would
+/// otherwise not complete.
+async fn pump_out(
+    mut ep: nusb::Endpoint<Bulk, Out>,
+    mut from_link: mpsc::Receiver<Vec<u8>>,
+    label: String,
+) {
+    let packet = ep.max_packet_size();
+    let mut carried = None;
+    loop {
+        let first = match carried.take() {
+            Some(chunk) => chunk,
+            None => match from_link.recv().await {
+                Some(chunk) => chunk,
+                None => break,
+            },
+        };
+        let transfer = gather(first, &mut from_link, &mut carried);
+        let len = transfer.len();
+        ep.submit(Buffer::from(transfer));
+        if needs_zlp(len, packet) {
+            ep.submit(Buffer::new(0));
+        }
+        while ep.pending() > OUT_IN_FLIGHT {
+            if let Err(e) = ep.next_complete().await.status {
+                debug!(link = %label, error = %e, "USB host: bulk out ended");
+                return;
+            }
+        }
+    }
+    while ep.pending() > 0 {
+        if ep.next_complete().await.status.is_err() {
+            return;
+        }
+    }
+}
+
+/// Whether a transfer of `len` bytes must be followed by a zero-length
+/// packet: it ends on a packet boundary but does not fill the phone's read.
+fn needs_zlp(len: usize, max_packet_size: usize) -> bool {
+    len > 0 && len.is_multiple_of(max_packet_size) && len < USB_TRANSFER_MAX
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A phone is asked once while its switch runs and for the cooldown
+    /// after, whoever offers it; asked again after the cooldown, after a
+    /// failed switch, and after it came up as an accessory.
+    #[test]
+    fn a_phone_is_asked_once_per_plug() {
+        let switches = Switches::default();
+        let t0 = Instant::now();
+        let key = switch_key(Some("R58M12345"), "host/1-2");
+
+        assert!(switches.claim(&key, t0), "first offer is asked");
+        assert!(
+            !switches.claim(&key, t0 + Duration::from_millis(5)),
+            "a second handover while the switch runs is not asked"
+        );
+        switches.sent(&key, t0 + Duration::from_secs(1));
+        assert!(
+            !switches.claim(&key, t0 + Duration::from_secs(3)),
+            "the phone back briefly as an ordinary device is not asked again"
+        );
+        assert!(
+            !switches.claim(
+                &key,
+                t0 + Duration::from_secs(1) + SWITCH_COOLDOWN - Duration::from_millis(1)
+            ),
+            "the cooldown runs from the start request"
+        );
+        assert!(
+            switches.claim(&key, t0 + Duration::from_secs(1) + SWITCH_COOLDOWN),
+            "after the cooldown the phone is asked again"
+        );
+
+        let other = switch_key(Some("ZY22ABC"), "host/1-3");
+        assert!(switches.claim(&other, t0), "another phone is its own claim");
+        switches.release(&other);
+        assert!(
+            switches.claim(&other, t0),
+            "a released claim is asked again at once"
+        );
+    }
+
+    /// The key is the serial whatever the label, so a phone the embedder
+    /// labels differently on each handover is still one phone; a device
+    /// with no serial falls back to its label.
+    #[test]
+    fn the_switch_key_is_the_serial_else_the_label() {
+        assert_eq!(
+            switch_key(Some("R58M12345"), "/dev/bus/usb/001/004"),
+            switch_key(Some("R58M12345"), "/dev/bus/usb/001/007"),
+        );
+        assert_ne!(switch_key(None, "a"), switch_key(None, "b"));
+        assert_eq!(switch_key(Some("  "), "a"), switch_key(None, "a"));
+        assert_ne!(switch_key(Some("a"), "x"), switch_key(None, "a"));
+    }
+
+    #[test]
+    fn a_zero_length_packet_follows_only_short_aligned_transfers() {
+        assert!(needs_zlp(512, 512));
+        assert!(needs_zlp(1024, 512));
+        assert!(needs_zlp(USB_TRANSFER_MAX - 512, 512));
+        assert!(!needs_zlp(USB_TRANSFER_MAX, 512));
+        assert!(!needs_zlp(513, 512));
+        assert!(!needs_zlp(37, 512));
+        assert!(!needs_zlp(0, 512));
+    }
+
+    /// Hardware check against a real phone running an app that accepts the
+    /// FIPS accessory and echoes every byte back. Not part of the suite:
+    ///
+    /// ```text
+    /// cargo test --features usb-host --lib aoa_echo_against_a_phone -- --ignored --nocapture
+    /// ```
+    ///
+    /// Plug the phone in first. It is switched into accessory mode, every
+    /// transfer size that needs (or must not get) a zero-length packet is
+    /// echoed, and then a pipelined stream measures throughput.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a phone on USB running an echoing accessory app"]
+    async fn aoa_echo_against_a_phone() {
+        let links = Arc::new(UsbLinkQueue::new());
+        let host = tokio::spawn(run(
+            Arc::clone(&links),
+            "https://example.invalid".into(),
+            Switches::default(),
+        ));
+        let mut link = tokio::time::timeout(Duration::from_secs(15), links.next_link())
+            .await
+            .expect("no accessory came up within 15 s");
+        println!("linked: {}", link.label);
+
+        async fn echo(link: &mut UsbLink, payload: Vec<u8>) {
+            let len = payload.len();
+            link.tx.send(payload.clone()).await.unwrap();
+            let mut got = Vec::with_capacity(len);
+            while got.len() < len {
+                let chunk = tokio::time::timeout(Duration::from_secs(3), link.rx.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("echo of {len} B stalled at {} B", got.len()))
+                    .expect("link closed");
+                got.extend_from_slice(&chunk);
+            }
+            assert_eq!(got, payload, "echo of {len} B differs");
+        }
+
+        // Sizes around every boundary the pumps treat specially.
+        for len in [
+            1,
+            37,
+            511,
+            512,
+            513,
+            1024,
+            4096,
+            16000,
+            USB_TRANSFER_MAX - 512,
+            USB_TRANSFER_MAX,
+        ] {
+            let payload: Vec<u8> = (0..len).map(|i| (i * 7 + len) as u8).collect();
+            echo(&mut link, payload).await;
+            println!("echoed {len} B");
+        }
+
+        // Pipelined: the writer keeps sending while the reader drains.
+        let transfers = 2000usize;
+        let size = USB_TRANSFER_MAX;
+        let tx = link.tx.clone();
+        let start = std::time::Instant::now();
+        let writer = tokio::spawn(async move {
+            for i in 0..transfers {
+                tx.send(vec![i as u8; size]).await.unwrap();
+            }
+        });
+        let mut received = 0usize;
+        while received < transfers * size {
+            let chunk = tokio::time::timeout(Duration::from_secs(3), link.rx.recv())
+                .await
+                .expect("pipelined echo stalled")
+                .expect("link closed");
+            received += chunk.len();
+        }
+        writer.await.unwrap();
+        let secs = start.elapsed().as_secs_f64();
+        let mb = (transfers * size) as f64 / 1e6;
+        println!(
+            "pipelined: {mb:.1} MB each way in {secs:.2} s = {:.1} MB/s per direction",
+            mb / secs
+        );
+        host.abort();
+    }
+}
