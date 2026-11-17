@@ -19,7 +19,7 @@ use std::mem::size_of;
 /// Most bytes one decrypt worker's idle channel may hold: the next whole MiB
 /// above 1.25 times `WORKER_CHANNEL_CAP` slots of 136 bytes (a 128-byte
 /// message and an 8-byte stamp).
-const CHANNEL_BUDGET: usize = 5 << 20;
+const CHANNEL_BUDGET: usize = 3 << 20;
 
 /// The key every test session seals and opens under.
 const KEY: [u8; 32] = [7u8; 32];

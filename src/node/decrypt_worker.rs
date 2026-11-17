@@ -62,21 +62,25 @@ use crate::noise::ReplayWindow;
 
 /// Slots in each decrypt worker's queue.
 ///
-/// The value came in with the worker pool, from upstream, with no recorded
-/// reason. The queue adds no capacity under sustained overload: a job that
-/// finds it full is dropped, at any depth, and counted as
-/// `dataplane.decrypt_queue_full`. What the depth sets is how long a worker
-/// can stall, descheduled while the receive loop keeps dispatching to it,
-/// before drops start, and how much queueing delay stands in front of them.
-/// The backlog that can reach one worker in such a stall is that of every
-/// link hashed to it; per link, a full default receive buffer holds about
-/// 4400 of the smallest frames, and the peer's encrypt queue and this node's
-/// packet channel add up to 1024 each.
+/// The queue adds no capacity under sustained overload: a job that finds it
+/// full is dropped, at any depth, and counted as `dataplane.decrypt_queue_full`.
+/// What the depth sets is how long a worker can stall, descheduled while the
+/// receive loop keeps dispatching to it, before drops start, and how much
+/// queueing delay stands in front of them. The backlog that can reach one
+/// worker in such a stall is that of every link hashed to it; per link, a full
+/// default receive buffer holds about 4400 of the smallest frames, and the
+/// peer's encrypt queue and this node's packet channel add up to 1024 each.
+///
+/// The pool came from upstream with 32768 and no recorded reason. The most a
+/// worker's queue was seen to hold, in the static chain harness under TCP and
+/// unlimited UDP, was 7663 messages, at one worker on two contended cores fed
+/// by two links at once; at a worker per CPU it was 7039. The depth is at
+/// least twice that, and above one link's backlog.
 ///
 /// The channel allocates every slot when it is created, so a worker holds
 /// this many times the size of [`WorkerMsg`] plus a word from startup, idle
 /// or not.
-pub(crate) const WORKER_CHANNEL_CAP: usize = 32768;
+pub(crate) const WORKER_CHANNEL_CAP: usize = 16384;
 
 /// The queue between the receive loop and one decrypt worker.
 fn worker_channel() -> (Sender<WorkerMsg>, Receiver<WorkerMsg>) {

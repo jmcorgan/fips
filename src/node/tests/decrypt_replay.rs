@@ -551,14 +551,21 @@ fn charge_per_datagram(len: usize) -> usize {
 /// destination can put up to its capacity more between them. The decrypt
 /// worker's window has to cover that reorder, or the queued frames are
 /// refused once the probe moves it. The buffer is the default UDP one, sized
-/// in the smallest frames by this host's kernel.
+/// in the smallest frames by this host's kernel. The frames are dispatched in
+/// runs of half the worker's queue, each closed by a barrier, so the queue
+/// never fills whatever this kernel charges per datagram; the worker still
+/// sees the probe first and the overtaken frames after it, in order. Where
+/// the frames number fewer than half the queue, as with the kernel this was
+/// written on, no barrier runs.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_frame_queued_behind_a_full_default_receive_buffer_is_not_refused_when_a_probe_overtakes_it()
  {
     use super::connected_udp::far_side_frame;
     use crate::config::UdpConfig;
-    use crate::node::decrypt_worker::{DecryptWorkerEvent, DecryptWorkerPool};
+    use crate::node::decrypt_worker::{
+        DecryptWorkerEvent, DecryptWorkerPool, WORKER_CHANNEL_CAP as DECRYPT_QUEUE,
+    };
     use crate::node::encrypt_worker::WORKER_CHANNEL_CAP;
 
     let charge = charge_per_datagram(60);
@@ -587,7 +594,10 @@ async fn a_frame_queued_behind_a_full_default_receive_buffer_is_not_refused_when
         .map(|_| far_side_frame(&mut far_side, index))
         .collect();
     let probe = frames.pop().unwrap();
-    for frame in std::iter::once(probe).chain(frames) {
+    for (sent, frame) in std::iter::once(probe).chain(frames).enumerate() {
+        if sent > 0 && sent % (DECRYPT_QUEUE / 2) == 0 {
+            node.supervisor.decrypt_workers.as_ref().unwrap().barrier();
+        }
         node.process_packet(ReceivedPacket::new(tid, original.clone(), frame))
             .await;
     }
