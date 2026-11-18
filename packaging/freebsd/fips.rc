@@ -32,6 +32,7 @@ procname="/usr/local/bin/fips"
 command="/usr/sbin/daemon"
 command_args="-H -p ${pidfile} -P ${supervisor_pidfile} -t fips -o ${fips_logfile} ${procname} --config ${fips_config} ${fips_flags}"
 start_precmd="fips_precmd"
+stop_postcmd="fips_poststop"
 
 # The daemon resolves its control socket to /var/run/fips when the
 # directory exists, so it must be there before the daemon starts.
@@ -45,6 +46,22 @@ fips_precmd() {
     else
         install -d -m 0755 "$runtime_dir"
     fi
+}
+
+# rc.subr's stop waits for the daemon with pwait(1), and pwait returns at
+# once for a process that has already begun to exit. The daemon can begin to
+# exit within a few milliseconds of SIGTERM, and then stop returns while the
+# kernel is still tearing it down: a restart's start finds it still listed
+# under the pidfile and refuses with "already running?", leaving nothing
+# running. daemon(8) removes both pidfiles only after it has reaped the
+# daemon, so wait for that, for at most 10 seconds.
+fips_poststop() {
+    _i=0
+    while [ -e "$pidfile" ] || [ -e "$supervisor_pidfile" ]; do
+        [ "$_i" -ge 100 ] && break
+        sleep 0.1
+        _i=$((_i + 1))
+    done
 }
 
 run_rc_command "$1"
