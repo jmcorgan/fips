@@ -20,13 +20,16 @@ it out. Handshake message bytes are opaque here.
   its header says), the `poll_*` decisions (handshake timeout and link
   setup msg1 resend), the inbound msg1 classification (FRC-1201 rules 1
   and 2 and the restart gates of a replacement; a held peer's same-epoch
-  msg1 goes to its link's rekey machine, which owns rules 3 and 4) and
-  the outbound msg2 classification (a restart when the msg2's epoch
-  differs from the held peer's; a move to this dial's session when the
-  held peer came from an earlier dial of this node's, whose session the
-  peer's answer to this one supersedes (a replacement on a link too young
-  to rekey, a rekey on an older one); else the cross-connection
-  tie-break).
+  msg1 goes to its link's rekey machine, which owns rules 3 and 4; a
+  fresh msg1 the machine finds off the established link of a peering
+  heard from is a redial, which, unless the silent-session refusal holds
+  it, the node answers into a pending redial and installs only at the
+  peer's first frame under its session) and the outbound msg2
+  classification (a restart when the msg2's epoch differs from the held
+  peer's; a move to this dial's session when the held peer came from an
+  earlier dial of this node's, whose session the peer's answer to this
+  one supersedes (a replacement on a link too young to rekey, a rekey on
+  an older one); else the cross-connection tie-break).
 - `state.rs`: `ConnectionState`, the bookkeeping of a connection in its
   handshake phase, which holds this node's index for the handshake as an
   `IndexLease` from the rekey machine's `lease::allocate`, so promotion

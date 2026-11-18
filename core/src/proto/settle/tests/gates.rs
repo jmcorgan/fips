@@ -442,7 +442,7 @@ fn refusal_of(r: Option<Refusal>) -> Option<m::Gate> {
         Refusal::Unheard => m::Gate::Unheard,
         Refusal::Heard => m::Gate::Heard,
         Refusal::Dampened => m::Gate::Dampened,
-        Refusal::Replayed | Refusal::ReplayFull | Refusal::Silent => {
+        Refusal::Replayed | Refusal::ReplayFull | Refusal::Silent | Refusal::Redialed => {
             panic!("the model has no {r:?} refusal")
         }
     })
@@ -467,10 +467,12 @@ fn ev_msg1(hs: u32, bytes: u32, epoch: u32, link: u32, from: u16) -> Event {
     }
 }
 
-/// The model's gate tests' replacement: a same-epoch msg1 from a new
-/// address on a link too young to rekey.
+/// The model's gate tests' replacement: a same-epoch msg1 on the link,
+/// from its setup address, on a link too young to rekey. From a new
+/// address, the msg1 of a peering heard from would be a redial, which no
+/// gate floor holds.
 fn repl(hs: u32) -> Event {
-    ev_msg1(hs, hs * 10, 1, hs, 8)
+    ev_msg1(hs, hs * 10, 1, hs, 9)
 }
 
 fn frame(hs: u32) -> Event {
@@ -589,4 +591,82 @@ fn the_gates_agree_with_the_model_on_every_gate_history() {
     for (name, history) in &histories {
         Beside::new().run(name, history);
     }
+}
+
+#[test]
+fn a_redial_is_not_held_by_the_heard_floor() {
+    // A heard peering whose last frame was just now: a replacement is held
+    // by the heard floor, a redial is not.
+    let mut g = Gates::new();
+    let held = heard(0, Some(40_000));
+    assert_eq!(
+        gate(&mut g, msg1(Source::Replacement, Some(held), 2), 40_100),
+        Some(Refusal::Heard)
+    );
+    assert_eq!(
+        gate(&mut g, msg1(Source::Redial, Some(held), 3), 40_100),
+        None
+    );
+    assert_eq!(g.stamp(&peer()), None, "an answered redial stamps nothing");
+}
+
+#[test]
+fn the_redial_memory_refuses_a_seen_ephemeral_and_a_full_memory_until_it_ages_out() {
+    let params = Params::default();
+    let mut g = Gates::new();
+    let held = heard(0, Some(0));
+    g.redialed(peer(), eph(2), t(40_000), &params);
+    assert_eq!(
+        gate(&mut g, msg1(Source::Redial, Some(held), 2), 41_000),
+        Some(Refusal::Redialed)
+    );
+    for n in 3..(3 + params.replays as u32 - 1) {
+        g.redialed(peer(), eph(n), t(41_000), &params);
+    }
+    assert_eq!(
+        gate(&mut g, msg1(Source::Redial, Some(held), 99), 42_000),
+        Some(Refusal::Redialed),
+        "a full memory refuses a fresh ephemeral too"
+    );
+    assert_eq!(
+        gate(&mut g, msg1(Source::Redial, Some(held), 99), 56_000),
+        None,
+        "every entry has aged out"
+    );
+}
+
+#[test]
+fn the_swap_stamps_the_dampener_only_for_a_heard_peering_and_clears_the_redial_memory() {
+    let params = Params::default();
+    let mut g = Gates::new();
+    g.redialed(peer(), eph(2), t(40_000), &params);
+    g.swapped(peer(), false, t(40_500));
+    assert_eq!(g.stamp(&peer()), None);
+    assert_eq!(
+        gate(
+            &mut g,
+            msg1(Source::Redial, Some(heard(40_500, Some(40_500))), 2),
+            41_000
+        ),
+        None,
+        "the swap forgot the memory"
+    );
+    g.swapped(peer(), true, t(41_000));
+    assert_eq!(g.stamp(&peer()), Some(t(41_000)));
+    assert_eq!(
+        gate(
+            &mut g,
+            msg1(Source::Redial, Some(heard(41_000, Some(41_000))), 3),
+            55_999
+        ),
+        Some(Refusal::Dampened)
+    );
+    assert_eq!(
+        gate(
+            &mut g,
+            msg1(Source::Redial, Some(heard(41_000, Some(41_000))), 3),
+            56_000
+        ),
+        None
+    );
 }

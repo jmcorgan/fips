@@ -734,6 +734,9 @@ pub struct DataplaneMetrics {
     pub orphaned_index: Counter,
     /// Frames dropped because their decrypt worker's queue was full.
     pub decrypt_queue_full: Counter,
+    /// Frames naming a pending redial's index that did not open under its
+    /// session.
+    pub redial_unopened: Counter,
 }
 
 impl DataplaneMetrics {
@@ -744,6 +747,7 @@ impl DataplaneMetrics {
             DataplaneReject::UnknownIndex => self.unknown_index.inc(),
             DataplaneReject::OrphanedIndex => self.orphaned_index.inc(),
             DataplaneReject::DecryptQueueFull => self.decrypt_queue_full.inc(),
+            DataplaneReject::RedialUnopened => self.redial_unopened.inc(),
         }
     }
 
@@ -753,6 +757,7 @@ impl DataplaneMetrics {
             unknown_index: self.unknown_index.get(),
             orphaned_index: self.orphaned_index.get(),
             decrypt_queue_full: self.decrypt_queue_full.get(),
+            redial_unopened: self.redial_unopened.get(),
         }
     }
 }

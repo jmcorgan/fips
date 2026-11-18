@@ -292,6 +292,13 @@ impl Node {
                         ambient.now_ms,
                     ) {
                         Ok(result) => {
+                            // A promoted link is no longer a pending
+                            // redial's, however it was promoted: by the
+                            // redial's first frame, or by a msg2 resend once
+                            // the peering it would have replaced was gone.
+                            if !node_fault!(RedialEntryKeptAtPromote) {
+                                self.redials.forget(promote_link);
+                            }
                             // A promotion that created a peer has already
                             // offered its session to the decrypt workers: the
                             // link's rekey machine is built knowing whether a

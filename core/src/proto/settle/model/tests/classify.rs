@@ -76,20 +76,21 @@ fn rule_3_2_a_copy_with_a_rewritten_header_is_discarded() {
 
 #[test]
 fn rule_3_3_any_other_msg1_on_a_young_link_replaces_the_peer() {
-    // frc-1201:1125: a fresh dial from a peer that lost its side, past the
-    // gates: the frame was 15 s ago and the link is still too young.
+    // frc-1201:1125: a fresh dial on the link from a peer that lost its
+    // side, past the gates: the frame was 15 s ago and the link is still
+    // too young. Off the link it is a redial (`LocalRule::DeferredRedial`).
     let mut j = responder(SMALL, LARGE);
     let s = last(
         &mut j,
         &[
             wait(15_000),
-            msg1(11, 110, E1, 2, at(8), Binding::Connectionless),
+            msg1(11, 110, E1, 2, at(9), Binding::Connectionless),
         ],
     );
     assert_eq!(s.class, Some(Class::Replacement));
     assert_eq!(s.reply, Some(Reply::Msg2));
     assert_eq!(s.change, Some(Transition::Replace));
-    assert_eq!(j.settled(), Some((Hs(11), LinkId(2), at(8))));
+    assert_eq!(j.settled(), Some((Hs(11), LinkId(2), at(9))));
 }
 
 #[test]
@@ -100,7 +101,7 @@ fn rule_3_3_a_refused_replacement_is_recorded_so_its_resends_are_copies() {
         &mut j,
         &[
             wait(500),
-            msg1(11, 110, E1, 2, at(8), Binding::Connectionless),
+            msg1(11, 110, E1, 2, at(9), Binding::Connectionless),
         ],
     );
     assert_eq!(refused.class, Some(Class::Replacement));
@@ -110,7 +111,7 @@ fn rule_3_3_a_refused_replacement_is_recorded_so_its_resends_are_copies() {
         &mut j,
         &[
             wait(20_000),
-            msg1(11, 110, E1, 2, at(8), Binding::Connectionless),
+            msg1(11, 110, E1, 2, at(9), Binding::Connectionless),
         ],
     );
     assert_eq!(resend.class, Some(Class::Copy));
@@ -119,14 +120,16 @@ fn rule_3_3_a_refused_replacement_is_recorded_so_its_resends_are_copies() {
 }
 
 #[test]
-fn rule_4_1_an_eligible_msg1_off_a_reachable_link_is_discarded() {
-    // frc-1201:1134: a second path, not a rekey of this link.
+fn rule_4_1_an_eligible_copy_off_a_reachable_link_is_discarded() {
+    // frc-1201:1134: a second path, not a rekey of this link. A copy of
+    // the setup msg1 with a rewritten header; a fresh msg1 there is a
+    // redial (`LocalRule::DeferredRedial`).
     let mut j = responder(SMALL, LARGE);
     let s = last(
         &mut j,
         &[
             wait(AGED),
-            msg1(11, 110, E1, 2, at(8), Binding::Connectionless),
+            msg1(10, 101, E1, 2, at(8), Binding::Connectionless),
         ],
     );
     assert_eq!(s.class, Some(Class::OffLink));

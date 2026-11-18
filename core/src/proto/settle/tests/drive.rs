@@ -141,6 +141,18 @@ fn home(a: Addr) -> Addr {
     }
 }
 
+/// What a held peer's machine asked of the core for a msg1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asked {
+    /// Nothing: it answered, resent or refused the msg1 itself.
+    Nothing,
+    /// A replacement, through the gates.
+    Replace,
+    /// A redial, through the gates, with the msg1's ephemeral as the
+    /// machine's record keys it.
+    Redial(crate::proto::rekey::Digest),
+}
+
 /// One node's core and the machines of the peer it holds.
 pub struct Drive {
     me: Node,
@@ -495,13 +507,13 @@ impl Drive {
     }
 
     /// A msg1's route through the machine: its class and reply, then what
-    /// the machine asks of the core. True when the machine asked for a
-    /// replacement, which goes through the gates next.
-    fn rekeyed(&mut self, hs: Hs, wire: &[u8], arrival: rekey::Arrival, did: &mut Did) -> bool {
+    /// the machine asks of the core: a replacement or a redial, which goes
+    /// through the gates next, or nothing.
+    fn rekeyed(&mut self, hs: Hs, wire: &[u8], arrival: rekey::Arrival, did: &mut Did) -> Asked {
         let before = self.pending();
         let now = self.now;
         let Some(m) = self.machines.as_mut() else {
-            return false;
+            return Asked::Nothing;
         };
         let events = m.msg1(&mut self.kit, now, hs, wire, arrival);
         let eligible = self.machines.as_ref().is_some_and(|m| self.eligible(m));
@@ -510,8 +522,12 @@ impl Drive {
         let after = self.pending();
         did.class = route::class(&r, before, after, eligible)
             .unwrap_or_else(|why| panic!("a msg1 refused {why:?}"));
-        let replace = r.replace.is_some();
-        if !replace {
+        let asked = match (&r.replace, &r.redial) {
+            (Some(_), _) => Asked::Replace,
+            (None, Some((_, e))) => Asked::Redial(*e),
+            (None, None) => Asked::Nothing,
+        };
+        if asked == Asked::Nothing {
             let answered = r.sends.iter().find_map(|s| match s {
                 Send::Msg2 { msg, .. } => Some(msg.clone()),
                 Send::Msg1(_) | Send::Prompt { .. } | Send::Path { .. } | Send::Connect { .. } => {
@@ -528,7 +544,7 @@ impl Drive {
             }
         }
         self.inputs(r.inputs, did);
-        replace
+        asked
     }
 
     fn msg1(&mut self, hs: Hs, b: Bytes, e: Epoch, from: Addr, sent: bool, did: &mut Did) {
@@ -547,16 +563,34 @@ impl Drive {
                 None
             }
         });
+        let mut redial = None;
         if let Some(arrival) = arrival {
             self.effects(out, did);
-            if !self.rekeyed(hs, &wire, arrival, did) {
+            let asked = self.rekeyed(hs, &wire, arrival, did);
+            if asked == Asked::Nothing {
                 return;
             }
             let (hello, again) = route::answer(&mut self.kit, tok.get(), hs, &wire, from);
             built = again;
-            out = self.core(Input::Replace(hello));
+            out = match asked {
+                Asked::Redial(e) => {
+                    redial = Some(e);
+                    self.core(Input::Redial(hello))
+                }
+                Asked::Replace | Asked::Nothing => self.core(Input::Replace(hello)),
+            };
         }
+        let answered = out
+            .iter()
+            .any(|o| matches!(o, Output::Answer { stored: false, .. }));
         self.admitted(out, hs, &wire, built, sent, did);
+        // The redial is armed: the held link's machine records its msg1.
+        if let (Some(e), true) = (redial, answered)
+            && !fault!(RedialUnnoted)
+            && let Some(m) = self.machines.as_mut()
+        {
+            m.redialed(e);
+        }
     }
 
     /// The outputs of an admission: a stored answer, a refusal, or a fresh
@@ -641,6 +675,18 @@ impl Drive {
     /// cutover it caused go to the core after.
     fn frame(&mut self, hs: Hs, from: Addr, did: &mut Did) {
         let now = self.now;
+        // A frame under a pending redial's session: the core hears the leg,
+        // which replaces the peering, and the frame then goes to the
+        // machines built on it.
+        if let Some(link) = self.opened(hs)
+            && self.table.redialing(&self.key()) == Some(link)
+        {
+            let out = self.core(Input::LegHeard {
+                link,
+                from: pair(from),
+            });
+            self.effects(out, did);
+        }
         let Some(wire) = self.sealed(hs) else {
             return;
         };
@@ -919,6 +965,7 @@ pub fn class(s: Source) -> Option<Class> {
         Source::NotHeld => Some(Class::NotHeld),
         Source::Restart => Some(Class::Restart),
         Source::Replacement => Some(Class::Replacement),
+        Source::Redial => Some(Class::Redial),
         Source::OwnMsg2 | Source::RekeyMsg2 => None,
     }
 }
@@ -929,8 +976,9 @@ pub fn refusal(d: Denial) -> Refusal {
         Denial::Gate(Gated::Unheard) => Refusal::Gate(Gate::Unheard),
         Denial::Gate(Gated::Heard) => Refusal::Gate(Gate::Heard),
         Denial::Gate(Gated::Dampened) => Refusal::Gate(Gate::Dampened),
-        Denial::Gate(Gated::Replayed | Gated::ReplayFull) => Refusal::Replay,
+        Denial::Gate(Gated::Replayed | Gated::ReplayFull | Gated::Redialed) => Refusal::Replay,
         Denial::Gate(Gated::Silent) => Refusal::Silent,
         Denial::Full => Refusal::Full,
+        Denial::Held => Refusal::Gate(Gate::Slot),
     }
 }

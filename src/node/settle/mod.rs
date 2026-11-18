@@ -63,7 +63,7 @@ pub(crate) mod table;
 mod tests;
 
 pub(in crate::node) use links::LinkTable;
-pub(in crate::node) use maps::{BindMap, DialMap, MachineMap, PeerMap};
+pub(in crate::node) use maps::{BindMap, DialMap, MachineMap, PeerMap, Redial, RedialMap};
 
 impl crate::node::Node {
     /// Audit the per-peer maps as the node entry `site` returns, panicking

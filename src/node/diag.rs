@@ -360,6 +360,8 @@ pub(crate) enum HsLine {
     Replace,
     /// A new-epoch msg1 was dropped by the restart gate.
     Restart,
+    /// A msg1 off the established link was refused as a redial.
+    Redial,
     /// A msg1 was refused by the silent-session back-off. Counted on the
     /// identity's silent-session record, never on a peer entry.
     Refused,
@@ -367,7 +369,7 @@ pub(crate) enum HsLine {
 
 impl HsLine {
     /// Number of kinds.
-    const COUNT: usize = 10;
+    const COUNT: usize = 11;
 }
 
 impl fmt::Display for HsLine {
@@ -382,6 +384,7 @@ impl fmt::Display for HsLine {
             Self::OffLink => "off_link",
             Self::Replace => "replace",
             Self::Restart => "restart",
+            Self::Redial => "redial",
             Self::Refused => "refused",
         })
     }

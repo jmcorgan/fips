@@ -298,7 +298,9 @@ fn statements(case: Case) -> Vec<(Effect, &'static str)> {
     match case {
         Case::PromoteInitiator => PROMOTE_OUT.to_vec(),
         Case::PromoteResponder => PROMOTE_IN.to_vec(),
-        Case::ReplaceRestart | Case::ReplaceReplacement => [REMOVE, PROMOTE_IN].concat(),
+        Case::ReplaceRestart | Case::ReplaceReplacement | Case::ReplaceRedial => {
+            [REMOVE, PROMOTE_IN].concat()
+        }
         Case::ReplaceOwnRestart => [REMOVE, PROMOTE_OUT].concat(),
         Case::MoveCrossing | Case::MoveOwn | Case::MoveCrossingRefused | Case::MoveOwnRefused => {
             MOVE.to_vec()
@@ -390,6 +392,7 @@ fn each_announcing_transition_logs_its_own_failure_line() {
                 | Case::PromoteResponder
                 | Case::ReplaceRestart
                 | Case::ReplaceReplacement
+                | Case::ReplaceRedial
                 | Case::ReplaceOwnRestart => Some("Failed to send initial TreeAnnounce"),
                 Case::MoveCrossing
                 | Case::MoveOwn

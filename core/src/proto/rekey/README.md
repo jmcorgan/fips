@@ -222,7 +222,12 @@ at `next_wake` produces.
   refused. While the link or session is too young: a resend of the
   setup msg1 draws the setup msg2, a copy is refused, a fresh one asks
   the shell to apply the restart gates. Once eligible: a msg1 off the
-  established link while it is reachable is refused; a resend of the
+  established link while it is reachable is refused. When the held
+  peering has been heard from (`Arrival::heard`), a fresh msg1 off the
+  established link, young or eligible, instead asks the shell to answer it
+  into a pending redial (`Output::RedialRequested`), recording nothing;
+  the shell records its ephemeral with `note_redial` once it arms the
+  redial, and a copy off the link is still refused. A resend of the
   msg1 that armed the held pending draws its msg2 again, on the route
   the first answer took; any other msg1 meets
   a pending in either role and is refused; a copy is refused while idle

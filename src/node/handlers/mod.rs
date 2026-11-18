@@ -1,9 +1,11 @@
 //! Message handlers: per-message-type behavior on `impl Node`.
 
 pub(in crate::node) mod handshake;
+// A held peer's redial from another address, answered beside the peering.
 pub(crate) mod lookup;
 mod mmp;
 mod native;
+mod redial;
 pub(in crate::node) use native::PendingNative;
 pub(in crate::node) mod netmon;
 // The node's side of each link's path machine: facts, parameters, release.

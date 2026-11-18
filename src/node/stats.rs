@@ -199,6 +199,24 @@ pub struct HandshakeStats {
     /// Inbound same-epoch msg1 refused because it arrived off the peer's
     /// working established link.
     pub off_link: u64,
+    /// Redials refused while another redial of the peer was pending and
+    /// under 1 s old.
+    pub redial_held: u64,
+    /// Redials refused as a msg1 ephemeral that already armed a redial of
+    /// the peer in the last 15 s, or over that memory's bound.
+    pub redial_seen: u64,
+    /// Redials refused while the restart dampener held the peer: its
+    /// peering was replaced within 15 s.
+    pub redial_dampened: u64,
+    /// Same-epoch msg1s off the established link answered into a pending
+    /// redial.
+    pub redials: u64,
+    /// Pending redials that a frame from the peer proved, replacing the
+    /// peering.
+    pub redials_proven: u64,
+    /// End-to-end sessions opened again after a redial's swap closed a
+    /// heard one.
+    pub redial_session_reopens: u64,
 }
 
 impl HandshakeStats {
@@ -212,6 +230,12 @@ impl HandshakeStats {
             rekey_tiebreak: self.rekey_tiebreak,
             answered_before: self.answered_before,
             off_link: self.off_link,
+            redial_held: self.redial_held,
+            redial_seen: self.redial_seen,
+            redial_dampened: self.redial_dampened,
+            redials: self.redials,
+            redials_proven: self.redials_proven,
+            redial_session_reopens: self.redial_session_reopens,
         }
     }
 
@@ -225,6 +249,9 @@ impl HandshakeStats {
             HandshakeReject::RekeyTiebreak => self.rekey_tiebreak += 1,
             HandshakeReject::AnsweredBefore => self.answered_before += 1,
             HandshakeReject::OffLink => self.off_link += 1,
+            HandshakeReject::RedialHeld => self.redial_held += 1,
+            HandshakeReject::RedialSeen => self.redial_seen += 1,
+            HandshakeReject::RedialDampened => self.redial_dampened += 1,
         }
     }
 }
@@ -495,6 +522,12 @@ pub struct HandshakeStatsSnapshot {
     pub rekey_tiebreak: u64,
     pub answered_before: u64,
     pub off_link: u64,
+    pub redial_held: u64,
+    pub redial_seen: u64,
+    pub redial_dampened: u64,
+    pub redials: u64,
+    pub redials_proven: u64,
+    pub redial_session_reopens: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -538,6 +571,7 @@ pub struct DataplaneStatsSnapshot {
     pub unknown_index: u64,
     pub orphaned_index: u64,
     pub decrypt_queue_full: u64,
+    pub redial_unopened: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

@@ -3702,6 +3702,9 @@ impl Node {
         // two run whether or not the notify's send already had the peer
         // removed.
         self.remove(&node_addr, Why::Admin);
+        if !node_fault!(RedialKeptAtDisconnect) {
+            self.drop_redial(&node_addr).await;
+        }
         let removed = Removed {
             why: Why::Admin,
             held,

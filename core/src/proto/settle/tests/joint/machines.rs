@@ -566,6 +566,13 @@ impl Machines {
         self.step(kit, now, Input::PeerMsg1 { tok, arrival })
     }
 
+    /// Record `ephemeral`, the ephemeral of a msg1 the machine asked to be
+    /// answered as a redial, once the core has answered it, as the node
+    /// does when it arms the redial.
+    pub fn redialed(&mut self, ephemeral: crate::proto::rekey::Digest) {
+        self.rekey.note_redial(ephemeral);
+    }
+
     /// A msg2 routed to this machine by its receiver index.
     pub fn reply(&mut self, kit: &mut Kit, now: Ms, bytes: &[u8]) -> Vec<Event> {
         self.step(kit, now, Input::Reply { bytes, route: () })
@@ -1040,6 +1047,7 @@ fn carried(kit: &mut Kit, machine: Option<&mut Machine>, now: Ms, o: Output<Ik>)
         | Output::PeerRestarted { .. }
         | Output::Rekeyed { .. }
         | Output::ReplaceRequested { .. }
+        | Output::RedialRequested { .. }
         | Output::Reject(_)
         | Output::Abandoned(_)
         | Output::Teardown(_)) => Event::Rekey(o),
@@ -1065,7 +1073,9 @@ fn sorted(
             Step::Rekey(o) => events.push(carried(kit, machine.as_deref_mut(), now, o)),
             Step::Path(o) => events.extend(kept(alloc::vec![o]).into_iter().map(Event::Path)),
             Step::Core(i) => told.push(i),
-            Step::Replace(_) => panic!("a machine call asked for a replacement"),
+            Step::Replace(_) | Step::Redial { .. } => {
+                panic!("a machine call asked for a replacement or a redial")
+            }
         }
     }
     (events, told)
@@ -1239,6 +1249,7 @@ fn two_peers_machines_rekey_and_both_cut_over_on_one_session() {
     let on = Arrival {
         on_link: true,
         reachable: true,
+        heard: true,
     };
     let ev = b.msg1(&mut kb, t, H1, &m1, on);
     let m2 = sent(&ev, MsgKind::Msg2);

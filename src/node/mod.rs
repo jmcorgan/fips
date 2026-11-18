@@ -826,6 +826,10 @@ pub struct Node {
     /// heard from. Held beside `restart_dampener` for the same reason: a
     /// replacement destroys the peer entry. See `MAX_REPLAYED_MSG1S`.
     replayed_msg1s: handlers::handshake::ReplayedMsg1s,
+    /// The pending redials, one per held identity at most, and the memory
+    /// of the msg1 ephemerals that armed one. Held here because a redial's
+    /// leg is not a peer, and its swap destroys the peer entry it replaces.
+    redials: settle::RedialMap,
     /// The replay record of each closed link, under the peer's address and
     /// startup epoch, handed to the next link with that peer at that epoch.
     /// Held here because closing a link destroys its peer entry.
@@ -1172,6 +1176,7 @@ impl Node {
             restart_dampener: HashMap::new(),
             silent_sessions: SilentSessions::new(),
             replayed_msg1s: Default::default(),
+            redials: Default::default(),
             link_records: handlers::rekey::link_records(&config.node.limits),
             paths: handlers::path::PathDriver::default(),
             msg1_rate_limiter,
@@ -1358,6 +1363,7 @@ impl Node {
             restart_dampener: HashMap::new(),
             silent_sessions: SilentSessions::new(),
             replayed_msg1s: Default::default(),
+            redials: Default::default(),
             link_records: handlers::rekey::link_records(&config.node.limits),
             paths: handlers::path::PathDriver::default(),
             msg1_rate_limiter,
@@ -3303,6 +3309,9 @@ impl Node {
     /// removal here rather than calling `peer_machines.remove` directly.
     pub(in crate::node) fn remove_peer_machine(&mut self, link: LinkId) {
         self.peer_machines.drop(link);
+        // A redial's leg goes with its machine: reaped at the handshake
+        // timeout, its msg2 send failed, or replaced by a later redial.
+        self.redials.forget(link);
     }
 
     /// Debug-build coherence sweep over the peer-lifecycle maps, run once per

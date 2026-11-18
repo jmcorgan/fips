@@ -315,6 +315,7 @@ impl NewFmp {
                 | Output::PeerRestarted { .. }
                 | Output::Rekeyed { .. }
                 | Output::ReplaceRequested { .. }
+                | Output::RedialRequested { .. }
                 | Output::Reject(_)
                 | Output::Abandoned(_)
                 | Output::Teardown(_)) => self.notes.push(note(&other)),
@@ -344,6 +345,7 @@ impl NewFmp {
                 | Output::PeerRestarted { .. }
                 | Output::Rekeyed { .. }
                 | Output::ReplaceRequested { .. }
+                | Output::RedialRequested { .. }
                 | Output::Reject(_)
                 | Output::Abandoned(_)
                 | Output::Teardown(_)) => notes.push(note(&other)),
@@ -444,6 +446,7 @@ impl End for NewFmp {
                     let arrival = Arrival {
                         on_link: true,
                         reachable: true,
+                        heard: true,
                     };
                     self.step(now, Input::PeerMsg1 { tok, arrival }, out);
                 } else {
@@ -769,6 +772,7 @@ impl NewFsp {
                 | Output::PeerRestarted { .. }
                 | Output::Rekeyed { .. }
                 | Output::ReplaceRequested { .. }
+                | Output::RedialRequested { .. }
                 | Output::Reject(_)
                 | Output::Abandoned(_)) => self.notes.push(note(&other)),
             }

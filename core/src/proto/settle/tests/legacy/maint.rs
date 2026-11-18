@@ -490,7 +490,7 @@ impl MaintParty {
                 replayed: BTreeMap::new(),
                 idle: BTreeMap::new(),
             },
-            log: Vec::new(),
+            log: alloc::vec![Entry::NoRedial],
         }
     }
 

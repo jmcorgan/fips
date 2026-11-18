@@ -549,9 +549,11 @@ async fn an_exact_resend_of_the_link_setup_msg1_draws_the_stored_msg2_whether_th
 /// After B rekeys as the initiator and cuts over, a fresh msg1 from A's
 /// identity and epoch arriving off the link, and one from A's link address
 /// with B having heard from A 3 s ago, must both leave the link up: the
-/// peering keeps its link and index, and the rekey still completes.
+/// peering keeps its link and index, and the rekey still completes. The
+/// first arms a redial beside the link, its leg the one connection left,
+/// which no frame of A's proves.
 #[tokio::test]
-async fn after_our_initiator_cutover_an_off_path_msg1_and_an_earlier_link_msg1_3_s_later_leave_the_link_up()
+async fn after_our_initiator_cutover_an_off_path_msg1_arms_only_a_redial_and_an_earlier_link_msg1_3_s_later_leaves_the_link_up()
  {
     let (a, b) = (0, 1);
     let mut nodes = linked_pair(rekey_config(60), rekey_config(60)).await;
@@ -618,10 +620,11 @@ async fn after_our_initiator_cutover_an_off_path_msg1_and_an_earlier_link_msg1_3
             "B's peering must keep its post-cutover index"
         );
     }
-    assert_eq!(
-        nodes[b].node.connection_count(),
-        0,
-        "the msg1s must leave no connection behind at B"
+    let redial = nodes[b].node.redials.of(&a_addr);
+    assert!(
+        nodes[b].node.connection_count() == 1
+            && redial.is_some_and(|r| nodes[b].node.peer_machines.get(&r.link).is_some()),
+        "defect: the msg1s must leave no connection behind at B but the off-path one's redial leg"
     );
 
     // What reached A is processed: B's cutover prompt, its first frame on
@@ -1020,10 +1023,12 @@ async fn a_peers_rekey_msg1_dropped_inside_10_s_of_our_cutover_is_refused_again_
 
 /// 12 s after B's own cutover on an aged link, a fresh msg1 with A's
 /// identity and epoch arrives off the link while the link works. Whether A
-/// is silent at B or live, it must be refused: B keeps its link and index,
-/// arms nothing and answers nothing, and B's frames still decrypt at A.
+/// is silent at B or live, it is answered as a redial at its source, and
+/// nothing else changes: B keeps its link and index and arms nothing on
+/// it, the redial's leg is the one connection the msg1 leaves, and B's
+/// frames still decrypt at A.
 #[tokio::test]
-async fn an_off_link_msg1_from_a_peer_silent_for_16_s_12_s_after_our_cutover_on_an_aged_link_is_refused_and_keeps_the_peering()
+async fn an_off_link_msg1_from_a_peer_silent_for_16_s_12_s_after_our_cutover_on_an_aged_link_arms_only_a_redial_and_keeps_the_peering()
  {
     let mut found = Vec::new();
     for b_dialled in [false, true] {
@@ -1063,14 +1068,16 @@ async fn an_off_link_msg1_from_a_peer_silent_for_16_s_12_s_after_our_cutover_on_
                 }
                 _ => found.push(format!("{label}: B's peering changed")),
             }
-            if !c.nodes[a].packet_rx.is_empty() {
-                found.push(format!("{label}: the off-link msg1 drew an answer"));
+            if c.nodes[b].node.redials.of(&c.a_addr).is_none() {
+                found.push(format!("{label}: the off-link msg1 armed no redial"));
             }
-            if c.nodes[b].node.connection_count() != 0 {
-                found.push(format!("{label}: the msg1 left a connection at B"));
+            if c.nodes[b].node.connection_count() != 1 {
+                found.push(format!(
+                    "{label}: the msg1 left a connection at B other than its redial's leg"
+                ));
             }
-            if refused(&c.nodes[b]) != refused_before + 1 {
-                found.push(format!("{label}: B did not count the refused msg1"));
+            if refused(&c.nodes[b]) != refused_before {
+                found.push(format!("{label}: B refused the msg1"));
             }
             if found.len() == before {
                 heartbeat_decrypts(&mut c.nodes, b, a, &label).await;

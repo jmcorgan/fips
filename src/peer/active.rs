@@ -176,7 +176,7 @@ fn split(joined: LinkJoined) -> (LinkOutputs, Outputs<UdpSlot>, Vec<In>) {
             Step::Rekey(o) => rekey.push(o),
             Step::Path(o) => paths.push(o),
             Step::Core(input) => core.push(input),
-            Step::Replace(_) => {
+            Step::Replace(_) | Step::Redial { .. } => {
                 debug_assert!(
                     false,
                     "a build or close of the machines asked for a replacement"
@@ -1935,6 +1935,15 @@ impl ActivePeer {
     /// `None` when no pending session is held.
     pub(crate) fn pending_age(&self) -> Option<Duration> {
         self.rekey.as_ref()?.started(Slot::Pending).map(since)
+    }
+
+    /// Record, in the link's replay record, the ephemeral of a msg1 this
+    /// peer's link machine asked to be answered as a redial, now that the
+    /// redial is armed: its copies are then refused as copies.
+    pub(crate) fn note_redial(&mut self, ephemeral: fips_core::proto::rekey::Digest) {
+        if let Some(rekey) = self.rekey.as_mut() {
+            rekey.note_redial(ephemeral);
+        }
     }
 
     /// Step this peer's link rekey machine with `input` at `now`, lending

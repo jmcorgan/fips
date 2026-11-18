@@ -17,6 +17,12 @@ value it asserts.
   epoch, and the late-second-dial, late-stored-msg2 and aged-link values.
 - `close.rs`: Section 5.6's close clause and the addresses each live link
   still needs.
+- `redial.rs`: the `DeferredRedial` local rule's values: a fresh msg1 off
+  the link answered and left pending until the peer's frame, young or
+  eligible; the floors and the slot that refuse one; the timeout that
+  drops one; the dampener stamped at the swap of a heard peering; copies
+  and resends of an armed redial; and a redial whose peering is lost
+  first.
 
 ## Rules for changing it
 

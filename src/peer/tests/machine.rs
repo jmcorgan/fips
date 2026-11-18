@@ -135,6 +135,7 @@ fn est_new_peer() -> EstablishSnapshot {
         has_existing_peer: false,
         existing_peer_epoch: None,
         replace: false,
+        redial: false,
         at_max_peers: false,
         silent_backoff: None,
     }
@@ -233,4 +234,65 @@ fn a_resent_msg2_does_not_promote_an_established_machine() {
         actions.is_empty(),
         "an established machine is not promoted again"
     );
+}
+
+/// An inbound leg that has read a held identity's redial and been
+/// authorized as one: it holds its index and has asked only for its msg2.
+fn redial_leg(alloc: &mut IndexAllocator) -> (PeerMachine, NodeAddr, Vec<PeerAction>) {
+    let (mut m, addr) = inbound_leg(alloc, false);
+    let actions = m.step(PeerEvent::AuthorizedHeld, 100, alloc);
+    (m, addr, actions)
+}
+
+#[test]
+fn authorized_held_sends_msg2_and_does_not_promote() {
+    let mut alloc = IndexAllocator::new();
+    let (m, _, actions) = redial_leg(&mut alloc);
+    assert!(
+        matches!(actions.as_slice(), [PeerAction::SendHandshake { .. }]),
+        "got {actions:?}"
+    );
+    assert!(m.our_index().is_some(), "the leg holds its index");
+    assert_eq!(m.state(), received_msg1());
+}
+
+#[test]
+fn proven_with_a_peer_held_tears_down_before_it_promotes() {
+    let mut alloc = IndexAllocator::new();
+    let (mut m, addr, _) = redial_leg(&mut alloc);
+    let actions = m.step(PeerEvent::Proven { peer_held: true }, 200, &mut alloc);
+    assert_eq!(
+        actions,
+        [
+            PeerAction::InvalidateSendState,
+            PeerAction::ReportLost {
+                peer: addr,
+                kind: LostKind::LinkDead
+            },
+            PeerAction::PromoteToActive {
+                link: LinkId::new(1)
+            },
+        ]
+    );
+}
+
+#[test]
+fn proven_with_no_peer_held_only_promotes() {
+    let mut alloc = IndexAllocator::new();
+    let (mut m, _, _) = redial_leg(&mut alloc);
+    let actions = m.step(PeerEvent::Proven { peer_held: false }, 200, &mut alloc);
+    assert_eq!(
+        actions,
+        [PeerAction::PromoteToActive {
+            link: LinkId::new(1)
+        }]
+    );
+}
+
+#[test]
+fn proven_does_nothing_on_a_leg_that_holds_no_index() {
+    let mut alloc = IndexAllocator::new();
+    let (mut m, _) = inbound_leg(&mut alloc, false);
+    let actions = m.step(PeerEvent::Proven { peer_held: true }, 200, &mut alloc);
+    assert!(actions.is_empty(), "got {actions:?}");
 }

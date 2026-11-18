@@ -59,6 +59,18 @@ follows a named rule (`judge::LocalRule`). Each says what it decides:
   starts a new record.
 - `SessionAge`: `REKEY_MIN_SESSION_AGE`, which a node chooses between 10 s
   and 30 s, is 10 s by default (`Params::sessionage`).
+- `DeferredRedial` (the operator's decision, 2026-11-17): a fresh
+  same-epoch msg1 off the established link of a held peering heard from,
+  which rule 4.1 discards on an eligible reachable link and rule 3.3
+  replaces on a young one, is answered into a redial beside the peering,
+  which is left as it is. The peer's first frame under the redial's
+  session replaces the peering, keeping the link's connection, and stamps
+  the dampener. One redial is pending at a time: a later one replaces it
+  once it is as old as the unheard floor and is refused before (the `Slot`
+  refusal). The dampener holds a redial; the heard floor does not. A
+  peering not heard from is never redialed and keeps rules 3.3 and 4.1.
+  A redial's msg1 joins the record when it is answered, not when it is
+  refused, and a redial no frame proves is dropped at its timeout.
 
 One more outcome is marked `Step::open`, because it lies outside the
 model's sources: rule 4.4's simultaneous rekey is resolved only as far as

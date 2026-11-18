@@ -943,7 +943,7 @@ impl JointParty {
                     if fx.class.is_none() {
                         fx.class = match why {
                             Why::Restart => Some(Class::Restart),
-                            Why::Replacement => Some(Class::Replacement),
+                            Why::Replacement | Why::Redial => Some(Class::Replacement),
                             Why::OwnRestart
                             | Why::Ended
                             | Why::Orphaned
@@ -1394,6 +1394,7 @@ impl JointParty {
         let reachable = self.reachable(net, id);
         let (hello, built) = self.hello(tok.get(), hs, &bytes, src);
         let mut built = Some(built);
+        let mut noted = None;
         let mut out = self.core(In::Msg1 { hello, reachable }, at);
         if let Some(on) = out.iter().find_map(|o| {
             if let Output::Rekey { arrival, .. } = o {
@@ -1449,23 +1450,39 @@ impl JointParty {
                 sends,
                 inputs,
                 replace,
+                redial,
                 ..
             } = r;
             self.sends(net, id, sends, Some((hs, src, local)));
             self.inputs(net, inputs, &mut fx);
-            match replace {
-                Some(tok) => {
+            match (replace, redial) {
+                (Some(tok), _) => {
                     let (hello, b2) = self.replacement(&tok, hs, &bytes, src);
                     built = Some(b2);
                     out = self.core(In::Replace(hello), at);
                 }
-                None => {
+                (None, Some((tok, ephemeral))) => {
+                    let (hello, b2) = self.replacement(&tok, hs, &bytes, src);
+                    built = Some(b2);
+                    out = self.core(In::Redial(hello), at);
+                    noted = Some(ephemeral);
+                }
+                (None, None) => {
                     self.logged_msg1(net, id, src, hs, b, e, sent, &fx, None);
                     return;
                 }
             }
         }
         self.effects(net, out, &mut fx);
+        // A redial the core answered is armed: the held link's machine
+        // records its msg1, as the node's does.
+        if let Some(ephemeral) = noted
+            && !fault!(RedialUnnoted)
+            && fx.answers.iter().any(|(_, was, _)| !*was)
+            && let Some(p) = self.s.peers.get_mut(&id.0)
+        {
+            p.machines.redialed(ephemeral);
+        }
         let mut stored = None;
         for (link, was, msg2) in core::mem::take(&mut fx.answers) {
             if was {
@@ -1612,6 +1629,17 @@ impl JointParty {
         from: Addr,
     ) -> (Hello, Built) {
         self.hello(tok.get(), hs, bytes, from)
+    }
+
+    /// The link of `peer`'s pending redial, if the core holds one answering
+    /// the msg1 of `hs`.
+    fn redial_of(&self, peer: Node, hs: Hs) -> Option<LinkNo> {
+        let link = self.s.table.redialing(&key(peer))?;
+        self.s
+            .runs
+            .get(&link)
+            .filter(|r| r.hs == hs && r.peer == peer)
+            .map(|_| link)
     }
 
     /// Log a msg1 and what it led to: the closes, the stored answer's
@@ -1863,6 +1891,21 @@ impl JointParty {
         stamp: i64,
     ) {
         let (now, at) = (net.now, Self::at(net, Some(stamp)));
+        // A frame under a pending redial's handshake, whose leg no peer
+        // holds yet: the leg is heard and replaces the peering, and the
+        // frame then goes to the machines built on it. The world's gate let
+        // it through because this node holds the leg's keys.
+        let mut lead = Fx::default();
+        if let Some(link) = self.redial_of(id, hs) {
+            let out = self.core(
+                In::LegHeard {
+                    link,
+                    from: pair(src),
+                },
+                at,
+            );
+            self.effects(net, out, &mut lead);
+        }
         let bytes = if wire == 0 {
             match self.sealed(id, hs) {
                 Some(b) => b,
@@ -1889,7 +1932,7 @@ impl JointParty {
                 return;
             }
         }
-        let mut fx = Fx::default();
+        let mut fx = lead;
         let binds = |m: &Machines| m.rekey().bindings().iter().any(|b| b.index == index);
         let held = self.s.kept.get(&id.0).is_some_and(|k| binds(&k.machines));
         if held {
@@ -2742,6 +2785,9 @@ impl Party for JointParty {
     }
 
     fn holds(&self, peer: Node, hs: Hs) -> bool {
+        if self.redial_of(peer, hs).is_some() {
+            return true;
+        }
         let Some(want) = self.s.names.kid(hs) else {
             return false;
         };
@@ -2959,7 +3005,8 @@ fn logged(w: &World, x: usize, hs: Hs) -> Option<Rec> {
         | Entry::Abandon { .. }
         | Entry::Unadopted { .. }
         | Entry::Restart
-        | Entry::Fallback => None,
+        | Entry::Fallback
+        | Entry::NoRedial => None,
     })
 }
 
@@ -3110,7 +3157,8 @@ fn a_restart_revealed_in_a_rekey_msg2_reaches_the_core() {
         | Entry::Abandon { .. }
         | Entry::Unadopted { .. }
         | Entry::Restart
-        | Entry::Fallback => None,
+        | Entry::Fallback
+        | Entry::NoRedial => None,
     });
     assert_eq!(
         cut.map(|(_, c)| c),
@@ -3293,6 +3341,73 @@ fn every_start_settles_scripted_off_with_off() {
                 "{} (off with off): {:?} at n{}: {}",
                 st.name, b.oracle, b.node, b.what
             ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// An aged pair whose link is young again after node 0's rekey cut over;
+/// node 1 then dials node 0 from its home address, on the link.
+fn drained_on_link(mk: super::super::starts::Maker) -> World {
+    use super::super::starts::{dial, pair};
+    let mut w = pair(mk, A, &[&[(1, UDP)], &[]]);
+    dial_home(&mut w, 0, 1, UDP);
+    settle(&mut w);
+    age(&mut w, 40_000);
+    w.input(0, Input::Rekey { peer: B });
+    settle(&mut w);
+    w.run_until(w.net.now + 1_000);
+    dial(&mut w, 1, 0, home(0, UDP), Some(home(1, UDP)));
+    w
+}
+
+/// Deliver node 1's msg1 to node 0.
+fn drained_on_link_script(w: &mut World) -> Vec<Act> {
+    use super::super::starts::{Do, Want, run};
+    run(w, &[Do::Get(0, Want::Msg1, Some(1))])
+}
+
+#[test]
+fn an_on_link_replacement_in_a_rekeys_drain_is_held_by_the_heard_floor_off_with_off_and_on_with_on()
+{
+    // Node 0's peering with node 1 is older than the heard floor, its
+    // link young again after node 0's own rekey, and node 1 heard within
+    // the floor. Node 1's fresh msg1 from its home address is then a
+    // replacement on the link, which the floor refuses, counted from the
+    // last frame. (From a new address it would be a redial, which the
+    // heard floor does not hold.)
+    let modes: [(&str, super::super::starts::Maker); 2] =
+        [("off with off", super::off), ("on with on", super::on)];
+    let mut wrong = Vec::new();
+    for (mode, maker) in modes {
+        let mut st = start(9);
+        st.name = "an on-link replacement in a rekey's drain";
+        st.maker = maker;
+        st.build = drained_on_link;
+        st.script = drained_on_link_script;
+        let w = replay(&st, &[]);
+        let hs = w
+            .net
+            .flight
+            .iter()
+            .filter(|f| f.to == 0)
+            .find_map(|f| {
+                if let Pkt::Msg1 { hs, .. } = f.pkt {
+                    Some(hs)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("{mode}: precondition: node 1's msg1 is in flight"));
+        let mut after = replay(&st, &[]);
+        let _ = (st.script)(&mut after);
+        if !after.parties[0].held().contains(&B) || after.parties[0].holds(B, hs) {
+            wrong.push(format!(
+                "{mode}: node 0 did not refuse node 1's msg1 and keep the peering"
+            ));
+        }
+        for b in scripted(&st) {
+            wrong.push(format!("{mode}: {:?} at n{}: {}", b.oracle, b.node, b.what));
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));

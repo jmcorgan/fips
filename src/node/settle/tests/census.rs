@@ -101,6 +101,7 @@ const NODE: &[(&str, Held)] = &[
     ("length_budget", Exempt(LATCH)),
     ("msgtype_budget", Exempt(LATCH)),
     ("pending_outbound", Table),
+    ("redials", Table),
     ("restart_dampener", Facets(&[Facet::Dampener])),
     ("silent_sessions", Facets(&[Facet::Silent])),
     ("replayed_msg1s", Facets(&[Facet::Replayed])),

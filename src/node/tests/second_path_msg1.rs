@@ -6,7 +6,9 @@
 //! that is already linked and dials a second path sends a link-setup msg1
 //! there; answered as a rekey on the established link, it arms a responder
 //! pending the dialing peer never adopts, which refuses the peer's genuine
-//! rekeys for the whole hold. These tests drive real msg1s through
+//! rekeys for the whole hold. Off the established link it is answered as a
+//! redial instead, at its source, beside the held link, which only the
+//! peer's frame under it replaces. These tests drive real msg1s through
 //! `handle_msg1` from a second address or transport while the established
 //! UDP link works, and replay a peering's own setup msg1 after the session
 //! has aged.
@@ -127,9 +129,11 @@ async fn second_path(
             "precondition: the link is at socket A"
         );
     }
-    node.get_peer_mut(&sender_addr)
-        .unwrap()
-        .test_backdate_session_established(Duration::from_secs(31));
+    // An aged session that has carried the peer's frames, so a fresh msg1
+    // off its link is a redial of a peering a frame has proven.
+    let p = node.get_peer_mut(&sender_addr).unwrap();
+    p.test_backdate_session_established(Duration::from_secs(31));
+    p.touch(Node::now_ms());
     SecondPath {
         node,
         sender,
@@ -152,8 +156,9 @@ async fn stop_all(node: &mut Node) {
 }
 
 /// Send a same-epoch msg1 from the second address, then a fresh msg1 on the
-/// established link, and check the first is refused outright and the second
-/// still completes as a rekey.
+/// established link, and check the first is answered at its source as a
+/// redial, arming nothing on the held link, and the second still completes
+/// as a rekey.
 async fn second_path_then_genuine_rekey(other_transport: bool) {
     let mut s = second_path(other_transport, |_| Identity::generate()).await;
 
@@ -174,13 +179,10 @@ async fn second_path_then_genuine_rekey(other_transport: bool) {
         "nothing may answer the second-path msg1 on the established link"
     );
     assert!(
-        !receives(&s.sock_b).await,
-        "nothing may answer the second-path msg1 at its source"
-    );
-    assert_eq!(
-        off_link(&s.node),
-        refused_before + 1,
-        "the second-path msg1 must be admitted and refused at classification"
+        receives(&s.sock_b).await
+            && s.node.redials.of(&s.sender_addr).is_some()
+            && off_link(&s.node) == refused_before,
+        "defect: the second-path msg1 must be answered at its source as a redial"
     );
 
     let genuine = SessionIndex::new(0x3333);
@@ -204,17 +206,17 @@ async fn second_path_then_genuine_rekey(other_transport: bool) {
 
 /// A peer linked over UDP that also reaches us on another transport sends a
 /// link-setup msg1 there after the session is 30 s old. It must arm no
-/// pending and draw nothing, and the peer's next genuine rekey on the link
-/// must still complete.
+/// pending on the link and draw only a redial's msg2 at its source, and the
+/// peer's next genuine rekey on the link must still complete.
 #[tokio::test]
-async fn a_second_path_msg1_on_an_aged_session_arms_no_pending_and_a_genuine_rekey_then_completes()
-{
+async fn a_second_path_msg1_on_an_aged_session_is_answered_as_a_redial_and_a_genuine_rekey_on_the_link_then_completes()
+ {
     second_path_then_genuine_rekey(true).await;
 }
 
 /// The same from a second address on the link's own transport.
 #[tokio::test]
-async fn a_second_address_msg1_on_the_same_transport_arms_no_pending_and_a_genuine_rekey_then_completes()
+async fn a_second_address_msg1_on_the_same_transport_is_answered_as_a_redial_and_a_genuine_rekey_on_the_link_then_completes()
  {
     second_path_then_genuine_rekey(false).await;
 }
@@ -253,10 +255,9 @@ async fn a_second_path_msg1_does_not_make_us_abandon_our_own_rekey() {
         p.pending_new_session().is_none(),
         "a msg1 off the established link must arm no pending"
     );
-    assert_eq!(
-        off_link(&s.node),
-        refused_before + 1,
-        "the second-path msg1 must be admitted and refused at classification"
+    assert!(
+        s.node.redials.of(&sender_addr).is_some() && off_link(&s.node) == refused_before,
+        "defect: the second-path msg1 must be answered as a redial"
     );
 
     stop_all(&mut s.node).await;

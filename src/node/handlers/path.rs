@@ -620,7 +620,7 @@ impl Node {
                     self.feed(&input);
                     continue;
                 }
-                Step::Rekey(_) | Step::Replace(_) => {
+                Step::Rekey(_) | Step::Replace(_) | Step::Redial { .. } => {
                     debug_assert!(false, "the join gave a bundle's step a rekey step");
                     continue;
                 }
@@ -756,6 +756,69 @@ impl Node {
         }
     }
 
+    /// Every path of `node_addr`'s link, with its identifier and state, in
+    /// set order: none when no peer is held there or it has no bundle.
+    pub(in crate::node) fn path_states(
+        &self,
+        node_addr: &NodeAddr,
+    ) -> Vec<(PathRef, u32, PathState)> {
+        self.peers
+            .get(node_addr)
+            .and_then(|p| p.bundle())
+            .map(|b| {
+                b.paths()
+                    .paths()
+                    .iter()
+                    .map(|p| {
+                        let to = PathRef {
+                            transport: p.transport_id(),
+                            addr: p.addr().clone(),
+                        };
+                        (to, p.path_id(), p.state())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Log the end of each of `ended`, the paths of `node_addr`'s link that
+    /// a redial's swap replaced, as a won crossed handshake's renewal logs
+    /// the paths of the link it starts again (`Why::Renewed`). The removal
+    /// releases those paths with no line of their own, and the new link's
+    /// original path may sit at the pair one of them held; a reader of the
+    /// log would otherwise take that original's probes for an old path's.
+    pub(in crate::node) fn log_paths_ended(
+        &self,
+        node_addr: &NodeAddr,
+        ended: &[(PathRef, u32, PathState)],
+    ) {
+        for (to, path_id, state) in ended {
+            self.log_state(
+                node_addr,
+                to,
+                *path_id,
+                (Some(*state), None),
+                Why::Renewed,
+                None,
+            );
+        }
+    }
+
+    /// Log the start of each path of `node_addr`'s link, the link a redial's
+    /// swap promoted, as a renewal logs the new link's original path.
+    pub(in crate::node) fn log_paths_begun(&self, node_addr: &NodeAddr) {
+        for (to, path_id, state) in self.path_states(node_addr) {
+            self.log_state(
+                node_addr,
+                &to,
+                path_id,
+                (None, Some(state)),
+                Why::Renewed,
+                None,
+            );
+        }
+    }
+
     /// Log a change of state of `node_addr`'s path `path_id` at `to`, from
     /// the first of `change` to the second. A change a probe's timeout made
     /// also logs `timeout_ms`, the probe timeout that probe was sent under,
@@ -813,7 +876,7 @@ impl Node {
                     self.feed(&input);
                     continue;
                 }
-                Step::Rekey(_) | Step::Replace(_) => {
+                Step::Rekey(_) | Step::Replace(_) | Step::Redial { .. } => {
                     debug_assert!(false, "the join gave a bundle's step a rekey step");
                     continue;
                 }

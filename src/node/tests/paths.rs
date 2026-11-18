@@ -2867,28 +2867,31 @@ async fn capable_rekey() -> (bool, bool, bool, u64, bool, usize) {
 
 /// On a link whose peer is capable and which holds one path, a rekey msg1
 /// from the setup address after the path followed the peer elsewhere comes
-/// from a pair holding no path: it is refused as off the established link
-/// while that link can be reached, and nothing is answered.
+/// from a pair holding no path, off the established link while that link
+/// can be reached: it is answered as a redial, to its source, and arms no
+/// pending on the held link, which only the peer's frame under the redial
+/// replaces.
 #[tokio::test]
-async fn a_setup_address_rekey_after_a_roam_of_a_capable_one_path_link_is_refused_while_the_link_is_reachable()
+async fn a_setup_address_rekey_after_a_roam_of_a_capable_one_path_link_is_answered_as_a_redial_to_its_source_not_as_a_rekey()
  {
     let got = capable_rekey().await;
     assert!(got.4, "precondition: node 1 holds node 0 capable: {got:?}");
     assert_eq!(got.5, 1, "precondition: node 1 holds one path: {got:?}");
     assert_eq!(
         (got.0, got.1, got.2, got.3),
-        (false, false, false, 1),
-        "refused as off the established link: {got:?}"
+        (false, true, false, 0),
+        "defect: answered as a redial to its source, refused nothing: {got:?}"
     );
 }
 
 /// On a link whose peer is capable, a rekey msg1 from a pair where the
-/// responder holds no path is refused while the link is reachable (loopback
-/// is connectionless, so it is), even with the pair mapped to the link in
-/// `addr_to_link`, as the address a link was set up at stays mapped after
-/// its original path moves.
+/// responder holds no path is off the link while the link is reachable
+/// (loopback is connectionless, so it is), even with the pair mapped to the
+/// link in `addr_to_link`, as the address a link was set up at stays mapped
+/// after its original path moves: it is answered into a redial and arms no
+/// pending on the held link.
 #[tokio::test]
-async fn a_capable_links_rekey_from_a_mapped_pair_holding_no_path_is_refused_while_the_link_is_reachable()
+async fn a_capable_links_rekey_from_a_mapped_pair_holding_no_path_arms_a_redial_not_a_rekey_while_the_link_is_reachable()
  {
     let (mut nodes, b, _a2, _b2) = two_transports(1280).await;
     let a = *nodes[0].node.node_addr();
@@ -2933,12 +2936,12 @@ async fn a_capable_links_rekey_from_a_mapped_pair_holding_no_path_is_refused_whi
     assert_eq!(
         nodes[1].node.get_peer(&a).unwrap().pending_role(),
         None,
-        "B does not accept the rekey from a pair with no path"
+        "defect: B accepts the rekey from a pair with no path on the held link"
     );
-    assert_eq!(
-        nodes[1].node.stats().handshake.off_link,
-        off_link + 1,
-        "B refuses it as off the established link"
+    assert!(
+        nodes[1].node.redials.of(&a).is_some()
+            && nodes[1].node.stats().handshake.off_link == off_link,
+        "defect: B does not answer it into a redial"
     );
     cleanup_nodes(&mut nodes).await;
 }

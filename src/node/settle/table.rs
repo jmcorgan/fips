@@ -563,7 +563,7 @@ pub(crate) enum Owner {
 fn reached(t: &Transition) -> bool {
     match t {
         Transition::Replace { initiator, why, .. } => match why {
-            Why::Restart | Why::Replacement => !initiator,
+            Why::Restart | Why::Replacement | Why::Redial => !initiator,
             Why::OwnRestart => *initiator,
             Why::Ended | Why::Orphaned | Why::Disconnect | Why::Dead | Why::Admin | Why::Closed => {
                 false
@@ -571,7 +571,7 @@ fn reached(t: &Transition) -> bool {
         },
         Transition::Remove { why } => match why {
             Why::Ended | Why::Orphaned | Why::Disconnect | Why::Dead | Why::Admin => true,
-            Why::Restart | Why::Replacement | Why::OwnRestart | Why::Closed => false,
+            Why::Restart | Why::Replacement | Why::Redial | Why::OwnRestart | Why::Closed => false,
         },
         Transition::Promote { .. }
         | Transition::Move { .. }
@@ -589,6 +589,11 @@ fn reached(t: &Transition) -> bool {
 /// a cause with no site reads the same as one with.
 pub(crate) fn data_cell(row: DataRow, t: &Transition) -> DataCell {
     match t {
+        // A redial's swap carries the peer's declaration and filter into the
+        // new record: the epoch is unchanged, so they are still the peer's.
+        Transition::Replace {
+            why: Why::Redial, ..
+        } if matches!(row, DataRow::PeerFilter | DataRow::TreePosition) => DataCell::Keep,
         Transition::Promote { .. } | Transition::Replace { .. } => DataCell::New,
         Transition::Remove { .. } => DataCell::Drop,
         Transition::Keep { .. }
@@ -825,6 +830,7 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
                 Why::Dead => Cell::SteppedThenRemoved,
                 Why::Restart
                 | Why::Replacement
+                | Why::Redial
                 | Why::OwnRestart
                 | Why::Ended
                 | Why::Orphaned
@@ -849,6 +855,7 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
                 Why::Admin => Cell::UnkeptQueuedCurrentClosed,
                 Why::Restart
                 | Why::Replacement
+                | Why::Redial
                 | Why::OwnRestart
                 | Why::Ended
                 | Why::Orphaned
@@ -887,6 +894,7 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
                 // reads no pair to clear, and only a drained close clears.
                 Why::Restart
                 | Why::Replacement
+                | Why::Redial
                 | Why::OwnRestart
                 | Why::Ended
                 | Why::Orphaned
@@ -936,6 +944,11 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
         },
         Row::FilterSend => match t {
             T::Promote { .. } | T::Move { .. } | T::Keep { .. } => Cell::Marked,
+            // A redial keeps what was sent to the peer's identity, which the
+            // same process holds, and marks the peer for an update.
+            T::Replace {
+                why: Why::Redial, ..
+            } => Cell::Marked,
             T::Replace { .. } => Cell::RemovedOthersMarkedThenMarked,
             T::Cutover { role } => match role {
                 Role::Responder => Cell::Marked,
@@ -946,6 +959,11 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
             T::Remove { .. } => Cell::RemovedOthersMarked,
         },
         Row::Tree => match t {
+            // A redial keeps the peer's declaration in the tree state, and
+            // with it this node's parent when the peer was its parent.
+            T::Replace {
+                why: Why::Redial, ..
+            } => Cell::Announced,
             T::Promote { .. } | T::Move { .. } | T::Keep { .. } => Cell::Announced,
             T::Replace { .. } | T::Restarted => Cell::CleanedOthersPendingAnnounced,
             T::Cutover { .. } | T::Roam | T::Follow | T::Switch | T::Release { .. } => Cell::Keep,
@@ -1027,9 +1045,12 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
             T::Remove { why } => match why {
                 Why::Dead | Why::Disconnect | Why::Orphaned => Cell::NotedDead,
                 Why::Admin => Cell::Removed,
-                Why::Restart | Why::Replacement | Why::OwnRestart | Why::Ended | Why::Closed => {
-                    Cell::Keep
-                }
+                Why::Restart
+                | Why::Replacement
+                | Why::Redial
+                | Why::OwnRestart
+                | Why::Ended
+                | Why::Closed => Cell::Keep,
             },
         },
         Row::IdentityCache => match t {

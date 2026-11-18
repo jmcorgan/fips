@@ -44,6 +44,7 @@ pub(super) fn establish_snapshot() -> EstablishSnapshot {
         has_existing_peer: false,
         existing_peer_epoch: None,
         replace: false,
+        redial: false,
         at_max_peers: false,
         silent_backoff: None,
     }

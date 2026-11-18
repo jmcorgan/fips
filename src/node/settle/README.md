@@ -51,6 +51,14 @@ field, at once.
   the authenticated peers (`install`, `take`, and `get_mut`, `values_mut`
   and `iter_mut` for a change to a peer that leaves the map as it is); and
   `BindMap`, our session indices and the peer each names (`bind`, `unbind`).
+- `RedialMap`, in `maps.rs`: the pending redials, one per held identity at
+  most, each naming the inbound link its leg runs on, the index its msg2
+  named and when it was armed, beside the memory of the msg1 ephemerals that
+  armed one in the last 15 s. An entry is written when a redial is armed
+  (`handlers/redial.rs`) and forgotten when its machine is removed or its
+  link promoted. The `redial-leg` clause holds each entry to a leg still at
+  `Handshaking{ReceivedMsg1}` for that identity and index, an index no peer
+  is bound to, on an open link.
 - `audit.rs`: the coherence of the maps, one function per clause, each
   naming what breaks it, and `live`, which runs every clause and panics on
   the first that fails, naming the node entry and the clause. Compiled in

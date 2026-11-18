@@ -86,13 +86,15 @@ files run off, which is what they test.
   after a drop, with a single-dial control and a run that rewrites the
   record); crossed loopback dials won on another transport or address (the
   pair the winning msg2 came from, then the audit); a second msg1 more than 1
-  s after the first (in order, on another transport, the dialer left on its
-  second dial's link, and with the second msg2 first, a known defect checked
-  by heartbeat and by the audit); a move's link: the address dialed with the
+  s after the first (in order, on another transport, where it is a redial the
+  dialer's first frame proves, the dialer left on its second dial's link, and
+  with the second msg2 first, a known defect checked by heartbeat and by the
+  audit); a move's link: the address dialed with the
   msg2's pair a path of it, the control machine moved with the peer, and the
   pin a second dial ends after a crossing; a TCP crossing whose one msg1
-  arrives inside the other's connect window, keeping the handshake that
-  completed first; a larger node's dial on a quiet peer's aged link (two known
+  arrives inside the other's connect window, which reaches the larger node
+  off its link as a redial and settles both ends on the smaller node's dial
+  at its first frame; a larger node's dial on a quiet peer's aged link (two known
   defects); a crossed msg1 the smaller node reads after installing from its
   own dial and hearing nothing for longer than the heard floor, from another
   transport and on the same one (known defects, with a control inside the

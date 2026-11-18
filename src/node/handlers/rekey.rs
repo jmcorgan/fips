@@ -192,6 +192,9 @@ pub(in crate::node) struct LinkReport {
     pub(in crate::node) pending: bool,
     /// The machine asked for the restart gates on the msg1 it was given.
     pub(in crate::node) replace: bool,
+    /// The machine asked for the msg1 it was given to be answered as a
+    /// redial, with the msg1's ephemeral, which it has not recorded.
+    pub(in crate::node) redial: Option<fips_core::proto::rekey::Digest>,
     /// The msg2s the machine asked to send in answer to the msg1 it was
     /// given, in order, each with the route the machine chose for it, for
     /// the caller to send relative to where the msg1 arrived.
@@ -333,6 +336,10 @@ impl Node {
                     report.replace |= !node_fault!(ReplaceNotRouted);
                     continue;
                 }
+                Step::Redial { ephemeral, .. } => {
+                    report.redial = Some(ephemeral);
+                    continue;
+                }
                 Step::Core(input) => {
                     debug_assert!(false, "the join gave a rekey step {input:?}");
                     continue;
@@ -395,6 +402,7 @@ impl Node {
                 // shell's.
                 LinkOutput::PeerRestarted { .. }
                 | LinkOutput::ReplaceRequested { .. }
+                | LinkOutput::RedialRequested { .. }
                 | LinkOutput::Teardown(_) => {
                     debug_assert!(false, "the join left a core output to the shell");
                 }
@@ -634,7 +642,8 @@ impl Node {
                 | LinkOutput::Send { .. }
                 | LinkOutput::Prompt { .. }
                 | LinkOutput::Deliver { .. }
-                | LinkOutput::ReplaceRequested { .. } => {}
+                | LinkOutput::ReplaceRequested { .. }
+                | LinkOutput::RedialRequested { .. } => {}
             }
         }
     }
@@ -943,7 +952,8 @@ impl Node {
             | Output::Delegate { .. }
             | Output::Revoke { .. }
             | Output::Release(_)
-            | Output::ReplaceRequested { .. } => {}
+            | Output::ReplaceRequested { .. }
+            | Output::RedialRequested { .. } => {}
         }
     }
 

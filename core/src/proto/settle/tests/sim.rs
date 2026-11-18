@@ -551,9 +551,9 @@ fn seeded_faulty_runs_on_two_transports_keep_the_properties_and_heal() {
 /// 3,000 seeds of any transport model turns on that one's resync, so a
 /// planted log in `shadow.rs` shows it, and this run only reaches it.
 const REACHED: [(Model, u64, &str); 4] = [
-    (Model::Stream, 144, "the larger node yields its own rekey"),
+    (Model::Stream, 239, "the larger node yields its own rekey"),
     (Model::Stream, 72, "an own rekey ends with its peering"),
-    (Model::Stream, 106, "a far-end close not yet seen here"),
+    (Model::Stream, 93, "a far-end close not yet seen here"),
     (Model::Datagram, 69, "a frame under the drained session"),
 ];
 

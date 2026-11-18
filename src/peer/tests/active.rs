@@ -494,6 +494,7 @@ fn rekey_to_pending(from: &mut End, to: &mut End) {
     let arrival = Arrival {
         on_link: true,
         reachable: true,
+        heard: true,
     };
     let out = to.step(Input::PeerMsg1 { tok, arrival });
     let msg2 = sent(&out, MsgKind::Msg2);
@@ -1205,7 +1206,7 @@ fn a_removal_closes_the_paths_before_the_rekey_machine_in_its_outputs() {
             Step::Path(_) => "path",
             Step::Rekey(_) => "rekey",
             Step::Core(_) => "core",
-            Step::Replace(_) => "replace",
+            Step::Replace(_) | Step::Redial { .. } => "replace",
         })
         .collect();
 

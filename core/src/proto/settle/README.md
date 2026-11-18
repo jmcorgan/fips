@@ -22,10 +22,13 @@ release build.
   record of its links can apply the same way.
 - `gates.rs`: the restart and replacement gates, one function
   (`Gates::gate`) that every restart source asks: a msg1 from an identity
-  not held, a msg1 at a new epoch, a same-epoch replacement, and a new
-  epoch found at this node's own msg2 or a rekey msg2. It holds the memory
-  per identity the gates read (the dampener's stamp, the replay memory and
-  the silent-session record), and judges as the current node does.
+  not held, a msg1 at a new epoch, a same-epoch replacement, a redial (a
+  fresh same-epoch msg1 off the link of a held peering heard from, the
+  operator's 2026-11-17 decision), and a new epoch found at this node's
+  own msg2 or a rekey msg2. It holds the memory per identity the gates
+  read (the dampener's stamp, the replay memory, the ephemerals that armed
+  a redial and the silent-session record), and judges as the current node
+  does.
 - `legs.rs`: the handshake legs in flight, by link: a dial leg with its
   msg1, its resend schedule (one interval after the dial, then doubling,
   up to the configured count) and its deadline; a responder leg with the
@@ -40,10 +43,12 @@ release build.
   epoch through the gate, hands a same-epoch msg1 to the peer's rekey
   machine with where it arrived (on the link from its setup address, the
   peer's current address or a proven path), takes the machine's
-  replacement request back through the gate, completes this node's own
-  dials (install, restart, the own-dial move and the crossing's
-  tie-break), removes peers, and applies the path bundle's events to the
-  link records.
+  replacement request back through the gate, answers its redial request
+  by a leg beside the held peer (one per identity) that the first frame
+  under it (`LegHeard`) installs in the peer's place, completes this
+  node's own dials (install, restart, the own-dial move and the
+  crossing's tie-break), removes peers, and applies the path bundle's
+  events to the link records.
 - `input.rs`: what the shell tells the core, each built after any Noise
   read, carrying the msg2 the shell built and its lease.
 - `join.rs`: the one function (`join`) that joins a peer's rekey machine
@@ -55,12 +60,12 @@ release build.
   and closes them at a removal (the bundle first), taking the slots where
   the shell keeps them. Its result says front to back what the shell is to
   carry out: a restart report and a teardown are core inputs, a
-  replacement request goes to the core's gates, every bundle output is the
-  shell's own and is followed by the core input it stands for, and a
-  one-path roam or bind, which the bundle reports in no output, is a move
-  or a Live path. Rekey outputs are converted as they are taken, so a
-  frame through it allocates nothing. The order is the machine calls' and
-  the routing's; a shell's loop that carries the steps (a node's sends
+  replacement or redial request goes to the core's gates, every bundle
+  output is the shell's own and is followed by the core input it stands
+  for, and a one-path roam or bind, which the bundle reports in no output,
+  is a move or a Live path. Rekey outputs are converted as they are taken,
+  so a frame through it allocates nothing. The order is the machine calls'
+  and the routing's; a shell's loop that carries the steps (a node's sends
   between steps, a test shell's sends first) stays the shell's own. One
   switch sits in it, `MoveBuildsFresh`, which builds the moved machine as
   a new link's; outside the core's tests it is the literal `false`. The

@@ -1,0 +1,459 @@
+//! A held peer's redial from another address: a fresh same-epoch msg1 that
+//! arrived off the peer's established link.
+//!
+//! Such a msg1 comes from a peer that changed address while its node kept
+//! running and dialed again, from a peer whose first packet from a new
+//! address is its timed rekey msg1, from a dial to another address of the
+//! peer, or from a replayer holding a capture. The wire tells these apart
+//! only by what follows: the peer holds the keys of the handshake its msg1
+//! opened and sends frames under them, and a replayer does not.
+//!
+//! So the msg1 is answered by a leg on its own inbound link beside the held
+//! peering, which nothing touches: [`Node::arm_redial`]. The leg's msg2 goes
+//! to the address the msg1 came from. When the first frame naming the leg's
+//! index authenticates under the leg's session, the peering is replaced by
+//! the leg: [`Node::redial_frame`], then [`Node::settle_redial`]. The swap
+//! replaces the link-level state (link, paths, indices, link session) and
+//! keeps the identity's tree declaration and filter, which the same process
+//! at the same epoch still holds, and opens the end-to-end session again
+//! when it closed a heard one. A leg no frame proves is reaped at the
+//! handshake timeout like any inbound leg, changing nothing.
+//!
+//! Only a heard peering is redialed (operator decision, 2026-11-17): the
+//! link machine asks for a redial only when the held peering has been heard
+//! from. A fresh msg1 off the link of an unheard peering, such as one a
+//! replayed msg1 promoted or the first of a dial over two paths, keeps the
+//! replacement at the msg1 and its floors (`handlers::handshake`).
+//!
+//! At most one redial is pending per identity. Before one is armed it must
+//! pass, in order: the slot rule (a pending redial under 1 s old holds the
+//! slot; an older one is replaced), the redial memory (an ephemeral that
+//! armed a redial of the peer in the last 15 s, or a full memory, is
+//! refused), the restart dampener and the ACL. Only then is the msg1's ephemeral recorded, in the
+//! held link's replay record and the redial memory, so a genuine dial
+//! refused by a gate is judged again at its next resend.
+
+use crate::NodeAddr;
+use crate::node::Node;
+use crate::node::acl::PeerAclContext;
+use crate::node::dataplane::PeerActionCtx;
+use crate::node::diag::HsLine;
+use crate::node::handlers::handshake::{
+    Armed, EPOCH_RESTART_MIN_INTERVAL_SECS, ReplayVerdict, UNHEARD_PEERING_MIN_AGE_MS,
+};
+use crate::node::reject::{DataplaneReject, HandshakeReject, RejectReason};
+use crate::node::settle::Redial;
+use crate::peer::machine::{PeerAction, PeerEvent, PeerState};
+use crate::proto::fmp::WireOutcome;
+use crate::proto::fmp::wire::{EncryptedHeader, build_msg2};
+use crate::proto::settle::output::Why;
+use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
+use std::time::Duration;
+use tracing::{debug, warn};
+
+/// Why a redial was refused before it was armed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    /// Another redial of the peer is pending and under 1 s old.
+    Slot,
+    /// Its ephemeral armed a redial of the peer in the last 15 s, or the
+    /// memory of them is full.
+    Seen,
+    /// The restart dampener holds the peer.
+    Dampened,
+}
+
+impl Node {
+    /// Answer the redial `armed`, the msg1 in `packet` read as `wire`, into
+    /// a pending redial beside the held peering, or refuse it at the first
+    /// gate that holds it.
+    pub(in crate::node) async fn arm_redial(
+        &mut self,
+        armed: Armed,
+        packet: &ReceivedPacket,
+        wire: &WireOutcome,
+    ) {
+        let Armed {
+            mut machine,
+            link,
+            peer,
+            identity,
+            digest,
+            ephemeral,
+            leg_at,
+        } = armed;
+        let interval_ms = leg_at.interval_ms;
+        let pending = self.redials.of(&peer);
+        if let Some(held) = self.redial_held(&peer, pending, ephemeral.as_ref(), interval_ms) {
+            if self.shown(&peer, HsLine::Redial) {
+                debug!(
+                    peer = %self.peer_display_name(&peer),
+                    transport_id = %packet.transport_id,
+                    remote_addr = %packet.remote_addr,
+                    held = ?held,
+                    "Same-epoch msg1 off the established link held back as a redial, dropping"
+                );
+            }
+            let reject = match held {
+                Held::Slot => HandshakeReject::RedialHeld,
+                Held::Seen => HandshakeReject::RedialSeen,
+                Held::Dampened => HandshakeReject::RedialDampened,
+            };
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(reject));
+            return;
+        }
+        if !node_fault!(RedialSkipsAcl)
+            && self
+                .authorize_peer(
+                    &identity,
+                    PeerAclContext::InboundHandshake,
+                    packet.transport_id,
+                    &packet.remote_addr,
+                )
+                .is_err()
+        {
+            let _ = machine.step(PeerEvent::Rejected, interval_ms, &mut self.index_allocator);
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+            return;
+        }
+        // Every gate passed: a pending redial older than the slot's floor
+        // gives way to this one, and the msg1's ephemeral is recorded, so
+        // its copies are copies from here on.
+        if let Some(old) = pending {
+            debug!(
+                peer = %self.peer_display_name(&peer),
+                link_id = %old.link,
+                "A later redial replaces a pending redial its frame never proved"
+            );
+            self.cleanup_stale_connection(old.link, packet.timestamp_ms)
+                .await;
+        }
+        if let Some(digest) = digest
+            && let Some(held) = self.peers.get_mut(&peer)
+        {
+            held.note_redial(digest);
+        }
+        if let Some(ephemeral) = ephemeral
+            && !node_fault!(RedialMemoryIgnored)
+        {
+            self.redials.seen().note(peer, ephemeral, interval_ms);
+        }
+
+        // Allocate the leg's index and send its msg2; nothing is promoted.
+        let actions = machine.step(
+            PeerEvent::AuthorizedHeld,
+            interval_ms,
+            &mut self.index_allocator,
+        );
+        let Some(our_index) = machine.our_index() else {
+            warn!("Failed to allocate session index for a redial");
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+            return;
+        };
+        let their_index = wire.their_index;
+        self.links.open(Link::connectionless(
+            link,
+            packet.transport_id,
+            packet.remote_addr.clone(),
+            LinkDirection::Inbound,
+            Duration::from_millis(self.config().node.base_rtt_ms),
+        ));
+        machine.set_conn_handshake_msg2(build_msg2(our_index, their_index, &wire.msg2_payload));
+        self.peer_machines.add(link, machine);
+        self.redials.note(
+            peer,
+            Redial {
+                link,
+                index: our_index,
+                at: interval_ms,
+            },
+        );
+        self.stats_mut().handshake.redials += 1;
+        debug!(
+            peer = %self.peer_display_name(&peer),
+            link_id = %link,
+            our_index = %our_index,
+            transport_id = %packet.transport_id,
+            remote_addr = %packet.remote_addr,
+            "Same-epoch msg1 off the established link, answered into a pending redial"
+        );
+        let ambient = PeerActionCtx {
+            verified_identity: identity,
+            transport_id: packet.transport_id,
+            remote_addr: packet.remote_addr.clone(),
+            our_index: Some(our_index),
+            their_index: Some(their_index),
+            now_ms: packet.timestamp_ms,
+            interval_ms,
+            is_outbound: false,
+            why: None,
+        };
+        self.execute_peer_actions(link, &ambient, actions).await;
+        // The mutation lane's breaks: the peering replaced with no frame
+        // from the peer, at the msg1 or once its answer is sent.
+        let unproven = [
+            node_fault!(RedialTearsDownAtMsg1),
+            node_fault!(RedialSwapsUnproven),
+        ]
+        .contains(&true);
+        if unproven && self.redials.of(&peer).is_some_and(|r| r.link == link) {
+            self.settle_redial(peer, link, packet.timestamp_ms).await;
+        }
+    }
+
+    /// The first gate that holds back a redial of `peer`, whose pending
+    /// redial is `pending`, with the msg1's `ephemeral`, at `now_ms` on the
+    /// interval clock; `None` when every gate passes.
+    fn redial_held(
+        &mut self,
+        peer: &NodeAddr,
+        pending: Option<Redial>,
+        ephemeral: Option<&crate::proto::fmp::EphemeralDigest>,
+        now_ms: u64,
+    ) -> Option<Held> {
+        if node_fault!(RedialTearsDownAtMsg1) {
+            return None;
+        }
+        if let Some(pending) = pending
+            && now_ms.saturating_sub(pending.at) < UNHEARD_PEERING_MIN_AGE_MS
+            && !node_fault!(RedialSlotIgnored)
+        {
+            return Some(Held::Slot);
+        }
+        if let Some(ephemeral) = ephemeral
+            && !node_fault!(RedialMemoryIgnored)
+            && self.redials.seen().verdict(peer, ephemeral, now_ms) != ReplayVerdict::Fresh
+        {
+            return Some(Held::Seen);
+        }
+        let dampened = self.restart_dampener.get(peer).is_some_and(|t| {
+            crate::time::mono_now()
+                .saturating_duration_since(*t)
+                .as_secs()
+                < EPOCH_RESTART_MIN_INTERVAL_SECS
+        });
+        if dampened && !node_fault!(RedialSkipsDampener) {
+            return Some(Held::Dampened);
+        }
+        None
+    }
+
+    /// A frame in `packet`, with `header`, names the index of `peer`'s
+    /// pending redial `redial`: open it under the leg's session, leaving
+    /// its replay window as it is, and on success replace the peering by
+    /// the leg. Returns whether the frame opened. A frame that does not open
+    /// changes nothing and is charged to no peer.
+    pub(in crate::node) async fn redial_frame(
+        &mut self,
+        peer: NodeAddr,
+        redial: Redial,
+        header: &EncryptedHeader,
+        packet: &ReceivedPacket,
+    ) -> bool {
+        let opened = self
+            .peer_machines
+            .get(&redial.link)
+            .and_then(|m| m.leg())
+            .and_then(|leg| leg.noise_session.as_ref())
+            .is_some_and(|session| {
+                session.check_replay(header.counter).is_ok()
+                    && packet
+                        .data
+                        .get(header.ciphertext_offset()..)
+                        .is_some_and(|body| {
+                            session
+                                .open_unmarked(body, header.counter, &header.header_bytes)
+                                .is_ok()
+                        })
+            });
+        if !opened {
+            self.metrics()
+                .dataplane
+                .record_reject(DataplaneReject::RedialUnopened);
+            if node_fault!(RedialChargesHeld) && self.peers.contains_key(&peer) {
+                self.charge_failure(&peer, packet.transport_id, &packet.remote_addr);
+            }
+            return false;
+        }
+        self.settle_redial(peer, redial.link, packet.timestamp_ms)
+            .await;
+        true
+    }
+
+    /// Replace the peering with `peer` by the pending redial's leg on
+    /// `link`: the ACL checked again, the held peering torn down for a
+    /// redial, keeping the identity's tree declaration and filter, the leg
+    /// promoted, and the end-to-end session opened again if the teardown
+    /// closed a heard one. `now_ms` is the wall stamp of the packet that
+    /// proved it.
+    pub(in crate::node) async fn settle_redial(
+        &mut self,
+        peer: NodeAddr,
+        link: LinkId,
+        now_ms: u64,
+    ) {
+        let Some((identity, ours, theirs, transport_id, remote_addr)) =
+            self.peer_machines.get(&link).and_then(|m| {
+                Some((
+                    *m.conn_expected_identity()?,
+                    m.our_index()?,
+                    m.conn_their_index()?,
+                    m.conn_transport_id()?,
+                    m.conn_source_addr()?.clone(),
+                ))
+            })
+        else {
+            return;
+        };
+        if self
+            .authorize_peer(
+                &identity,
+                PeerAclContext::InboundHandshake,
+                transport_id,
+                &remote_addr,
+            )
+            .is_err()
+        {
+            debug!(
+                peer = %self.peer_display_name(&peer),
+                link_id = %link,
+                "Redial's peer no longer authorized at its first frame, dropping the redial"
+            );
+            self.cleanup_stale_connection(link, now_ms).await;
+            return;
+        }
+        let interval_ms = Self::interval_ms();
+        let held = self.peers.get(&peer).map(|p| {
+            (
+                p.is_heard(),
+                p.declaration().cloned().zip(p.coords().cloned()),
+                p.inbound_filter()
+                    .cloned()
+                    .map(|f| (f, p.filter_sequence())),
+            )
+        });
+        let had_session = self.sessions.contains_key(&peer);
+        // The held link's paths, which the teardown releases unlogged.
+        let ended = self.path_states(&peer);
+        let actions = match self.peer_machines.get_mut(&link) {
+            Some(machine) => machine.step(
+                PeerEvent::Proven {
+                    peer_held: held.is_some(),
+                },
+                interval_ms,
+                &mut self.index_allocator,
+            ),
+            None => return,
+        };
+        let at = actions
+            .iter()
+            .position(|a| matches!(a, PeerAction::PromoteToActive { .. }))
+            .unwrap_or(actions.len());
+        let mut teardown = actions;
+        let promote = teardown.split_off(at);
+        if !teardown.is_empty() {
+            debug!(
+                peer = %self.peer_display_name(&peer),
+                link_id = %link,
+                "Redial proven by the peer's frame, replacing the peering"
+            );
+            self.log_paths_ended(&peer, &ended);
+            let teardown_ctx = PeerActionCtx {
+                verified_identity: identity,
+                transport_id,
+                remote_addr: remote_addr.clone(),
+                our_index: None,
+                their_index: Some(theirs),
+                now_ms,
+                interval_ms,
+                is_outbound: false,
+                why: Some(Why::Redial),
+            };
+            self.execute_peer_actions(link, &teardown_ctx, teardown)
+                .await;
+        }
+        // Stamped as an accepted replacement of a heard peering is: it bounds
+        // the churn two processes under one key could drive. A replayer
+        // cannot reach here, so it cannot stamp it.
+        if held.as_ref().is_some_and(|(heard, _, _)| *heard) {
+            let cutoff = Duration::from_secs(EPOCH_RESTART_MIN_INTERVAL_SECS);
+            self.restart_dampener
+                .retain(|_, t| crate::time::mono_now().saturating_duration_since(*t) < cutoff);
+            self.restart_dampener.insert(peer, crate::time::mono_now());
+        }
+        let session_closed = had_session && !self.sessions.contains_key(&peer);
+        let ambient = PeerActionCtx {
+            verified_identity: identity,
+            transport_id,
+            remote_addr,
+            our_index: Some(ours),
+            their_index: Some(theirs),
+            now_ms,
+            interval_ms,
+            is_outbound: false,
+            why: held.as_ref().map(|_| Why::Redial),
+        };
+        self.execute_peer_actions(link, &ambient, promote).await;
+        if !matches!(
+            self.peer_machines.get(&link).map(|m| m.state()),
+            Some(PeerState::Established { .. })
+        ) {
+            return;
+        }
+        if !ended.is_empty() {
+            self.log_paths_begun(&peer);
+        }
+        self.redials.seen().forget(&peer);
+        self.stats_mut().handshake.redials_proven += 1;
+        // The peer's process and epoch are unchanged, so what it declared
+        // and the filter it sent still hold for the peering that replaces
+        // the one they came on.
+        if let Some((_, tree, filter)) = held
+            && !node_fault!(RedialDropsIdentity)
+            && let Some(p) = self.peers.get_mut(&peer)
+        {
+            let now = Self::now_ms();
+            if let Some((declaration, ancestry)) = tree {
+                p.update_tree_position(declaration, ancestry, now);
+            }
+            if let Some((filter, sequence)) = filter {
+                p.update_filter(filter, sequence, now);
+            }
+        }
+        if session_closed && !node_fault!(RedialNoSessionReopen) {
+            let pubkey = identity.pubkey_full();
+            match self.initiate_session(peer, pubkey).await {
+                Ok(()) => {
+                    self.stats_mut().handshake.redial_session_reopens += 1;
+                    debug!(
+                        peer = %self.peer_display_name(&peer),
+                        "Opened the end-to-end session again after a redial's swap"
+                    );
+                }
+                Err(e) => debug!(
+                    peer = %self.peer_display_name(&peer),
+                    error = %e,
+                    "Failed to open the end-to-end session again after a redial's swap"
+                ),
+            }
+        }
+    }
+
+    /// Drop `peer`'s pending redial, if any, as its expiry would: the
+    /// operator disconnected the peer, so a later frame under the leg must
+    /// promote nothing.
+    pub(in crate::node) async fn drop_redial(&mut self, peer: &NodeAddr) {
+        if let Some(redial) = self.redials.of(peer) {
+            debug!(
+                peer = %self.peer_display_name(peer),
+                link_id = %redial.link,
+                "Dropping the pending redial of a peer disconnected by the operator"
+            );
+            self.cleanup_stale_connection(redial.link, Self::now_ms())
+                .await;
+        }
+    }
+}

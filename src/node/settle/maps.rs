@@ -8,6 +8,7 @@ use crate::NodeAddr;
 use crate::peer::ActivePeer;
 use crate::peer::machine::{PeerMachine, TimerKind};
 use crate::transport::{LinkId, TransportId};
+use crate::utils::index::SessionIndex;
 
 /// The per-peer control machines, keyed by the `LinkId` that spans a peer's
 /// handshake and active life, with each machine's timer store.
@@ -182,5 +183,78 @@ impl BindMap {
     /// is gone.
     pub(in crate::node) fn unbind(&mut self, index: &u32) {
         self.indices.remove(index);
+    }
+}
+
+/// One pending redial: the inbound link its leg runs on, the index the
+/// leg's msg2 named, and when the msg1 that armed it was answered, on the
+/// interval clock (`Node::interval_ms`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::node) struct Redial {
+    pub(in crate::node) link: LinkId,
+    pub(in crate::node) index: SessionIndex,
+    pub(in crate::node) at: u64,
+}
+
+/// The pending redials, at most one per held identity, and the memory of
+/// the msg1 ephemerals that armed one.
+///
+/// A redial is a fresh same-epoch msg1 that arrived off a held peer's
+/// established link. It is answered by a leg on its own inbound link,
+/// beside the held peering, and replaces the peering only when the peer's
+/// first frame authenticates under the leg's session. An entry is written
+/// when the leg is armed and forgotten when the leg is promoted, reaped or
+/// replaced; the audit's `redial-leg` clause holds each entry to a leg.
+///
+/// The memory keeps, per identity, the ephemerals that armed a redial in
+/// the last 15 s, so a capture is answered once per interval. It is kept
+/// apart from the replay memory of unheard promotions, which forgets a
+/// peer's entries at its first frame: the held peering keeps sending
+/// frames. It forgets an identity's entries only at that identity's swap.
+#[derive(Debug, Default)]
+pub(in crate::node) struct RedialMap {
+    by_peer: HashMap<NodeAddr, Redial>,
+    memory: crate::node::handlers::handshake::ReplayedMsg1s,
+}
+
+impl RedialMap {
+    /// The leg on `redial.link` answers a redial of `peer`.
+    pub(in crate::node) fn note(&mut self, peer: NodeAddr, redial: Redial) {
+        self.by_peer.insert(peer, redial);
+    }
+
+    /// Forget the redial whose leg runs on `link`, if any, returning the
+    /// identity it was for.
+    pub(in crate::node) fn forget(&mut self, link: LinkId) -> Option<NodeAddr> {
+        let peer = self
+            .by_peer
+            .iter()
+            .find(|(_, r)| r.link == link)
+            .map(|(peer, _)| *peer)?;
+        self.by_peer.remove(&peer);
+        Some(peer)
+    }
+
+    /// The pending redial of `peer`.
+    pub(in crate::node) fn of(&self, peer: &NodeAddr) -> Option<Redial> {
+        self.by_peer.get(peer).copied()
+    }
+
+    /// The identity and redial whose leg's msg2 named `index`.
+    pub(in crate::node) fn by_index(&self, index: u32) -> Option<(NodeAddr, Redial)> {
+        self.by_peer
+            .iter()
+            .find(|(_, r)| r.index.as_u32() == index)
+            .map(|(peer, r)| (*peer, *r))
+    }
+
+    /// Every pending redial.
+    pub(in crate::node) fn iter(&self) -> impl Iterator<Item = (&NodeAddr, &Redial)> {
+        self.by_peer.iter()
+    }
+
+    /// The memory of the ephemerals that armed a redial.
+    pub(in crate::node) fn seen(&mut self) -> &mut crate::node::handlers::handshake::ReplayedMsg1s {
+        &mut self.memory
     }
 }

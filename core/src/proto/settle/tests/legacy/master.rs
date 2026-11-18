@@ -122,6 +122,37 @@ struct Leg {
     answer: Answered,
 }
 
+/// A pending redial (`RedialMap`, `handlers/redial.rs`): the inbound leg
+/// answering a fresh same-epoch msg1 off the held peer's established link,
+/// beside the held peering, which its first frame replaces.
+#[derive(Debug)]
+struct Redialing {
+    hs: Hs,
+    link: u32,
+    /// The msg1's source and this node's address on its path.
+    src: Addr,
+    local: Addr,
+    /// The msg1 on the wire, which alone draws the msg2 again once sent.
+    msg1: Vec<u8>,
+    /// When it was armed, and when the leg is reaped unproven.
+    at: Ms,
+    deadline: Ms,
+    /// The msg2 went out (`msg2_sent`).
+    sent: bool,
+    answer: Answered,
+}
+
+/// Where a same-epoch msg1 goes after the held peer's link machine judged
+/// it (`LinkVerdict`).
+enum Verdict {
+    /// Answered, resent or refused there.
+    Done,
+    /// The restart gates, as a replacement.
+    Replace,
+    /// A redial, with the msg1's ephemeral the machine has not recorded.
+    Redial(crate::proto::rekey::Digest),
+}
+
 /// An active peer.
 #[derive(Debug)]
 struct Peer {
@@ -162,6 +193,10 @@ struct State {
     legs: BTreeMap<u32, Leg>,
     dampener: BTreeMap<u8, Ms>,
     replayed: BTreeMap<u8, Vec<(Hs, Ms)>>,
+    /// The pending redial of each peer.
+    redials: BTreeMap<u8, Redialing>,
+    /// The msg1s that armed a redial of each peer, and when.
+    redialed: BTreeMap<u8, Vec<(Hs, Ms)>>,
     /// Inbound connections whose msg1 left no link, by address, and when
     /// the node gives up on each.
     idle: BTreeMap<(u8, u16), Ms>,
@@ -245,6 +280,8 @@ impl MasterParty {
                 legs: BTreeMap::new(),
                 dampener: BTreeMap::new(),
                 replayed: BTreeMap::new(),
+                redials: BTreeMap::new(),
+                redialed: BTreeMap::new(),
                 idle: BTreeMap::new(),
                 kit: Kit::new(me, Epoch(u32::from(me.0) << 8), &kinds),
                 store: store(),
@@ -493,6 +530,8 @@ impl MasterParty {
                 | In::Arrived { .. }
                 | In::Msg1 { .. }
                 | In::Replace(_)
+                | In::Redial(_)
+                | In::LegHeard { .. }
                 | In::Msg2 { .. }
                 | In::Heard { .. }
                 | In::Disconnect { .. }
@@ -978,7 +1017,8 @@ impl MasterParty {
 
     /// Hand a same-epoch msg1 of the held peer `id` to its rekey machine,
     /// and carry out what it asks. Returns whether the machine asked for
-    /// the restart gates: otherwise the msg1 is done with, and logged here.
+    /// the restart gates or a redial: otherwise the msg1 is done with, and
+    /// logged here.
     #[allow(clippy::too_many_arguments)]
     fn handed(
         &mut self,
@@ -988,14 +1028,14 @@ impl MasterParty {
         hs: Hs,
         msg1: &[u8],
         ev: Event,
-    ) -> bool {
+    ) -> Verdict {
         let now = net.now;
         let reachable = self.reachable(net, id);
         let pending = self.pending(id);
         let floors = self.s.floors;
         let indexed = self.indexed(src);
         let Some(p) = self.s.peers.get_mut(&id.0) else {
-            return false;
+            return Verdict::Done;
         };
         // On the link: from a path proven at this end, or, on a link whose
         // peer is not capable, from a pair it holds no path for that the
@@ -1008,7 +1048,11 @@ impl MasterParty {
                 false,
             ),
         };
-        let arrival = Arrival { on_link, reachable };
+        let arrival = Arrival {
+            on_link,
+            reachable,
+            heard: p.heard,
+        };
         let events = p.machines.msg1(&mut self.s.kit, now, hs, msg1, arrival);
         let ok = p.machines.eligible(floors, now);
         self.named(id, Some(hs));
@@ -1021,7 +1065,11 @@ impl MasterParty {
                 None
             }
         };
-        let replace = r.replace.is_some();
+        let verdict = match (&r.replace, &r.redial) {
+            (Some(_), _) => Verdict::Replace,
+            (None, Some((_, e))) => Verdict::Redial(*e),
+            (None, None) => Verdict::Done,
+        };
         let Routed { sends, inputs, .. } = r;
         self.sends(net, id, sends, Some((hs, src, local, onpath)));
         let rest = Routed {
@@ -1029,8 +1077,8 @@ impl MasterParty {
             ..Routed::default()
         };
         self.carry(net, id, rest);
-        if replace {
-            return true;
+        if !matches!(verdict, Verdict::Done) {
+            return verdict;
         }
         self.note(
             now,
@@ -1042,7 +1090,7 @@ impl MasterParty {
                 ..Rec::default()
             },
         );
-        false
+        Verdict::Done
     }
 
     /// `handle_msg1`.
@@ -1068,8 +1116,22 @@ impl MasterParty {
             return;
         };
         // The pre-crypto duplicate short circuit: an inbound link from this
-        // address with no peer on it resends its stored msg2.
-        if let Some(l) = self.indexed(src)
+        // address with no peer on it resends its stored msg2; once sent, a
+        // stored msg2 answers only the msg1 it was written for, and any
+        // other msg1 is classified.
+        let redialing = self.indexed(src).and_then(|l| {
+            self.s
+                .redials
+                .iter()
+                .find(|(_, r)| r.link == l)
+                .map(|(k, r)| (*k, r.sent && r.msg1 != msg1))
+        });
+        if let Some((k, false)) = redialing {
+            self.resent(net, (src, local), Node(k), (hs, bytes, epoch));
+            return;
+        }
+        if redialing.is_none()
+            && let Some(l) = self.indexed(src)
             && self.s.links.get(&l).is_some_and(|k| k.dir == Dir::Inbound)
             && !self.s.peers.values().any(|p| p.link == l)
         {
@@ -1150,12 +1212,14 @@ impl MasterParty {
         let class = match self.s.peers.get(&id.0) {
             None => Class::NotHeld,
             Some(p) if p.machines.rekey().view().peer_epoch != Some(wired(epoch)) => Class::Restart,
-            Some(_) => {
-                if !self.handed(net, (src, local), id, hs, &msg1, ev) {
+            Some(_) => match self.handed(net, (src, local), id, hs, &msg1, ev) {
+                Verdict::Done => return,
+                Verdict::Replace => Class::Replacement,
+                Verdict::Redial(e) => {
+                    self.arm(net, (src, local), id, tok.get(), (hs, msg1, e), ev);
                     return;
                 }
-                Class::Replacement
-            }
+            },
         };
         if class != Class::NotHeld {
             // The replay memory and the gates, on the peer clock.
@@ -1260,6 +1324,199 @@ impl MasterParty {
         if sent {
             self.announce(net, id);
         }
+    }
+
+    /// `arm_redial`: the gates of a redial of `id`, a heard peering (the
+    /// slot, the memory and the dampener, in that order), then the msg1's
+    /// ephemeral recorded, a leg on a new inbound link beside the held
+    /// peering, and its msg2. Nothing of the held peering is touched.
+    fn arm(
+        &mut self,
+        net: &mut Net,
+        (src, local): (Addr, Addr),
+        id: Node,
+        tok: &Msg1,
+        (hs, msg1, ephemeral): (Hs, Vec<u8>, crate::proto::rekey::Digest),
+        ev: Event,
+    ) {
+        let (ix, now, me) = (self.s.ix, net.now, self.s.me);
+        let proven = self
+            .s
+            .peers
+            .get(&id.0)
+            .is_some_and(|p| matches!(p.machines.matched(src), Match::Proven { .. }));
+        let slot = self
+            .s
+            .redials
+            .get(&id.0)
+            .is_some_and(|r| now - r.at < UNHEARD);
+        let seen = {
+            let mem = self.s.redialed.entry(id.0).or_default();
+            mem.retain(|&(_, at)| now - at < INTERVAL);
+            mem.iter().any(|(e, _)| *e == hs) || mem.len() >= REPLAYS
+        };
+        let dampened = self
+            .s
+            .dampener
+            .get(&id.0)
+            .is_some_and(|&t| now - t < INTERVAL);
+        let refused = if slot {
+            Some(Refusal::Gate(Gate::Slot))
+        } else if seen {
+            Some(Refusal::Replay)
+        } else if dampened {
+            Some(Refusal::Gate(Gate::Dampened))
+        } else {
+            None
+        };
+        let rec = Rec {
+            class: Some(Class::Redial),
+            refused,
+            proven,
+            ..Rec::default()
+        };
+        if refused.is_some() {
+            self.note(now, id, ev, rec);
+            return;
+        }
+        // A pending redial older than the slot's floor gives way.
+        self.unredial(net, id.0);
+        if let Some(p) = self.s.peers.get_mut(&id.0)
+            && !fault!(RedialUnnoted)
+        {
+            p.machines.redialed(ephemeral);
+        }
+        let mem = self.s.redialed.entry(id.0).or_default();
+        if !mem.iter().any(|(e, _)| *e == hs) {
+            mem.push((hs, now));
+        }
+        if mem.len() > REPLAYS {
+            mem.remove(0);
+        }
+        let link = self.link(Dir::Inbound, src, hs);
+        let answer = self.answered(tok, hs);
+        let sent = net.sendable(ix, src);
+        if sent {
+            let w = net.intern(&answer.msg2);
+            let pkt = Pkt::Msg2 {
+                id: me,
+                hs,
+                epoch: self.epoch(),
+                wire: w,
+            };
+            net.send(ix, Some(local), src, pkt);
+        }
+        self.s.redials.insert(
+            id.0,
+            Redialing {
+                hs,
+                link,
+                src,
+                local,
+                msg1,
+                at: now,
+                deadline: now + HANDSHAKE,
+                sent,
+                answer,
+            },
+        );
+        self.note(now, id, ev, rec);
+    }
+
+    /// The short circuit at a pending redial's leg of `peer`: a msg1 that
+    /// draws its stored msg2 again, and `promote_resent`, which promotes
+    /// the leg once its peer is no longer held.
+    fn resent(
+        &mut self,
+        net: &mut Net,
+        (src, local): (Addr, Addr),
+        peer: Node,
+        (hs, bytes, epoch): (Hs, Bytes, Epoch),
+    ) {
+        let (ix, now, me) = (self.s.ix, net.now, self.s.me);
+        let Some(r) = self.s.redials.get_mut(&peer.0) else {
+            return;
+        };
+        let sent = net.sendable(ix, src);
+        let ev = Event::Msg1 {
+            hs,
+            bytes,
+            epoch,
+            link: LinkId(r.link),
+            from: src,
+            binding: binding(net.kind(src.transport)),
+            sent,
+        };
+        if !sent {
+            self.note(now, peer, ev, Rec::default());
+            return;
+        }
+        r.sent = true;
+        let (lhs, w) = (r.hs, net.intern(&r.answer.msg2));
+        let pkt = Pkt::Msg2 {
+            id: me,
+            hs: lhs,
+            epoch: self.epoch(),
+            wire: w,
+        };
+        net.send(ix, Some(local), src, pkt);
+        self.note(now, peer, ev, Rec::default());
+        if self.s.peers.contains_key(&peer.0) {
+            self.note(now, peer, Event::Msg2Sent { hs: lhs }, Rec::default());
+            return;
+        }
+        let Some(r) = self.s.redials.remove(&peer.0) else {
+            return;
+        };
+        self.install(net, peer, r.hs, r.answer, r.link, (r.src, r.local));
+        let rec = Rec {
+            change: Some(Transition::Promote),
+            ..Rec::default()
+        };
+        self.note(now, peer, Event::Msg2Sent { hs: lhs }, rec);
+        self.announce(net, peer);
+    }
+
+    /// `settle_redial`, at a frame of `id` under the session of `hs`: when
+    /// it is `id`'s pending redial's, the held peering, if any, is torn
+    /// down for a redial (its connection kept, the dampener stamped if it
+    /// was heard), the redial memory forgotten, and the leg promoted. The
+    /// change, if it swapped.
+    fn swap(&mut self, net: &mut Net, id: Node, hs: Hs) -> Option<Transition> {
+        let now = net.now;
+        if !self.s.redials.get(&id.0).is_some_and(|r| r.hs == hs) {
+            return None;
+        }
+        let r = self.s.redials.remove(&id.0)?;
+        let held = self.s.peers.get(&id.0).map(|p| p.heard);
+        if held == Some(true) {
+            self.s.dampener.retain(|_, t| now - *t < INTERVAL);
+            self.s.dampener.insert(id.0, now);
+        }
+        if held.is_some()
+            && let Some(link) = self.close(now, id)
+        {
+            self.unlink(link);
+        }
+        self.s.redialed.remove(&id.0);
+        self.install(net, id, r.hs, r.answer, r.link, (r.src, r.local));
+        self.announce(net, id);
+        Some(if held.is_some() {
+            Transition::Replace
+        } else {
+            Transition::Promote
+        })
+    }
+
+    /// Drop `peer`'s pending redial, if any (`cleanup_stale_connection`):
+    /// its lease freed, its link closed by the close rule and removed. The
+    /// handshake it answered.
+    fn unredial(&mut self, net: &mut Net, peer: u8) -> Option<Hs> {
+        let r = self.s.redials.remove(&peer)?;
+        self.s.kit.pool.free(r.answer.lease.release());
+        self.close_leg(net, r.link);
+        self.unlink(r.link);
+        Some(r.hs)
     }
 
     /// `ReplayedMsg1s::verdict`: whether a msg1 replacing an unheard peering
@@ -1568,6 +1825,10 @@ impl MasterParty {
         (wire, copy): (u32, bool),
     ) {
         let now = net.now;
+        // `redial_frame`: a frame under a pending redial's keys, whose index
+        // no peer holds, replaces the peering by the leg, and then goes to
+        // the machines built on it.
+        let swapped = self.swap(net, id, hs);
         let bytes = if wire == 0 {
             match self.sealed(id, hs, copy) {
                 Some(b) => b,
@@ -1640,7 +1901,7 @@ impl MasterParty {
         let change = if cut {
             Some(revealed.unwrap_or(Transition::RekeyCutover))
         } else {
-            roamed.then_some(Transition::Roam)
+            swapped.or(roamed.then_some(Transition::Roam))
         };
         self.note(
             now,
@@ -1752,6 +2013,19 @@ impl MasterParty {
             self.close_leg(net, g.link);
             self.unlink(g.link);
             self.note(now, g.peer, Event::Timeout { hs: Hs(k) }, Rec::default());
+        }
+        // A pending redial no frame proved is reaped with its leg.
+        let unproven: Vec<u8> = self
+            .s
+            .redials
+            .iter()
+            .filter(|(_, r)| now >= r.deadline)
+            .map(|(k, _)| *k)
+            .collect();
+        for k in unproven {
+            if let Some(hs) = self.unredial(net, k) {
+                self.note(now, Node(k), Event::Timeout { hs }, Rec::default());
+            }
         }
         let peers: Vec<u8> = self.s.peers.keys().copied().collect();
         for k in peers {
@@ -1901,6 +2175,8 @@ impl MasterParty {
             legs,
             dampener,
             replayed,
+            redials,
+            redialed,
             idle,
             kit,
             store,
@@ -1914,7 +2190,7 @@ impl MasterParty {
             expired: _,
         } = &self.s;
         let mut out = format!(
-            "{ix} {now} {me:?} {mode:?} {life} {count} {nlinks} {configured:?} {retry:?} {links:?} {dials:?} {legs:?} {dampener:?} {replayed:?} {idle:?} "
+            "{ix} {now} {me:?} {mode:?} {life} {count} {nlinks} {configured:?} {retry:?} {links:?} {dials:?} {legs:?} {dampener:?} {replayed:?} {redials:?} {redialed:?} {idle:?} "
         );
         for (k, p) in peers {
             let Peer {
@@ -1964,7 +2240,11 @@ impl MasterParty {
             .dials
             .values()
             .flat_map(|d| [Some(d.deadline), (d.resends < RESENDS).then_some(d.next)]);
-        let legs = s.legs.values().map(|g| Some(g.deadline));
+        let legs = s
+            .legs
+            .values()
+            .map(|g| Some(g.deadline))
+            .chain(s.redials.values().map(|r| Some(r.deadline)));
         let peers = s.peers.values().flat_map(|p| {
             let m = if bundles {
                 p.machines.wake()
@@ -2108,6 +2388,9 @@ impl Party for MasterParty {
     }
 
     fn holds(&self, peer: Node, hs: Hs) -> bool {
+        if self.s.redials.get(&peer.0).is_some_and(|r| r.hs == hs) {
+            return true;
+        }
         let Some(want) = self.s.names.kid(hs) else {
             return false;
         };

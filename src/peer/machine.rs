@@ -271,6 +271,14 @@ pub(crate) enum PeerEvent {
     },
     /// Late-ACL authorization succeeded (benign confirmation).
     Authorized,
+    /// Late-ACL authorization of a redial succeeded, while the node still
+    /// holds the peer on another link: allocate the index and send the msg2,
+    /// but do not promote. The leg waits for the peer's first frame.
+    AuthorizedHeld,
+    /// A frame authenticated under this redial leg's session: the peer holds
+    /// it. `peer_held`: the node still holds the peer on another link, which
+    /// is torn down before the leg is promoted.
+    Proven { peer_held: bool },
     /// Late-ACL authorization rejected.
     Rejected,
     /// `promote_connection` resolved the [`PromoteToActive`](PeerAction::PromoteToActive)
@@ -1119,6 +1127,12 @@ impl PeerMachine {
                 self.on_msg2(their_index, out, now, index_allocator)
             }
             PeerEvent::Authorized => self.on_authorized(now, index_allocator),
+            PeerEvent::AuthorizedHeld => {
+                let mut actions = self.on_authorized(now, index_allocator);
+                actions.retain(|a| !matches!(a, PeerAction::PromoteToActive { .. }));
+                actions
+            }
+            PeerEvent::Proven { peer_held } => self.on_proven(peer_held),
             PeerEvent::Rejected => self.fail(FailReason::AclRejected),
             PeerEvent::PromotionResolved { result } => self.on_promotion_resolved(result, now),
             PeerEvent::Msg2Resent { peer_held } => self.on_resend(peer_held),
@@ -1359,7 +1373,12 @@ impl PeerMachine {
                 actions.extend(self.inbound_classify(link, wire));
                 actions
             }
-            InboundDecision::Promote => self.inbound_classify(link, wire),
+            // A redial parks the leg as a net-new msg1 does; the shell
+            // authorizes it with `AuthorizedHeld`, so nothing is promoted
+            // until the peer's first frame proves it.
+            InboundDecision::Promote | InboundDecision::Redial { .. } => {
+                self.inbound_classify(link, wire)
+            }
         };
         (decision, actions)
     }
@@ -1441,6 +1460,34 @@ impl PeerMachine {
             return Vec::new();
         }
         vec![PeerAction::PromoteToActive { link: self.link }]
+    }
+
+    /// A frame authenticated under this redial leg's session. With the
+    /// peer still held on another link, that peering is torn down first
+    /// (`InvalidateSendState`, then the loss noted), as a replacement tears
+    /// it down; then the leg is promoted. Guarded as `on_resend` is: a leg
+    /// not yet authorized, or past its handshake, does nothing.
+    fn on_proven(&self, peer_held: bool) -> Vec<PeerAction> {
+        let pending = matches!(
+            self.state,
+            PeerState::Handshaking {
+                phase: HandshakePhase::ReceivedMsg1,
+                ..
+            }
+        );
+        if !pending || self.conn.our_index().is_none() {
+            return Vec::new();
+        }
+        let mut actions = Vec::new();
+        if peer_held && let Some(identity) = self.identity {
+            actions.push(PeerAction::InvalidateSendState);
+            actions.push(PeerAction::ReportLost {
+                peer: *identity.node_addr(),
+                kind: LostKind::LinkDead,
+            });
+        }
+        actions.push(PeerAction::PromoteToActive { link: self.link });
+        actions
     }
 
     // ------------------------------------------------------------------
@@ -1799,6 +1846,7 @@ mod tests {
             has_existing_peer: false,
             existing_peer_epoch: None,
             replace: false,
+            redial: false,
             at_max_peers: false,
             silent_backoff: None,
         }

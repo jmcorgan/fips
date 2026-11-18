@@ -363,3 +363,41 @@ fn the_max_peers_gate_still_comes_first() {
         }
     ));
 }
+
+/// An existing peer at [`EPOCH`] whose link machine asked for a redial.
+fn redial_snapshot() -> EstablishSnapshot {
+    let mut snap = held_snapshot();
+    snap.redial = true;
+    snap
+}
+
+#[test]
+fn an_off_link_redial_request_classifies_as_a_redial() {
+    let decision = classify(&redial_snapshot(), EPOCH);
+    assert!(
+        matches!(decision, InboundDecision::Redial { .. }),
+        "got {decision:?}"
+    );
+}
+
+#[test]
+fn a_redial_under_the_silent_back_off_is_refused() {
+    let mut snap = redial_snapshot();
+    snap.silent_backoff = backoff();
+    let decision = classify(&snap, EPOCH);
+    assert!(is_silent_reject(&decision), "got {decision:?}");
+}
+
+#[test]
+fn an_on_link_replacement_request_is_unchanged_and_a_new_epoch_is_still_a_restart() {
+    let decision = classify(&young_snapshot(), EPOCH);
+    assert!(
+        matches!(decision, InboundDecision::ReplaceThenPromote { .. }),
+        "got {decision:?}"
+    );
+    let decision = classify(&redial_snapshot(), OTHER_EPOCH);
+    assert!(
+        matches!(decision, InboundDecision::RestartThenPromote { .. }),
+        "got {decision:?}"
+    );
+}

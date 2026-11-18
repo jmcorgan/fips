@@ -200,6 +200,7 @@ impl Responder {
         let arrival = Arrival {
             on_link: true,
             reachable: true,
+            heard: true,
         };
         let mut env = Env {
             indices: &mut self.alloc,

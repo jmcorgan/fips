@@ -67,6 +67,12 @@ pub enum Class {
     Simultaneous,
     /// Rule 4.5: eligible, the peer's rekey.
     Rekey,
+    /// A fresh msg1 off the established link: off it while it is reachable
+    /// when eligible (where rule 4.1 discards it), or off it while it is
+    /// too young to rekey (where rule 3.3 replaces). It is answered into a
+    /// redial that replaces the peering only at the peer's first frame
+    /// under it ([`LocalRule::DeferredRedial`]).
+    Redial,
 }
 
 /// A restart gate that refused a restart or replacement, FRC-1201 Section
@@ -82,6 +88,9 @@ pub enum Gate {
     /// The ceiling not yet reached: a restart or replacement of the
     /// identity was accepted within [`Params::interval`].
     Dampened,
+    /// Another redial of the identity is pending and younger than
+    /// [`Params::unheard`] ([`LocalRule::DeferredRedial`]).
+    Slot,
 }
 
 /// What the node sends in answer to an input.
@@ -158,6 +167,18 @@ pub enum LocalRule {
     RecordScope,
     /// `REKEY_MIN_SESSION_AGE` is 10 s by default ([`Params::sessionage`]).
     SessionAge,
+    /// A fresh same-epoch msg1 off the established link of a held peering
+    /// heard from is answered into a redial beside the peering, which is left as it is (the operator's decision,
+    /// 2026-11-17). The first frame under the redial's session replaces the
+    /// peering, keeping the link's connection, and stamps the dampener. One
+    /// redial is pending at a time: a later one replaces it once it is as
+    /// old as [`Params::unheard`] and is refused before. A redial is held by
+    /// the dampener, not by the heard floor; its msg1 joins the record
+    /// ([`LocalRule::RecordScope`]) when it is answered, not when it is
+    /// refused. A redial no frame proves is dropped at its timeout. A
+    /// peering not heard from keeps rules 3.3 and 4.1. FRC-1201 Section
+    /// 5.7 discards (rule 4.1) or replaces (rule 3.3) such a msg1.
+    DeferredRedial,
 }
 
 /// What one event did.
@@ -282,6 +303,18 @@ pub struct Leg {
     pub binding: Binding,
 }
 
+/// A redial answered beside the held peering
+/// ([`LocalRule::DeferredRedial`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Redial {
+    /// The msg1 it answered, as a responder leg.
+    pub leg: Leg,
+    /// When it was answered.
+    pub at: Ms,
+    /// Its msg2 was sent: from then on only its own msg1 draws it again.
+    pub sent: bool,
+}
+
 /// One node's view of one peer identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Judge {
@@ -299,6 +332,9 @@ pub struct Judge {
     pub attempts: Vec<Attempt>,
     /// Responder legs with a stored msg2.
     pub legs: Vec<Leg>,
+    /// The pending redial, if any, and when it was answered
+    /// ([`LocalRule::DeferredRedial`]).
+    pub redial: Option<Redial>,
     /// This node's own rekey in flight.
     pub rekey: Option<Hs>,
     /// The dampener: when a restart or replacement of the identity was
@@ -319,6 +355,7 @@ impl Judge {
             peering: None,
             attempts: Vec::new(),
             legs: Vec::new(),
+            redial: None,
             rekey: None,
             stamp: None,
             closed: Vec::new(),
@@ -349,6 +386,7 @@ impl Judge {
         }
         out.extend(self.attempts.iter().map(|a| (a.link, a.to)));
         out.extend(self.legs.iter().map(|l| (l.link, l.from)));
+        out.extend(self.redial.iter().map(|r| (r.leg.link, r.leg.from)));
         out
     }
 
@@ -436,6 +474,15 @@ impl Judge {
         if self.legs.iter().any(|l| l.from == leg.from) {
             return reply(None, Reply::Stored);
         }
+        // So does any msg1 from the source of the pending redial while its
+        // msg2 is unsent, and after only the msg1 that armed it; any other
+        // msg1 from there is classified.
+        if self
+            .redial
+            .is_some_and(|r| r.leg.from == leg.from && (!r.sent || r.leg.bytes == leg.bytes))
+        {
+            return reply(None, Reply::Stored);
+        }
         let Some(p) = self.peering.as_ref() else {
             return self.install(Class::NotHeld, leg, sent); // rule 1 (frc-1201:1107)
         };
@@ -449,9 +496,15 @@ impl Judge {
             if p.record.contains(&leg.hs) {
                 return reply(Some(Class::Copy), Reply::Silent); // rule 3.2 (:1123)
             }
+            if p.heard && !self.onlink(p, leg.from) {
+                return self.redialed(leg, sent); // DeferredRedial, for rule 3.3
+            }
             return self.replace(Class::Replacement, leg, sent); // rule 3.3 (:1125)
         }
         if !self.onlink(p, leg.from) && self.reachable(p) {
+            if p.heard && !p.record.contains(&leg.hs) {
+                return self.redialed(leg, sent); // DeferredRedial, for rule 4.1
+            }
             return reply(Some(Class::OffLink), Reply::Silent); // rule 4.1 (:1134)
         }
         if let Some(pd) = p.pending {
@@ -475,6 +528,78 @@ impl Judge {
         }
         let mut step = self.arm(leg);
         step.class = Some(Class::Rekey); // rule 4.5 (:1151)
+        step
+    }
+
+    /// A fresh msg1 off the established link of a peering heard from, under
+    /// [`LocalRule::DeferredRedial`]: refused while another redial younger
+    /// than the unheard floor is pending, or by the dampener; otherwise
+    /// answered into a redial that replaces any older one, with its msg1
+    /// joining the record.
+    fn redialed(&mut self, leg: Leg, sent: bool) -> Step {
+        let p = self.peering.as_mut().expect("a redial meets a held peer");
+        let slot = self
+            .redial
+            .is_some_and(|r| self.now - r.at < self.params.unheard);
+        let refused = if slot {
+            Some(Gate::Slot)
+        } else if self
+            .stamp
+            .is_some_and(|s| self.now - s < self.params.interval)
+        {
+            Some(Gate::Dampened)
+        } else {
+            None
+        };
+        if let Some(gate) = refused {
+            return Step {
+                class: Some(Class::Redial),
+                refused: Some(gate),
+                reply: Some(Reply::Silent),
+                rule: Some(LocalRule::DeferredRedial),
+                ..Step::default()
+            };
+        }
+        p.record.push(leg.hs);
+        let mut step = Step {
+            class: Some(Class::Redial),
+            reply: Some(if sent { Reply::Msg2 } else { Reply::Deferred }),
+            rule: Some(LocalRule::DeferredRedial),
+            ..Step::default()
+        };
+        if let Some(old) = self.redial.take() {
+            step.closes = self.close(old.leg.link, old.leg.from, old.leg.binding);
+        }
+        self.redial = Some(Redial {
+            leg,
+            at: self.now,
+            sent,
+        });
+        step
+    }
+
+    /// The pending redial's session is proven by the peer's frame from
+    /// `from`: it replaces the peering, or installs the peer if none is
+    /// held by now ([`LocalRule::DeferredRedial`]).
+    fn swapped(&mut self, from: Addr) -> Step {
+        let Some(Redial { leg, .. }) = self.redial.take() else {
+            return Step::default();
+        };
+        let held = self.peering.as_ref().map(|p| p.heard);
+        if held == Some(true) {
+            self.stamp = Some(self.now);
+        }
+        let mut p = self.answered(leg);
+        p.heard = true;
+        p.last = Some(self.now);
+        p.current = from;
+        self.peering = Some(p);
+        let mut step = change(if held.is_some() {
+            Transition::Replace
+        } else {
+            Transition::Promote
+        });
+        step.rule = Some(LocalRule::DeferredRedial);
         step
     }
 
@@ -569,6 +694,26 @@ impl Judge {
 
     /// A stored msg2's send succeeded.
     fn sent(&mut self, hs: Hs) -> Step {
+        if let Some(r) = self.redial.as_mut().filter(|r| r.leg.hs == hs) {
+            // A redial's answer installs nothing while the peer is held;
+            // once it is gone, it installs as any answer does.
+            r.sent = true;
+            let leg = r.leg;
+            if self.peering.is_some() {
+                return Step {
+                    reply: Some(Reply::Stored),
+                    rule: Some(LocalRule::DeferredRedial),
+                    ..Step::default()
+                };
+            }
+            self.redial = None;
+            self.peering = Some(self.answered(leg));
+            return Step {
+                reply: Some(Reply::Stored),
+                change: Some(Transition::Promote),
+                ..Step::default()
+            };
+        }
         let Some(i) = self.legs.iter().position(|l| l.hs == hs) else {
             return Step::default();
         };
@@ -683,11 +828,23 @@ impl Judge {
                 ..Step::default()
             };
         }
+        if let Some(r) = self.redial.filter(|r| r.leg.hs == hs) {
+            self.redial = None;
+            let l = r.leg;
+            return Step {
+                closes: self.close(l.link, l.from, l.binding),
+                rule: Some(LocalRule::DeferredRedial),
+                ..Step::default()
+            };
+        }
         Step::default()
     }
 
     /// An authenticated frame from the peer.
     fn frame(&mut self, hs: Hs, from: Addr) -> Step {
+        if self.redial.is_some_and(|r| r.leg.hs == hs) {
+            return self.swapped(from);
+        }
         let now = self.now;
         let Some(p) = self.peering.as_mut() else {
             return Step::default();

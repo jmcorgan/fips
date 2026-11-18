@@ -192,11 +192,14 @@ async fn repeated_msg1s_from_a_peer_heard_within_the_interval_log_three_lines_th
     stop_transport(&mut e.node, TransportId::new(1)).await;
 }
 
-/// `e` with a pending armed and five more rekey msg1s refused against it.
-async fn five_refused_while_pending(e: &mut Established) -> LogCapture {
+/// `e` with a pending armed and five more rekey msg1s refused against it,
+/// the first of which is returned.
+async fn five_refused_while_pending(e: &mut Established) -> Vec<u8> {
     arm_pending(e, 0x0D01).await;
     let msg1s = fresh_msg1s(e, 0x0D10, 5);
-    deliver_logged(&mut e.node, TransportId::new(1), &e.addr, msg1s).await
+    let first = msg1s[0].clone();
+    deliver_logged(&mut e.node, TransportId::new(1), &e.addr, msg1s).await;
+    first
 }
 
 #[tokio::test]
@@ -233,15 +236,18 @@ async fn a_rekey_cutover_restarts_the_count_and_reports_the_previous_sessions_su
     stop_transport(&mut e.node, TransportId::new(1)).await;
 }
 
+/// Five msg1s refused while a pending is held suppress that kind of line;
+/// a copy of one of them then arriving off the link, refused as off the
+/// link, still logs its first line. A fresh msg1 off the link would be a
+/// redial instead.
 #[tokio::test]
 async fn suppressing_one_kind_of_line_does_not_hide_the_first_line_of_another() {
     let mut e = established(31).await;
-    five_refused_while_pending(&mut e).await;
+    let copy = five_refused_while_pending(&mut e).await;
 
     let tid2 = TransportId::new(2);
     let (_sock2, addr2) = register_udp_with_peer_socket(&mut e.node, tid2).await;
-    let msg1s = fresh_msg1s(&e, 0x0E00, 1);
-    let logs = deliver_logged(&mut e.node, tid2, &addr2, msg1s).await;
+    let logs = deliver_logged(&mut e.node, tid2, &addr2, vec![copy]).await;
     expect_line(&logs, OFF_LINK);
     stop_transport(&mut e.node, TransportId::new(1)).await;
     stop_transport(&mut e.node, tid2).await;

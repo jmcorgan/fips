@@ -36,9 +36,13 @@
 //! address every few seconds while their session is healthy, A's transport
 //! dialling what it discovers.
 //!
-//! Each test asserts what the tree does today, with the multipath setting
-//! stated per end; these are characterisations, not targets.
+//! Each test asserts what the tree does, with the multipath setting stated
+//! per end. A pair can run each node's decrypt workers
+//! (`Pair::workers_on`): a frame under a session offered to them is then
+//! opened on a worker and its result handed back to the node, each round of
+//! the hand-over waiting for the workers to finish what they were sent.
 
+use super::dialer::Dialer;
 use super::paths::{beacon, capable_at, loopback};
 use super::settle::with_path;
 use super::spanning_tree::{
@@ -55,7 +59,7 @@ use crate::transport::{TransportHandle, TransportId};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// How far the clocks move between two ticks of both nodes.
-const STEP_MS: u64 = 500;
+pub(super) const STEP_MS: u64 = 500;
 
 /// The multipath setting (`node.path.enabled`) at each end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +127,7 @@ pub(super) struct Outcome {
     pub(super) first_msg1: Option<f64>,
     /// msg2s B sent that reached A, and how many of them were the msg2 B
     /// answered A's setup msg1 with.
+    #[allow(dead_code)] // printed, never asserted
     pub(super) msg2s: usize,
     pub(super) stale_msg2s: usize,
     /// B's handshake refusal counters, counted from the change.
@@ -142,54 +147,84 @@ pub(super) struct Outcome {
 }
 
 /// A and B, the record of what passed between them, and the clocks.
-struct Pair {
-    nodes: Vec<TestNode>,
+pub(super) struct Pair {
+    pub(super) nodes: Vec<TestNode>,
     /// Time since the pair was built, in ms.
-    t: u64,
+    pub(super) t: u64,
     /// When A's address changed.
-    change: Option<u64>,
+    pub(super) change: Option<u64>,
     /// What reaches A's old address once it is black-holed.
-    sink: UnboundedReceiver<ReceivedPacket>,
-    sink_tx: UnboundedSender<ReceivedPacket>,
+    pub(super) sink: UnboundedReceiver<ReceivedPacket>,
+    pub(super) sink_tx: UnboundedSender<ReceivedPacket>,
     /// B's own entry in the loopback registry while an outage holds it.
-    b_entry: Option<(TransportId, UnboundedSender<ReceivedPacket>)>,
+    pub(super) b_entry: Option<(TransportId, UnboundedSender<ReceivedPacket>)>,
     /// B's link and index for A, and the msg2 it stored, before the change.
-    before: Option<(LinkId, Option<SessionIndex>, Option<Vec<u8>>)>,
-    refused: Option<HandshakeStatsSnapshot>,
-    msg1s: Vec<u64>,
+    pub(super) before: Option<(LinkId, Option<SessionIndex>, Option<Vec<u8>>)>,
+    pub(super) refused: Option<HandshakeStatsSnapshot>,
+    pub(super) msg1s: Vec<u64>,
     /// msg1s that reached B from any address.
-    msg1s_any: usize,
+    pub(super) msg1s_any: usize,
     /// Addresses of B's that deliver to the test, which hands what reaches
     /// them to B, and how many msg1s reached them.
-    taps: Vec<UnboundedReceiver<ReceivedPacket>>,
-    to_taps: usize,
-    first_tap: Option<u64>,
-    msg2s: usize,
-    stale: usize,
-    to_old: usize,
-    a_dropped: Option<u64>,
-    b_dropped: Option<u64>,
-    settled: Option<(u64, How)>,
+    pub(super) taps: Vec<UnboundedReceiver<ReceivedPacket>>,
+    pub(super) to_taps: usize,
+    pub(super) first_tap: Option<u64>,
+    pub(super) msg2s: usize,
+    pub(super) stale: usize,
+    pub(super) to_old: usize,
+    pub(super) a_dropped: Option<u64>,
+    pub(super) b_dropped: Option<u64>,
+    pub(super) settled: Option<(u64, How)>,
+    /// Every msg1 that reached B, byte for byte, in order, from the pair's
+    /// first dial on.
+    pub(super) seen: Vec<Vec<u8>>,
+    /// Each node's decrypt worker events, once its workers run.
+    #[cfg(unix)]
+    pub(super) events:
+        [Option<UnboundedReceiver<crate::node::decrypt_worker::DecryptWorkerEvent>>; 2],
 }
 
 /// One pass of `node`'s timers as its receive loop runs them: the loop's
 /// whole tick (`Node::tick`, every timer in its production order), then the
 /// path machines' tick, which the loop runs on its own timer arm, when any
 /// is armed.
-async fn tick(node: &mut Node) {
+pub(super) async fn tick(node: &mut Node) {
     node.tick(false).await;
     if node.paths.armed() {
         node.path_tick().await;
     }
 }
 
+/// The handshake counters `now` holds past `was`.
+pub(super) fn since(
+    now: &HandshakeStatsSnapshot,
+    was: &HandshakeStatsSnapshot,
+) -> HandshakeStatsSnapshot {
+    HandshakeStatsSnapshot {
+        bad_state: now.bad_state - was.bad_state,
+        unknown_connection: now.unknown_connection - was.unknown_connection,
+        silent_backoff: now.silent_backoff - was.silent_backoff,
+        max_peers: now.max_peers - was.max_peers,
+        rekey_pending: now.rekey_pending - was.rekey_pending,
+        rekey_tiebreak: now.rekey_tiebreak - was.rekey_tiebreak,
+        answered_before: now.answered_before - was.answered_before,
+        off_link: now.off_link - was.off_link,
+        redial_held: now.redial_held - was.redial_held,
+        redial_seen: now.redial_seen - was.redial_seen,
+        redial_dampened: now.redial_dampened - was.redial_dampened,
+        redials: now.redials - was.redials,
+        redials_proven: now.redials_proven - was.redials_proven,
+        redial_session_reopens: now.redial_session_reopens - was.redial_session_reopens,
+    }
+}
+
 /// The phase of `packet`'s common prefix.
-fn phase(packet: &ReceivedPacket) -> Option<u8> {
+pub(super) fn phase(packet: &ReceivedPacket) -> Option<u8> {
     CommonPrefix::parse(&packet.data).map(|p| p.phase)
 }
 
 /// Seconds from `from` to `at`, both in ms.
-fn secs(at: u64, from: u64) -> f64 {
+pub(super) fn secs(at: u64, from: u64) -> f64 {
     at.saturating_sub(from) as f64 / 1000.0
 }
 
@@ -197,9 +232,21 @@ impl Pair {
     /// A dialling B with the multipath setting `mp`, A's node address the
     /// smaller when `a_smaller`. B is configured at A as an auto-connect
     /// peer at its address, so A redials it after losing it.
-    async fn new(mp: Multipath, a_smaller: bool) -> Pair {
+    pub(super) async fn new(mp: Multipath, a_smaller: bool) -> Pair {
+        Pair::with_b(mp, a_smaller, |_| {}).await
+    }
+
+    /// As [`Pair::new`], with B's configuration changed by `b_config`
+    /// first.
+    pub(super) async fn with_b(
+        mp: Multipath,
+        a_smaller: bool,
+        b_config: impl FnOnce(&mut Config),
+    ) -> Pair {
         crate::time::freeze();
-        let b = make_test_node_with_config(with_path(Config::new(), mp.b()), 1280).await;
+        let mut config = with_path(Config::new(), mp.b());
+        b_config(&mut config);
+        let b = make_test_node_with_config(config, 1280).await;
         let a = loop {
             let mut config = with_path(Config::new(), mp.a());
             config.peers.push(PeerConfig::new(
@@ -239,6 +286,9 @@ impl Pair {
             a_dropped: None,
             b_dropped: None,
             settled: None,
+            seen: Vec::new(),
+            #[cfg(unix)]
+            events: [None, None],
         };
         let id = PeerIdentity::from_pubkey_full(pair.nodes[1].node.identity().pubkey_full());
         let (tid, b_addr) = (pair.nodes[0].transport_id, pair.nodes[1].addr.clone());
@@ -255,25 +305,25 @@ impl Pair {
         pair
     }
 
-    fn a_addr(&self) -> NodeAddr {
+    pub(super) fn a_addr(&self) -> NodeAddr {
         *self.nodes[0].node.node_addr()
     }
 
-    fn b_addr(&self) -> NodeAddr {
+    pub(super) fn b_addr(&self) -> NodeAddr {
         *self.nodes[1].node.node_addr()
     }
 
-    fn a_holds_b(&self) -> bool {
+    pub(super) fn a_holds_b(&self) -> bool {
         self.nodes[0].node.get_peer(&self.b_addr()).is_some()
     }
 
-    fn b_holds_a(&self) -> bool {
+    pub(super) fn b_holds_a(&self) -> bool {
         self.nodes[1].node.get_peer(&self.a_addr()).is_some()
     }
 
     /// Hand each node what it was sent, recording what passes, until a
     /// round moves nothing.
-    async fn pump(&mut self) {
+    pub(super) async fn pump(&mut self) {
         for _ in 0..1000 {
             let mut moved = 0;
             for at in 0..2 {
@@ -282,6 +332,10 @@ impl Pair {
                     self.nodes[at].node.process_packet(packet).await;
                     moved += 1;
                 }
+            }
+            #[cfg(unix)]
+            {
+                moved += self.worked().await;
             }
             while self.sink.try_recv().is_ok() {
                 self.to_old += 1;
@@ -308,8 +362,51 @@ impl Pair {
         panic!("precondition: the pair went quiet within 1000 rounds");
     }
 
+    /// Run each node's decrypt workers from now on, offering them the
+    /// session each holds now; later sessions are offered at promotion.
+    #[cfg(unix)]
+    pub(super) fn workers_on(&mut self) {
+        use crate::node::decrypt_worker::DecryptWorkerPool;
+        for at in 0..2 {
+            let other = *self.nodes[1 - at].node.node_addr();
+            let node = &mut self.nodes[at].node;
+            node.supervisor.decrypt_workers = Some(DecryptWorkerPool::spawn(1));
+            if let Some(offer) = node.get_peer(&other).map(|p| p.offer_to_workers()) {
+                node.run_link_outputs(&other, offer);
+            }
+            self.events[at] = node.decrypt_fallback_rx.take();
+        }
+    }
+
+    /// Wait for each node's workers to finish what they were sent, and hand
+    /// what they report back to the node; the number handed back.
+    #[cfg(unix)]
+    async fn worked(&mut self) -> usize {
+        let mut n = 0;
+        for at in 0..2 {
+            let Some(mut rx) = self.events[at].take() else {
+                continue;
+            };
+            if let Some(pool) = self.nodes[at].node.supervisor.decrypt_workers.as_ref() {
+                pool.barrier();
+            }
+            while let Ok(event) = rx.try_recv() {
+                self.nodes[at]
+                    .node
+                    .process_decrypt_worker_event(event)
+                    .await;
+                n += 1;
+            }
+            self.events[at] = Some(rx);
+        }
+        n
+    }
+
     /// Record a msg1 reaching B from A's new address, and a msg2 reaching A.
-    fn observe(&mut self, at: usize, packet: &ReceivedPacket) {
+    pub(super) fn observe(&mut self, at: usize, packet: &ReceivedPacket) {
+        if at == 1 && phase(packet) == Some(PHASE_MSG1) {
+            self.seen.push(packet.data.clone());
+        }
         if self.change.is_none() {
             return;
         }
@@ -333,7 +430,7 @@ impl Pair {
 
     /// Move both clocks on by `STEP_MS`, run both nodes' timers, and hand
     /// over what they sent.
-    async fn step(&mut self) {
+    pub(super) async fn step(&mut self) {
         crate::time::advance(Duration::from_millis(STEP_MS));
         crate::time::step_wall(STEP_MS as i64);
         self.t += STEP_MS;
@@ -345,14 +442,14 @@ impl Pair {
     }
 
     /// Run for `secs` seconds.
-    async fn run(&mut self, secs: u64) {
+    pub(super) async fn run(&mut self, secs: u64) {
         for _ in 0..secs * 1000 / STEP_MS {
             self.step().await;
         }
     }
 
     /// Record losses and the first settlement after the change.
-    fn note(&mut self) {
+    pub(super) fn note(&mut self) {
         if self.change.is_none() {
             return;
         }
@@ -371,7 +468,7 @@ impl Pair {
 
     /// How B's peering reached A's new address, when both ends hold one
     /// session and B's frames to A go to that address.
-    fn one_session_at_the_new_address(&self) -> Option<How> {
+    pub(super) fn one_session_at_the_new_address(&self) -> Option<How> {
         let ap = self.nodes[0].node.get_peer(&self.b_addr())?;
         let bp = self.nodes[1].node.get_peer(&self.a_addr())?;
         let crossed = ap.our_index().is_some()
@@ -392,7 +489,25 @@ impl Pair {
 
     /// A's address changes: A sends from a new loopback address on the same
     /// transport, and its old address goes as `old` says.
-    fn move_a(&mut self, old: OldAddr) {
+    pub(super) fn move_a(&mut self, old: OldAddr) {
+        let a = &self.nodes[0];
+        let new = add_loopback_alias(&a.addr, a.transport_id);
+        self.move_a_to(old, new);
+    }
+
+    /// Have what is sent to `at` from now on reach A, as A's own address
+    /// does.
+    pub(super) fn deliver_to_a(&self, at: &TransportAddr) {
+        let mut registry = LOOPBACK_REGISTRY.lock().unwrap();
+        let entry = registry
+            .get(&self.nodes[0].addr)
+            .cloned()
+            .expect("precondition: A's address is registered");
+        registry.insert(at.clone(), entry);
+    }
+
+    /// [`Pair::move_a`] to `new`, an address already delivering to A.
+    pub(super) fn move_a_to(&mut self, old: OldAddr, new: TransportAddr) {
         let bp = self.nodes[1]
             .node
             .get_peer(&self.a_addr())
@@ -405,7 +520,6 @@ impl Pair {
         self.refused = Some(self.nodes[1].node.stats().handshake.snapshot());
         let a = &mut self.nodes[0];
         let tid = a.transport_id;
-        let new = add_loopback_alias(&a.addr, tid);
         let mut registry = LOOPBACK_REGISTRY.lock().unwrap();
         match old {
             OldAddr::Blackhole => {
@@ -423,7 +537,7 @@ impl Pair {
     }
 
     /// Lose everything sent to B's address, or stop losing it.
-    fn cut_b(&mut self, cut: bool) {
+    pub(super) fn cut_b(&mut self, cut: bool) {
         let b = &self.nodes[1];
         let mut registry = LOOPBACK_REGISTRY.lock().unwrap();
         if cut {
@@ -437,7 +551,7 @@ impl Pair {
     }
 
     /// Whether a heartbeat from `from` authenticates at `to`.
-    async fn heartbeat(&mut self, from: usize, to: usize) -> bool {
+    pub(super) async fn heartbeat(&mut self, from: usize, to: usize) -> bool {
         let to_addr = *self.nodes[to].node.node_addr();
         let from_addr = *self.nodes[from].node.node_addr();
         let recv = |p: &Pair| {
@@ -460,20 +574,11 @@ impl Pair {
     }
 
     /// What the run saw.
-    async fn outcome(&mut self) -> Outcome {
+    pub(super) async fn outcome(&mut self) -> Outcome {
         let change = self.change.expect("precondition: the address changed");
         let now = self.nodes[1].node.stats().handshake.snapshot();
         let was = self.refused.clone().unwrap_or_default();
-        let b_refused = HandshakeStatsSnapshot {
-            bad_state: now.bad_state - was.bad_state,
-            unknown_connection: now.unknown_connection - was.unknown_connection,
-            silent_backoff: now.silent_backoff - was.silent_backoff,
-            max_peers: now.max_peers - was.max_peers,
-            rekey_pending: now.rekey_pending - was.rekey_pending,
-            rekey_tiebreak: now.rekey_tiebreak - was.rekey_tiebreak,
-            answered_before: now.answered_before - was.answered_before,
-            off_link: now.off_link - was.off_link,
-        };
+        let b_refused = since(&now, &was);
         let works = self.heartbeat(0, 1).await && self.heartbeat(1, 0).await;
         Outcome {
             msg1s: self.msg1s.len(),
@@ -502,7 +607,25 @@ pub(super) async fn responder(
     old: OldAddr,
     window_secs: u64,
 ) -> Outcome {
+    responder_with(mp, (a_smaller, false), age_secs, trigger, old, window_secs).await
+}
+
+/// [`responder`], with each node's decrypt workers running when `workers`.
+pub(super) async fn responder_with(
+    mp: Multipath,
+    (a_smaller, workers): (bool, bool),
+    age_secs: u64,
+    trigger: Trigger,
+    old: OldAddr,
+    window_secs: u64,
+) -> Outcome {
     let mut pair = Pair::new(mp, a_smaller).await;
+    #[cfg(unix)]
+    if workers {
+        pair.workers_on();
+    }
+    #[cfg(not(unix))]
+    let _ = workers;
     pair.run(age_secs).await;
     assert!(
         pair.a_holds_b() && pair.b_holds_a(),
@@ -580,7 +703,7 @@ pub(super) struct Redials {
 
 impl Pair {
     /// Each end's (link, index) for the other.
-    fn sessions(&self) -> [Option<(LinkId, Option<SessionIndex>)>; 2] {
+    pub(super) fn sessions(&self) -> [Option<(LinkId, Option<SessionIndex>)>; 2] {
         let a = self.nodes[0]
             .node
             .get_peer(&self.b_addr())
@@ -653,16 +776,7 @@ pub(super) async fn initiator(
     }
     let now = pair.nodes[1].node.stats().handshake.snapshot();
     let was = pair.refused.clone().unwrap_or_default();
-    let b_refused = HandshakeStatsSnapshot {
-        bad_state: now.bad_state - was.bad_state,
-        unknown_connection: now.unknown_connection - was.unknown_connection,
-        silent_backoff: now.silent_backoff - was.silent_backoff,
-        max_peers: now.max_peers - was.max_peers,
-        rekey_pending: now.rekey_pending - was.rekey_pending,
-        rekey_tiebreak: now.rekey_tiebreak - was.rekey_tiebreak,
-        answered_before: now.answered_before - was.answered_before,
-        off_link: now.off_link - was.off_link,
-    };
+    let b_refused = since(&now, &was);
     let a_paths = pair.nodes[0]
         .node
         .get_peer(&pair.b_addr())
@@ -746,96 +860,111 @@ async fn a_peer_whose_address_changes_with_its_link_up_is_followed_on_its_first_
 
 /// A's interface goes and comes back at a new address on a link 60 s old,
 /// with B's last frame from A 9.5 s before (age 60) and 0.5 s before (age
-/// 51). A withdraws B at once and its reconnect dials B 5 s later. B
-/// answers none of that dial's msg1s: each is refused as off the
-/// established link (`off_link`), and no msg2 at all reaches A, so none is
-/// B's stored one. B's link-dead reaper removes A 30 s after A's last frame,
-/// after the dial's last resend (at 20 s), and A's next dial, at 45 s, is
-/// promoted on a new link.
-async fn refused_off_link_until_reaped(mp: Multipath) {
-    for age in [60, 51] {
-        for o in responder_runs(mp, age, Trigger::Detach, 90).await {
-            let b_dropped = o.b_dropped.expect("B drops A");
+/// 51). A withdraws B at once and its reconnect dials B 5 s later. B answers
+/// the dial's first msg1 into a pending redial beside the peering it holds,
+/// sending its msg2 to A's new address; A promotes B on it and its first
+/// frame proves the redial to B, which replaces the peering in the same
+/// step. Nothing is refused, no stored msg2 goes out, B never drops A, and
+/// the pair settles on a new link 5 s after the change, long before B's
+/// link-dead reaper would have removed the old peering at 30 s.
+async fn answered_and_settles_before_the_reap(mp: Multipath, ages: &[u64]) {
+    answered_and_settles(mp, ages, false).await;
+}
+
+/// [`answered_and_settles_before_the_reap`], with each node's decrypt
+/// workers running when `workers`.
+async fn answered_and_settles(mp: Multipath, ages: &[u64], workers: bool) {
+    for &age in ages {
+        let mut runs = Vec::new();
+        for (a_smaller, old) in RUNS {
+            let o = responder_with(mp, (a_smaller, workers), age, Trigger::Detach, old, 60).await;
+            eprintln!("{mp:?} workers {workers} a_smaller {a_smaller} age {age} s {old:?}: {o:?}");
+            runs.push(o);
+        }
+        for o in runs {
             let r = &o.b_refused;
             assert!(
                 o.first_msg1 == Some(5.0)
-                    && o.msg1s == 6
-                    && r.off_link == 5
-                    && r.bad_state + r.answered_before + r.rekey_pending + r.rekey_tiebreak == 0
-                    && o.msg2s == 1
-                    && o.stale_msg2s == 0
-                    && o.a_dropped == Some(0.0)
-                    && (29.5..=30.5).contains(&b_dropped)
-                    && o.settled == Some(45.5)
+                    && o.settled.is_some_and(|s| s < 10.0)
                     && o.how == Some(How::NewLink)
+                    && o.b_dropped.is_none()
+                    && o.stale_msg2s == 0
+                    && r.redials == 1
+                    && r.redials_proven == 1
+                    && r.off_link + r.bad_state + r.answered_before == 0
                     && o.works,
-                "{o:?}"
+                "defect: {o:?}"
             );
         }
     }
 }
 
 #[tokio::test]
-async fn a_redial_from_a_new_address_on_an_aged_link_is_refused_off_link_until_the_responder_reaps_and_the_next_dial_settles_at_45_s_multipath_off()
+async fn a_redial_from_a_new_address_on_an_aged_link_is_answered_and_settles_before_the_responder_would_reap_multipath_off()
  {
-    refused_off_link_until_reaped(Multipath::Off).await;
+    answered_and_settles_before_the_reap(Multipath::Off, &[60, 51]).await;
 }
 
 #[tokio::test]
-async fn a_redial_from_a_new_address_on_an_aged_link_is_refused_off_link_until_the_responder_reaps_and_the_next_dial_settles_at_45_s_multipath_on()
+async fn a_redial_from_a_new_address_on_an_aged_link_is_answered_and_settles_before_the_responder_would_reap_multipath_on()
  {
-    refused_off_link_until_reaped(Multipath::On).await;
+    answered_and_settles_before_the_reap(Multipath::On, &[60, 51]).await;
+}
+
+/// [`a_redial_from_a_new_address_on_an_aged_link_is_answered_and_settles_before_the_responder_would_reap_multipath_off`]
+/// with each node's decrypt workers running: the redial's first frame names
+/// an index no worker holds and is opened by the node, and the frame after
+/// the swap goes to a worker under the session the swap offered it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_redial_from_a_new_address_on_an_aged_link_is_answered_and_settles_before_the_responder_would_reap_with_decrypt_workers_multipath_off()
+ {
+    answered_and_settles(Multipath::Off, &[60], true).await;
+}
+
+/// The same with multipath on.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_redial_from_a_new_address_on_an_aged_link_is_answered_and_settles_before_the_responder_would_reap_with_decrypt_workers_multipath_on()
+ {
+    answered_and_settles(Multipath::On, &[60], true).await;
 }
 
 #[tokio::test]
-async fn a_redial_from_a_new_address_on_an_aged_link_is_refused_off_link_until_the_responder_reaps_and_the_next_dial_settles_at_45_s_multipath_on_at_the_redialler_only()
+async fn a_redial_from_a_new_address_on_an_aged_link_is_answered_and_settles_before_the_responder_would_reap_multipath_on_at_the_redialler_only()
  {
-    refused_off_link_until_reaped(Multipath::AOnly).await;
+    answered_and_settles_before_the_reap(Multipath::AOnly, &[60, 51]).await;
 }
 
 #[tokio::test]
-async fn a_redial_from_a_new_address_on_an_aged_link_is_refused_off_link_until_the_responder_reaps_and_the_next_dial_settles_at_45_s_multipath_on_at_the_responder_only()
+async fn a_redial_from_a_new_address_on_an_aged_link_is_answered_and_settles_before_the_responder_would_reap_multipath_on_at_the_responder_only()
  {
-    refused_off_link_until_reaped(Multipath::BOnly).await;
+    answered_and_settles_before_the_reap(Multipath::BOnly, &[60, 51]).await;
 }
 
-/// As `refused_off_link_until_reaped`, on a link 10 s old at the change:
-/// the dial's msg1 reaches B on a link 15 s old, too young to rekey, and B
-/// refuses to replace a peering it heard from within 15 s (`bad_state`),
-/// refuses the three resends of that msg1 as already seen
-/// (`answered_before`), and the fourth, on a link now 30 s old, as off the
-/// link. No msg2 answers any of them; the next dial settles at 45 s.
-async fn refused_as_replacement_until_reaped(mp: Multipath) {
-    for o in responder_runs(mp, 10, Trigger::Detach, 90).await {
-        let b_dropped = o.b_dropped.expect("B drops A");
-        let r = &o.b_refused;
-        assert!(
-            o.first_msg1 == Some(5.0)
-                && o.msg1s == 6
-                && r.bad_state == 1
-                && r.answered_before == 3
-                && r.off_link == 1
-                && o.msg2s == 1
-                && o.stale_msg2s == 0
-                && (29.5..=30.5).contains(&b_dropped)
-                && o.settled == Some(45.5)
-                && o.how == Some(How::NewLink)
-                && o.works,
-            "{o:?}"
-        );
-    }
+/// As on an aged link, on a link 10 s old at the change: the dial's msg1
+/// reaches B on a link 15 s old, too young to rekey, and is answered into a
+/// pending redial in the same way rather than refused as a replacement of a
+/// peering heard from within 15 s.
+#[tokio::test]
+async fn a_redial_from_a_new_address_on_a_young_link_is_answered_and_settles_before_the_responder_would_reap_multipath_off()
+ {
+    answered_and_settles_before_the_reap(Multipath::Off, &[10]).await;
 }
 
 #[tokio::test]
-async fn a_redial_from_a_new_address_on_a_young_link_is_refused_as_a_replacement_of_a_live_peering_until_the_responder_reaps_multipath_off()
+async fn a_redial_from_a_new_address_on_a_young_link_is_answered_and_settles_before_the_responder_would_reap_multipath_on()
  {
-    refused_as_replacement_until_reaped(Multipath::Off).await;
+    answered_and_settles_before_the_reap(Multipath::On, &[10]).await;
 }
 
+/// [`a_redial_from_a_new_address_on_a_young_link_is_answered_and_settles_before_the_responder_would_reap_multipath_off`]
+/// with each node's decrypt workers running.
+#[cfg(unix)]
 #[tokio::test]
-async fn a_redial_from_a_new_address_on_a_young_link_is_refused_as_a_replacement_of_a_live_peering_until_the_responder_reaps_multipath_on()
+async fn a_redial_from_a_new_address_on_a_young_link_is_answered_and_settles_before_the_responder_would_reap_with_decrypt_workers_multipath_off()
  {
-    refused_as_replacement_until_reaped(Multipath::On).await;
+    answered_and_settles(Multipath::Off, &[10], true).await;
 }
 
 /// A is cut off both ways for 40 s from the change: both ends' link-dead
@@ -872,9 +1001,7 @@ async fn after_an_outage_past_the_link_dead_timeout_both_ends_reap_and_the_redia
 }
 
 /// Issue 130's reported shape, on the detach trigger: a redial from a new
-/// address settles only after the responder's old peering is reaped. The
-/// assertion is the target; whether it is the desired behaviour is not
-/// decided here.
+/// address settles before the responder would reap the old peering.
 async fn settles_before_the_old_peering_is_reaped(mp: Multipath) {
     let o = responder(mp, true, 60, Trigger::Detach, OldAddr::Blackhole, 90).await;
     eprintln!("{o:?}");
@@ -885,13 +1012,11 @@ async fn settles_before_the_old_peering_is_reaped(mp: Multipath) {
 }
 
 #[tokio::test]
-#[ignore = "known defect: issue 130, a same-epoch redial from a new address is refused as off-link until the responder reaps the old peering"]
 async fn a_redial_from_a_new_address_settles_before_the_responder_reaps_the_old_peering() {
     settles_before_the_old_peering_is_reaped(Multipath::Off).await;
 }
 
 #[tokio::test]
-#[ignore = "known defect: issue 130, a same-epoch redial from a new address is refused as off-link until the responder reaps the old peering"]
 async fn a_redial_from_a_new_address_settles_before_the_responder_reaps_the_old_peering_with_multipath_on()
  {
     settles_before_the_old_peering_is_reaped(Multipath::On).await;
@@ -950,4 +1075,462 @@ async fn a_beacon_of_a_held_peer_at_a_new_address_draws_no_redial_and_leaves_the
 async fn a_beacon_of_a_held_peer_at_a_new_address_draws_no_redial_and_leaves_the_session_undisturbed_multipath_on_at_the_peer_only()
  {
     no_redial_and_undisturbed(Multipath::BOnly).await;
+}
+
+/// Run each node's decrypt workers from now on when `on`.
+pub(super) fn workers_if(pair: &mut Pair, on: bool) {
+    #[cfg(unix)]
+    if on {
+        pair.workers_on();
+    }
+    #[cfg(not(unix))]
+    let _ = (pair, on);
+}
+
+/// B's (link, index) for A.
+fn b_session(pair: &Pair) -> Option<(LinkId, Option<SessionIndex>)> {
+    pair.nodes[1]
+        .node
+        .get_peer(&pair.a_addr())
+        .map(|p| (p.link_id(), p.our_index()))
+}
+
+/// A redial of A armed at B by hand, from a tap address of B's transport,
+/// as A's identity: the dialer that keeps its handshake state, the tap's
+/// address, and the msg2 B answered with.
+pub(super) struct Tapped {
+    pub(super) dialer: Dialer,
+    pub(super) at: TransportAddr,
+    /// What reaches the tap, held so that B's sends there succeed.
+    _rx: UnboundedReceiver<ReceivedPacket>,
+    pub(super) msg2: Vec<u8>,
+}
+
+impl Tapped {
+    /// The dialer's next frame, as B receives it from the tap.
+    pub(super) fn frame(&mut self, tid: TransportId) -> ReceivedPacket {
+        ReceivedPacket::with_timestamp(tid, self.at.clone(), self.dialer.frame(), Node::now_ms())
+    }
+}
+
+/// Arm a redial of A at B from a tap address, the dial naming sender index
+/// `sidx`.
+pub(super) async fn arm_from_tap(pair: &mut Pair, sidx: u32) -> Tapped {
+    let tid = pair.nodes[1].transport_id;
+    let (at, mut rx) = loopback_tap(tid);
+    let (dialer, data) = Dialer::new(&pair.nodes[0].node, &pair.nodes[1].node, sidx);
+    pair.nodes[1]
+        .node
+        .process_packet(ReceivedPacket::with_timestamp(
+            tid,
+            at.clone(),
+            data,
+            Node::now_ms(),
+        ))
+        .await;
+    let msg2 = std::iter::from_fn(|| rx.try_recv().ok())
+        .find(|p| phase(p) == Some(PHASE_MSG2))
+        .expect("precondition: the redial's msg2 reached the tap")
+        .data;
+    Tapped {
+        dialer,
+        at,
+        _rx: rx,
+        msg2,
+    }
+}
+
+/// A's interface goes and comes back at `new`, so A withdraws B and
+/// redials it 5 s later from there.
+async fn detach_to(pair: &mut Pair, new: TransportAddr) {
+    let tid = pair.nodes[0].transport_id;
+    pair.nodes[0].node.path_presence(tid, false).await;
+    pair.move_a_to(OldAddr::Blackhole, new);
+    pair.nodes[0].node.path_presence(tid, true).await;
+    pair.note();
+    pair.pump().await;
+}
+
+/// A redial of A is armed at B from another address while A's link to B
+/// is 60 s old and working. For three seconds a heartbeat each way after
+/// every step authenticates on the old session, and B keeps A on the old
+/// link and index. The redial's first frame then replaces the peering, in
+/// one swap, onto the redial's link and index, and a second frame under it
+/// is delivered on the new peering with no second swap.
+async fn delivers_until_the_first_frame(workers: bool) {
+    let mut pair = Pair::new(Multipath::Off, true).await;
+    workers_if(&mut pair, workers);
+    pair.run(60).await;
+    let a = pair.a_addr();
+    let tid = pair.nodes[1].transport_id;
+    let before = b_session(&pair);
+    let was = pair.nodes[1].node.stats().handshake.snapshot();
+    let mut tap = arm_from_tap(&mut pair, 0xD1A1).await;
+    let pending = pair.nodes[1]
+        .node
+        .redials
+        .of(&a)
+        .expect("precondition: a redial is pending");
+    let mut kept = Vec::new();
+    for step in 0..6 {
+        pair.step().await;
+        let ab = pair.heartbeat(0, 1).await;
+        let ba = pair.heartbeat(1, 0).await;
+        kept.push((step, ab, ba, b_session(&pair) == before));
+    }
+    tap.dialer.answered(&tap.msg2);
+    let first = tap.frame(tid);
+    pair.nodes[1].node.process_packet(first).await;
+    pair.pump().await;
+    let after = b_session(&pair);
+    let recv = |p: &Pair| {
+        p.nodes[1]
+            .node
+            .get_peer(&a)
+            .map(|p| p.link_stats().packets_recv)
+    };
+    let r0 = recv(&pair);
+    let second = tap.frame(tid);
+    pair.nodes[1].node.process_packet(second).await;
+    pair.pump().await;
+    let r1 = recv(&pair);
+    let r = since(&pair.nodes[1].node.stats().handshake.snapshot(), &was);
+    cleanup_nodes(&mut pair.nodes).await;
+    assert!(
+        kept.iter().all(|&(_, ab, ba, same)| ab && ba && same),
+        "defect: the old peering stopped delivering before the redial's first frame: {kept:?}"
+    );
+    assert!(
+        after == Some((pending.link, Some(pending.index)))
+            && r.redials == 1
+            && r.redials_proven == 1
+            && r1 > r0,
+        "defect: the first frame did not replace the peering once: {before:?} -> {after:?} \
+         (pending {pending:?}) {r:?} frames {r0:?} -> {r1:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_responder_keeps_the_old_peering_delivering_until_the_redials_first_frame_then_replaces_it_once()
+ {
+    delivers_until_the_first_frame(false).await;
+}
+
+/// [`the_responder_keeps_the_old_peering_delivering_until_the_redials_first_frame_then_replaces_it_once`]
+/// with each node's decrypt workers running.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_responder_keeps_the_old_peering_delivering_until_the_redials_first_frame_then_replaces_it_once_with_decrypt_workers()
+ {
+    delivers_until_the_first_frame(true).await;
+}
+
+/// With multipath on, A redials B from a new address after its interface
+/// returns there. At B the swap frees the old peering's index, removes the
+/// old link and its index entry, and leaves no path at A's old address,
+/// and the audit finds no breach.
+async fn swap_frees_the_old_link(workers: bool) {
+    let mut pair = Pair::new(Multipath::On, true).await;
+    workers_if(&mut pair, workers);
+    pair.run(60).await;
+    let a = pair.a_addr();
+    let tid = pair.nodes[1].transport_id;
+    let old_addr = pair.nodes[0].addr.clone();
+    let (old_link, old_index) = match b_session(&pair) {
+        Some((link, Some(index))) => (link, index),
+        other => panic!("precondition: B holds A on an indexed link: {other:?}"),
+    };
+    assert!(
+        matches!(
+            pair.nodes[1]
+                .node
+                .get_peer(&a)
+                .map(|p| p.path_match(tid, &old_addr)),
+            Some(crate::peer::Match::Proven { .. })
+        ),
+        "precondition: B holds a proven path at A's address"
+    );
+    let was = pair.nodes[1].node.stats().handshake.snapshot();
+    let new = add_loopback_alias(&old_addr, pair.nodes[0].transport_id);
+    detach_to(&mut pair, new).await;
+    pair.run(10).await;
+    let r = since(&pair.nodes[1].node.stats().handshake.snapshot(), &was);
+    let b = &pair.nodes[1].node;
+    let p = b.get_peer(&a);
+    let state = (
+        p.map(|p| p.link_id() != old_link),
+        b.links.get(&old_link).is_none(),
+        !b.index_allocator.is_allocated(old_index),
+        !b.peers_by_index.contains_key(&old_index.as_u32()),
+        p.map(|p| p.path_match(tid, &old_addr)),
+    );
+    let works = pair.heartbeat(0, 1).await && pair.heartbeat(1, 0).await;
+    assert!(
+        r.redials_proven == 1
+            && works
+            && matches!(
+                state,
+                (Some(true), true, true, true, Some(crate::peer::Match::None))
+            ),
+        "defect: (new link, old link gone, old index free, old index unmapped, old pair) {state:?} {r:?} works {works}"
+    );
+    // The audit's own delivery hands no decrypt worker's result back to its
+    // node, so it runs on the pair without workers.
+    if !workers {
+        super::settle::audit::assert_coherent(&mut pair.nodes, "after the swap").await;
+    }
+    cleanup_nodes(&mut pair.nodes).await;
+}
+
+#[tokio::test]
+async fn the_swap_frees_the_old_index_and_retires_the_old_link_and_its_paths_multipath_on() {
+    swap_frees_the_old_link(false).await;
+}
+
+/// [`the_swap_frees_the_old_index_and_retires_the_old_link_and_its_paths_multipath_on`]
+/// with each node's decrypt workers running.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_swap_frees_the_old_index_and_retires_the_old_link_and_its_paths_multipath_on_with_decrypt_workers()
+ {
+    swap_frees_the_old_link(true).await;
+}
+
+/// B stops hearing A on a link 60 s old. 25 s later a redial of A is armed
+/// at B from another address, and 5 s after that B's link-dead reaper
+/// removes the old peering, leaving the redial pending. The redial's first
+/// frame then promotes it with no peering to tear down: B holds A on the
+/// redial's link and index, and the dampener, which only a swap of a
+/// peering stamps, is not stamped.
+async fn reaped_first(workers: bool) {
+    let mut pair = Pair::new(Multipath::Off, true).await;
+    workers_if(&mut pair, workers);
+    pair.run(60).await;
+    let a = pair.a_addr();
+    let tid = pair.nodes[1].transport_id;
+    pair.cut_b(true);
+    pair.run(25).await;
+    assert!(pair.b_holds_a(), "precondition: B still holds A at 25 s");
+    let mut tap = arm_from_tap(&mut pair, 0xD1A3).await;
+    let pending = pair.nodes[1]
+        .node
+        .redials
+        .of(&a)
+        .expect("precondition: a redial is pending");
+    for _ in 0..30 {
+        if !pair.b_holds_a() {
+            break;
+        }
+        pair.step().await;
+    }
+    assert!(
+        !pair.b_holds_a() && pair.nodes[1].node.redials.of(&a) == Some(pending),
+        "precondition: B reaped A and kept the redial pending"
+    );
+    let was = pair.nodes[1].node.stats().handshake.snapshot();
+    tap.dialer.answered(&tap.msg2);
+    let first = tap.frame(tid);
+    pair.nodes[1].node.process_packet(first).await;
+    pair.pump().await;
+    let r = since(&pair.nodes[1].node.stats().handshake.snapshot(), &was);
+    let held = b_session(&pair);
+    let stamped = pair.nodes[1].node.restart_dampener.contains_key(&a);
+    cleanup_nodes(&mut pair.nodes).await;
+    assert!(
+        held == Some((pending.link, Some(pending.index))) && r.redials_proven == 1 && !stamped,
+        "defect: held {held:?} (pending {pending:?}) {r:?} dampener stamped {stamped}"
+    );
+}
+
+#[tokio::test]
+async fn a_redial_whose_old_peering_was_reaped_first_is_promoted_at_its_first_frame_with_no_teardown()
+ {
+    reaped_first(false).await;
+}
+
+/// [`a_redial_whose_old_peering_was_reaped_first_is_promoted_at_its_first_frame_with_no_teardown`]
+/// with each node's decrypt workers running.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_redial_whose_old_peering_was_reaped_first_is_promoted_at_its_first_frame_with_no_teardown_with_decrypt_workers()
+ {
+    reaped_first(true).await;
+}
+
+/// With multipath on, B hears a beacon of A at an address A will move to,
+/// and holds it as a path of A's it has not proven. A's interface then goes
+/// and comes back at that address, and A redials B from it: the msg1 is off
+/// B's link, answered as a redial, and settles before B would have reaped
+/// the old peering.
+#[tokio::test]
+async fn a_redial_from_an_address_the_responder_learned_by_discovery_settles_before_the_reap_multipath_on()
+ {
+    let mut pair = Pair::new(Multipath::On, true).await;
+    pair.run(60).await;
+    let a = pair.a_addr();
+    let tid = pair.nodes[1].transport_id;
+    loopback(&pair.nodes[1], tid).set_autoconnect(true);
+    // Nothing reaches A at its next address yet, so B's probes there go
+    // unanswered and the path stays unproven.
+    let (new, _lost) = loopback_tap(pair.nodes[0].transport_id);
+    beacon(&pair.nodes[1], tid, &new, &pair.nodes[0]);
+    pair.step().await;
+    let held = pair.nodes[1]
+        .node
+        .get_peer(&a)
+        .map(|p| p.path_match(tid, &new));
+    assert!(
+        matches!(held, Some(crate::peer::Match::Unproven)),
+        "precondition: B holds A's next address as a path it has not proven: {held:?}"
+    );
+    pair.deliver_to_a(&new);
+    detach_to(&mut pair, new).await;
+    pair.run(20).await;
+    let o = pair.outcome().await;
+    cleanup_nodes(&mut pair.nodes).await;
+    let r = &o.b_refused;
+    assert!(
+        r.redials == 1
+            && r.redials_proven == 1
+            && o.settled.is_some_and(|s| s < 10.0)
+            && o.b_dropped.is_none()
+            && o.works,
+        "defect: {o:?}"
+    );
+}
+
+/// The lines B logged for A's paths: (`path_id`, `from`, `next`, `why`),
+/// in order.
+fn b_path_lines(logs: &crate::testutil::LogCapture, b: &Node, a: &NodeAddr) -> Vec<[String; 4]> {
+    use crate::testutil::log_field;
+    let name = b.peer_display_name(a);
+    logs.lines_with("Path state changed")
+        .into_iter()
+        .filter(|l| log_field(l, "peer") == Some(name.as_str()))
+        .map(|l| {
+            ["path_id", "from", "next", "why"]
+                .map(|f| log_field(&l, f).unwrap_or_default().to_string())
+        })
+        .collect()
+}
+
+/// With multipath on, B holds A's next address as a path it is still
+/// probing when A's redial from that address replaces the peering, so the
+/// new link's original path sits at the pair of an old path that never left
+/// Probing. B's log ends every path of the old link, that one among them,
+/// and then begins the new link's original path, as a renewal logs a link
+/// that starts again. A reader of the log, such as the chaos harness's path
+/// timelines, would otherwise count every probe the new link sends there as
+/// one endless Probing episode of the old path.
+#[tokio::test]
+async fn a_redials_swap_logs_the_end_of_every_old_path_and_the_start_of_the_new_original_multipath_on()
+ {
+    let (logs, _guard) = crate::testutil::capture_logs_scoped();
+    let mut pair = Pair::new(Multipath::On, true).await;
+    pair.run(60).await;
+    let a = pair.a_addr();
+    let tid = pair.nodes[1].transport_id;
+    loopback(&pair.nodes[1], tid).set_autoconnect(true);
+    // Nothing reaches A at its next address yet, so B's probes there go
+    // unanswered and the path stays Probing.
+    let (new, _lost) = loopback_tap(pair.nodes[0].transport_id);
+    beacon(&pair.nodes[1], tid, &new, &pair.nodes[0]);
+    pair.step().await;
+    let old = pair.nodes[1].node.path_states(&a);
+    let probing = old
+        .iter()
+        .find(|(to, _, state)| {
+            to.addr == new && *state == fips_core::proto::path::PathState::Probing
+        })
+        .map(|(_, id, _)| *id);
+    let Some(probing) = probing else {
+        panic!("precondition: B is probing A's next address as a path of the old link: {old:?}");
+    };
+    pair.deliver_to_a(&new);
+    detach_to(&mut pair, new.clone()).await;
+    pair.run(20).await;
+    let b = &pair.nodes[1].node;
+    let proven = b.stats().handshake.redials_proven;
+    let now = b.path_states(&a);
+    let lines = b_path_lines(&logs, b, &a);
+    cleanup_nodes(&mut pair.nodes).await;
+    let original = now
+        .iter()
+        .find(|(to, _, _)| to.addr == new)
+        .map(|(_, id, _)| *id);
+    assert!(
+        proven == 1 && original.is_some_and(|id| id != probing),
+        "precondition: the redial replaced the peering, with a new path at A's next address: \
+         proven {proven}, paths {now:?}"
+    );
+    let last = |id: u32| lines.iter().rev().find(|l| l[0] == id.to_string()).cloned();
+    let unended: Vec<_> = old
+        .iter()
+        .filter(|(_, id, _)| last(*id).is_none_or(|l| l[2] != "None"))
+        .map(|(_, id, _)| (*id, last(*id)))
+        .collect();
+    assert!(
+        unended.is_empty(),
+        "defect: the swap left old paths with no logged end, the one probing at A's next \
+         address ({probing}) among them: {unended:?}"
+    );
+    let begun = original.and_then(|id| lines.iter().find(|l| l[0] == id.to_string()).cloned());
+    assert!(
+        begun
+            .as_ref()
+            .is_some_and(|l| l[1] == "None" && l[3] == "Renewed"),
+        "defect: the new link's original path at A's next address has no logged start: {begun:?}"
+    );
+}
+
+/// A, the smaller node, is B's parent. A's interface goes and comes back
+/// at a new address and A redials B from it. Across the swap B keeps A as
+/// its parent at every step and never declares itself again (its own
+/// declaration's sequence is unchanged), and it still holds A's tree
+/// declaration and filter at the end.
+async fn swap_keeps_the_parent(workers: bool) {
+    let mut pair = Pair::new(Multipath::Off, true).await;
+    workers_if(&mut pair, workers);
+    pair.run(60).await;
+    let a = pair.a_addr();
+    let mine = |p: &Pair| {
+        let d = p.nodes[1].node.tree_state().my_declaration();
+        (*d.parent_id(), d.sequence())
+    };
+    let before = mine(&pair);
+    assert_eq!(before.0, a, "precondition: A is B's parent");
+    let was = pair.nodes[1].node.stats().handshake.snapshot();
+    let tid = pair.nodes[0].transport_id;
+    let new = add_loopback_alias(&pair.nodes[0].addr, tid);
+    detach_to(&mut pair, new).await;
+    let mut seen = vec![mine(&pair)];
+    for _ in 0..20 {
+        pair.step().await;
+        seen.push(mine(&pair));
+    }
+    let r = since(&pair.nodes[1].node.stats().handshake.snapshot(), &was);
+    let held = pair.nodes[1]
+        .node
+        .get_peer(&a)
+        .map(|p| (p.declaration().is_some(), p.inbound_filter().is_some()));
+    cleanup_nodes(&mut pair.nodes).await;
+    assert!(
+        r.redials_proven == 1 && seen.iter().all(|m| *m == before) && held == Some((true, true)),
+        "defect: B's (parent, sequence) {before:?} -> {seen:?}, A's declaration and filter {held:?}, {r:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_swap_keeps_the_redialers_tree_declaration_and_filter_and_the_responders_parent_when_the_redialer_was_its_parent()
+ {
+    swap_keeps_the_parent(false).await;
+}
+
+/// [`the_swap_keeps_the_redialers_tree_declaration_and_filter_and_the_responders_parent_when_the_redialer_was_its_parent`]
+/// with each node's decrypt workers running.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_swap_keeps_the_redialers_tree_declaration_and_filter_and_the_responders_parent_when_the_redialer_was_its_parent_with_decrypt_workers()
+ {
+    swap_keeps_the_parent(true).await;
 }

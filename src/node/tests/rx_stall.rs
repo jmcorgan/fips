@@ -1469,9 +1469,12 @@ async fn msg1_from(
     peer: &NodeAddr,
     hold: fn(&mut Node, &NodeAddr, TransportId, &TransportAddr),
 ) -> ProbingOutcome {
-    node.get_peer_mut(peer)
-        .unwrap()
-        .test_backdate_session_established(Duration::from_secs(31));
+    // An aged link that has carried the peer's frames: a peering a frame
+    // has proven, whose fresh msg1 off the link is a redial.
+    let p = node.get_peer_mut(peer).unwrap();
+    p.test_backdate_session_established(Duration::from_secs(31));
+    p.test_backdate_promoted(Duration::from_secs(31));
+    p.touch(Node::now_ms());
     let tcp_id = TransportId::new(TCP_ID);
     let (mut client, from) = client_on(node, tcp_id).await;
     hold(node, peer, tcp_id, &from);
@@ -1492,30 +1495,57 @@ async fn msg1_from(
 /// A rekey msg1 from a path the peer holds but that is still Probing at this
 /// end is treated as from no path, even with an `addr_to_link` entry mapping
 /// its pair to the peer's link: while the established link is reachable it
-/// is refused as off the link, and nothing is armed or sent.
+/// is off the link, and is answered into a redial on its own connection,
+/// arming no pending session on the held link.
 #[tokio::test]
-async fn a_rekey_msg1_from_a_probing_path_is_refused_while_the_link_is_reachable() {
+async fn a_rekey_msg1_from_a_probing_path_is_answered_as_a_redial_on_its_own_connection_while_the_link_is_reachable()
+ {
     let bh = Blackhole::open(false);
     let (mut node, sender, sender_addr, _far_end) = peer_on_tcp(&bh).await;
     let out = rekey_msg1_from_a_probing_path(&mut node, &sender, &sender_addr).await;
+    let redial = node.redials.of(&sender_addr).is_some();
+    let stats = node.stats().handshake.snapshot();
     stop_all(&mut node).await;
-    assert_eq!(out.off_link, 1, "the msg1 is refused as off the link");
-    assert!(!out.pending, "no pending session is armed");
-    assert!(!out.answered, "no msg2 goes out on the Probing path");
+    assert_eq!(
+        out.off_link, 0,
+        "defect: the msg1 is refused as off the link"
+    );
+    assert!(
+        !out.pending,
+        "defect: a pending session is armed on the held link"
+    );
+    assert!(
+        out.answered && redial,
+        "defect: the msg1 is not answered into a redial on its own connection: answered {} armed {redial} {stats:?}",
+        out.answered
+    );
 }
 
 /// A held path that was never acked stays unproven when it goes Dead, so a
 /// rekey msg1 from it is treated as from no path, as from a Probing one:
-/// refused as off the link while the established link is reachable.
+/// answered into a redial while the established link is reachable.
 #[tokio::test]
-async fn a_rekey_msg1_from_a_never_acked_dead_path_is_refused_while_the_link_is_reachable() {
+async fn a_rekey_msg1_from_a_never_acked_dead_path_is_answered_as_a_redial_while_the_link_is_reachable()
+ {
     let bh = Blackhole::open(false);
     let (mut node, sender, sender_addr, _far_end) = peer_on_tcp(&bh).await;
     let out = msg1_from(&mut node, &sender, &sender_addr, hold_dead).await;
+    let redial = node.redials.of(&sender_addr).is_some();
+    let stats = node.stats().handshake.snapshot();
     stop_all(&mut node).await;
-    assert_eq!(out.off_link, 1, "the msg1 is refused as off the link");
-    assert!(!out.pending, "no pending session is armed");
-    assert!(!out.answered, "no msg2 goes out on the Dead path");
+    assert_eq!(
+        out.off_link, 0,
+        "defect: the msg1 is refused as off the link"
+    );
+    assert!(
+        !out.pending,
+        "defect: a pending session is armed on the held link"
+    );
+    assert!(
+        out.answered && redial,
+        "defect: the msg1 is not answered into a redial on its own connection: answered {} armed {redial} {stats:?}",
+        out.answered
+    );
 }
 
 /// The same msg1 once the established link is down is the recovery case the

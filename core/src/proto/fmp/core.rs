@@ -229,6 +229,12 @@ pub struct EstablishSnapshot {
     /// gates (FRC-1201 rule 3.3); or the existing peer has no machine to
     /// ask. False on the first classification of a msg1.
     pub replace: bool,
+    /// The existing peer's link rekey machine asked for a redial: a fresh
+    /// same-epoch msg1 that arrived off the established link. The shell
+    /// answers it into a pending redial and keeps the held peering until a
+    /// frame authenticates under the redial's session. False on the first
+    /// classification of a msg1.
+    pub redial: bool,
     /// Admitting this peer as a net-new identity would exceed `max_peers`
     /// (pre-evaluated `max_peers > 0 && peers.len() >= max_peers`).
     pub at_max_peers: bool,
@@ -333,6 +339,12 @@ pub enum InboundDecision {
     /// authorize → … → promote sequence as [`Promote`](InboundDecision::Promote).
     /// `peer` is the teardown / reconnect target.
     RestartThenPromote { peer: NodeAddr },
+    /// Same-epoch msg1 from a held peer that its link rekey machine judged a
+    /// fresh dial off the established link: answer it into a pending redial
+    /// beside the held peering, which the shell replaces only when the
+    /// peer's first frame authenticates under the redial's session. `peer`
+    /// is the held peer.
+    Redial { peer: NodeAddr },
     /// Same-epoch msg1 from a held peer: hand it to that peer's link rekey
     /// machine, which answers it, refuses it, resends a stored answer, or
     /// asks for the restart gates (then the shell classifies the msg1 again
@@ -473,8 +485,9 @@ impl Fmp {
     /// The early max-peers cap gate, then, for an existing same-identity peer,
     /// the epoch restart (FRC-1201 rule 2), the hand-off of a same-epoch msg1
     /// to the peer's link machine (rules 3 and 4), or, once that machine has
-    /// asked for it, the restart gates of a replacement (rule 3.3); else a
-    /// net-new promote (rule 1).
+    /// asked for it, a redial off the established link (operator decision,
+    /// 2026-11-17) or the restart gates of a replacement (rule 3.3), either
+    /// after the silent-session refusal; else a net-new promote (rule 1).
     pub fn establish_inbound(
         &self,
         snap: &EstablishSnapshot,
@@ -501,10 +514,11 @@ impl Fmp {
                 // Same epoch (or no epoch captured on either side): rules 3
                 // and 4 are the peer's link machine's, which asks for the
                 // restart gates only for a fresh dial on a young link.
-                _ if !snap.replace => InboundDecision::Rekey { peer },
+                _ if !snap.replace && !snap.redial => InboundDecision::Rekey { peer },
                 _ if silent_refusal(snap, wire) => InboundDecision::Reject {
                     reason: InboundReject::SilentBackoff,
                 },
+                _ if snap.redial => InboundDecision::Redial { peer },
                 _ => InboundDecision::ReplaceThenPromote { peer },
             }
         } else if silent_refusal(snap, wire) {

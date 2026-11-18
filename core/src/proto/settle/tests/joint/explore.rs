@@ -362,7 +362,8 @@ fn spared(w: &World, b: &Breach) -> Option<Spared> {
 /// What a node of the model, which runs no link-dead timer, leaves once
 /// healed beside a joint node, which runs the node's: the model still
 /// holds the joint node on a link whose frames were lost in flight, the
-/// joint node's timer removed it, and the model refuses each redial, so
+/// joint node's timer removed it, and the model refuses each redial a
+/// gate still holds (its dampener or unheard floor), so
 /// the joint node holds a configured peer it cannot reach and the model
 /// keeps open the connection a refused redial came on. A node would have
 /// removed the silent peer too and taken the redial. Only a pairing of a
@@ -439,8 +440,12 @@ fn each_breach_the_pins_hold_is_exempted_by_its_own_cause_and_a_settled_pair_by_
     }
     // Start 2 with the model at node 0 and a joint node at node 1: the
     // model's dial completes, the frames are lost for the link-dead
-    // timeout, the joint node's timer removes the model, and the model,
-    // which runs no timer, refuses every redial.
+    // timeout, and the joint node's timer removes the model. The model,
+    // which runs no timer, still holds the joint node; it refused every
+    // redial off the link before redials were answered (the operator's
+    // decision, 2026-11-17), and now answers the joint node's redial, whose
+    // first frame replaces the stale peering, so the pair heals with no
+    // breach for the missing timer to exempt.
     let st = chosen(super::starts::uncapped(model_off), |s| s.number == 2).remove(0);
     let path = [
         Act::Dup(0),
@@ -455,16 +460,9 @@ fn each_breach_the_pins_hold_is_exempted_by_its_own_cause_and_a_settled_pair_by_
     heal(&mut w);
     let found = healed(&w);
     assert!(
-        found.len() == 2,
-        "precondition: the model's stale peering leaves two breaches: {found:?}"
+        found.is_empty(),
+        "the model's stale peering is replaced by the joint node's redial: {found:?}"
     );
-    for b in &found {
-        assert_eq!(
-            spared(&w, b),
-            Some(Spared::Untimed),
-            "{b:?} is exempted as the model's missing timer"
-        );
-    }
     // Start 2's script settles both ends, capable, and then holds for a
     // heal: the cause names nothing there.
     let st = start(2);

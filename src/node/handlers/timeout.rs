@@ -24,6 +24,12 @@ impl LifecycleView for Node {
         self.peer_machines
             .iter()
             .filter(|(_, machine)| machine.leg().is_some())
+            // The mutation lane's break: a pending redial's leg is never
+            // reaped.
+            .filter(|(link_id, _)| {
+                !(node_fault!(RedialNeverExpires)
+                    && self.redials.iter().any(|(_, r)| r.link == **link_id))
+            })
             .filter(|(link_id, machine)| {
                 machine.is_failed()
                     || (machine.conn_is_timed_out(interval_now, timeout_ms)
@@ -116,6 +122,13 @@ impl Node {
                                 "Stale handshake connection timed out"
                             );
                         }
+                    }
+                    if let Some((peer, _)) = self.redials.iter().find(|(_, r)| r.link == link) {
+                        debug!(
+                            peer = %self.peer_display_name(peer),
+                            link_id = %link,
+                            "Pending redial expired with no frame"
+                        );
                     }
                     self.cleanup_stale_connection(link, now_ms).await;
                 }

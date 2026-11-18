@@ -98,7 +98,23 @@ impl Node {
     /// rekey machine. A frame that authenticates under the pending session
     /// cuts over to it, and one under the previous session is delivered
     /// while the drain holds it.
+    ///
+    /// A frame naming the index of a pending redial, which no peer holds
+    /// yet, is first opened under the redial's session: if it opens, the
+    /// redial replaces the peering, and the frame is then handled as the
+    /// new peering's first; if it does not, it is dropped and counted, and
+    /// no peer is charged.
     pub(in crate::node) async fn handle_encrypted_frame(&mut self, packet: ReceivedPacket) {
+        if let Some(header) = EncryptedHeader::parse(&packet.data) {
+            let key = header.receiver_idx.as_u32();
+            if self.peers_by_index.get(&key).is_none()
+                && let Some((peer, redial)) = self.redials.by_index(key)
+                && !self.redial_frame(peer, redial, &header, &packet).await
+            {
+                self.audit_live("handle_encrypted_frame");
+                return;
+            }
+        }
         self.frame_body(packet).await;
         self.audit_live("handle_encrypted_frame");
     }

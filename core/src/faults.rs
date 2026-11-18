@@ -400,6 +400,57 @@ faults! {
     /// as soon as the Wi-Fi path's window score passes the cable's, and the
     /// Wi-Fi path takes it back once the load has followed, over and over.
     MediumMoveUnheld,
+    /// A pending inbound link's stored msg2, once sent, answers any msg1
+    /// from the link's address, not only the msg1 it was written for.
+    StoredAnswersAny,
+    /// A fresh same-epoch msg1 off the established link of a heard peering
+    /// is refused as off the link while that link is reachable, and asks
+    /// for a replacement on a link too young to rekey, as before redials
+    /// were answered.
+    OffLinkFreshRefused,
+    /// The link machine records a redial msg1's ephemeral when it judges
+    /// the msg1, so a redial the node then refuses has its resends refused
+    /// as copies for as long as the link lives.
+    RedialRecordsAtJudge,
+    /// A redial is answered by tearing the held peering down at the msg1,
+    /// and promoting the msg1 at once, as a replacement is.
+    RedialTearsDownAtMsg1,
+    /// A pending redial replaces the held peering as soon as its msg2 is
+    /// sent, with no frame from the peer.
+    RedialSwapsUnproven,
+    /// A pending redial is never reaped at the handshake timeout.
+    RedialNeverExpires,
+    /// A second redial for an identity replaces its pending one however
+    /// young that one is.
+    RedialSlotIgnored,
+    /// A redial's ephemeral is not remembered, so a capture is answered
+    /// each time it is sent.
+    RedialMemoryIgnored,
+    /// A redial of a peering this node replaced within 15 s is answered
+    /// anyway: the restart dampener is not consulted.
+    RedialSkipsDampener,
+    /// A fresh msg1 off the established link of a peering not yet heard
+    /// from is answered into a redial, as one of a heard peering is, where
+    /// it should be replaced at the msg1 (rule 3.3) or refused as off the
+    /// link (rule 4.1) as before.
+    RedialCoversUnheard,
+    /// A frame that names a pending redial's index and fails to open is
+    /// charged to the held peer as a decryption failure.
+    RedialChargesHeld,
+    /// A pending redial's entry survives the promotion of its link by a
+    /// msg2 resend.
+    RedialEntryKeptAtPromote,
+    /// The swap removes the redialed peer as a replacement does, dropping
+    /// its tree declaration, its filter and this node's filter state for it.
+    RedialDropsIdentity,
+    /// The swap does not open the end-to-end session again after closing a
+    /// heard one.
+    RedialNoSessionReopen,
+    /// A redial is answered whatever the ACL says of its identity.
+    RedialSkipsAcl,
+    /// An operator disconnect of a held peer leaves its pending redial, so
+    /// the redial's first frame promotes the peer again.
+    RedialKeptAtDisconnect,
 }
 
 impl Fault {

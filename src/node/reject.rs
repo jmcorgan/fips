@@ -250,6 +250,19 @@ pub enum HandshakeReject {
     /// established link while that link works. Tracked via
     /// [`HandshakeStats::off_link`](crate::node::stats::HandshakeStats).
     OffLink,
+    /// A redial refused because another redial of the same peer is pending
+    /// and under 1 s old. Tracked via
+    /// [`HandshakeStats::redial_held`](crate::node::stats::HandshakeStats).
+    RedialHeld,
+    /// A redial whose msg1 ephemeral already armed a redial of the peer in
+    /// the last 15 s, or with that memory full. A sustained rate is replayed
+    /// msg1s. Tracked via
+    /// [`HandshakeStats::redial_seen`](crate::node::stats::HandshakeStats).
+    RedialSeen,
+    /// A redial of a peer whose peering this node replaced within 15 s: the
+    /// restart dampener holds it. Tracked via
+    /// [`HandshakeStats::redial_dampened`](crate::node::stats::HandshakeStats).
+    RedialDampened,
 }
 
 /// FSP session rejection reasons.
@@ -448,6 +461,11 @@ pub enum DataplaneReject {
     /// receive loop. Tracked via
     /// [`DataplaneMetrics::decrypt_queue_full`](crate::node::metrics::DataplaneMetrics).
     DecryptQueueFull,
+    /// An encrypted frame named the index of a pending redial and did not
+    /// open under its session: nothing changes, and the held peer is not
+    /// charged a failure. Tracked via
+    /// [`DataplaneMetrics::redial_unopened`](crate::node::metrics::DataplaneMetrics).
+    RedialUnopened,
 }
 
 #[cfg(test)]

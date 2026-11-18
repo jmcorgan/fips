@@ -1212,7 +1212,6 @@ async fn late_cross(on: bool, other: bool, quiet: Duration) -> Result<(), String
 /// smaller node after it installed from its own dial and heard nothing for
 /// longer than the heard floor, leaves one working session.
 #[tokio::test]
-#[ignore = "known defect: a crossed msg1 read past the heard floor makes the smaller node replace its session while the larger node keeps its own"]
 async fn a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session() {
     let out = late_cross(false, true, SILENCE).await;
     assert!(out.is_ok(), "defect: {out:?}");
@@ -1220,7 +1219,6 @@ async fn a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_
 
 /// [`a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: a crossed msg1 read past the heard floor makes the smaller node replace its session while the larger node keeps its own"]
 async fn a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session_with_multipath_on()
  {
     let out = late_cross(true, true, SILENCE).await;
@@ -1826,11 +1824,14 @@ async fn until_at(tn: &mut TestNode, done: impl Fn(&TestNode) -> bool) {
 /// smaller node's msg1 reaches it: the smaller node's connect is still in
 /// flight when the larger node's msg1 arrives, so the smaller node installs
 /// the peer as responder and the larger as initiator. The smaller node's
-/// msg1 then meets a peer the larger holds on a young, heard link, which
-/// the restart gates refuse, so no move runs at either end: both hold the
-/// one link whose handshake completed first, the larger node's dial
-/// (FRC-1201, Section 5.6, its last paragraph). Reaped, the smaller node's
-/// dial closes its connection, which no live link uses.
+/// msg1 then reaches the larger node on its own connection, off the link
+/// the larger node holds, and is answered into a redial (the operator's
+/// decision, 2026-11-17), while the smaller node moves onto its own dial at
+/// its msg2 by the tie-break. The smaller node's first frame on that
+/// session replaces the larger node's peering, so both ends end on the
+/// smaller node's dial, where FRC-1201 Section 5.6's last paragraph keeps
+/// the handshake that completed first. The link the smaller node moved off
+/// is retired by the close rule, closing its connection.
 async fn connect_window(on: bool) {
     let mut nodes = tcp_pair(on, false).await;
     let (s, l) = (1, 0);
@@ -1848,24 +1849,20 @@ async fn connect_window(on: bool) {
         .expect("precondition: the smaller node's connect is in flight");
     until_at(&mut nodes[s], |tn| tn.node.get_peer(&l_addr).is_some()).await;
     until_at(&mut nodes[l], |tn| tn.node.get_peer(&s_addr).is_some()).await;
-    let held = (
-        nodes[s].node.get_peer(&l_addr).and_then(|p| p.our_index()),
-        nodes[l].node.get_peer(&s_addr).and_then(|p| p.our_index()),
-    );
+    let held_l = nodes[l].node.get_peer(&s_addr).map(|p| p.link_id());
     resolve_connect(&mut nodes[s]).await;
     pump(&mut nodes).await;
+    let moved = nodes[s].node.get_peer(&l_addr).map(|p| p.link_id());
     assert_eq!(
-        (
-            nodes[s].node.get_peer(&l_addr).and_then(|p| p.our_index()),
-            nodes[l].node.get_peer(&s_addr).and_then(|p| p.our_index()),
-        ),
-        held,
-        "precondition: the smaller node's msg1 moved neither end"
+        moved,
+        Some(dial),
+        "defect: the smaller node did not move onto its own dial"
     );
-    assert!(
-        nodes[s].node.links.contains_key(&dial),
-        "precondition: the smaller node's dial is still in flight"
-    );
+    let first = settled(&mut nodes, s, l).await;
+    let session = match first {
+        Ok(()) => Ok(()),
+        Err(_) => settled(&mut nodes, s, l).await,
+    };
     let direction = |tn: &TestNode, peer: &NodeAddr| {
         tn.node
             .get_peer(peer)
@@ -1873,50 +1870,47 @@ async fn connect_window(on: bool) {
             .map(|k| k.direction())
     };
     let directions = (direction(&nodes[s], &l_addr), direction(&nodes[l], &s_addr));
-    let session = settled(&mut nodes, s, l).await;
-    nodes[s].node.cleanup_stale_connection(dial, 0).await;
-    assert!(
-        !nodes[s].node.links.contains_key(&dial),
-        "precondition: the smaller node's dial is reaped"
-    );
+    let swapped = nodes[l].node.get_peer(&s_addr).map(|p| p.link_id()) != held_l
+        && nodes[l].node.redials.of(&s_addr).is_none();
     for _ in 0..100 {
-        if pool(&nodes[s]).1 == 0 {
+        if pool(&nodes[s]).0 == 0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let pools = pool(&nodes[s]);
     let after = settled(&mut nodes, s, l).await;
+    let found = audit(&mut nodes).await;
     cleanup_nodes(&mut nodes).await;
     assert!(
-        session.is_ok(),
-        "defect: the two ends are not on one session: {session:?}"
+        session.is_ok() && swapped,
+        "defect: the two ends are not on one session after the smaller node's first frame (swapped {swapped}): {session:?}"
     );
     assert_eq!(
         directions,
-        (Some(LinkDirection::Inbound), Some(LinkDirection::Outbound)),
-        "defect: the ends do not hold the larger node's dial, the handshake that completed first"
+        (Some(LinkDirection::Outbound), Some(LinkDirection::Inbound)),
+        "defect: the ends do not hold the smaller node's dial"
     );
     assert_eq!(
         pools,
-        (1, 0),
-        "defect: the reaped dial's connection is left open, or the peer's is closed"
+        (0, 1),
+        "defect: the connection the smaller node moved off is left open, or its own is closed"
     );
     assert!(
-        after.is_ok(),
-        "defect: the reap broke the session: {after:?}"
+        after.is_ok() && found.is_empty(),
+        "defect: the session or the maps after the swap: {after:?} {found:?}"
     );
 }
 
 #[tokio::test]
-async fn a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_keeps_the_handshake_that_completed_first()
+async fn a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_settles_both_ends_on_the_smaller_nodes_dial_at_its_first_frame()
  {
     connect_window(false).await;
 }
 
-/// [`a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_keeps_the_handshake_that_completed_first`] with multipath on.
+/// [`a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_settles_both_ends_on_the_smaller_nodes_dial_at_its_first_frame`] with multipath on.
 #[tokio::test]
-async fn a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_keeps_the_handshake_that_completed_first_with_multipath_on()
+async fn a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_settles_both_ends_on_the_smaller_nodes_dial_at_its_first_frame_with_multipath_on()
  {
     connect_window(true).await;
 }

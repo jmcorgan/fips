@@ -150,6 +150,13 @@ enum Change<'a, P: Profile> {
         tok: Authentic<P::Msg1, Replayable>,
         ephemeral: Option<Digest>,
     },
+    /// Ask the shell to answer a fresh msg1 that arrived off the
+    /// established link into a pending redial, recording nothing: the
+    /// shell notes the ephemeral (`note_redial`) once it arms the redial.
+    Redial {
+        tok: Authentic<P::Msg1, Replayable>,
+        ephemeral: Digest,
+    },
     /// Answer a fresh eligible msg1, yielding an unanswered own attempt;
     /// `on_link` is whether the msg1 arrived on the established link.
     Respond {
@@ -852,6 +859,18 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         }
     }
 
+    /// Whether a fresh msg1 that arrived as `arrival` says is answered into
+    /// a pending redial rather than refused or sent to the restart gates:
+    /// it arrived off the established link of a peering heard from
+    /// (operator decision, 2026-11-17). Off the link of an unheard peering,
+    /// such as one a replayed msg1 promoted or the first of a dial over two
+    /// paths, rules 3.3 and 4.1 hold as before.
+    fn redials(arrival: Arrival) -> bool {
+        let covered = arrival.heard || node_fault!(RedialCoversUnheard);
+        let refused = node_fault!(OffLinkFreshRefused);
+        !arrival.on_link && covered && !refused
+    }
+
     /// An IK msg1 read as the peer: the eligibility and copy-kind rows.
     fn judge_msg1(
         &self,
@@ -903,6 +922,14 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                     None => Change::Reject(Reason::AnsweredBefore),
                 },
                 Copied::Armed | Copied::Seen => Change::Reject(Reason::AnsweredBefore),
+                // A fresh msg1 off the link, from a peer that may have lost
+                // its side of the link and dialed again from another
+                // address: answered into a pending redial, which replaces
+                // the peering only at the peer's first frame under it.
+                Copied::Fresh if Self::redials(arrival) => Change::Redial {
+                    tok,
+                    ephemeral: key,
+                },
                 Copied::Fresh => Change::Replace {
                     tok,
                     ephemeral: fresh,
@@ -910,6 +937,12 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
             };
         }
         if !arrival.on_link && arrival.reachable {
+            if copy == Copied::Fresh && Self::redials(arrival) {
+                return Change::Redial {
+                    tok,
+                    ephemeral: key,
+                };
+            }
             return Change::Refuse {
                 reason: Reason::OffLink,
                 ephemeral: fresh,
@@ -1143,6 +1176,12 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                     self.record.push(e);
                 }
                 out.push(Output::ReplaceRequested { tok });
+            }
+            Change::Redial { tok, ephemeral } => {
+                if node_fault!(RedialRecordsAtJudge) {
+                    self.record.push(ephemeral);
+                }
+                out.push(Output::RedialRequested { tok, ephemeral });
             }
             Change::Respond {
                 tok,
@@ -2876,6 +2915,14 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         let slot = self.slot_of(tag)?;
         self.epoch(slot)
             .map(|e| core::ptr::from_ref::<P::Session>(e.session.as_ref()).addr())
+    }
+
+    /// Record `ephemeral`, the ephemeral of a msg1 this machine asked to be
+    /// answered as a redial (`Output::RedialRequested`), now that the shell
+    /// has armed the redial: a copy of that msg1 is then a copy, refused
+    /// for as long as this link lives.
+    pub fn note_redial(&mut self, ephemeral: Digest) {
+        self.record.push(ephemeral);
     }
 
     /// End the machine: abandon the attempt, end a responder pending

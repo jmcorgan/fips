@@ -4,10 +4,13 @@
 use super::*;
 use crate::proto::settle::model::judge::{Gate, LocalRule, Transition};
 
-/// A replacement msg1 from a new address, on a link still too young to
-/// rekey.
+/// A replacement msg1 on the link, from its setup address, on a link
+/// still too young to rekey. From a new address, the msg1 of a peering
+/// heard from would be a redial (`LocalRule::DeferredRedial`); that of a
+/// peering not heard from is still a replacement, which `redial.rs`
+/// covers.
 fn replacement(hs: u32) -> Event {
-    msg1(hs, hs * 10, E1, hs, at(8), Binding::Connectionless)
+    msg1(hs, hs * 10, E1, hs, at(9), Binding::Connectionless)
 }
 
 /// A judge holding the peer from its msg1 at time 0, never heard from.

@@ -117,12 +117,8 @@ known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_rekey_a
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::restart::a_rekey_msg1_of_the_peers_previous_run_read_late_by_the_restarted_node_leaves_one_session  src/node/tests/settle/restart.rs
-known-defect  fips-mesh  node::tests::roam_redial::a_redial_from_a_new_address_settles_before_the_responder_reaps_the_old_peering  src/node/tests/roam_redial.rs
-known-defect  fips-mesh  node::tests::roam_redial::a_redial_from_a_new_address_settles_before_the_responder_reaps_the_old_peering_with_multipath_on  src/node/tests/roam_redial.rs

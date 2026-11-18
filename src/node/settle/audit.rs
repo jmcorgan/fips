@@ -142,6 +142,32 @@ pub(in crate::node) fn leg_entry(node: &Node) -> Vec<LinkId> {
     bad
 }
 
+/// `redial-leg`: each pending redial names a leg: a registered machine on its
+/// link, still at `Handshaking{ReceivedMsg1}`, whose identity is the
+/// redial's peer and whose index is the redial's, an index no peer is bound
+/// to, on a link that is open. The identities whose entry breaks it.
+pub(in crate::node) fn redial_leg(node: &Node) -> Vec<crate::NodeAddr> {
+    use crate::peer::machine::{HandshakePhase, PeerState};
+    let mut bad = Vec::new();
+    for (peer, redial) in node.redials.iter() {
+        let ok = node.peer_machines.get(&redial.link).is_some_and(|m| {
+            matches!(
+                m.state(),
+                PeerState::Handshaking {
+                    phase: HandshakePhase::ReceivedMsg1,
+                    ..
+                }
+            ) && m.conn_expected_identity().map(|id| *id.node_addr()) == Some(*peer)
+                && m.our_index() == Some(redial.index)
+        }) && node.peers_by_index.get(&redial.index.as_u32()).is_none()
+            && node.links.contains_key(&redial.link);
+        if !ok {
+            bad.push(*peer);
+        }
+    }
+    bad
+}
+
 /// `index-cache`: the index the link table keeps is the one its link
 /// records give now. The pairs where the two differ, each with the link the
 /// cache names there and the link the records do.
@@ -358,6 +384,7 @@ pub(in crate::node) fn live(node: &Node, site: &str) {
     fail(site, "entry-pair", &entry_pair(node));
     fail(site, "held-entry", &held_entry(node));
     fail(site, "leg-entry", &leg_entry(node));
+    fail(site, "redial-leg", &redial_leg(node));
     fail(site, "index-cache", &index_cache(node));
     index(node, &format!("audit_live: {site}: index"));
     fail(site, "carrier", &carrier(node));

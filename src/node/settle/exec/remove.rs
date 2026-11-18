@@ -182,20 +182,32 @@ impl Node {
             self.cleanup_bootstrap_transport_if_unused(transport_id);
         }
 
-        // Tree state cleanup
-        let tree_changed = self.handle_peer_removal_tree_cleanup(node_addr);
-        if tree_changed {
-            // Mark all remaining peers for pending tree announce.
-            // These will be sent on the next tick via check_tree_state().
-            for peer in self.peers.values_mut() {
-                peer.mark_tree_announce_pending();
+        // A redial's swap keeps the identity's tree declaration and filter
+        // state: the peer's process and epoch are unchanged, so what it
+        // declared still holds, and the link it is promoted on at once is
+        // the same peer's. Removing them would reselect this node's parent
+        // and announce to every peer when the peer was its parent.
+        let keeps_identity = why == Why::Redial && !node_fault!(RedialDropsIdentity);
+        let tree_changed = if keeps_identity {
+            self.bloom_state.mark_update_needed(*node_addr);
+            false
+        } else {
+            // Tree state cleanup
+            let tree_changed = self.handle_peer_removal_tree_cleanup(node_addr);
+            if tree_changed {
+                // Mark all remaining peers for pending tree announce.
+                // These will be sent on the next tick via check_tree_state().
+                for peer in self.peers.values_mut() {
+                    peer.mark_tree_announce_pending();
+                }
             }
-        }
 
-        // Bloom filter cleanup: clear state for removed peer, mark all remaining peers
-        self.bloom_state.remove_peer_state(node_addr);
-        let remaining_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
-        self.bloom_state.mark_all_updates_needed(remaining_peers);
+            // Bloom filter cleanup: clear state for removed peer, mark all remaining peers
+            self.bloom_state.remove_peer_state(node_addr);
+            let remaining_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+            self.bloom_state.mark_all_updates_needed(remaining_peers);
+            tree_changed
+        };
 
         debug!(
             peer = %self.peer_display_name(node_addr),

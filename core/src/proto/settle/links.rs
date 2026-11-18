@@ -204,6 +204,8 @@ impl Links {
             | Input::Arrived { .. }
             | Input::Msg1 { .. }
             | Input::Replace(_)
+            | Input::Redial(_)
+            | Input::LegHeard { .. }
             | Input::Msg2 { .. }
             | Input::Restarted { .. }
             | Input::Ended { .. }

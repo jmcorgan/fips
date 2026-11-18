@@ -355,6 +355,7 @@ fn evs(events: &[Event]) -> Vec<Ev<u8>> {
                 O::PeerRestarted { layer, epoch } => Ev::Restarted(*layer, *epoch),
                 O::Rekeyed { role } => Ev::Rekeyed(*role),
                 O::ReplaceRequested { .. } => Ev::Replace,
+                O::RedialRequested { ephemeral, .. } => Ev::Redial(*ephemeral),
                 O::Reject(r) => Ev::Reject(*r),
                 O::Abandoned(a) => Ev::Abandoned(*a),
                 O::Teardown(t) => Ev::Teardown(*t),

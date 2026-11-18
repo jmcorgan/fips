@@ -585,16 +585,6 @@ pub(super) const PINS: &[(&str, bool, Reach)] = &[
         Reach::None(AGED),
     ),
     (
-        "node::tests::settle::crossing::a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session",
-        false,
-        Reach::None(SILENT),
-    ),
-    (
-        "node::tests::settle::crossing::a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session_with_multipath_on",
-        true,
-        Reach::None(SILENT),
-    ),
-    (
         "node::tests::settle::crossing::a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session",
         false,
         Reach::None(SILENT),
@@ -621,17 +611,4 @@ pub(super) const PINS: &[(&str, bool, Reach)] = &[
             "the restarted node must read the late rekey msg1 with its new peering about 1 s old, so not eligible as a rekey; the world's rekey step ages the peer's end of the session past the 30 s floor, which makes that msg1 an eligible rekey, and a rekey reached by time alone starts at a jittered moment no schedule names",
         ),
     ),
-    (
-        "node::tests::roam_redial::a_redial_from_a_new_address_settles_before_the_responder_reaps_the_old_peering",
-        false,
-        Reach::None(ROAMED),
-    ),
-    (
-        "node::tests::roam_redial::a_redial_from_a_new_address_settles_before_the_responder_reaps_the_old_peering_with_multipath_on",
-        true,
-        Reach::None(ROAMED),
-    ),
 ];
-
-/// Why a redial from a new address is out of the explorer's reach.
-const ROAMED: &str = "the dialer's address changes while its node runs; the world's nodes each keep one address, and no step moves one";

@@ -61,7 +61,11 @@ fn freed(steps: Vec<Seen>) {
             Step::Rekey(rekey::Output::Release(lease)) => {
                 lease.release();
             }
-            Step::Core(_) | Step::Replace(_) | Step::Rekey(_) | Step::Path(_) => {}
+            Step::Core(_)
+            | Step::Replace(_)
+            | Step::Redial { .. }
+            | Step::Rekey(_)
+            | Step::Path(_) => {}
         }
     }
 }
@@ -71,6 +75,7 @@ fn shown(s: &Seen) -> String {
     match s {
         Step::Core(i) => format!("core {i:?}"),
         Step::Replace(_) => String::from("replace"),
+        Step::Redial { .. } => String::from("redial"),
         Step::Rekey(o) => format!("rekey {o:?}"),
         Step::Path(o) => format!("path {o:?}"),
     }
@@ -418,7 +423,7 @@ fn a_released_path_goes_to_the_link_moved_off() {
     .into_iter()
     .filter_map(|s| match s {
         Step::Core(i) => Some(i),
-        Step::Replace(_) | Step::Rekey(_) | Step::Path(_) => None,
+        Step::Replace(_) | Step::Redial { .. } | Step::Rekey(_) | Step::Path(_) => None,
     })
     .collect();
     assert_eq!(
@@ -538,7 +543,7 @@ fn counted(out: Vec<Out>) -> (u32, u64) {
         for step in steps {
             match step {
                 Step::Rekey(_) => n += 1,
-                Step::Core(_) | Step::Replace(_) | Step::Path(_) => {}
+                Step::Core(_) | Step::Replace(_) | Step::Redial { .. } | Step::Path(_) => {}
             }
         }
     }
@@ -736,7 +741,7 @@ fn cores(steps: &[Seen]) -> Vec<&In> {
         .iter()
         .filter_map(|s| match s {
             Step::Core(i) => Some(i),
-            Step::Replace(_) | Step::Rekey(_) | Step::Path(_) => None,
+            Step::Replace(_) | Step::Redial { .. } | Step::Rekey(_) | Step::Path(_) => None,
         })
         .collect()
 }
@@ -746,7 +751,11 @@ fn returned(me: &mut Node, steps: Vec<Seen>) {
     for s in steps {
         match s {
             Step::Rekey(rekey::Output::Release(lease)) => me.pool.free(lease.release()),
-            Step::Core(_) | Step::Replace(_) | Step::Rekey(_) | Step::Path(_) => {}
+            Step::Core(_)
+            | Step::Replace(_)
+            | Step::Redial { .. }
+            | Step::Rekey(_)
+            | Step::Path(_) => {}
         }
     }
 }
@@ -917,7 +926,7 @@ fn a_stop_files_what_the_rekey_machine_carried() {
         .map(|s| match s {
             Step::Path(_) => 'p',
             Step::Rekey(_) => 'r',
-            Step::Core(_) | Step::Replace(_) => 'c',
+            Step::Core(_) | Step::Replace(_) | Step::Redial { .. } => 'c',
         })
         .collect();
     let first = shape.iter().position(|&c| c == 'r');

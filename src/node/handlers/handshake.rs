@@ -57,7 +57,7 @@ use tracing::{debug, info, warn};
 /// that is not a resend of its link-setup msg1, which is just as replayable.
 /// The dampener is per peer and shared by both, so a restart and a
 /// replacement of one peer inside the interval count as two teardowns.
-const EPOCH_RESTART_MIN_INTERVAL_SECS: u64 = 15;
+pub(in crate::node) const EPOCH_RESTART_MIN_INTERVAL_SECS: u64 = 15;
 
 /// How long a peering promoted on a received msg1 is kept against another
 /// msg1 from the same peer while nothing has been heard on it.
@@ -103,6 +103,34 @@ pub(in crate::node) const UNHEARD_PEERING_MIN_AGE_MS: u64 = 1_000;
 /// msg1 and, if that peering was replaced before its first frame, its next).
 /// No measured basis.
 const MAX_REPLAYED_MSG1S: usize = 8;
+
+/// Where a same-epoch msg1 from a held peer goes after that peer's link
+/// rekey machine has judged it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::node) enum LinkVerdict {
+    /// The machine answered, resent or refused it: nothing more.
+    Done,
+    /// The restart gates, as a replacement of the peering.
+    Replace,
+    /// A pending redial, with the msg1's ephemeral the machine has not
+    /// recorded.
+    Redial(fips_core::proto::rekey::Digest),
+}
+
+/// A msg1 classified as a redial, with what arming it needs: the leg's
+/// control machine (parked at `Handshaking{ReceivedMsg1}`), the link
+/// allocated for it, the held peer and the authenticated identity, the
+/// msg1's ephemeral as the link machine and the node key it, and the
+/// leg's stamp.
+pub(in crate::node) struct Armed {
+    pub(in crate::node) machine: PeerMachine,
+    pub(in crate::node) link: LinkId,
+    pub(in crate::node) peer: NodeAddr,
+    pub(in crate::node) identity: PeerIdentity,
+    pub(in crate::node) digest: Option<fips_core::proto::rekey::Digest>,
+    pub(in crate::node) ephemeral: Option<EphemeralDigest>,
+    pub(in crate::node) leg_at: LegStamp,
+}
 
 /// The handshake reject a msg1 refusal records.
 ///
@@ -255,6 +283,7 @@ impl EstablishView for Node {
             has_existing_peer: existing.is_some(),
             existing_peer_epoch: existing.and_then(|p| p.remote_epoch()),
             replace: false,
+            redial: false,
             at_max_peers: max_peers > 0 && self.peers.len() >= max_peers,
             silent_backoff: self
                 .silent_sessions
@@ -288,7 +317,7 @@ impl Node {
     /// Count a line of `kind` for `peer` and say whether to log it. On the
     /// first counted line after a session change, logs what earlier sessions
     /// withheld. A msg1 with no peer entry is always logged.
-    fn shown(&mut self, peer: &NodeAddr, kind: HsLine) -> bool {
+    pub(in crate::node) fn shown(&mut self, peer: &NodeAddr, kind: HsLine) -> bool {
         let Some(entry) = self.peers.get_mut(peer) else {
             return true;
         };
@@ -332,6 +361,7 @@ impl Node {
             off_link = withheld.of(HsLine::OffLink),
             replace = withheld.of(HsLine::Replace),
             restart = withheld.of(HsLine::Restart),
+            redial = withheld.of(HsLine::Redial),
             "Suppressed repeated handshake lines"
         );
     }
@@ -782,7 +812,9 @@ impl Node {
             // classified below rather than answered with keys it does not
             // hold.
             let own_msg1 = self.peer_machines.get(&existing_link_id).is_none_or(|m| {
-                !m.msg2_sent() || m.conn_msg1_digest() == Some(Msg1Digest::of(&packet.data))
+                !m.msg2_sent()
+                    || node_fault!(StoredAnswersAny)
+                    || m.conn_msg1_digest() == Some(Msg1Digest::of(&packet.data))
             });
             if link.direction() == LinkDirection::Inbound && !own_msg1 {
                 debug!(
@@ -977,13 +1009,18 @@ impl Node {
         // enters `peer_machines` only at the promote tails.
         let (mut decision, mut actions) =
             machine.inbound_msg1(link_id, &wire, est, packet.timestamp_ms);
+        let mut redial_ephemeral = None;
         if let InboundDecision::Rekey { peer } = decision {
             debug_assert!(actions.is_empty());
-            if !self.msg1_to_link(&peer, &packet, &wire).await {
-                return;
-            }
             let mut est = self.establish_snapshot(&peer_node_addr);
-            est.replace = true;
+            match self.msg1_to_link(&peer, &packet, &wire).await {
+                LinkVerdict::Done => return,
+                LinkVerdict::Replace => est.replace = true,
+                LinkVerdict::Redial(e) => {
+                    est.redial = true;
+                    redial_ephemeral = Some(e);
+                }
+            }
             (decision, actions) = machine.inbound_msg1(link_id, &wire, est, packet.timestamp_ms);
         }
         let replacing = matches!(decision, InboundDecision::ReplaceThenPromote { .. });
@@ -1049,6 +1086,19 @@ impl Node {
                 // Classified again with the replacement requested, a held
                 // peer's msg1 is a replacement or a refusal, never a rekey.
                 debug_assert!(false, "a replacement was classified as a rekey");
+            }
+            InboundDecision::Redial { peer } => {
+                debug_assert!(actions.is_empty());
+                let armed = Armed {
+                    machine,
+                    link: link_id,
+                    peer,
+                    identity: peer_identity,
+                    digest: redial_ephemeral,
+                    ephemeral,
+                    leg_at,
+                };
+                self.arm_redial(armed, &packet, &wire).await;
             }
             InboundDecision::RestartThenPromote { peer }
             | InboundDecision::ReplaceThenPromote { peer } => {
@@ -1597,18 +1647,19 @@ impl Node {
     /// Hand `packet`'s msg1, read as `wire`, a same-epoch msg1 from the held
     /// peer `peer`, to that peer's link rekey machine, and carry out what it
     /// asks for: answer it into a new pending session, resend a stored
-    /// answer, or refuse it, each counted and logged. Returns whether the
-    /// msg1 goes on to the restart gates as a replacement: the machine asked
-    /// for them (a fresh dial on a link too young to rekey), or the peer has
-    /// no machine to ask.
+    /// answer, or refuse it, each counted and logged. Returns where the
+    /// msg1 goes next: nowhere, to the restart gates as a replacement (the
+    /// machine asked for them, for a fresh dial on the link while it is too
+    /// young to rekey, or the peer has no machine to ask), or to a pending
+    /// redial (the machine asked for one, for a fresh dial off the link).
     async fn msg1_to_link(
         &mut self,
         peer: &NodeAddr,
         packet: &ReceivedPacket,
         wire: &WireOutcome,
-    ) -> bool {
+    ) -> LinkVerdict {
         if !self.peers.get(peer).is_some_and(|p| p.has_session()) {
-            return true;
+            return LinkVerdict::Replace;
         }
         let local = self.session_node_keys();
         let Some(tok) = read_msg1::<OsEntropy>(&local, &packet.data) else {
@@ -1621,7 +1672,7 @@ impl Node {
             );
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-            return false;
+            return LinkVerdict::Done;
         };
         // On this peer's link: from a path the peer holds that is proven at
         // this end (Live or acked; the original path is both), or, on a link
@@ -1652,9 +1703,13 @@ impl Node {
                 ),
             }
         });
+        // Only a heard peering is redialed (operator decision, 2026-11-17):
+        // a fresh msg1 off the link of an unheard one keeps the replacement
+        // at the msg1 and its floors.
         let arrival = Arrival {
             on_link,
             reachable: self.link_reachable(peer).await,
+            heard: self.peers.get(peer).is_some_and(|p| p.is_heard()),
         };
         let path = Msg1Path::new(
             packet.transport_id,
@@ -1688,7 +1743,7 @@ impl Node {
         let answers_it = OrNone(stored_ridx.map(|r| r == wire.their_index));
         let stored_ridx = OrNone(stored_ridx);
         let Some(out) = self.step_link(peer, Input::PeerMsg1 { tok, arrival }) else {
-            return false;
+            return LinkVerdict::Done;
         };
         let report = self.run_link_step(peer, out).await;
         for reason in &report.rejects {
@@ -1866,7 +1921,11 @@ impl Node {
                 }
             }
         }
-        report.replace
+        match report.redial {
+            Some(ephemeral) => LinkVerdict::Redial(ephemeral),
+            None if report.replace => LinkVerdict::Replace,
+            None => LinkVerdict::Done,
+        }
     }
 
     /// Hand `packet`'s msg2, which names `peer`'s index, to that peer's link

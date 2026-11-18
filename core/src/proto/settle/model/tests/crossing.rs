@@ -3,7 +3,7 @@
 //! late second dial, a late stored msg2 and an aged link.
 
 use super::*;
-use crate::proto::settle::model::judge::{LocalRule, Reply, Transition};
+use crate::proto::settle::model::judge::{Class, LocalRule, Reply, Transition};
 
 /// The smaller node's listen address and the larger node's, and the
 /// source port each dials from.
@@ -105,8 +105,29 @@ fn a_msg2_with_a_changed_epoch_is_not_a_cross_connection() {
 }
 
 #[test]
-fn a_msg1_that_arrives_after_the_peer_is_held_is_a_replacement_the_heard_floor_refuses() {
+fn a_msg1_that_arrives_on_the_link_after_the_peer_is_held_is_a_replacement_the_heard_floor_refuses()
+{
     // frc-1201:1085-1092: the first handshake to complete is kept.
+    let mut j = judge(LARGE, SMALL);
+    let s = last(
+        &mut j,
+        &[
+            dial(2, 1, at(SMALL_AT), Binding::Connectionless),
+            msg2(2, E1, at(SMALL_AT)),
+            msg1(1, 100, E1, 2, at(SMALL_AT), Binding::Connectionless),
+        ],
+    );
+    assert_eq!(s.reply, Some(Reply::Silent));
+    assert!(s.refused.is_some());
+    assert_eq!(j.settled(), Some((Hs(2), LinkId(1), at(SMALL_AT))));
+}
+
+#[test]
+fn a_msg1_that_arrives_off_the_link_after_the_peer_is_held_is_a_redial_its_first_frame_settles() {
+    // `LocalRule::DeferredRedial`, where frc-1201:1085-1092 keeps the first
+    // handshake to complete: the crossing msg1 from another address is
+    // answered beside the held link, which its dialer's first frame under
+    // it replaces, so both ends end on the handshake the dialer uses.
     let mut j = judge(LARGE, SMALL);
     let s = last(
         &mut j,
@@ -116,9 +137,13 @@ fn a_msg1_that_arrives_after_the_peer_is_held_is_a_replacement_the_heard_floor_r
             msg1(1, 100, E1, 2, at(SMALL_SRC), Binding::Connectionless),
         ],
     );
-    assert_eq!(s.reply, Some(Reply::Silent));
-    assert!(s.refused.is_some());
+    assert_eq!(s.class, Some(Class::Redial));
+    assert_eq!(s.reply, Some(Reply::Msg2));
+    assert_eq!(s.change, None);
     assert_eq!(j.settled(), Some((Hs(2), LinkId(1), at(SMALL_AT))));
+    let s = j.step(frame(1, at(SMALL_SRC)));
+    assert_eq!(s.change, Some(Transition::Replace));
+    assert_eq!(j.settled(), Some((Hs(1), LinkId(2), at(SMALL_SRC))));
 }
 
 #[test]

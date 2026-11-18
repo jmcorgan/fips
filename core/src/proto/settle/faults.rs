@@ -95,6 +95,21 @@ pub(crate) enum Fault {
     ModelFallbackInCore,
     /// A replacement the rekey machine asks for skips the gate.
     ReplacementUngated,
+    /// A redial's answer, once sent while the peer is held, replaces the
+    /// peering at once, with no frame from the peer.
+    RedialInstallsAtSent,
+    /// A frame under a redial's leg is not heard: the leg replaces nothing
+    /// and is reaped at its deadline.
+    LegHeardIgnored,
+    /// A redial skips its memory and the dampener, and records no ephemeral.
+    RedialUngated,
+    /// A redial is held by the heard floor, as a replacement is.
+    RedialHeardFloored,
+    /// A second redial replaces a pending one however young that one is.
+    RedialSlotIgnored,
+    /// A redial's mark outlives its leg: reaped, or installed at its send
+    /// once its peer is gone.
+    RedialLegKept,
     /// A msg1 counts as on the link only from the link's setup address.
     AttributeBySetupOnly,
     /// A path's move leaves its pair where it was.
@@ -236,6 +251,16 @@ pub(crate) enum Fault {
     /// The comparison takes a msg1 on a pair the bundle holds proven,
     /// which the model reads as off the link, for a difference.
     ProvenCompared,
+    /// The comparison takes a deployed release's refusal or replacement of
+    /// a msg1 the model answers into a redial for a difference.
+    RedialCompared,
+    /// A joint node, the driver and the model of `master` do not record an
+    /// armed redial's msg1 in the held link's machine, so a copy of it is
+    /// judged afresh.
+    RedialUnnoted,
+    /// The comparison holds an address closed for good, so a redial over a
+    /// connection opened to it again is a difference.
+    ReopenedCompared,
     /// A joint node keeps its rekey machine as it was at a
     /// cross-connection move, so the machine runs the session of the
     /// handshake moved off in place of the one moved onto.
@@ -288,6 +313,12 @@ impl Fault {
         Self::IgnoreOwnDial,
         Self::ModelFallbackInCore,
         Self::ReplacementUngated,
+        Self::RedialInstallsAtSent,
+        Self::LegHeardIgnored,
+        Self::RedialUngated,
+        Self::RedialHeardFloored,
+        Self::RedialSlotIgnored,
+        Self::RedialLegKept,
         Self::AttributeBySetupOnly,
         Self::PathMoveIgnored,
         Self::SwitchIgnored,
@@ -345,6 +376,9 @@ impl Fault {
         Self::HeardFeedDropped,
         Self::ArrivalIgnored,
         Self::ProvenCompared,
+        Self::RedialCompared,
+        Self::RedialUnnoted,
+        Self::ReopenedCompared,
         Self::MoveBuildsStale,
         Self::ReplaceKeepsMachine,
         Self::LeaseForgotten,

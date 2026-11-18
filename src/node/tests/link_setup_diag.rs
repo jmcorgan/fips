@@ -306,19 +306,26 @@ async fn a_failed_duplicate_resend_logs_the_msg1_path() {
     assert_eq!(field(&line, "transport_id"), "transport:1", "{line}");
 }
 
-/// A rekey msg1 that arrives on a transport other than the peer's
-/// established link, while that link works, is refused, and the line records
-/// that the two paths differ. A rekey msg1 on the link itself reads as the
-/// same path and is answered.
+/// A rekey msg1 on the peer's established link reads as the same path and
+/// is answered; a copy of it that then arrives on another transport, while
+/// the link works, is refused, and the line records that the two paths
+/// differ. A fresh msg1 there would be a redial instead.
 #[tokio::test]
-async fn a_rekey_msg1_on_a_second_transport_is_refused_and_logs_that_it_is_off_the_established_path()
+async fn a_copy_of_a_rekey_msg1_on_a_second_transport_is_refused_and_logs_that_it_is_off_the_established_path()
  {
     let mut e = established(31).await;
+    let tid = TransportId::new(1);
     let tid2 = TransportId::new(2);
     let (_sock2, addr2) = register_udp_with_peer_socket(&mut e.node, tid2).await;
     let rekey = craft_msg1_wire(&e.node, &e.sender, EPOCH, SessionIndex::new(0x0B0B), 2000);
-    let logs = msg1_logged(&mut e.node, packet(tid2, &addr2, rekey.clone(), 2000)).await;
+    let logs = msg1_logged(&mut e.node, packet(tid, &e.addr, rekey.clone(), 2000)).await;
+    let line = expect_line(&logs, "Sent rekey msg2 response");
+    assert_eq!(field(&line, "same_path"), "true", "{line}");
+    assert_eq!(field(&line, "transport_id"), "transport:1", "{line}");
+    assert_eq!(field(&line, "link_tid"), "transport:1", "{line}");
+    assert_eq!(field(&line, "msg1_dg"), msg1_tag(&rekey), "{line}");
 
+    let logs = msg1_logged(&mut e.node, packet(tid2, &addr2, rekey.clone(), 2100)).await;
     let line = expect_line(
         &logs,
         "Same-epoch msg1 off the established link while that link is up, dropping",
@@ -328,28 +335,11 @@ async fn a_rekey_msg1_on_a_second_transport_is_refused_and_logs_that_it_is_off_t
     assert_eq!(field(&line, "remote_addr"), addr2.to_string(), "{line}");
     assert_eq!(field(&line, "msg1_dg"), msg1_tag(&rekey), "{line}");
     assert!(
-        e.node
-            .get_peer(&e.peer)
-            .expect("peer present")
-            .pending_new_session()
-            .is_none(),
-        "the refused msg1 armed no pending"
+        e.node.redials.of(&e.peer).is_none(),
+        "the refused copy armed no redial"
     );
-    stop_transport(&mut e.node, TransportId::new(1)).await;
-    stop_transport(&mut e.node, tid2).await;
-
-    // Healthy path, on a fresh node: the second copy of the same msg1 on the
-    // first node would be a resend of the msg1 that armed its pending.
-    let mut e = established(31).await;
-    let tid = TransportId::new(1);
-    let rekey = craft_msg1_wire(&e.node, &e.sender, EPOCH, SessionIndex::new(0x0B0B), 2000);
-    let logs = msg1_logged(&mut e.node, packet(tid, &e.addr, rekey.clone(), 2000)).await;
-    let line = expect_line(&logs, "Sent rekey msg2 response");
-    assert_eq!(field(&line, "same_path"), "true", "{line}");
-    assert_eq!(field(&line, "transport_id"), "transport:1", "{line}");
-    assert_eq!(field(&line, "link_tid"), "transport:1", "{line}");
-    assert_eq!(field(&line, "msg1_dg"), msg1_tag(&rekey), "{line}");
     stop_transport(&mut e.node, tid).await;
+    stop_transport(&mut e.node, tid2).await;
 }
 
 /// A rekey answer that cannot be sent carries the msg1's path.

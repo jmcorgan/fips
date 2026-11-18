@@ -7,6 +7,7 @@ mod classify;
 mod close;
 mod crossing;
 mod gates;
+mod redial;
 
 use alloc::vec::Vec;
 
