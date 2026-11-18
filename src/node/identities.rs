@@ -208,7 +208,9 @@ impl IdentityCache {
         self.feed.as_ref()?.told.get(key).copied()
     }
 
-    /// Whether the adapter has been told of `key`, or no feed runs.
+    /// Whether the adapter has been told of `key`, or no feed runs. Only the
+    /// debug-build check in `Node::sweep_identities` asks.
+    #[cfg(debug_assertions)]
     pub(crate) fn told(&self, key: &PeerKey) -> bool {
         self.feed
             .as_ref()
