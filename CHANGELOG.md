@@ -1725,6 +1725,14 @@ with v0.5.x or earlier peers.
   dependency is derived from the binaries instead of hand-written, so it states
   the floor it was built against.
 
+#### FreeBSD
+
+- `service fips restart`, the step the package prints after an upgrade, no
+  longer leaves the daemon stopped. The rc script's stop could return while
+  the daemon was still exiting, and the start that followed then found it
+  still listed, reported it as already running and started nothing. Stop now
+  waits until the daemon is gone, for at most ten seconds.
+
 #### macOS
 
 - Upgrading with the macOS package no longer leaves the daemon without UDP.
