@@ -713,11 +713,13 @@ fn named() -> Vec<(History, usize, Named)> {
             CL,
         ));
     }
+    // Each a fresh dial on the link, which replaces the unheard peering;
+    // from another address it would be a redial, which replaces nothing
+    // until a frame proves it.
     let mut silent = alloc::vec![msg1(10, 100, E1, 1, at(9), CL)];
     for n in 1..=4u32 {
         silent.push(wait(1_000));
-        let port = u16::try_from(20 + n).expect("a small port");
-        silent.push(msg1(10 + n, (10 + n) * 10, E1, 1 + n, at(port), CL));
+        silent.push(msg1(10 + n, (10 + n) * 10, E1, 1 + n, at(9), CL));
     }
     alloc::vec![
         (
@@ -749,7 +751,7 @@ fn named() -> Vec<(History, usize, Named)> {
                 alloc::vec![
                     msg1(10, 100, E1, 1, at(9), CL),
                     wait(1_000),
-                    msg1(11, 110, E1, 2, at(8), CL),
+                    msg1(11, 110, E1, 2, at(9), CL),
                     wait(1_000),
                     msg1(10, 100, E1, 1, at(9), CL),
                 ],

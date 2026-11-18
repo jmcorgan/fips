@@ -75,6 +75,8 @@ impl Node {
             | Input::Arrived { .. }
             | Input::Msg1 { .. }
             | Input::Replace(_)
+            | Input::Redial(_)
+            | Input::LegHeard { .. }
             | Input::Msg2 { .. }
             | Input::Restarted { .. }
             | Input::Ended { .. }
@@ -118,7 +120,7 @@ impl Node {
         for step in steps {
             match step {
                 Step::Core(input) => self.feed(&input),
-                Step::Replace(_) | Step::Rekey(_) | Step::Path(_) => {
+                Step::Replace(_) | Step::Redial { .. } | Step::Rekey(_) | Step::Path(_) => {
                     debug_assert!(false, "a roam gave the shell a step");
                 }
             }

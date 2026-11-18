@@ -277,3 +277,6 @@ MediumMoveUnheld	red	fips-core	proto::path::tests::choice::load_that_follows_the
 MediumMoveUnheld	red	fips-core	proto::path::select::tests::a_move_to_a_cable_for_its_medium_waits_while_it_is_outside_the_margin_of_the_loaded_wifi_at_its_best
 MediumMoveUnheld	pass	fips-core	proto::path::tests::choice::a_cable_within_the_margin_of_a_better_scoring_wifi_takes_the_link_one_dwell_after_its_second_sample
 MediumMoveUnheld	pass	fips-core	proto::path::tests::choice::load_that_follows_the_link_does_not_flap_it_between_a_cable_and_a_wifi_slightly_faster_at_its_best
+OffLinkFreshRefused	red	fips-core	proto::rekey::tests::fmp::a_fresh_msg1_off_an_aged_reachable_link_asks_for_a_redial_and_records_nothing_until_noted
+RedialCoversUnheard	red	fips-core	proto::rekey::tests::fmp::a_fresh_msg1_off_the_link_of_an_unheard_peering_keeps_the_replacement_or_the_off_link_refusal
+RedialRecordsAtJudge	red	fips-core	proto::rekey::tests::fmp::a_fresh_msg1_off_an_aged_reachable_link_asks_for_a_redial_and_records_nothing_until_noted

@@ -304,8 +304,10 @@ pub const ROWS: &[Row] = &[
             (GATES, "the_heard_floor_counts_from_the_last_frame"),
             GATE_HISTORIES,
             YOUNG_LINK,
-            SCRIPTED_OFF,
-            SCRIPTED_ON,
+            (
+                JOINT_PARTY,
+                "an_on_link_replacement_in_a_rekeys_drain_is_held_by_the_heard_floor_off_with_off_and_on_with_on",
+            ),
         ],
     ),
     (
@@ -567,6 +569,76 @@ pub const ROWS: &[Row] = &[
         &[AGREES, YOUNG_LINK, SCRIPTED_OFF, SCRIPTED_ON],
     ),
     (
+        Fault::RedialInstallsAtSent,
+        &[(TABLE, "a_redial_opens_a_leg_and_leaves_the_held_peer")],
+    ),
+    (
+        Fault::LegHeardIgnored,
+        &[(
+            TABLE,
+            "a_frame_under_a_sent_redial_leg_replaces_the_held_peer_for_redial",
+        )],
+    ),
+    (
+        Fault::RedialUngated,
+        &[
+            (
+                GATES,
+                "the_redial_memory_refuses_a_seen_ephemeral_and_a_full_memory_until_it_ages_out",
+            ),
+            (TABLE, "the_redial_memory_refuses_a_seen_ephemeral"),
+            (
+                GATES,
+                "the_swap_stamps_the_dampener_only_for_a_heard_peering_and_clears_the_redial_memory",
+            ),
+        ],
+    ),
+    (
+        Fault::RedialHeardFloored,
+        &[(GATES, "a_redial_is_not_held_by_the_heard_floor")],
+    ),
+    (
+        Fault::RedialSlotIgnored,
+        &[(TABLE, "one_redial_leg_per_identity")],
+    ),
+    (
+        Fault::RedialLegKept,
+        &[
+            (
+                TABLE,
+                "a_redial_leg_reaped_at_its_deadline_leaves_the_held_peer",
+            ),
+            (
+                TABLE,
+                "a_redial_leg_whose_peer_is_gone_installs_at_its_send_and_is_no_longer_a_redial",
+            ),
+        ],
+    ),
+    (
+        Fault::RedialCompared,
+        &[(
+            SHADOW,
+            "a_deployed_releases_refusal_of_a_redial_is_named_and_a_redialing_nodes_is_a_difference",
+        )],
+    ),
+    (
+        Fault::ReopenedCompared,
+        &[
+            (
+                SHADOW,
+                "a_redial_over_a_connection_opened_again_is_compared_with_the_address_open",
+            ),
+            SIM_STREAM,
+        ],
+    ),
+    (
+        Fault::RedialUnnoted,
+        &[(
+            JOINT_RUNS,
+            "a_rekey_msg1_answered_as_a_redial_off_the_link_is_refused_as_a_copy_when_it_comes_on_the_link",
+        )],
+    ),
+    (
         Fault::AttributeBySetupOnly,
         &[
             (TABLE, "a_msg1_from_a_proven_path_is_on_the_link"),
@@ -721,10 +793,16 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::ReplyNewConn,
-        &[(
-            WORLD,
-            "a_connection_oriented_reply_goes_on_the_arrival_connection",
-        )],
+        &[
+            (
+                WORLD,
+                "a_connection_oriented_reply_goes_on_the_arrival_connection",
+            ),
+            (
+                ORACLE,
+                "a_crossing_on_the_connection_oriented_transport_with_its_frames_lost_leaves_every_connection_in_use",
+            ),
+        ],
     ),
     (Fault::EofDropped, &[(WORLD, "an_eof_reaches_the_far_end")]),
     (
@@ -763,8 +841,8 @@ pub const ROWS: &[Row] = &[
         Fault::ReplacedConnKept,
         &[
             (
-                ORACLE,
-                "a_replacement_over_another_connection_closes_the_replaced_links_connection",
+                WORLD,
+                "a_replacement_of_an_unheard_peering_over_another_connection_closes_the_replaced_links_connection",
             ),
             MODEL_SETTLES,
         ],
@@ -1012,13 +1090,6 @@ pub const REKEY: &[RekeyRow] = &[
     (
         "LargerKeepsOwn",
         &[(JOINT_RUNS, "simultaneous_rekeys_settle_on_one_session")],
-    ),
-    (
-        "RefusalUnrecorded",
-        &[(
-            JOINT_RUNS,
-            "a_refused_rekey_msg1_stays_refused_when_it_comes_again",
-        )],
     ),
     (
         "CloseSkipsRecord",

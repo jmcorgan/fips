@@ -699,12 +699,16 @@ mod checks {
     }
 
     #[test]
-    fn a_replacement_over_another_connection_closes_the_replaced_links_connection() {
-        // The crossing on the connection-oriented transport with every
-        // frame and the first msg2s lost: node 0 replaces its unheard
-        // peering with node 1's dial, loses its link and redials, and node
-        // 1 replaces with that redial. Node 1's end of node 0's first
-        // connection then carries no link, and the replacement closes it.
+    fn a_crossing_on_the_connection_oriented_transport_with_its_frames_lost_leaves_every_connection_in_use()
+     {
+        // The crossing on the connection-oriented transport with node 0's
+        // dial answered first and every frame lost: node 1 holds node 0's
+        // dial, and when its own dial's answer arrives at the heal it
+        // keeps that peering, as the crossing rule settles both ends on
+        // the smaller node's dial, and closes its own dial's connection.
+        // No connection is then left without a link. (Before that rule,
+        // this path had node 1 replace a peering over another connection;
+        // `world.rs` shows that close on an unheard peering.)
         use super::super::explore::Act;
         let mut st = starts()
             .into_iter()

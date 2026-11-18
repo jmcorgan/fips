@@ -98,13 +98,20 @@ pub type Wire = Vec<u8>;
 /// The outputs of one call, executed by the shell front to back.
 pub type Outputs<P> = Vec<Output<P>>;
 
-/// The two facts FMP's eligibility rule needs about where a msg1 arrived.
+/// The facts FMP's eligibility rule needs about where a msg1 arrived, and
+/// whether the peering it would act on has been heard from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Arrival {
     /// The msg1 arrived on the peer's established link.
     pub on_link: bool,
     /// The established link is reachable.
     pub reachable: bool,
+    /// The held peering has been heard from (FRC-1201 Section 5.5): a frame
+    /// of it has authenticated, or this node dialed it. Only a fresh msg1
+    /// off the link of a heard peering is answered into a redial; one off
+    /// the link of an unheard peering, such as one a replayed msg1 promoted
+    /// or the first of a dial over two paths, keeps rules 3.3 and 4.1.
+    pub heard: bool,
 }
 
 /// What a leg table decided a completed handshake is (next only).
@@ -351,6 +358,18 @@ pub enum Output<P: Profile> {
     ReplaceRequested {
         /// The msg1.
         tok: Authentic<P::Msg1, Replayable>,
+    },
+    /// A fresh msg1 that arrived off the established link of a heard
+    /// peering, while that link is reachable or while it is too young to
+    /// rekey: answer it into a pending redial, keeping this machine, and
+    /// replace the peering only when a frame authenticates under the
+    /// redial's session. The machine recorded nothing; [`Rekey::note_redial`] records `ephemeral` once
+    /// the shell arms the redial.
+    RedialRequested {
+        /// The msg1.
+        tok: Authentic<P::Msg1, Replayable>,
+        /// Its ephemeral, as the replay record keys it.
+        ephemeral: Digest,
     },
     /// An input changed nothing (or only what its row names).
     Reject(Reason),

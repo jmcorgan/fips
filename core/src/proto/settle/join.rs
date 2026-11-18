@@ -4,14 +4,14 @@
 //! A held peer has a rekey machine and a path bundle. [`join`] is the one
 //! place both are built for a new link, carried across a cross-connection
 //! move and closed at a removal, and the one rule for what each machine's
-//! outputs tell the core: a restart report, a teardown and a replacement
-//! request from the rekey machine, and every path change the bundle
+//! outputs tell the core: a restart report, a teardown, a replacement
+//! request and a redial request from the rekey machine, and every path change the bundle
 //! reports, its one-path roams and binds besides. It holds no state and
 //! performs no I/O. It takes the machines' slots where the shell keeps
 //! them, makes the machine calls in their order, and returns [`Joined`],
 //! which says front to back what the shell is to carry out: a core input
-//! ([`Step::Core`]), a replacement for the core's gates ([`Step::Replace`])
-//! or one of the machines' own outputs ([`Step::Rekey`], [`Step::Path`]).
+//! ([`Step::Core`]), a replacement for the core's gates ([`Step::Replace`]),
+//! a redial for them ([`Step::Redial`]) or one of the machines' own outputs ([`Step::Rekey`], [`Step::Path`]).
 //!
 //! Every call is generic over the rekey profile, the clock, the entropy
 //! source and the driver slot, so a node and a test shell call the same
@@ -154,6 +154,16 @@ pub enum Step<P: Profile, D> {
     /// A msg1 the rekey machine asks the core's gates to take as a
     /// replacement.
     Replace(Authentic<P::Msg1, Replayable>),
+    /// A fresh msg1 off the established link the rekey machine asks the
+    /// core to take as a redial, with its ephemeral as the machine's record
+    /// keys it, which the shell records (`Rekey::note_redial`) once the
+    /// core answers it.
+    Redial {
+        /// The msg1.
+        tok: Authentic<P::Msg1, Replayable>,
+        /// Its ephemeral, as the replay record keys it.
+        ephemeral: rekey::Digest,
+    },
     /// A rekey machine output that is the shell's own.
     Rekey(rekey::Output<P>),
     /// A bundle output, its driver slot with it.
@@ -411,13 +421,14 @@ where
 }
 
 /// The step the rekey output `o` of `peer`'s machine asks for: a restart
-/// report and a teardown are the core's, a replacement request goes to its
-/// gates, and everything else is the shell's.
+/// report and a teardown are the core's, a replacement or redial request
+/// goes to its gates, and everything else is the shell's.
 fn told<P: Profile, D>(o: rekey::Output<P>, peer: NodeAddr) -> Step<P, D> {
     match o {
         rekey::Output::PeerRestarted { epoch, .. } => Step::Core(In::Restarted { peer, epoch }),
         rekey::Output::Teardown(_) => Step::Core(In::Ended { peer }),
         rekey::Output::ReplaceRequested { tok } => Step::Replace(tok),
+        rekey::Output::RedialRequested { tok, ephemeral } => Step::Redial { tok, ephemeral },
         other @ (rekey::Output::Send { .. }
         | rekey::Output::Prompt { .. }
         | rekey::Output::Deliver { .. }

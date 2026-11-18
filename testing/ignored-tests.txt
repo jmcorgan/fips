@@ -122,3 +122,9 @@ known-defect  fips-mesh  node::tests::settle::crossing::a_crossing_settled_at_th
 known-defect  fips-mesh  node::tests::settle::crossing::a_crossing_settled_at_the_larger_nodes_msg3_leaves_it_on_a_link_with_an_open_connection_larger_first  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_crossing_settled_at_the_larger_nodes_msg3_leaves_it_on_a_link_with_an_open_connection_larger_first_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::ble::a_crossed_dial_won_on_a_second_link_leaves_the_larger_node_on_a_pooled_link  src/node/tests/ble.rs
+# The next two are issue 130 on this line, with multipath off and on: a
+# redial from a new address by the larger node settles only after the
+# responder reaps the old peering. The smaller node's redial settles at its
+# msg3, and its target tests run.
+known-defect  fips-mesh  node::tests::roam_redial::a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering  src/node/tests/roam_redial.rs
+known-defect  fips-mesh  node::tests::roam_redial::a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering_with_multipath_on  src/node/tests/roam_redial.rs

@@ -138,11 +138,13 @@ fn facts(r: &mut Run) -> Option<&mut Facts> {
 fn transition(link: LinkId, ambient: &PeerActionCtx) -> Transition {
     let initiator = ambient.is_outbound;
     match ambient.why {
-        Some(why @ (Why::Restart | Why::Replacement | Why::OwnRestart)) => Transition::Replace {
-            link,
-            initiator,
-            why,
-        },
+        Some(why @ (Why::Restart | Why::Replacement | Why::Redial | Why::OwnRestart)) => {
+            Transition::Replace {
+                link,
+                initiator,
+                why,
+            }
+        }
         Some(
             Why::Ended | Why::Orphaned | Why::Disconnect | Why::Dead | Why::Admin | Why::Closed,
         )

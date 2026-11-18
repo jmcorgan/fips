@@ -28,6 +28,18 @@
 //!   an acceptance stamps it, so a sustained replay cannot keep a genuine
 //!   restart out.
 //!
+//! A redial (a fresh same-epoch msg1 off the established link of a held
+//! peering that has been heard from, operator decision 2026-11-17) is
+//! judged by the silent-session refusal, its own memory of the ephemerals
+//! that armed a redial of the peer within [`Params::interval`] (at most
+//! [`Params::replays`] of them) and the dampener, and not by the heard
+//! floor or the replay memory of unheard promotions: it tears nothing down
+//! when it is answered, and the peering it would replace is one the peer
+//! was heard on. A peering not yet heard from is never redialed, so the
+//! unheard floor does not arise. Its
+//! acceptance stamps nothing; the swap its first frame proves does
+//! ([`Gates::swapped`]), so a replayer, which sends no frame, cannot.
+//!
 //! A new epoch in a msg2 is the reply to this node's own handshake, so
 //! neither msg2 source is refused or stamps the dampener. A frame that
 //! authenticates forgets the peer's replay memory and silent sessions.
@@ -52,6 +64,10 @@ pub enum Source {
     Restart,
     /// A same-epoch msg1 that would replace the peering (rule 3.3).
     Replacement,
+    /// A fresh same-epoch msg1 off the held peer's established link, to be
+    /// answered into a redial that replaces the peering only at the peer's
+    /// first frame under it (operator decision, 2026-11-17).
+    Redial,
     /// A new epoch in the msg2 of this node's own dial.
     OwnMsg2,
     /// A new epoch revealed in the msg2 of a rekey.
@@ -62,7 +78,7 @@ impl Source {
     /// Whether the source is a msg1.
     fn msg1(self) -> bool {
         match self {
-            Self::NotHeld | Self::Restart | Self::Replacement => true,
+            Self::NotHeld | Self::Restart | Self::Replacement | Self::Redial => true,
             Self::OwnMsg2 | Self::RekeyMsg2 => false,
         }
     }
@@ -87,6 +103,9 @@ pub enum Refusal {
     ReplayFull,
     /// The identity's silent-session back-off is running at this epoch.
     Silent,
+    /// The redial's ephemeral already armed a redial of the identity within
+    /// [`Params::interval`], or [`Params::replays`] of them did.
+    Redialed,
 }
 
 /// What the gate knows of the peering a source would tear down.
@@ -139,6 +158,10 @@ struct Memory<I> {
     replays: Vec<(EphemeralDigest, I)>,
     /// The silent-session record.
     silence: Option<Silence<I>>,
+    /// The ephemerals that armed a redial, and when. Kept apart from
+    /// `replays`, which a frame forgets: the held peering a redial meets
+    /// keeps sending frames.
+    redials: Vec<(EphemeralDigest, I)>,
 }
 
 impl<I> Default for Memory<I> {
@@ -147,6 +170,7 @@ impl<I> Default for Memory<I> {
             stamp: None,
             replays: Vec::new(),
             silence: None,
+            redials: Vec::new(),
         }
     }
 }
@@ -187,7 +211,7 @@ impl<I: Instant> Gates<I> {
     ) -> Option<Refusal> {
         let mem = self.peers.entry(peer).or_default();
         let silenced = match ask.source {
-            Source::NotHeld | Source::Replacement => mem.silencing(ask.epoch, now),
+            Source::NotHeld | Source::Replacement | Source::Redial => mem.silencing(ask.epoch, now),
             Source::Restart | Source::OwnMsg2 | Source::RekeyMsg2 => false,
         };
         if silenced {
@@ -197,8 +221,11 @@ impl<I: Instant> Gates<I> {
             (Source::NotHeld, _) | (_, None) => return None,
             (_, Some(held)) => held,
         };
+        if ask.source == Source::Redial {
+            return mem.redial(&ask, held, now, params);
+        }
         let gated = match ask.source {
-            Source::Restart | Source::Replacement => true,
+            Source::Restart | Source::Replacement | Source::Redial => true,
             Source::OwnMsg2 => fault!(OutboundGated),
             Source::NotHeld | Source::RekeyMsg2 => false,
         };
@@ -303,6 +330,46 @@ impl<I: Instant> Gates<I> {
         Some(length)
     }
 
+    /// Whether `peer`'s silent-session back-off refuses a msg1 at `epoch`
+    /// at `now`: the gate's first question, asked alone.
+    pub fn silenced(&self, peer: &NodeAddr, epoch: Option<Epoch>, now: I) -> bool {
+        self.peers
+            .get(peer)
+            .is_some_and(|m| m.silencing(epoch, now))
+    }
+
+    /// A redial of `peer` was armed by a msg1 with `ephemeral` at `now`.
+    pub fn redialed(
+        &mut self,
+        peer: NodeAddr,
+        ephemeral: EphemeralDigest,
+        now: I,
+        params: &Params,
+    ) {
+        if fault!(RedialUngated) {
+            return;
+        }
+        let mem = self.peers.entry(peer).or_default();
+        mem.redials.retain(|(_, at)| recent(*at, now, params));
+        if !mem.redials.iter().any(|(e, _)| *e == ephemeral) {
+            mem.redials.push((ephemeral, now));
+        }
+        if mem.redials.len() > params.replays {
+            mem.redials.remove(0);
+        }
+    }
+
+    /// A redial of `peer` replaced its peering at `now`, proven by the
+    /// peer's frame: the dampener is stamped if the peering it replaced was
+    /// `heard`, and the redial memory is forgotten.
+    pub fn swapped(&mut self, peer: NodeAddr, heard: bool, now: I) {
+        let mem = self.peers.entry(peer).or_default();
+        if heard {
+            mem.stamp = Some(now);
+        }
+        mem.redials.clear();
+    }
+
     /// When a restart or replacement of `peer` last stamped the dampener.
     pub fn stamp(&self, peer: &NodeAddr) -> Option<I> {
         self.peers.get(peer).and_then(|m| m.stamp)
@@ -353,6 +420,35 @@ impl<I: Instant> Memory<I> {
             } else {
                 Refusal::Unheard
             });
+        }
+        if self.stamp.is_some_and(|t| recent(t, now, params)) {
+            return Some(Refusal::Dampened);
+        }
+        None
+    }
+
+    /// A redial's memory and dampener, in the current node's order. It
+    /// stamps nothing.
+    fn redial(&self, ask: &Ask<I>, held: Liveness<I>, now: I, params: &Params) -> Option<Refusal> {
+        if fault!(RedialUngated) {
+            return None;
+        }
+        if let Some(e) = ask.ephemeral {
+            let live: Vec<&EphemeralDigest> = self
+                .redials
+                .iter()
+                .filter(|(_, at)| recent(*at, now, params))
+                .map(|(e, _)| e)
+                .collect();
+            if live.contains(&&e) || live.len() >= params.replays {
+                return Some(Refusal::Redialed);
+            }
+        }
+        if fault!(RedialHeardFloored)
+            && held.heard
+            && recent(held.last.unwrap_or(held.installed), now, params)
+        {
+            return Some(Refusal::Heard);
         }
         if self.stamp.is_some_and(|t| recent(t, now, params)) {
             return Some(Refusal::Dampened);

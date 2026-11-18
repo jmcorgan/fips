@@ -336,6 +336,20 @@ faults! {
     /// as soon as the Wi-Fi path's window score passes the cable's, and the
     /// Wi-Fi path takes it back once the load has followed, over and over.
     MediumMoveUnheld,
+    /// A fresh same-epoch msg1 off the established link of a heard peering
+    /// is refused as off the link while that link is reachable, and asks
+    /// for a replacement on a link too young to rekey, as before redials
+    /// were answered.
+    OffLinkFreshRefused,
+    /// The link machine records a redial msg1's ephemeral when it judges
+    /// the msg1, so a redial the node then refuses has its resends refused
+    /// as copies for as long as the link lives.
+    RedialRecordsAtJudge,
+    /// A fresh msg1 off the established link of a peering not yet heard
+    /// from is answered into a redial, as one of a heard peering is, where
+    /// it should be replaced at the msg1 (rule 3.3) or refused as off the
+    /// link (rule 4.1) as before.
+    RedialCoversUnheard,
 }
 
 impl Fault {

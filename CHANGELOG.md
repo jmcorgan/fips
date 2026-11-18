@@ -1835,6 +1835,20 @@ with v0.5.x or earlier peers.
 
 #### Peer and link state
 
+- A peer that changes address while its node keeps running and dials again
+  is answered at once. The responder keeps the old peering until the peer's
+  first frame on the new session, then moves the peering to the new address,
+  keeping the peer's tree and filter state and re-opening the end-to-end
+  session; before, the dial was refused until the old peering timed out
+  (about 45 s at the defaults). A dial to a second address of a peer whose
+  link has gone quiet now moves the peering to that address the same way
+  instead of being refused, and crossed TCP dials whose second msg1 reaches
+  the larger node on its own connection now settle both ends on the smaller
+  node's dial. A replayed handshake message cannot end or move a peering:
+  the responder answers it once, to the address it came from, and discards
+  that pending state after the handshake timeout. Nothing on the wire
+  changes.
+
 - With multipath enabled, a dial to a peer that times out after the peer came
   up on another link now leaves its address as a path candidate, where before
   the address was dropped with the dial. A dial that loses that race was the

@@ -258,6 +258,7 @@ fn with_arrival_on_an_off_link_msg1_accepted_while_unreachable_is_answered_on_th
         let at = Arrival {
             on_link,
             reachable: false,
+            heard: true,
         };
 
         let evs = b.recv_on(41_000, &m1, at);
@@ -325,7 +326,8 @@ fn every_ik_msg1_cell_takes_its_rows_action() {
     );
     assert_eq!(b.digest(), before);
 
-    // Eligible (link 40 s, session 40 s).
+    // Eligible (link 40 s, session 40 s). The peering was never heard from,
+    // so a fresh msg1 off the link keeps rule 4.1 rather than a redial.
     let off = fresh(&a.local, &b.local);
     let before = view(&b);
     assert_eq!(
@@ -334,7 +336,8 @@ fn every_ik_msg1_cell_takes_its_rows_action() {
             &off,
             Arrival {
                 on_link: false,
-                reachable: true
+                reachable: true,
+                heard: false,
             }
         ),
         vec![Ev::Reject(Reason::OffLink)]
@@ -356,6 +359,7 @@ fn every_ik_msg1_cell_takes_its_rows_action() {
     let unreachable = Arrival {
         on_link: false,
         reachable: false,
+        heard: true,
     };
     let evs = b.recv_on(41_000, &m1, unreachable);
     let m2 = bytes(&last(&mut b.wire, MsgKind::Msg2));
@@ -1564,5 +1568,131 @@ fn cross_connection_move_keeps_the_time_the_peer_was_last_heard() {
         a.m().view().last_rx,
         heard,
         "the last-heard time is inherited"
+    );
+}
+
+/// A link past both eligibility floors when `eligible`, else 5 s old.
+fn redial_link(eligible: bool) -> (Node<Ik>, Node<Ik>, u64) {
+    let (x, y) = ordered(1, 2);
+    let (a, b) = pair::<Ik>(x, y, 0, with(Config::fmp(), |_| {}));
+    (a, b, if eligible { 40_000 } else { 5_000 })
+}
+
+/// The arrival of a msg1 off a link that is up, of a heard peering.
+const OFF: Arrival = Arrival {
+    on_link: false,
+    reachable: true,
+    heard: true,
+};
+
+#[test]
+fn a_fresh_msg1_off_the_link_of_an_unheard_peering_keeps_the_replacement_or_the_off_link_refusal() {
+    for (eligible, want) in [
+        (false, vec![Ev::Replace]),
+        (true, vec![Ev::Reject(Reason::OffLink)]),
+    ] {
+        let (a, mut b, t) = redial_link(eligible);
+        let m1 = fresh(&a.local, &b.local);
+        let evs = b.recv_on(
+            t,
+            &m1,
+            Arrival {
+                heard: false,
+                ..OFF
+            },
+        );
+        assert_eq!(
+            evs, want,
+            "defect: eligible {eligible}: an unheard peering's off-link msg1 was taken as a redial"
+        );
+    }
+}
+
+#[test]
+fn a_fresh_msg1_off_an_aged_reachable_link_asks_for_a_redial_and_records_nothing_until_noted() {
+    for eligible in [true, false] {
+        let (a, mut b, t) = redial_link(eligible);
+        let m1 = fresh(&a.local, &b.local);
+        let before = b.digest();
+        let evs = b.recv_on(t, &m1, OFF);
+        assert!(
+            matches!(evs.as_slice(), [Ev::Redial(_)]),
+            "defect: eligible {eligible}: {evs:?}"
+        );
+        assert_eq!(
+            b.digest(),
+            before,
+            "defect: eligible {eligible}: the judgement recorded the ephemeral"
+        );
+        let again = b.recv_on(t + 1, &m1, OFF);
+        assert!(
+            matches!(again.as_slice(), [Ev::Redial(_)]),
+            "defect: eligible {eligible}: an unnoted redial's resend is judged afresh: {again:?}"
+        );
+    }
+}
+
+#[test]
+fn a_noted_redial_ephemeral_makes_its_copy_a_copy() {
+    for eligible in [true, false] {
+        let (a, mut b, t) = redial_link(eligible);
+        let m1 = fresh(&a.local, &b.local);
+        let Some(Ev::Redial(e)) = b.recv_on(t, &m1, OFF).pop() else {
+            panic!("precondition: a redial");
+        };
+        b.m.as_mut().expect("the node has a machine").note_redial(e);
+        let copy = b.recv_on(t + 1, &m1, OFF);
+        let want = if eligible {
+            Reason::OffLink
+        } else {
+            Reason::AnsweredBefore
+        };
+        assert_eq!(
+            copy,
+            vec![Ev::Reject(want)],
+            "defect: eligible {eligible}: a noted redial's copy"
+        );
+    }
+}
+
+#[test]
+fn a_copy_off_the_link_is_still_refused_as_off_link_and_a_fresh_msg1_on_it_is_still_a_rekey_or_replacement()
+ {
+    let (a, mut b, t) = redial_link(true);
+    let on = fresh(&a.local, &b.local);
+    let evs = b.recv_on(
+        t,
+        &on,
+        Arrival {
+            on_link: true,
+            reachable: true,
+            heard: true,
+        },
+    );
+    assert!(
+        evs.iter().any(|e| matches!(e, Ev::Send(MsgKind::Msg2, ..))),
+        "an eligible fresh msg1 on the link is answered as a rekey: {evs:?}"
+    );
+    let (a, mut b, t) = redial_link(false);
+    let on = fresh(&a.local, &b.local);
+    assert_eq!(
+        b.recv(t, &on),
+        vec![Ev::Replace],
+        "a fresh msg1 on a young link still asks for the restart gates"
+    );
+    let (a, mut b, t) = redial_link(true);
+    let unreachable = fresh(&a.local, &b.local);
+    let evs = b.recv_on(
+        t,
+        &unreachable,
+        Arrival {
+            on_link: false,
+            reachable: false,
+            heard: true,
+        },
+    );
+    assert!(
+        evs.iter().any(|e| matches!(e, Ev::Send(MsgKind::Msg2, ..))),
+        "a fresh msg1 off a link that cannot be reached is answered as a rekey: {evs:?}"
     );
 }

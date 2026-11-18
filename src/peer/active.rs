@@ -190,7 +190,7 @@ fn split(joined: LinkJoined) -> (LinkOutputs, Outputs<UdpSlot>, Vec<In>) {
             Step::Rekey(o) => rekey.push(o),
             Step::Path(o) => paths.push(o),
             Step::Core(input) => core.push(input),
-            Step::Replace(_) => {
+            Step::Replace(_) | Step::Redial { .. } => {
                 debug_assert!(
                     false,
                     "a build or close of the machines asked for a replacement"

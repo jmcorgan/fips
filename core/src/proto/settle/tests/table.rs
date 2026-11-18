@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 
 use super::*;
 use crate::proto::rekey::IndexLease;
+use crate::proto::settle::gates::Refusal;
 use crate::testutil::TestInstant;
 use crate::transport::{TransportAddr, TransportId};
 
@@ -533,4 +534,173 @@ fn the_table_and_the_record_read_the_mirror_the_same_way() {
         );
         assert_eq!(released(&out), closes, "the table's closes after {shown}");
     }
+}
+
+/// A table holding the larger node, heard, from its msg1 1 at port 9,
+/// at 40 s: past both floors.
+fn held_heard() -> Table<TestInstant> {
+    let mut table = Table::new(small(), Params::default());
+    let out = go(&mut table, msg1(large(), 1, 9), 0);
+    let link = answered(&out);
+    go(&mut table, Input::Sent { link }, 0);
+    go(
+        &mut table,
+        Input::Heard {
+            peer: large(),
+            from: pair(9),
+        },
+        40_000,
+    );
+    table
+}
+
+/// Redial `n` of the larger node from `port`, answered and sent at `at`:
+/// the leg's link.
+fn redialed(table: &mut Table<TestInstant>, n: u32, port: u16, at: u64) -> LinkNo {
+    let out = go(table, Input::Redial(hello(large(), n, port)), at);
+    let link = answered(&out);
+    let out = go(table, Input::Sent { link }, at);
+    assert!(
+        !out.iter()
+            .any(|o| matches!(o, Output::Opened { .. } | Output::Remove { .. })),
+        "defect: a redial's sent answer installed or removed: {out:?}"
+    );
+    link
+}
+
+#[test]
+fn a_redial_opens_a_leg_and_leaves_the_held_peer() {
+    let mut table = held_heard();
+    let before = table.held(&large()).map(|h| h.link);
+    let link = redialed(&mut table, 2, 8, 40_100);
+    assert_eq!(table.held(&large()).map(|h| h.link), before);
+    assert_eq!(table.redialing(&large()), Some(link));
+    assert!(table.legs().get(link).is_some());
+}
+
+#[test]
+fn a_frame_under_a_sent_redial_leg_replaces_the_held_peer_for_redial() {
+    let mut table = held_heard();
+    let old = table.held(&large()).map(|h| h.link).expect("held");
+    let link = redialed(&mut table, 2, 8, 40_100);
+    let out = go(
+        &mut table,
+        Input::LegHeard {
+            link,
+            from: pair(8),
+        },
+        40_200,
+    );
+    assert!(
+        out.iter().any(|o| matches!(
+            o,
+            Output::Remove {
+                why: Why::Redial,
+                ..
+            }
+        )) && out.iter().any(
+            |o| matches!(o, Output::Retire { link: l, closes } if *l == old && closes.is_empty())
+        ) && out.iter().any(|o| matches!(
+            o,
+            Output::Reset {
+                transition: Transition::Replace,
+                ..
+            }
+        )),
+        "defect: the leg's frame did not replace the peer for a redial: {out:?}"
+    );
+    let h = table.held(&large()).expect("held");
+    assert!(h.link == link && h.heard && h.current == pair(8));
+    assert_eq!(table.redialing(&large()), None);
+}
+
+#[test]
+fn a_redial_leg_reaped_at_its_deadline_leaves_the_held_peer() {
+    let mut table = held_heard();
+    let old = table.held(&large()).map(|h| h.link);
+    let link = redialed(&mut table, 2, 8, 40_100);
+    let out = drain(table.poll(t(40_100 + 30_000)));
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::Retire { link: l, .. } if *l == link)),
+        "the leg is reaped: {out:?}"
+    );
+    assert_eq!(table.held(&large()).map(|h| h.link), old);
+    assert_eq!(table.redialing(&large()), None);
+    let late = go(
+        &mut table,
+        Input::LegHeard {
+            link,
+            from: pair(8),
+        },
+        70_200,
+    );
+    assert!(
+        late.is_empty(),
+        "a reaped leg is heard by nothing: {late:?}"
+    );
+}
+
+#[test]
+fn a_redial_leg_whose_peer_is_gone_installs_at_its_send_and_is_no_longer_a_redial() {
+    let mut table = held_heard();
+    let out = go(&mut table, Input::Redial(hello(large(), 2, 8)), 40_100);
+    let link = answered(&out);
+    go(&mut table, Input::Dead { peer: large() }, 40_150);
+    let out = go(&mut table, Input::Sent { link }, 40_200);
+    assert!(
+        out.iter().any(|o| matches!(
+            o,
+            Output::Reset {
+                transition: Transition::Promote,
+                ..
+            }
+        )),
+        "{out:?}"
+    );
+    assert_eq!(table.held(&large()).map(|h| h.link), Some(link));
+    assert_eq!(table.redialing(&large()), None);
+}
+
+#[test]
+fn one_redial_leg_per_identity() {
+    let mut table = held_heard();
+    let first = redialed(&mut table, 2, 8, 40_100);
+    let early = go(&mut table, Input::Redial(hello(large(), 3, 7)), 41_099);
+    assert!(
+        early.iter().any(|o| matches!(
+            o,
+            Output::Reject {
+                why: Denial::Held,
+                ..
+            }
+        )),
+        "{early:?}"
+    );
+    assert_eq!(table.redialing(&large()), Some(first));
+    let late = go(&mut table, Input::Redial(hello(large(), 3, 7)), 41_100);
+    assert!(
+        late.iter()
+            .any(|o| matches!(o, Output::Retire { link, .. } if *link == first)),
+        "the older leg is abandoned: {late:?}"
+    );
+    assert_ne!(table.redialing(&large()), Some(first));
+}
+
+#[test]
+fn the_redial_memory_refuses_a_seen_ephemeral() {
+    let mut table = held_heard();
+    let first = redialed(&mut table, 2, 8, 40_100);
+    go(&mut table, Input::ConnectFailed { link: first }, 40_200);
+    let again = go(&mut table, Input::Redial(hello(large(), 2, 7)), 42_000);
+    assert!(
+        again.iter().any(|o| matches!(
+            o,
+            Output::Reject {
+                why: Denial::Gate(Refusal::Redialed),
+                ..
+            }
+        )),
+        "defect: {again:?}"
+    );
 }

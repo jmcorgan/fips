@@ -50,6 +50,11 @@ pub enum Why {
     Restart,
     /// A same-epoch msg1 replaced it (rule 3.3).
     Replacement,
+    /// A redial from another address replaced its link: a fresh same-epoch
+    /// msg1 off the established link, answered into a pending redial and
+    /// proven by the peer's first frame under it. The peer's identity-level
+    /// state (its tree declaration and filter) is kept.
+    Redial,
     /// This node's own dial found it restarted.
     OwnRestart,
     /// Its rekey machine tore it down.
@@ -73,6 +78,9 @@ pub enum Denial {
     Gate(Refusal),
     /// The admission cap on answers in flight is reached.
     Full,
+    /// Another redial of the identity is pending and younger than the
+    /// unheard floor.
+    Held,
 }
 
 /// A peer installed.

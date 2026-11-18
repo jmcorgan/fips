@@ -51,8 +51,8 @@ pub(crate) enum Transition {
     /// The held peer torn down and a new one installed, by a msg3 at a new
     /// epoch (`Restart`), or this node's own dial answered by a restarted
     /// peer (`OwnRestart`, the only one this node initiated). A same-epoch
-    /// handshake never replaces a held peer on this line, so `Replacement`
-    /// has no site.
+    /// handshake never replaces a held peer on this line, so neither
+    /// `Replacement` nor `Redial` has a site.
     Replace {
         // As in `Promote`.
         link: LinkId,
@@ -564,6 +564,7 @@ fn reached(t: &Transition) -> bool {
             Why::Restart => !initiator,
             Why::OwnRestart => *initiator,
             Why::Replacement
+            | Why::Redial
             | Why::Ended
             | Why::Orphaned
             | Why::Disconnect
@@ -575,7 +576,7 @@ fn reached(t: &Transition) -> bool {
         Transition::Move { own, .. } => !own,
         Transition::Remove { why } => match why {
             Why::Ended | Why::Orphaned | Why::Disconnect | Why::Dead | Why::Admin => true,
-            Why::Restart | Why::Replacement | Why::OwnRestart | Why::Closed => false,
+            Why::Restart | Why::Replacement | Why::Redial | Why::OwnRestart | Why::Closed => false,
         },
         Transition::Promote { .. }
         | Transition::Keep { .. }
@@ -853,6 +854,7 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
                 Why::Dead => Cell::SteppedThenRemoved,
                 Why::Restart
                 | Why::Replacement
+                | Why::Redial
                 | Why::OwnRestart
                 | Why::Ended
                 | Why::Orphaned
@@ -899,6 +901,7 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
                 Why::Admin => Cell::UnkeptQueuedCurrentClosed,
                 Why::Restart
                 | Why::Replacement
+                | Why::Redial
                 | Why::OwnRestart
                 | Why::Ended
                 | Why::Orphaned
@@ -937,6 +940,7 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
                 // reads no pair to clear, and only a drained close clears.
                 Why::Restart
                 | Why::Replacement
+                | Why::Redial
                 | Why::OwnRestart
                 | Why::Ended
                 | Why::Orphaned
@@ -1075,9 +1079,12 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
             T::Remove { why } => match why {
                 Why::Dead | Why::Disconnect | Why::Orphaned => Cell::NotedDead,
                 Why::Admin => Cell::Removed,
-                Why::Restart | Why::Replacement | Why::OwnRestart | Why::Ended | Why::Closed => {
-                    Cell::Keep
-                }
+                Why::Restart
+                | Why::Replacement
+                | Why::Redial
+                | Why::OwnRestart
+                | Why::Ended
+                | Why::Closed => Cell::Keep,
             },
         },
         Row::IdentityCache => match t {

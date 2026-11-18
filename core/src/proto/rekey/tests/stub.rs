@@ -1064,6 +1064,7 @@ pub(crate) enum Ev<T> {
     Restarted(Layer, [u8; 8]),
     Rekeyed(Role),
     Replace,
+    Redial(crate::proto::rekey::Digest),
     Reject(Reason),
     Abandoned(Abandon),
     Teardown(Teardown),
@@ -1269,6 +1270,7 @@ impl<P: Stub> Node<P> {
                 Output::PeerRestarted { layer, epoch } => Ev::Restarted(layer, epoch),
                 Output::Rekeyed { role } => Ev::Rekeyed(role),
                 Output::ReplaceRequested { .. } => Ev::Replace,
+                Output::RedialRequested { ephemeral, .. } => Ev::Redial(ephemeral),
                 Output::Reject(r) => Ev::Reject(r),
                 Output::Abandoned(a) => Ev::Abandoned(a),
                 Output::Teardown(t) => Ev::Teardown(t),
@@ -1307,6 +1309,7 @@ impl<P: Stub> Node<P> {
             super::super::Arrival {
                 on_link: true,
                 reachable: true,
+                heard: true,
             },
         )
     }

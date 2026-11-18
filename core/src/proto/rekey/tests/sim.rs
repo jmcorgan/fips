@@ -1091,6 +1091,7 @@ impl<P: Stub> World<P> {
                 | Ev::Restarted(..)
                 | Ev::Rekeyed(_)
                 | Ev::Replace
+                | Ev::Redial(_)
                 | Ev::Teardown(_) => {}
             }
         }

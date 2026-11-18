@@ -57,6 +57,16 @@
 # crate), and the node's own
 # `crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_*` tests
 # hold it of a real node. The trace holds no `core` line.
+#
+# Added with the deferred redial (the operator's decision, 2026-11-17): a
+# second dial on another transport, which reaches the responder from an
+# address its link does not hold, in both address orders and at both
+# settings. Its lines were written from the model's `DeferredRedial` rule
+# before any side ran them: the responder answers the second msg1 and keeps
+# its peering, unheard, through the dialer's move onto its own second dial
+# (FRC-1201 Section 5.6's own-dial rule), and holds the dialer's TCP
+# connection, heard, once the heal delivers the dialer's first frame under
+# it. The joint world and real nodes then gave the same lines.
 
 script crossing-udp-smaller-first-off off off
 1 n0 none
@@ -801,6 +811,86 @@ script crossing-tcp-rekey-larger-on on on
 12 n1 held own out tcp-home tcp-home heard
 13 n0 held own in tcp-accepted tcp-accepted heard
 13 n1 held peer out tcp-home tcp-home heard
+
+script redial-transport-smaller-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home heard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home heard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+8 n0 held own out tcp-home tcp-home heard
+8 n1 held peer in udp-home udp-home heard
+9 n0 held own out tcp-home tcp-home heard
+9 n1 held peer in tcp-accepted tcp-accepted heard
+
+script redial-transport-larger-off off off
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home heard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home heard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+8 n0 held own out tcp-home tcp-home heard
+8 n1 held peer in udp-home udp-home heard
+9 n0 held own out tcp-home tcp-home heard
+9 n1 held peer in tcp-accepted tcp-accepted heard
+
+script redial-transport-smaller-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home heard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home heard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+8 n0 held own out tcp-home tcp-home heard
+8 n1 held peer in udp-home udp-home heard
+9 n0 held own out tcp-home tcp-home heard
+9 n1 held peer in tcp-accepted tcp-accepted heard
+
+script redial-transport-larger-on on on
+1 n0 none
+1 n1 none
+2 n0 none
+2 n1 held peer in udp-home udp-home unheard
+3 n0 held own out udp-home udp-home heard
+3 n1 held peer in udp-home udp-home unheard
+4 n0 held own out udp-home udp-home heard
+4 n1 held peer in udp-home udp-home heard
+5 n0 held own out udp-home udp-home heard
+5 n1 held peer in udp-home udp-home heard
+6 n0 held own out udp-home udp-home heard
+6 n1 held peer in udp-home udp-home heard
+7 n0 held own out udp-home udp-home heard
+7 n1 held peer in udp-home udp-home heard
+8 n0 held own out tcp-home tcp-home heard
+8 n1 held peer in udp-home udp-home heard
+9 n0 held own out tcp-home tcp-home heard
+9 n1 held peer in tcp-accepted tcp-accepted heard
 
 script ble-reaped-smaller-on on on
 1 n0 none

@@ -143,11 +143,20 @@ fn scripted(st: &Start, mk: Maker) -> Vec<Shape> {
 }
 
 /// The shape a start carries by design: the late second dial answered in
-/// the other order, and the dial on the peer's aged link.
-fn carried(number: u8) -> Vec<Shape> {
+/// the other order, and the dial on the peer's aged link. With the model at
+/// both ends (`model`), a crossing during a rekey also shows a stale frame:
+/// the crossing msg1 reaches the responder off its link and is answered as
+/// a redial, so the responder keeps sending under the session it holds,
+/// and the dialer, which moved onto its own dial and kept that session as
+/// its fallback (`LocalRule::LateSecondDial`), moves back onto it at the
+/// first such frame; the redial is then never proven. The two ends settle
+/// on the session they began with, and joint nodes, which keep no
+/// fallback, show nothing.
+fn carried(number: u8, model: bool) -> Vec<Shape> {
     match number {
         6 => alloc::vec![Shape::LaterDialFirst],
         7 => alloc::vec![Shape::DialAsRekey],
+        9 if model => alloc::vec![Shape::StaleFrame],
         _ => Vec::new(),
     }
 }
@@ -157,13 +166,13 @@ fn each_starts_own_script_shows_only_the_shape_it_carries() {
     for st in starts().into_iter().filter(|s| s.number != 12) {
         assert_eq!(
             scripted(&st, st.maker),
-            carried(st.number),
+            carried(st.number, true),
             "{}: its script's shapes",
             st.name
         );
         assert_eq!(
             scripted(&st, off),
-            carried(st.number),
+            carried(st.number, false),
             "{}: its script's shapes on joint nodes",
             st.name
         );
@@ -179,7 +188,7 @@ fn the_two_defects_left_for_later_show_their_shapes_in_the_current_and_deployed_
     for st in starts().into_iter().filter(|s| matches!(s.number, 6 | 7)) {
         assert_eq!(
             scripted(&st, master),
-            carried(st.number),
+            carried(st.number, false),
             "{} with master",
             st.name
         );

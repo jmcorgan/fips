@@ -20,6 +20,18 @@
 //!   the link's setup address, the peer's current address or one of the
 //!   link's proven paths. A replacement the machine asks for (rule 3.3)
 //!   comes back and asks the gate the same way.
+//! - **A redial** (operator decision, 2026-11-17): a fresh same-epoch msg1
+//!   off the established link, which the machine asks to have answered as
+//!   one, asks the gate as a redial and is answered by a responder leg on
+//!   its own link beside the held peer, which it leaves as it is. At most
+//!   one is pending per identity: a later one replaces it once it is as old
+//!   as the unheard floor, and is refused before. Its answer, once sent,
+//!   installs nothing while the peer is held. The first frame that
+//!   authenticates under it (`LegHeard`) replaces the peering by the leg,
+//!   for a redial (`Why::Redial`), and the swap stamps the dampener if the
+//!   peering it replaced was heard. A leg no frame proves is reaped at its
+//!   deadline. If the held peer is gone before then, the leg's send
+//!   installs it as any answer's does.
 //! - **A msg2** of this node's own dial installs the peer if none is held,
 //!   and replaces it if its epoch changed, which the gate accepts without a
 //!   stamp. Otherwise this node holds the peer already: if the held link is
@@ -100,6 +112,9 @@ struct Answered {
     replaces: bool,
     /// The answer was sent.
     sent: bool,
+    /// It answers a redial: a frame under it, not its send, replaces the
+    /// held peer.
+    redial: bool,
 }
 
 /// Test-only, for a candidate rule: a session kept beside the peer's
@@ -127,6 +142,9 @@ pub struct Table<I> {
     legs: Legs<I>,
     held: BTreeMap<NodeAddr, Held<I>>,
     answered: BTreeMap<LinkNo, Answered>,
+    /// The pending redial of each identity: its leg's link and when it
+    /// was answered.
+    redials: BTreeMap<NodeAddr, (LinkNo, I)>,
     gates: Gates<I>,
     /// Test-only: the candidate rule this node runs, if any.
     #[cfg(test)]
@@ -146,6 +164,7 @@ impl<I: Instant> Table<I> {
             legs: Legs::new(),
             held: BTreeMap::new(),
             answered: BTreeMap::new(),
+            redials: BTreeMap::new(),
             gates: Gates::new(),
             #[cfg(test)]
             cand: None,
@@ -176,6 +195,11 @@ impl<I: Instant> Table<I> {
         self.held.get(peer)
     }
 
+    /// The link of `peer`'s pending redial, if any.
+    pub fn redialing(&self, peer: &NodeAddr) -> Option<LinkNo> {
+        self.redials.get(peer).map(|(link, _)| *link)
+    }
+
     /// When [`Table::poll`] next has something to do.
     pub fn next_wake(&self) -> Option<I> {
         #[cfg(test)]
@@ -198,6 +222,9 @@ impl<I: Instant> Table<I> {
             Input::Arrived { from, bytes } => self.arrived(&from, &bytes, &mut out),
             Input::Msg1 { hello, reachable } => self.msg1(hello, reachable, now, &mut out),
             Input::Replace(hello) => self.admit(Source::Replacement, hello, now, &mut out),
+            Input::Redial(hello) => self.redial(hello, now, &mut out),
+            Input::LegHeard { .. } if fault!(LegHeardIgnored) => {}
+            Input::LegHeard { link, from } => self.leg_heard(link, from, now, &mut out),
             Input::Msg2 { link, epoch, from } => self.msg2(link, epoch, from, now, &mut out),
             Input::Restarted { peer, epoch } => self.restarted(peer, epoch, now, &mut out),
             Input::Ended { peer } => self.remove(peer, Why::Ended, now, &mut out),
@@ -247,6 +274,9 @@ impl<I: Instant> Table<I> {
                     ..
                 } => {
                     self.answered.remove(&link);
+                    if !fault!(RedialLegKept) {
+                        self.redials.retain(|_, (l, _)| *l != link);
+                    }
                     out.push(Output::Free { lease });
                     out.push(Output::Retire { link, closes });
                 }
@@ -261,6 +291,7 @@ impl<I: Instant> Table<I> {
         let mut out = Vec::new();
         let closed = self.legs.close(&mut self.links);
         self.answered.clear();
+        self.redials.clear();
         out.extend(
             closed
                 .leases
@@ -303,6 +334,7 @@ impl<I: Instant> Table<I> {
             return;
         };
         self.answered.remove(&link);
+        self.redials.retain(|_, (l, _)| *l != link);
         out.push(Output::Free { lease: leg.lease() });
         let closes = self.links.retire(link);
         out.push(Output::Retire { link, closes });
@@ -361,6 +393,7 @@ impl<I: Instant> Table<I> {
                 let arrival = Arrival {
                     on_link: self.attributed(h, &hello.from),
                     reachable,
+                    heard: h.heard,
                 };
                 out.push(Output::Rekey {
                     peer: hello.peer,
@@ -423,9 +456,11 @@ impl<I: Instant> Table<I> {
         if held.is_some() {
             let why = match source {
                 Source::Restart => Why::Restart,
-                Source::NotHeld | Source::Replacement | Source::OwnMsg2 | Source::RekeyMsg2 => {
-                    Why::Replacement
-                }
+                Source::NotHeld
+                | Source::Replacement
+                | Source::Redial
+                | Source::OwnMsg2
+                | Source::RekeyMsg2 => Why::Replacement,
             };
             #[cfg(test)]
             self.hold_replaced(peer, source, now, out);
@@ -451,6 +486,7 @@ impl<I: Instant> Table<I> {
                 epoch: hello.epoch,
                 replaces: held.is_some(),
                 sent: false,
+                redial: false,
             },
         );
         out.push(Output::Answer {
@@ -473,13 +509,25 @@ impl<I: Instant> Table<I> {
             (Kind::Answer { .. }, None) => return,
             (Kind::Answer { .. }, Some(peer)) => peer,
         };
+        let redial = self.answered.get(&link).is_some_and(|a| a.redial);
+        if self.held.contains_key(&peer) && redial && fault!(RedialInstallsAtSent) {
+            self.swap(peer, link, None, now, out);
+            return;
+        }
         if self.held.contains_key(&peer) {
-            // The peer is held through another link by now: the leg
-            // installs nothing and answers resends until it is reaped.
+            // The peer is held through another link by now, or it is the
+            // peer a redial's leg would replace at its first frame: the leg
+            // installs nothing and answers resends until it is heard or
+            // reaped.
             if let Some(a) = self.answered.get_mut(&link) {
                 a.sent = true;
             }
             return;
+        }
+        // A redial's leg whose peer is gone installs as any answer does,
+        // and is no longer a redial.
+        if !fault!(RedialLegKept) {
+            self.redials.retain(|_, (l, _)| *l != link);
         }
         let (Some(leg), Some(a), Some(pair)) = (
             self.legs.take(link),
@@ -511,6 +559,152 @@ impl<I: Instant> Table<I> {
             lease: leg.lease(),
         }));
         let transition = if a.replaces {
+            Transition::Replace
+        } else {
+            Transition::Promote
+        };
+        out.push(Output::Reset { peer, transition });
+    }
+
+    /// A redial: through the cap, the silent-session refusal, the slot rule
+    /// and the rest of the gate, then answered by a leg on its own link
+    /// beside the held peer, which is left as it is.
+    fn redial(&mut self, hello: Hello, now: I, out: &mut Vec<Output>) {
+        let peer = hello.peer;
+        let Some(held) = self.held.get(&peer).map(Held::liveness) else {
+            // Gone since the machine asked: a msg1 from an identity not
+            // held.
+            self.admit(Source::NotHeld, hello, now, out);
+            return;
+        };
+        let pending = self.redials.get(&peer).copied();
+        let refused = if self.full() {
+            Some(Denial::Full)
+        } else if self.gates.silenced(&peer, Some(hello.epoch), now) {
+            Some(Denial::Gate(super::gates::Refusal::Silent))
+        } else if pending
+            .is_some_and(|(_, at)| now.saturating_duration_since(at) < self.params.unheard)
+            && !fault!(RedialSlotIgnored)
+        {
+            Some(Denial::Held)
+        } else {
+            let ask = Ask {
+                source: Source::Redial,
+                held: Some(held),
+                ephemeral: Some(hello.ephemeral),
+                epoch: Some(hello.epoch),
+            };
+            self.gates
+                .gate(peer, ask, now, &self.params)
+                .map(Denial::Gate)
+        };
+        if let Some(why) = refused {
+            out.push(Output::Reject {
+                peer: Some(peer),
+                source: Some(Source::Redial),
+                why,
+            });
+            out.push(Output::Free { lease: hello.lease });
+            return;
+        }
+        if let Some((old, _)) = pending {
+            self.abandon(old, out);
+        }
+        self.gates
+            .redialed(peer, hello.ephemeral, now, &self.params);
+        let link = self.links.open(hello.from, Dir::Inbound, Holder::Leg);
+        let start = Start {
+            link,
+            peer: Some(peer),
+            msg1: hello.bytes,
+            lease: hello.lease,
+        };
+        if let Some(old) = self
+            .legs
+            .answer(start, hello.msg2.clone(), now, &self.params)
+        {
+            out.push(Output::Free { lease: old.lease() });
+        }
+        self.answered.insert(
+            link,
+            Answered {
+                ephemeral: hello.ephemeral,
+                epoch: hello.epoch,
+                replaces: false,
+                sent: false,
+                redial: true,
+            },
+        );
+        self.redials.insert(peer, (link, now));
+        out.push(Output::Answer {
+            link,
+            msg2: hello.msg2,
+            stored: false,
+        });
+    }
+
+    /// A frame authenticated under the redial's leg on `link`, from
+    /// `from`: the peer holds the redial's keys, so the leg replaces the
+    /// held peer, or installs the peer if none is held by now.
+    fn leg_heard(&mut self, link: LinkNo, from: Pair, now: I, out: &mut Vec<Output>) {
+        let Some(peer) = self
+            .redials
+            .iter()
+            .find(|(_, (l, _))| *l == link)
+            .map(|(p, _)| *p)
+        else {
+            return;
+        };
+        self.swap(peer, link, Some(from), now, out);
+    }
+
+    /// Replace the peer held for `peer`, if any, by the redial's leg on
+    /// `link`, heard at `now` from `from` (its setup address when `None`).
+    fn swap(
+        &mut self,
+        peer: NodeAddr,
+        link: LinkNo,
+        from: Option<Pair>,
+        now: I,
+        out: &mut Vec<Output>,
+    ) {
+        let (Some(leg), Some(a), Some(setup)) = (
+            self.legs.take(link),
+            self.answered.remove(&link),
+            self.links.get(link).map(|r| r.setup.clone()),
+        ) else {
+            return;
+        };
+        let pair = from.unwrap_or(setup);
+        self.redials.remove(&peer);
+        let heard = self.held.get(&peer).map(|h| h.heard);
+        if heard.is_some() {
+            self.remove(peer, Why::Redial, now, out);
+        }
+        self.gates.swapped(peer, heard == Some(true), now);
+        self.links.hold(link, Holder::Peer(peer));
+        self.held.insert(
+            peer,
+            Held {
+                link,
+                epoch: a.epoch,
+                current: pair.clone(),
+                heard: true,
+                installed: now,
+                last: Some(now),
+                setup: Some(a.ephemeral),
+            },
+        );
+        self.gates.heard(&peer);
+        out.push(Output::Install(Install {
+            peer,
+            link,
+            pair,
+            rekey: Build::Fresh,
+            initiator: false,
+            lease: leg.lease(),
+        }));
+        let transition = if heard.is_some() {
             Transition::Replace
         } else {
             Transition::Promote
@@ -745,6 +939,7 @@ impl<I: Instant> Table<I> {
             Why::Orphaned | Why::Admin | Why::Closed => true,
             Why::Restart
             | Why::Replacement
+            | Why::Redial
             | Why::OwnRestart
             | Why::Ended
             | Why::Disconnect
@@ -761,6 +956,7 @@ impl<I: Instant> Table<I> {
             Why::Dead | Why::Disconnect => out.push(Output::Retry { peer }),
             Why::Restart
             | Why::Replacement
+            | Why::Redial
             | Why::OwnRestart
             | Why::Ended
             | Why::Orphaned

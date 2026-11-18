@@ -66,7 +66,8 @@ fn logged(w: &World, x: usize, hs: Hs) -> Option<Rec> {
         | Entry::Abandon { .. }
         | Entry::Unadopted { .. }
         | Entry::Restart
-        | Entry::Fallback => None,
+        | Entry::Fallback
+        | Entry::NoRedial => None,
     })
 }
 
@@ -219,8 +220,12 @@ fn simultaneous_rekeys_settle_on_one_session() {
     assert!(left.is_empty(), "every property holds after: {left:?}");
 }
 
+/// Node 0's rekey msg1 reaches node 1 first from a pair node 1's link holds
+/// no path at, which is answered as a redial (the operator's decision,
+/// 2026-11-17); the same msg1 then on the link is a copy, refused and left
+/// unanswered.
 #[test]
-fn a_refused_rekey_msg1_stays_refused_when_it_comes_again() {
+fn a_rekey_msg1_answered_as_a_redial_off_the_link_is_refused_as_a_copy_when_it_comes_on_the_link() {
     let mut w = paired(super::off);
     age(&mut w, 40_000);
     assert!(
@@ -235,15 +240,29 @@ fn a_refused_rekey_msg1_stays_refused_when_it_comes_again() {
     arrive(&mut w, 1, second(0, UDP), msg1);
     assert_eq!(
         logged(&w, 1, hs).and_then(|r| r.class),
-        Some(Class::OffLink),
-        "precondition: the msg1 from a pair no path holds is refused as off the link"
+        Some(Class::Redial),
+        "precondition: the msg1 from a pair no path holds is answered as a redial"
     );
-    assert!(!answers(&w, 1, 0), "precondition: and draws no answer");
+    let msg2s = |w: &World| {
+        w.net
+            .flight
+            .iter()
+            .filter(|f| f.to == 0 && matches!(f.pkt, Pkt::Msg2 { .. }))
+            .count()
+    };
+    assert!(answers(&w, 1, 0), "precondition: and draws an answer");
+    let answered = msg2s(&w);
     // Then the same msg1 on the link.
     arrive(&mut w, 1, from, msg1);
-    assert!(
-        !answers(&w, 1, 0),
-        "a msg1 refused once is refused again when it comes on the link"
+    assert_eq!(
+        last(&w, 1, hs).and_then(|r| r.class),
+        Some(Class::Recorded),
+        "defect: the copy of an armed redial's msg1 on the link is not refused as recorded"
+    );
+    assert_eq!(
+        msg2s(&w),
+        answered,
+        "defect: the copy of an armed redial's msg1 is answered again"
     );
     let left: Vec<Breach> = every_step(&w);
     assert!(left.is_empty(), "every property holds: {left:?}");
@@ -265,7 +284,8 @@ fn last(w: &World, x: usize, hs: Hs) -> Option<Rec> {
             | Entry::Abandon { .. }
             | Entry::Unadopted { .. }
             | Entry::Restart
-            | Entry::Fallback => None,
+            | Entry::Fallback
+            | Entry::NoRedial => None,
         })
         .next_back()
 }

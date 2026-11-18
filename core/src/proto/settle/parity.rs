@@ -363,6 +363,24 @@ const LATE_REORDERED: &[Step] = &[
     Step::Heal,
 ];
 
+/// Node 0 dials node 1 on UDP, which answers, and the pair runs for a
+/// minute, so node 1 has heard node 0 on the link; then node 0 dials node 1
+/// again on TCP, from an address node 1's link does not hold, and both
+/// handshakes complete: node 1 answers the second msg1 as a redial of the
+/// heard peering (the operator's decision, 2026-11-17), and the peering
+/// ends on the dial node 0 settles on, at the heal.
+const REDIAL_TRANSPORT: &[Step] = &[
+    dial(0, 1, Transport::Udp),
+    msg1(1, 1),
+    msg2(0, 1),
+    Step::Heal,
+    dial(0, 1, Transport::Tcp),
+    Step::Connected { node: 0 },
+    msg1(1, 2),
+    msg2(0, 2),
+    Step::Heal,
+];
+
 /// Node 0 dials node 1, which answers; node 0 restarts after reading the
 /// answer, and redials (start 8).
 const RESTART: &[Step] = &[
@@ -437,6 +455,8 @@ const BLE_REAPED: &[Step] = &[
 /// schedule), 3 (`crossing-tcp`), 4 (`crossing-ble`), 5
 /// (`late-dial-in-order`), 6 (`late-dial-reordered`), 8 (`restart`) and
 /// 18 (`ble-reaped`); [`UNSHARED`] says why each other start is not here.
+/// `redial-transport` is a schedule of its own, a second dial on another
+/// transport answered as a redial of a heard peering.
 pub const SCRIPTS: &[Script] = &[
     Script {
         name: "crossing-udp-smaller-first-off",
@@ -717,6 +737,34 @@ pub const SCRIPTS: &[Script] = &[
         smaller: 1,
         transports: &[Transport::Tcp],
         steps: CROSSING_TCP_REKEY,
+    },
+    Script {
+        name: "redial-transport-smaller-off",
+        settings: OFF,
+        smaller: 0,
+        transports: &[Transport::Udp, Transport::Tcp],
+        steps: REDIAL_TRANSPORT,
+    },
+    Script {
+        name: "redial-transport-larger-off",
+        settings: OFF,
+        smaller: 1,
+        transports: &[Transport::Udp, Transport::Tcp],
+        steps: REDIAL_TRANSPORT,
+    },
+    Script {
+        name: "redial-transport-smaller-on",
+        settings: ON,
+        smaller: 0,
+        transports: &[Transport::Udp, Transport::Tcp],
+        steps: REDIAL_TRANSPORT,
+    },
+    Script {
+        name: "redial-transport-larger-on",
+        settings: ON,
+        smaller: 1,
+        transports: &[Transport::Udp, Transport::Tcp],
+        steps: REDIAL_TRANSPORT,
     },
     Script {
         name: "ble-reaped-smaller-on",

@@ -69,6 +69,10 @@ const MODEL: &[(&str, &str)] = &[
         "model/tests/gates.rs",
         include_str!("../model/tests/gates.rs"),
     ),
+    (
+        "model/tests/redial.rs",
+        include_str!("../model/tests/redial.rs"),
+    ),
 ];
 
 /// The core's modules, which no model source may name.

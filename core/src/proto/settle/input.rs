@@ -9,9 +9,11 @@
 //!
 //! A same-epoch msg1 from a held identity goes to that peer's rekey
 //! machine, which keeps FRC-1201 Section 5.7 rules 3.1, 3.2 and 4.1 to
-//! 4.5. The machine's replacement request, restart report and teardown
-//! come back as [`Input::Replace`], [`Input::Restarted`] and
-//! [`Input::Ended`]. The path inputs mirror the path bundle's outputs with
+//! 4.5. The machine's replacement request, redial request, restart report
+//! and teardown come back as [`Input::Replace`], [`Input::Redial`],
+//! [`Input::Restarted`] and [`Input::Ended`]. A frame that authenticates
+//! under a redial's answer, which no peer holds yet, comes back as
+//! [`Input::LegHeard`]. The path inputs mirror the path bundle's outputs with
 //! plain pairs.
 
 use alloc::vec::Vec;
@@ -87,6 +89,24 @@ pub enum Input {
     /// The rekey machine asked for this same-epoch msg1 to replace the
     /// peering (rule 3.3), with a fresh answer.
     Replace(Hello),
+    /// The rekey machine asked for this fresh same-epoch msg1, which arrived
+    /// off the held peer's established link, to be answered into a redial
+    /// (operator decision, 2026-11-17), with a fresh answer. The held peer
+    /// is left as it is. When the outputs hold a fresh
+    /// [`Output::Answer`](super::output::Output::Answer), the shell records
+    /// the msg1's ephemeral in the held link's machine
+    /// (`Rekey::note_redial`), so a copy of it is a copy from then on.
+    Redial(Hello),
+    /// A frame authenticated under the answer on `link`, a redial's leg
+    /// that no peer holds, from `from`: the peer holds the redial's keys.
+    /// The trial open leaves the replay window as it was; the shell hands
+    /// the frame to the peer installed here afterwards.
+    LegHeard {
+        /// The leg's link.
+        link: LinkNo,
+        /// The frame's source.
+        from: Pair,
+    },
     /// The msg2 of this node's own dial, authenticated.
     Msg2 {
         /// The dial's link.

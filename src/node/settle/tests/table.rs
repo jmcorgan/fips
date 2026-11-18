@@ -68,6 +68,7 @@ pub(crate) const CASES: &[Case] = &[
 const WHYS: &[Why] = &[
     Why::Restart,
     Why::Replacement,
+    Why::Redial,
     Why::OwnRestart,
     Why::Ended,
     Why::Orphaned,
@@ -159,6 +160,7 @@ fn case_of(t: &Transition) -> Option<Case> {
             | (
                 true | false,
                 Why::Replacement
+                | Why::Redial
                 | Why::Ended
                 | Why::Orphaned
                 | Why::Disconnect
@@ -207,7 +209,9 @@ fn case_of(t: &Transition) -> Option<Case> {
             Why::Disconnect => Case::RemoveDisconnect,
             Why::Dead => Case::RemoveDead,
             Why::Admin => Case::RemoveAdmin,
-            Why::Restart | Why::Replacement | Why::OwnRestart | Why::Closed => return None,
+            Why::Restart | Why::Replacement | Why::Redial | Why::OwnRestart | Why::Closed => {
+                return None;
+            }
         },
     })
 }

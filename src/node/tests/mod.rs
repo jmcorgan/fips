@@ -75,6 +75,7 @@ mod rekey_cutover_index;
 mod rekey_leg;
 mod rekey_parity;
 mod restart_dial;
+mod roam_redial;
 mod routing;
 mod rx_stall;
 mod send_report;

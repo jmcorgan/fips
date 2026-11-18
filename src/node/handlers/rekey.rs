@@ -341,8 +341,8 @@ impl Node {
                     return report;
                 }
                 // A link machine reads no msg1 and so never asks for the
-                // restart gates.
-                Step::Replace(_) => {
+                // restart gates or for a redial.
+                Step::Replace(_) | Step::Redial { .. } => {
                     debug_assert!(false, "a link machine asked for the restart gates");
                     continue;
                 }
@@ -405,6 +405,7 @@ impl Node {
                 // shell's.
                 LinkOutput::PeerRestarted { .. }
                 | LinkOutput::ReplaceRequested { .. }
+                | LinkOutput::RedialRequested { .. }
                 | LinkOutput::Teardown(_) => {
                     debug_assert!(false, "the join left a core output to the shell");
                 }
@@ -683,7 +684,8 @@ impl Node {
                 | LinkOutput::Send { .. }
                 | LinkOutput::Prompt { .. }
                 | LinkOutput::Deliver { .. }
-                | LinkOutput::ReplaceRequested { .. } => {}
+                | LinkOutput::ReplaceRequested { .. }
+                | LinkOutput::RedialRequested { .. } => {}
             }
         }
     }
@@ -992,7 +994,8 @@ impl Node {
             | Output::Delegate { .. }
             | Output::Revoke { .. }
             | Output::Release(_)
-            | Output::ReplaceRequested { .. } => {}
+            | Output::ReplaceRequested { .. }
+            | Output::RedialRequested { .. } => {}
         }
     }
 

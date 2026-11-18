@@ -50,6 +50,22 @@
 //! - Where the node's replay memory or silent-session back-off refuses a
 //!   msg1 the model refuses too, the node asked those first; both refuse,
 //!   and the comparison goes on.
+//! - **A redial**: a node whose log opens with [`Entry::NoRedial`] (a
+//!   deployed release) refuses or replaces a fresh msg1 off the link where
+//!   the model answers it into a redial ([`LocalRule::DeferredRedial`],
+//!   the operator's 2026-11-17 decision). The comparison of that peer is
+//!   pruned there. A node that answers redials is compared step by step,
+//!   and a msg1 on a proven pair that the model answers as a redial is
+//!   stepped again from the setup pair, on the judge as it was before the
+//!   redial wrote anything.
+//! - **A connection opened again**: the model counts an address whose
+//!   connection closed as closed for good, where the node reads its link
+//!   reachable while any connection to the peer's address is open, as one
+//!   its bundle opened again after the close. Where the node took a fresh
+//!   msg1 off the link as off a reachable link (a redial, or a refusal as
+//!   off the link) and the model, holding the peer's address closed, took
+//!   it as off an unreachable one, the shadow steps the model again on the
+//!   judge as it was, with that address open.
 //! - **The derived index** is the core's own and has no shadow step.
 
 use alloc::format;
@@ -120,6 +136,9 @@ pub enum Entry {
     /// model keeps its fallback (the dialer's candidate rule), so the
     /// late second dial is no named difference for it.
     Fallback,
+    /// The node answers no redial: a deployed release, which refuses or
+    /// replaces a fresh msg1 off the link at once.
+    NoRedial,
 }
 
 /// A named difference from the model.
@@ -151,6 +170,12 @@ pub enum Named {
     /// node take as on the link and the model, having no paths, reads as
     /// off it.
     ProvenPath,
+    /// A node that answers no redial refused or replaced a fresh msg1 the
+    /// model answers into one.
+    Redial,
+    /// The node read the peer's link reachable over a connection opened
+    /// again to an address the model holds closed.
+    Reopened,
 }
 
 /// One difference from the shadow.
@@ -179,9 +204,11 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
     let mut found = Found::default();
     let mut now: Ms = 0;
     let mut fallback = false;
+    let mut noredial = false;
     for e in log {
         match *e {
             Entry::Fallback => fallback = true,
+            Entry::NoRedial => noredial = true,
             Entry::Restart => {
                 for (_, j, _) in judges.iter_mut() {
                     j.step(Event::Restart);
@@ -240,6 +267,7 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
                     | Event::Lost
                     | Event::Restart => false,
                 };
+                let before = j.clone();
                 let mut s = j.step(ev);
                 if *pruned {
                     continue;
@@ -253,14 +281,16 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
                     sent,
                     ..
                 } = ev
-                    && s.class == Some(Class::OffLink)
+                    && matches!(s.class, Some(Class::OffLink | Class::Redial))
                     && rec.proven
                     && !fault!(ProvenCompared)
-                    && let Some(setup) = j.peering.as_ref().map(|p| p.setup)
+                    && let Some(setup) = before.peering.as_ref().map(|p| p.setup)
                 {
-                    // Rule 4.1 refused before writing anything, so the
-                    // model's answer on the link is the same msg1 from the
-                    // peering's setup pair.
+                    // Rule 4.1 refused before writing anything, and a
+                    // redial is stepped again on the judge as it was, so
+                    // the model's answer on the link is the same msg1 from
+                    // the peering's setup pair.
+                    *j = before.clone();
                     s = j.step(Event::Msg1 {
                         hs,
                         bytes,
@@ -271,6 +301,18 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
                         sent,
                     });
                     found.named.push((peer, Named::ProvenPath));
+                }
+                if let Event::Msg1 { .. } = ev
+                    && matches!(rec.class, Some(Class::Redial | Class::OffLink))
+                    && !matches!(s.class, Some(Class::Redial | Class::OffLink))
+                    && let Some(cur) = before.peering.as_ref().map(|p| p.current)
+                    && before.closed.contains(&cur)
+                    && !fault!(ReopenedCompared)
+                {
+                    *j = before.clone();
+                    j.closed.retain(|a| *a != cur);
+                    s = j.step(ev);
+                    found.named.push((peer, Named::Reopened));
                 }
                 if previous
                     && !fault!(PreviousUnheard)
@@ -346,6 +388,16 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
                     p.fallback = None;
                     found.named.push((peer, Named::LateSecondDial));
                 }
+                if noredial
+                    && matches!(ev, Event::Msg1 { .. })
+                    && s.class == Some(Class::Redial)
+                    && rec.class != s.class
+                    && !fault!(RedialCompared)
+                {
+                    found.named.push((peer, Named::Redial));
+                    *pruned = true;
+                    continue;
+                }
                 let model_refused = s.refused.map(Refusal::Gate);
                 let named = match rec.refused {
                     Some(Refusal::Replay) => Some(Named::Replay),
@@ -415,10 +467,10 @@ mod checks {
     use super::super::super::model::history::{Bytes, Epoch, Hs, LinkId};
     use super::*;
 
-    /// A log of node 1's: node 2 held from its msg1 at `at(1)`, then at
-    /// 40 s, past both floors, a msg1 of node 2's from `from` with epoch
-    /// `epoch`, which the party logged as `class` with `change`, from a
-    /// pair its bundle holds proven or not.
+    /// A log of node 1's: node 2 held from its msg1 at `at(1)` and heard
+    /// there, then at 40 s, past both floors, a msg1 of node 2's from
+    /// `from` with epoch `epoch`, which the party logged as `class` with
+    /// `change`, from a pair its bundle holds proven or not.
     fn proven_log(
         from: Addr,
         epoch: Epoch,
@@ -446,6 +498,17 @@ mod checks {
                     change: Some(Transition::Promote),
                     ..Rec::default()
                 },
+            },
+            // A frame proves the peering, so a fresh msg1 off its link is
+            // a redial to the model.
+            Entry::Ev {
+                at: 1_000,
+                peer,
+                ev: Event::Frame {
+                    hs: Hs(1),
+                    from: at(1),
+                },
+                rec: Rec::default(),
             },
             Entry::Ev {
                 at: 40_000,
@@ -497,8 +560,14 @@ mod checks {
                 true,
             ),
             (
-                "a refusal as off the link on a pair not proven",
+                "a refusal as off the link of a fresh msg1 on a pair not proven, which the model answers as a redial",
                 proven_log(second, Epoch(1), Class::OffLink, false, None),
+                true,
+                false,
+            ),
+            (
+                "a redial on a pair not proven",
+                proven_log(second, Epoch(1), Class::Redial, false, None),
                 false,
                 false,
             ),
@@ -530,7 +599,7 @@ mod checks {
     fn a_frame_under_the_drained_session_counts_as_heard_at_the_next_gate() {
         // Node 2 is held, unheard, from its msg1; its frame under a session
         // the model holds nothing of, the one a rekey cut over from, then
-        // arrives; and half a second later its msg1 from another address is
+        // arrives; and half a second later its fresh msg1 on the link is
         // refused by the heard floor, as the node refuses it. Read as
         // unheard, the model would let the replacement through.
         let peer = Node(2);
@@ -566,7 +635,7 @@ mod checks {
             Entry::Ev {
                 at: 2_500,
                 peer,
-                ev: msg1(3, at(7)),
+                ev: msg1(3, at(1)),
                 rec: Rec {
                     class: Some(Class::Replacement),
                     refused: Some(Refusal::Gate(Gate::Heard)),
@@ -584,6 +653,87 @@ mod checks {
             found.named.contains(&(peer, Named::HeardByPrevious)),
             "and the difference is named: {:?}",
             found.named
+        );
+    }
+
+    #[test]
+    fn a_redial_over_a_connection_opened_again_is_compared_with_the_address_open() {
+        // Node 2 is held on a connection to at(1) that then closes, and the
+        // node's bundle connects to at(1) again; a fresh msg1 off the link
+        // 40 s on is a redial at the node, which reads the link reachable,
+        // and a rekey to a model that holds at(1) closed.
+        let peer = Node(2);
+        let msg1 = |hs: u32, from: Addr| Event::Msg1 {
+            hs: Hs(hs),
+            bytes: Bytes(hs),
+            epoch: Epoch(1),
+            link: LinkId(hs),
+            from,
+            binding: Binding::Connected,
+            sent: true,
+        };
+        let log = alloc::vec![
+            Entry::Ev {
+                at: 0,
+                peer,
+                ev: msg1(1, at(1)),
+                rec: Rec {
+                    class: Some(Class::NotHeld),
+                    change: Some(Transition::Promote),
+                    ..Rec::default()
+                },
+            },
+            Entry::Ev {
+                at: 1_000,
+                peer,
+                ev: Event::Frame {
+                    hs: Hs(1),
+                    from: at(1),
+                },
+                rec: Rec::default(),
+            },
+            Entry::Ev {
+                at: 2_000,
+                peer,
+                ev: Event::Close { at: at(1) },
+                rec: Rec::default(),
+            },
+            Entry::Ev {
+                at: 40_000,
+                peer,
+                ev: msg1(2, at(7)),
+                rec: Rec {
+                    class: Some(Class::Redial),
+                    ..Rec::default()
+                },
+            },
+        ];
+        let found = compare(Node(1), &log);
+        assert!(
+            found.diffs.is_empty() && found.named.contains(&(peer, Named::Reopened)),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_deployed_releases_refusal_of_a_redial_is_named_and_a_redialing_nodes_is_a_difference() {
+        // A fresh msg1 off the link of a peering past both floors, which the
+        // model answers into a redial: a node that answers no redial (a
+        // deployed release, whose log opens with the marker) refuses it as
+        // off the link, a named difference; the same refusal from a node
+        // that answers redials is a difference.
+        let refusal = proven_log(at(7), Epoch(1), Class::OffLink, false, None);
+        let mut deployed = alloc::vec![Entry::NoRedial];
+        deployed.extend(refusal.iter().copied());
+        let found = compare(Node(1), &deployed);
+        assert!(
+            found.diffs.is_empty() && found.named.contains(&(Node(2), Named::Redial)),
+            "a deployed release: {found:?}"
+        );
+        let found = compare(Node(1), &refusal);
+        assert!(
+            !found.diffs.is_empty() && !found.named.contains(&(Node(2), Named::Redial)),
+            "a node that answers redials: {found:?}"
         );
     }
 

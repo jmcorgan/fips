@@ -92,6 +92,9 @@ pub struct Routed {
     pub inputs: Vec<In>,
     /// The machine asked for the msg1 to replace the peering.
     pub replace: Option<Authentic<Msg1, Replayable>>,
+    /// The machine asked for the msg1 to be answered as a redial, with its
+    /// ephemeral as its record keys it.
+    pub redial: Option<(Authentic<Msg1, Replayable>, crate::proto::rekey::Digest)>,
     /// A cutover happened.
     pub cut: bool,
     /// The machine yielded its own attempt to the peer's.
@@ -208,6 +211,9 @@ pub fn class(
 ) -> Result<Option<Class>, Reason> {
     if r.replace.is_some() {
         return Ok(Some(Class::Replacement));
+    }
+    if r.redial.is_some() {
+        return Ok(Some(Class::Redial));
     }
     if r.sends.iter().any(|s| matches!(s, Send::Msg2 { .. })) {
         return Ok(Some(if r.yielded {
@@ -346,6 +352,7 @@ fn stepped(steps: Joined<Ik, u64, TestInstant>, ctx: &mut Ctx<'_>, r: &mut Route
                     r.replace = Some(tok);
                 }
             }
+            Step::Redial { tok, ephemeral } => r.redial = Some((tok, ephemeral)),
             Step::Rekey(o) => rekeyed(o, ctx, r),
             Step::Path(o) => pathed(o, r),
         }
@@ -400,7 +407,10 @@ fn rekeyed(o: Output<Ik>, ctx: &mut Ctx<'_>, r: &mut Routed) {
             | Abandon::Superseded
             | Abandon::Closed(_) => {}
         },
-        Output::PeerRestarted { .. } | Output::ReplaceRequested { .. } | Output::Teardown(_) => {
+        Output::PeerRestarted { .. }
+        | Output::ReplaceRequested { .. }
+        | Output::RedialRequested { .. }
+        | Output::Teardown(_) => {
             r.broken.push(format!(
                 "{:?}: the join function gave the core's output {o:?} to the shell",
                 ctx.peer

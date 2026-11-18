@@ -1259,7 +1259,7 @@ fn a_removal_closes_the_paths_before_the_rekey_machine_in_its_outputs() {
             Step::Path(_) => "path",
             Step::Rekey(_) => "rekey",
             Step::Core(_) => "core",
-            Step::Replace(_) => "replace",
+            Step::Replace(_) | Step::Redial { .. } => "replace",
         })
         .collect();
 

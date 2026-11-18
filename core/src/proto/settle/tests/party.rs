@@ -479,6 +479,14 @@ impl ModelParty {
                 .filter(|(_, (_, t))| now >= *t)
                 .map(|(k, _)| *k),
         );
+        // A redial no frame proved is dropped at the handshake timeout, as
+        // the node reaps its leg.
+        if let Some(r) = s.judge.redial
+            && now >= r.at + HANDSHAKE
+            && !ended.contains(&r.leg.hs.0)
+        {
+            ended.push(r.leg.hs.0);
+        }
         if let Some(r) = s.rekey.as_mut() {
             if now >= r.deadline {
                 // The model has no rekey deadline; the abandoned rekey is
@@ -621,6 +629,9 @@ impl Party for ModelParty {
             for (_, dl) in s.stored.values() {
                 at(*dl);
             }
+            if let Some(r) = s.judge.redial {
+                at(r.at + HANDSHAKE);
+            }
             if let Some(r) = s.rekey {
                 at(r.deadline);
                 if r.resends < RESENDS {
@@ -649,10 +660,11 @@ impl Party for ModelParty {
     }
 
     fn holds(&self, peer: Node, hs: Hs) -> bool {
-        self.sides
-            .get(&peer.0)
-            .and_then(|s| s.judge.peering.as_ref())
-            .is_some_and(|p| {
+        let Some(s) = self.sides.get(&peer.0) else {
+            return false;
+        };
+        s.judge.redial.is_some_and(|r| r.leg.hs == hs)
+            || s.judge.peering.as_ref().is_some_and(|p| {
                 p.hs == hs
                     || p.pending.is_some_and(|pd| pd.hs == hs)
                     || p.fallback.is_some_and(|f| f.hs == hs)
@@ -702,7 +714,12 @@ impl Party for ModelParty {
                 ));
             }
             let mut stored: Vec<u32> = s.stored.keys().copied().collect();
-            let mut legs: Vec<u32> = j.legs.iter().map(|l| l.hs.0).collect();
+            let mut legs: Vec<u32> = j
+                .legs
+                .iter()
+                .map(|l| l.hs.0)
+                .chain(j.redial.filter(|r| !r.sent).map(|r| r.leg.hs.0))
+                .collect();
             stored.sort_unstable();
             legs.sort_unstable();
             if stored != legs {

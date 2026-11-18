@@ -620,7 +620,7 @@ impl Node {
                     self.feed(&input);
                     continue;
                 }
-                Step::Rekey(_) | Step::Replace(_) => {
+                Step::Rekey(_) | Step::Replace(_) | Step::Redial { .. } => {
                     debug_assert!(false, "the join gave a bundle's step a rekey step");
                     continue;
                 }
@@ -813,7 +813,7 @@ impl Node {
                     self.feed(&input);
                     continue;
                 }
-                Step::Rekey(_) | Step::Replace(_) => {
+                Step::Rekey(_) | Step::Replace(_) | Step::Redial { .. } => {
                     debug_assert!(false, "the join gave a bundle's step a rekey step");
                     continue;
                 }

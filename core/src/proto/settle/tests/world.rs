@@ -1705,8 +1705,10 @@ mod checks {
     #[test]
     fn an_inbound_connection_whose_msg1_was_refused_is_closed_at_the_handshake_timeout() {
         // Node 1 holds node 0, heard just now; a msg1 claiming node 0's
-        // identity arrives over a new connection and is refused. Its
-        // sender is a recorder that never closes anything.
+        // identity in a later life arrives over a new connection and is
+        // refused by the heard floor. Its sender is a recorder that never
+        // closes anything. (A msg1 of node 0's own life from there would
+        // be answered into a redial, whose leg uses the connection.)
         let mut w = world(&[A, B, C], &[&[(1, UDP)], &[], &[]]);
         w.input(
             0,
@@ -1724,7 +1726,7 @@ mod checks {
         });
         let c = w.net.connect(2, None, home(1, TCP)).expect("a connection");
         w.connected(c, true);
-        let epoch = w.parties[0].epoch();
+        let epoch = Epoch(w.parties[0].epoch().0 + 1);
         let pkt = Pkt::Msg1 {
             id: A,
             hs: Hs(0x0100_0099),
@@ -1734,6 +1736,10 @@ mod checks {
         };
         w.net.send(2, None, home(1, TCP), pkt);
         settle(&mut w);
+        assert!(
+            !w.parties[1].holds(A, Hs(0x0100_0099)),
+            "precondition: the msg1 was refused"
+        );
         assert_eq!(
             w.net.conns[c as usize].state,
             State::Open,
@@ -1746,5 +1752,66 @@ mod checks {
             State::Closed(1),
             "the refusing node closes the connection at the handshake timeout"
         );
+    }
+
+    #[test]
+    fn a_replacement_of_an_unheard_peering_over_another_connection_closes_the_replaced_links_connection()
+     {
+        // Node 1 holds node 0 from a msg1 over one connection and has not
+        // heard from it. Past the unheard floor, a fresh msg1 of the same
+        // life over a second connection replaces the peering at the msg1
+        // (a peering not heard from is replaced, not redialed), and node 1
+        // closes the first connection, which no link uses any more. The
+        // sender is a recorder that never closes anything. Node 1 is the
+        // model, then a joint node.
+        use super::super::joint::off;
+        use super::super::starts::{Maker, model, world_of};
+        let hello = |w: &mut World, n: u32| -> u32 {
+            let c = w.net.connect(0, None, home(1, TCP)).expect("a connection");
+            w.connected(c, true);
+            let pkt = Pkt::Msg1 {
+                id: A,
+                hs: Hs(0x0100_0000 + n),
+                bytes: Bytes(0x0100_0000 + n),
+                epoch: Epoch(0x0101),
+                wire: 0,
+            };
+            w.net.send(0, None, home(1, TCP), pkt);
+            settle(w);
+            c
+        };
+        let makers: [(&str, Maker); 2] = [("model", model), ("joint", off)];
+        let mut wrong = Vec::new();
+        for (name, mk) in makers {
+            let mut w = world_of(mk, &[A, B], &[]);
+            w.parties[0] = Box::new(Recorder {
+                sessions: Vec::new(),
+                seen: std::rc::Rc::new(core::cell::RefCell::new(Vec::new())),
+            });
+            let first = hello(&mut w, 1);
+            assert!(
+                w.parties[1].holds(A, Hs(0x0100_0001)),
+                "{name}: precondition: node 1 holds node 0 from the first msg1"
+            );
+            let end = w.net.now + 2_000;
+            w.run_until(end);
+            let second = hello(&mut w, 2);
+            assert!(
+                w.parties[1].holds(A, Hs(0x0100_0002)),
+                "{name}: precondition: the second msg1 replaced the peering"
+            );
+            assert_eq!(
+                w.net.conns[second as usize].state,
+                State::Open,
+                "{name}: precondition: the replacing msg1's connection is open"
+            );
+            let state = w.net.conns[first as usize].state;
+            if state != State::Closed(1) {
+                wrong.push(format!(
+                    "{name}: the replaced link's connection is {state:?}, not closed by node 1"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 }
