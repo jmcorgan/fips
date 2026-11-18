@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .docker_exec import docker_exec_quiet, is_container_running
@@ -44,6 +45,15 @@ def _stamp(out: str | None) -> float | None:
         return float(out.splitlines()[0].strip())
     except (ValueError, IndexError):
         return None
+
+
+def cut_gap(a: str, b: str, ab: float | None, ba: float | None) -> str:
+    """How far apart the two directions of the ``a -- b`` down were cut,
+    for its log line: for that long the down was one-way."""
+    if ab is None or ba is None:
+        return "one-way gap unknown, a cut has no stamp"
+    first = f"{a}->{b}" if ab <= ba else f"{b}->{a}"
+    return f"one-way gap {abs(ab - ba) * 1000:.1f} ms, {first} cut first"
 
 
 class LinkManager:
@@ -129,14 +139,14 @@ class LinkManager:
         a, b = edge
         state = self.link_states[edge]
 
-        # The down is stamped inside the container, in the same shell as the
-        # first direction's tc command: a stamp taken on the host before two
+        # The down is stamped inside the containers, in the same shell as
+        # each direction's tc command: a stamp taken on the host before the
         # docker execs would include their start-up, hundreds of ms under
         # load, in every latency measured from it.
         host = time.time()
-        stamp = self._set_held(a, b, True)
-        self._set_held(b, a, True)
-        now = stamp if stamp is not None else host
+        ab, ba = self._hold_both(a, b, True)
+        stamps = [s for s in (ab, ba) if s is not None]
+        now = min(stamps) if stamps else host
 
         state.is_down = True
         state.down_since = now
@@ -144,8 +154,9 @@ class LinkManager:
         self.flap_events.append((now, "down", a, b))
 
         log.info(
-            "Link DOWN: %s -- %s (restore in %.0fs; stamped %.6f in %s, host %.6f)",
-            a, b, duration, now, "container" if stamp is not None else "host only", host,
+            "Link DOWN: %s -- %s (restore in %.0fs; stamped %.6f in %s, host %.6f; %s)",
+            a, b, duration, now, "container" if stamps else "host only", host,
+            cut_gap(a, b, ab, ba),
         )
 
     def _link_up(self, edge: tuple[str, str]):
@@ -197,9 +208,10 @@ class LinkManager:
                 f"u32 match u32 0 0 action drop",
             )
         elif mode == "netem":
-            stamp = self._set_held(a, b, True)
-            if stamp is None or self._set_held(b, a, True) is None:
+            ab, ba = self._hold_both(a, b, True)
+            if ab is None or ba is None:
                 raise StepError(f"netem down of {a}--{b} did not install")
+            stamp = min(ab, ba)
         elif mode == "admin":
             other = b if end == a else a
             iface = veth_interface_name(end, other)
@@ -214,8 +226,9 @@ class LinkManager:
         self.flap_events.append((stamp, "down", a, b))
         log.info(
             "Link DOWN (scheduled, %s%s): %s -- %s for %.0fs; stamped %.6f in "
-            "the container, host %.6f",
+            "the container, host %.6f%s",
             mode, f" at {end}" if end else "", a, b, duration, stamp, host,
+            f"; {cut_gap(a, b, ab, ba)}" if mode == "netem" else "",
         )
         return stamp
 
@@ -248,6 +261,24 @@ class LinkManager:
         self.flap_events.append((stamp, "up", a, b))
         log.info("Link UP (scheduled, %s): %s -- %s (was down %.1fs)", mode, a, b, down_for)
         return stamp
+
+    def _hold_both(self, a: str, b: str, held: bool) -> tuple[float | None, float | None]:
+        """Install both directions of the edge at once; return the a->b and
+        b->a stamps, each as ``_set_held`` gives it.
+
+        Each direction is a ``docker exec`` into its own container. Run one
+        after the other, the second lands hundreds of ms after the first
+        under host load, and in that gap the down is one-way: a's frames
+        are dropped while b's still arrive, so a's probes wait on b's data
+        (draft Section 5.6) and a's switch is late by the gap. Run together,
+        the two cuts are still apart by the difference between the two
+        execs' start-ups, tens of ms under load; the Link DOWN lines log
+        that gap from the two stamps.
+        """
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ab = pool.submit(self._set_held, a, b, held)
+            ba = pool.submit(self._set_held, b, a, held)
+            return ab.result(), ba.result()
 
     def _set_held(self, src_node: str, dst_node: str, held: bool) -> float | None:
         """Mark the src->dst direction held down (or not) and install it.

@@ -847,6 +847,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 from: Some(p.state()),
                 next: None,
                 why: Why::Renewed,
+                timeout: None,
             });
             if Some(i) == kept {
                 stays = Some(p);
@@ -868,6 +869,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             from: None,
             next: Some(path.state()),
             why: Why::Renewed,
+            timeout: None,
         });
         self.scope = rules::link(env.facts, path.transport_id(), path.addr());
         self.set = PathSet::holding(path);
@@ -1149,7 +1151,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         {
             p.live_mut().unlink();
         }
-        self.note(i, None, Why::Candidate, out);
+        self.note(i, None, Why::Candidate, None, out);
     }
 
     /// [`Self::enlist`] each released slot whose bit `mask` sets, in slot
@@ -1310,7 +1312,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             }
             let i = self.admit(from.clone(), env, out)?;
             self.set.learn_peer(i, msg.path_id);
-            self.note(i, None, Why::Probed, out);
+            self.note(i, None, Why::Probed, None, out);
             return Some(i);
         };
         if self.state(i) == Some(PathState::Dead) && self.revives(i, env).is_ok() {
@@ -1430,7 +1432,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         // A move the rules refuse is skipped; the answer still counts.
         let _ = self.follow(i, &from, env, out);
         if from_state != PathState::Live {
-            self.shift(i, PathState::Live, now, Why::Answered, out);
+            self.shift(i, PathState::Live, now, Why::Answered, None, out);
         }
     }
 
@@ -1449,7 +1451,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         };
         match state {
             PathState::Live | PathState::Suspect => {
-                self.shift(i, PathState::Dead, now, Why::Closed, out);
+                self.shift(i, PathState::Dead, now, Why::Closed, None, out);
             }
             PathState::Probing | PathState::Dead => {}
         }
@@ -1482,7 +1484,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             }
             match (path.state(), up) {
                 (PathState::Live, false) => {
-                    self.shift(i, PathState::Suspect, now, Why::Carrier, out);
+                    self.shift(i, PathState::Suspect, now, Why::Carrier, None, out);
                 }
                 (PathState::Dead, true) => {
                     if self.again(i, env).is_ok() {
@@ -1506,7 +1508,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             return;
         };
         if self.state(i) == Some(PathState::Live) {
-            self.shift(i, PathState::Suspect, now, Why::Unreachable, out);
+            self.shift(i, PathState::Suspect, now, Why::Unreachable, None, out);
         }
     }
 
@@ -1537,7 +1539,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             return;
         }
         if probing && live.misses() >= discovery {
-            self.shift(i, PathState::Dead, now, Why::Connect, out);
+            self.shift(i, PathState::Dead, now, Why::Connect, None, out);
             return;
         }
         let interval = self.interval(i);
@@ -1937,7 +1939,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 continue;
             };
             if self.trippable(i) {
-                self.shift(i, PathState::Dead, at, Why::AuthLimit, out);
+                self.shift(i, PathState::Dead, at, Why::AuthLimit, None, out);
             }
         }
     }
@@ -1960,7 +1962,11 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// on its path (`Liveness::expire`), and apply the state changes
     /// the counts cause (draft Section 5.6): a Live path with `suspect` in
     /// a row becomes Suspect, a Suspect one with `retire` becomes Dead, and
-    /// a Probing one with `discovery` becomes Dead. A Dead path's count
+    /// a Probing one with `discovery` becomes Dead. Each such change
+    /// carries the timeout the probe that made it was sent under, not the
+    /// timeout the path would give a probe sent now: round trips learned
+    /// after it went, a late answer's among them, do not reach it, nor
+    /// does a verdict held to the cap. A Dead path's count
     /// only spaces its probes. Only a Live path's timeouts are ETX loss
     /// samples. A capability probe timed out counts on no path; the last
     /// of the first round reports the link not capable (Section 5.2).
@@ -1973,7 +1979,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 };
                 let state = path.state();
                 let live = path.live_mut();
-                let Some(counted) = live.expire(now, overdue, cfg.verdict_cap) else {
+                let Some((counted, wait)) = live.expire(now, overdue, cfg.verdict_cap) else {
                     break;
                 };
                 if !counted {
@@ -1998,7 +2004,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                     }
                 };
                 if let Some((next, why)) = next {
-                    self.shift(i, next, now, why, out);
+                    self.shift(i, next, now, why, Some(wait), out);
                 }
             }
         }
@@ -2225,6 +2231,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
             from: Some(p.state()),
             next: None,
             why,
+            timeout: None,
         });
         out.push(Output::Released {
             to: pair(&p),
@@ -2721,7 +2728,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
     /// cadence: the floor holds it and counts it, as it does the discovery
     /// probes after it.
     fn revive(&mut self, i: usize, now: C::Instant, why: Why, out: &mut Outputs<D>) {
-        self.shift(i, PathState::Probing, now, why, out);
+        self.shift(i, PathState::Probing, now, why, None, out);
         if let Some(p) = self.set.path_mut(i) {
             let live = p.live_mut();
             if why == Why::Probed {
@@ -2733,7 +2740,9 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         }
     }
 
-    /// Move path `i` to `next` for `why`, and log it. Every change of state
+    /// Move path `i` to `next` for `why`, and log it, with `timeout`, the
+    /// probe timeout of the probe whose timeout made the change, when one
+    /// did ([`Output::State`]). Every change of state
     /// starts the unanswered count again (draft Section 5.6, path
     /// lifetime), and leaving Dead also keeps a probe still outstanding
     /// from before from counting when it times out. Leaving Live records
@@ -2748,6 +2757,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
         next: PathState,
         now: C::Instant,
         why: Why,
+        timeout: Option<Duration>,
         out: &mut Outputs<D>,
     ) {
         let Some(from) = self.state(i) else {
@@ -2776,11 +2786,19 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 live.halt(now, active);
             }
         }
-        self.note(i, Some(from), why, out);
+        self.note(i, Some(from), why, timeout, out);
     }
 
-    /// Log path `i`'s state, entered from `from` for `why`.
-    fn note(&self, i: usize, from: Option<PathState>, why: Why, out: &mut Outputs<D>) {
+    /// Log path `i`'s state, entered from `from` for `why`, with the probe
+    /// timeout of the probe whose timeout made the change, if one did.
+    fn note(
+        &self,
+        i: usize,
+        from: Option<PathState>,
+        why: Why,
+        timeout: Option<Duration>,
+        out: &mut Outputs<D>,
+    ) {
         if let Some(p) = self.set.get(i) {
             out.push(Output::State {
                 to: pair(p),
@@ -2788,6 +2806,7 @@ impl<C: Clock, E: EntropySource, D: Default> Bundle<C, E, D> {
                 from,
                 next: Some(p.state()),
                 why,
+                timeout,
             });
         }
     }

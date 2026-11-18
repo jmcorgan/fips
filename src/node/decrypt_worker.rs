@@ -14,8 +14,8 @@
 //! Three message types travel through the per-worker `crossbeam_channel`:
 //!
 //! - **`RegisterSession`** — sent once on the first successful legacy
-//!   decrypt for a session. Hands the worker an owned snapshot of the
-//!   recv cipher + replay window for both FMP and FSP layers.
+//!   decrypt for a session. Hands the worker an owned, boxed snapshot of
+//!   the recv cipher + replay window for the FMP layer.
 //! - **`Job`** — per-packet bulk decrypt + deliver. The worker looks
 //!   up the session in its local HashMap; if absent (registration
 //!   hasn't arrived yet, or session was unregistered), the packet is
@@ -60,7 +60,32 @@ use tracing::{debug, trace, warn};
 
 use crate::noise::ReplayWindow;
 
-const WORKER_CHANNEL_CAP: usize = 32768;
+/// Slots in each decrypt worker's queue.
+///
+/// The queue adds no capacity under sustained overload: a job that finds it
+/// full is dropped, at any depth, and counted as `dataplane.decrypt_queue_full`.
+/// What the depth sets is how long a worker can stall, descheduled while the
+/// receive loop keeps dispatching to it, before drops start, and how much
+/// queueing delay stands in front of them. The backlog that can reach one
+/// worker in such a stall is that of every link hashed to it; per link, a full
+/// default receive buffer holds about 4400 of the smallest frames, and the
+/// peer's encrypt queue and this node's packet channel add up to 1024 each.
+///
+/// The pool came from upstream with 32768 and no recorded reason. The most a
+/// worker's queue was seen to hold, in the static chain harness under TCP and
+/// unlimited UDP, was 7663 messages, at one worker on two contended cores fed
+/// by two links at once; at a worker per CPU it was 7039. The depth is at
+/// least twice that, and above one link's backlog.
+///
+/// The channel allocates every slot when it is created, so a worker holds
+/// this many times the size of [`WorkerMsg`] plus a word from startup, idle
+/// or not.
+pub(crate) const WORKER_CHANNEL_CAP: usize = 16384;
+
+/// The queue between the receive loop and one decrypt worker.
+fn worker_channel() -> (Sender<WorkerMsg>, Receiver<WorkerMsg>) {
+    bounded(WORKER_CHANNEL_CAP)
+}
 
 /// Owning recv-side state for one established FMP session. Lives
 /// **inside the worker thread that owns this session** — never
@@ -211,16 +236,17 @@ pub(crate) enum DecryptWorkerEvent {
 /// `UnregisterSession` are control plane events sent at session
 /// establishment / teardown.
 ///
-/// The `Job` variant is intentionally much larger than the control
-/// variants (it carries the whole packet buffer + cipher clone). The
-/// alternative — boxing `Job` — adds a per-packet alloc on the hot
-/// path, which is the exact thing this module is designed to avoid.
-#[allow(clippy::large_enum_variant)]
+/// Every slot of a worker's channel is the size of the largest variant, and
+/// every slot is allocated when the channel is created. The session a
+/// registration carries (a cipher key and a replay window) is over ten times
+/// the size of a `Job`, so it is boxed, and a slot is the size of a `Job`.
+/// That costs one allocation per registration. `Job` stays inline: boxing it
+/// would add an allocation per packet.
 pub(crate) enum WorkerMsg {
     Job(DecryptJob),
     RegisterSession {
         cache_key: u32,
-        state: OwnedSessionState,
+        state: Box<OwnedSessionState>,
     },
     UnregisterSession {
         cache_key: u32,
@@ -232,6 +258,18 @@ pub(crate) enum WorkerMsg {
     /// ([`DecryptWorkerPool::barrier`]).
     #[cfg(test)]
     Barrier(std::sync::mpsc::Sender<()>),
+}
+
+/// What became of a job handed to [`DecryptWorkerPool::dispatch_job`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a job refused at a full queue is dropped, and only the caller can count it"]
+pub(crate) enum Dispatched {
+    /// The job is in its worker's queue.
+    Queued,
+    /// The worker's queue was full, so the job was dropped.
+    Full,
+    /// The worker has exited, so the job was dropped; the pool counts these.
+    Refused,
 }
 
 /// Handle to the decrypt worker pool. Shard-style: each worker is one
@@ -268,12 +306,7 @@ impl DecryptWorkerPool {
         spawn: impl FnMut(usize, Receiver<WorkerMsg>) -> std::io::Result<std::thread::JoinHandle<()>>,
     ) -> Self {
         Self {
-            workers: Arc::new(WorkerSet::start(
-                "decrypt",
-                n,
-                || bounded::<WorkerMsg>(WORKER_CHANNEL_CAP),
-                spawn,
-            )),
+            workers: Arc::new(WorkerSet::start("decrypt", n, worker_channel, spawn)),
         }
     }
 
@@ -308,15 +341,15 @@ impl DecryptWorkerPool {
         }
     }
 
-    /// Dispatch a per-packet decrypt job. Drops if the per-worker
-    /// channel is full (sustained rate overrun); the rx_loop's drain
-    /// caps inbound at the same scale upstream so the cliff is
-    /// bounded. A job for an exited worker is dropped, counted and
+    /// Dispatch a per-packet decrypt job without blocking. A job whose
+    /// worker's channel is full (the worker has fallen behind) is dropped,
+    /// logged at a bounded rate and returned as [`Dispatched::Full`] for the
+    /// caller to count. A job for an exited worker is dropped, counted and
     /// logged at WARN.
-    pub fn dispatch_job(&self, job: DecryptJob) {
+    pub fn dispatch_job(&self, job: DecryptJob) -> Dispatched {
         let idx = self.worker_idx_for(job.cache_key);
         match self.workers.sender(idx).try_send(WorkerMsg::Job(job)) {
-            Ok(()) => {}
+            Ok(()) => Dispatched::Queued,
             Err(TrySendError::Full(_)) => {
                 static FULL_COUNT: AtomicU64 = AtomicU64::new(0);
                 let n = FULL_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -327,8 +360,12 @@ impl DecryptWorkerPool {
                         "DecryptWorker channel full; dropping inbound packet"
                     );
                 }
+                Dispatched::Full
             }
-            Err(TrySendError::Disconnected(_)) => self.note_refused(idx, "inbound packet"),
+            Err(TrySendError::Disconnected(_)) => {
+                self.note_refused(idx, "inbound packet");
+                Dispatched::Refused
+            }
         }
     }
 
@@ -354,6 +391,7 @@ impl DecryptWorkerPool {
     #[must_use = "registration may have failed under queue pressure; caller must gate its own session-registered flag on the returned bool"]
     pub fn register_session(&self, cache_key: u32, state: OwnedSessionState) -> bool {
         let idx = self.worker_idx_for(cache_key);
+        let state = Box::new(state);
         match self
             .workers
             .sender(idx)
@@ -413,7 +451,7 @@ fn handle_msg(idx: usize, sessions: &mut HashMap<u32, OwnedSessionState>, msg: W
         }
         WorkerMsg::RegisterSession { cache_key, state } => {
             trace!(worker = idx, ?cache_key, "DecryptWorker: register session");
-            sessions.insert(cache_key, state);
+            sessions.insert(cache_key, *state);
         }
         WorkerMsg::UnregisterSession { cache_key } => {
             trace!(
@@ -950,6 +988,44 @@ impl DecryptWorkerPool {
     }
 }
 
+/// The longest a [`HeldRelease`] leaves a held worker held.
+#[cfg(all(test, unix))]
+const HELD_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Starts a [`DecryptWorkerPool::held`] worker if it is still held after
+/// 60 s. A test that fills the held worker's queue would hang if dispatch
+/// ever waited on a full queue; the release lets that dispatch finish, and
+/// [`Self::disarm`] says the worker had to be released, so the test fails
+/// instead.
+#[cfg(all(test, unix))]
+pub(crate) struct HeldRelease {
+    cancel: std::sync::mpsc::Sender<()>,
+    watch: std::thread::JoinHandle<bool>,
+}
+
+#[cfg(all(test, unix))]
+impl HeldRelease {
+    /// Watch the held worker whose `start` channel this is.
+    pub(crate) fn arm(start: std::sync::mpsc::Sender<()>) -> Self {
+        use std::sync::mpsc::{RecvTimeoutError, channel};
+        let (cancel, cancelled) = channel::<()>();
+        let watch = std::thread::spawn(move || match cancelled.recv_timeout(HELD_WAIT) {
+            Err(RecvTimeoutError::Timeout) => {
+                let _ = start.send(());
+                true
+            }
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => false,
+        });
+        Self { cancel, watch }
+    }
+
+    /// Stop watching; true when the worker had to be released.
+    pub(crate) fn disarm(self) -> bool {
+        let _ = self.cancel.send(());
+        self.watch.join().expect("the release watch does not panic")
+    }
+}
+
 /// The pool's view of its workers: which are live and what a dead one does to
 /// a dispatch or a registration. Every wait is bounded.
 #[cfg(test)]
@@ -1027,7 +1103,7 @@ mod pool_tests {
             pool.register_session(key, session_state()),
             "the live worker refused a registration"
         );
-        pool.dispatch_job(job(key));
+        assert_eq!(pool.dispatch_job(job(key)), Dispatched::Queued);
         assert_eq!(pool.liveness().refused_dispatches(), 0);
     }
 
@@ -1035,7 +1111,8 @@ mod pool_tests {
     fn dispatch_to_an_exited_decrypt_worker_warns_and_counts() {
         let pool = DecryptWorkerPool::for_test(vec![TestWorker::Run, TestWorker::FailSpawn]);
         let key = key_on_worker(&pool, 1);
-        let ((), logs) = crate::testutil::capture_logs(|| pool.dispatch_job(job(key)));
+        let (dispatched, logs) = crate::testutil::capture_logs(|| pool.dispatch_job(job(key)));
+        assert_eq!(dispatched, Dispatched::Refused);
         let warnings = logs.warnings();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains(" worker=1"), "{warnings:?}");
@@ -1056,3 +1133,7 @@ mod pool_tests {
         assert_eq!(pool.liveness().refused_dispatches(), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "tests/decrypt_worker.rs"]
+mod slot_tests;

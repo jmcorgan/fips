@@ -155,8 +155,9 @@ subsystem split of the metrics:
 - **Mmp** — MMP link-layer rejections.
 - **Forwarding** — forwarding-path rejections (no-route, TTL, MTU).
 - **Transport** — transport-layer rejections (admission caps, framing).
-- **Dataplane** — encrypted frames dropped before any peer is looked up
-  (an unknown or orphaned session index).
+- **Dataplane** — encrypted frames dropped on the receive path before they
+  are authenticated (an unknown or orphaned session index, or a full decrypt
+  worker queue).
 
 Each rejection increments the corresponding counter in its family's
 stats, surfaced through `show_metrics` (the `tree`, `bloom`,

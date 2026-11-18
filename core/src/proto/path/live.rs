@@ -119,8 +119,13 @@ pub struct Sent<I> {
     pub probe_id: u32,
     /// When it was sent.
     pub at: I,
-    /// When it is unanswered, if no answer has come.
+    /// When it is unanswered, if no answer has come. A verdict held for
+    /// the peer's session datagrams moves it later.
     pub due: I,
+    /// The probe timeout it was sent under: `due` less `at` as sent. A
+    /// held verdict leaves it as it was, so it stays the timeout in force
+    /// when the probe went.
+    pub wait: Duration,
     /// Its whole length, counted from its link message type byte.
     pub len: usize,
 }
@@ -626,6 +631,7 @@ impl<I: Instant> Liveness<I> {
             probe_id,
             at,
             due,
+            wait: due.saturating_duration_since(at),
             len,
         });
         Some(probe_id)
@@ -670,12 +676,19 @@ impl<I: Instant> Liveness<I> {
     /// with `overdue` strictly before it, if there is one, and keep it in
     /// the late record. Returns whether it counted as unanswered: it does
     /// unless a probe sent after it has been answered in time, or it was
-    /// sent before the path last left Dead ([`Self::thaw`]).
+    /// sent before the path last left Dead ([`Self::thaw`]); and the probe
+    /// timeout it was sent under ([`Sent::wait`]), which a change of state
+    /// the count causes reports.
     ///
     /// A probe due then after whose sending a session datagram has arrived
     /// on the path is not timed out while `cap` from its sending is still
     /// ahead: it becomes due at that instant instead ([`Self::defer`]).
-    pub(super) fn expire(&mut self, now: I, overdue: bool, cap: Duration) -> Option<bool> {
+    pub(super) fn expire(
+        &mut self,
+        now: I,
+        overdue: bool,
+        cap: Duration,
+    ) -> Option<(bool, Duration)> {
         let passed = |due: I| due < now || (!overdue && due == now);
         let slot = loop {
             let slot = self
@@ -700,7 +713,7 @@ impl<I: Instant> Liveness<I> {
         if counted {
             self.misses = self.misses.saturating_add(1);
         }
-        Some(counted)
+        Some((counted, sent.wait))
     }
 
     /// The instant a probe whose timeout has passed waits to before it is

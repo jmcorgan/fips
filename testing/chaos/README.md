@@ -405,7 +405,8 @@ against planted input:
 assertions:
   path_switches: {min_total: 4, per_flap: 4, extra: 2}  # or max_total
   switch_latency: {max_ms: 1300, each_end: true}  # signalled_ms: tighter;
-                                    # sender_ms: a oneway down's dropped sender
+                                    # sender_ms: a oneway down's dropped sender;
+                                    # timeout_allowance: true, see below
   max_promotions: {per_node: 1}     # a second promotion is a re-peering
   max_dials: 0                      # no dial after a node's first promotion
   max_stall: {max_secs: 2}          # longest zero-byte run at a receiver;
@@ -490,8 +491,22 @@ own sends are dropped; the other end and both ends of any other down keep
 which the down's path (the veth, by the other end's veth address or MAC) did
 not carry the link when it went down is not measured: its next switch is not
 one the down caused, so the run fails on that precondition, naming the end,
-the down and the address the link was on. `paths_live`
-and `max_dials` read `debug` lines, so a scenario declaring them must set
+the down and the address the link was on. With `timeout_allowance: true` an
+end's ceiling for a down grows by the probe timeout the node had in force
+when the down's path went Suspect, less its 400 ms floor: the `timeout_ms` of
+that end's "Path state changed" line from `Some(Live)` to `Some(Suspect)` for
+`why=Timeout`, on the down's path (by the same veth address or MAC), between
+the down's stamp and the end's first switch after it or the next down,
+whichever comes first. On an unloaded host the timeout is the floor and the
+ceiling is `max_ms` exactly; an end with no such line gets no allowance, and
+the line says so. The value is the timeout the probe was sent under: a
+verdict the node held for the peer's arriving session data waits past it, up
+to the 3 s verdict cap, and earns no allowance for that wait. The verdict
+prints each end's base, allowance and the timeout it came from. It reads
+`debug` lines, so loading refuses it without
+`fips::node::handlers::path=debug`; `testing/chaos/sim-allowance-test.py`
+tests it against planted lines. `paths_live` and `max_dials` read `debug`
+lines, so a scenario declaring them must set
 `fips::node::handlers::path=debug` and `fips::node::lifecycle=debug` in
 `logging.rust_log`; loading refuses it otherwise.
 
@@ -669,6 +684,22 @@ CI parity job, and `ci-local.sh` just before the chaos suites (tier 2 and up).
 It takes about a minute. The shipped bound is checked against the 31 s stall
 without waiting it out; the cases that time a helper out run on a shortened
 bound.
+
+## Node worker pools
+
+The compose file gives every node `FIPS_ENCRYPT_WORKERS` and
+`FIPS_DECRYPT_WORKERS`, 4 each by default (`WORKERS_DEFAULT` in
+`sim/compose.py`). Unset, the node sizes both pools by the host's CPU count,
+and each decrypt worker holds about 51 MiB from startup, so a node on a
+20-CPU host sat at about 1.05 GiB whatever its load. Two nightly chaos runs
+whose long scenarios overlapped needed more memory than the builder had, and
+the kernel's OOM killer stopped nodes in both. At 4 a node holds about
+0.23 GiB on any host, and a scenario no longer behaves differently with the
+CPU count of the host that runs it. Either variable set in the environment
+`chaos.sh` runs in replaces the default for every node, for an A/B run; a
+value that is not a whole number stops the run. `sim-compose-test.py`
+renders the compose file for every scenario and fails when a node is not
+given both counts. Both CI runners run it as a guard.
 
 ## Creating Custom Scenarios
 

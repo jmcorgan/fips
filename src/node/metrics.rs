@@ -735,11 +735,13 @@ impl NativeMetrics {
     }
 }
 
-/// Encrypted-frame drops made before the frame's peer is resolved.
+/// Encrypted-frame drops on the receive hot path, made before the frame is
+/// authenticated.
 ///
-/// The drop sites sit on the receive hot path ahead of any peer lookup, so
-/// these are the only record of them: a link whose peer keeps sealing for
-/// an index this node retired shows here and nowhere else. Bumped on the
+/// None of these drops can be charged to a peer, because the frame has not
+/// been authenticated, so these are the only record of them: a link whose
+/// peer keeps sealing for an index this node retired shows here and nowhere
+/// else, as does a decrypt worker whose queue overflowed. Bumped on the
 /// rx_loop only.
 #[derive(Default)]
 pub struct DataplaneMetrics {
@@ -747,6 +749,8 @@ pub struct DataplaneMetrics {
     pub unknown_index: Counter,
     /// Frames naming an index whose entry pointed at a peer no longer held.
     pub orphaned_index: Counter,
+    /// Frames dropped because their decrypt worker's queue was full.
+    pub decrypt_queue_full: Counter,
 }
 
 impl DataplaneMetrics {
@@ -756,6 +760,7 @@ impl DataplaneMetrics {
         match reason {
             DataplaneReject::UnknownIndex => self.unknown_index.inc(),
             DataplaneReject::OrphanedIndex => self.orphaned_index.inc(),
+            DataplaneReject::DecryptQueueFull => self.decrypt_queue_full.inc(),
         }
     }
 
@@ -764,6 +769,7 @@ impl DataplaneMetrics {
         DataplaneStatsSnapshot {
             unknown_index: self.unknown_index.get(),
             orphaned_index: self.orphaned_index.get(),
+            decrypt_queue_full: self.decrypt_queue_full.get(),
         }
     }
 }

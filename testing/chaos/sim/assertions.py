@@ -918,12 +918,79 @@ def uncarried_downs(
     return out
 
 
+# The node's probe timeout floor (``timeout`` in core/src/proto/path/params.rs,
+# 400 ms), which the 1300 ms switch ceiling already counts: a timeout at the
+# floor earns no allowance.
+TIMEOUT_FLOOR_MS = 400
+
+
+def switch_timeouts(
+    downs: list[tuple[float, str, str]],
+    switches: list[tuple[str, str]],
+    path_lines: list[tuple[str, str]],
+    addrs: dict[tuple[float, str], set[str]],
+) -> dict[tuple[float, str], int]:
+    """The probe timeout each end had in force when a down's path went
+    Suspect, in ms, by ``(stamp, end)``.
+
+    It is ``timeout_ms`` of the end's "Path state changed" line from
+    ``Some(Live)`` to ``Some(Suspect)`` for ``why=Timeout``: the timeout the
+    probe whose loss made the change was sent under. Only a line of the
+    down's path counts: logged by that end, at a remote address in ``addrs``
+    for the down and end (the other end's veth IP or MAC, as
+    ``uncarried_downs`` takes them, so a line of another peer or of the
+    end's other path is not read), from the down's stamp up to the end's
+    first switch after it or the next down, whichever comes first, so no
+    two downs share a line. Of several, the last is the one the switch
+    followed. An end with no such line, or none with ``timeout_ms``, is
+    absent.
+
+    The value is the timeout the probe was sent under. A verdict the node
+    held for the peer's arriving session data waits past it, up to the
+    verdict cap, and that wait is not in ``timeout_ms``.
+    """
+    switched: dict[str, list[float]] = {}
+    for source, line in switches:
+        t = line_epoch(line)
+        if t is not None:
+            switched.setdefault(source, []).append(t)
+    stamps = sorted(d for d, _, _ in downs)
+    out = {}
+    for down_at, a, b in downs:
+        bound = min((d for d in stamps if d > down_at), default=float("inf"))
+        for end in (a, b):
+            wanted = {x.lower() for x in addrs.get((down_at, end), set())}
+            if not wanted:
+                continue
+            until = min(
+                (t for t in switched.get(end, []) if down_at <= t < bound),
+                default=bound,
+            )
+            for src, line in path_lines:
+                if src != end or "Path state changed" not in line:
+                    continue
+                t = line_epoch(line)
+                if t is None or t < down_at or t > until or t >= bound:
+                    continue
+                f = line_fields(line)
+                if (
+                    f.get("from") == "Some(Live)"
+                    and f.get("next") == "Some(Suspect)"
+                    and f.get("why") == "Timeout"
+                    and f.get("timeout_ms", "").isdigit()
+                    and _at(f.get("remote_addr", ""), wanted)
+                ):
+                    out[(down_at, end)] = int(f["timeout_ms"])
+    return out
+
+
 def evaluate_switch_latency(
     cfg: SwitchLatencyAssertion,
     downs: list[tuple[float, str, str]],
     switches: list[tuple[str, str]],
     senders: dict[float, str] | None = None,
     uncarried: dict[tuple[float, str], str] | None = None,
+    timeouts: dict[tuple[float, str], int] | None = None,
 ) -> AssertionOutcome:
     """Ceiling on the time from each down to the path switch it caused.
 
@@ -943,6 +1010,16 @@ def evaluate_switch_latency(
     switch after the down is some later move, such as the fail-back after
     the restore. Such an end is not measured, and the run fails on the
     unmet precondition, naming the end, the down and where the link was.
+
+    With ``timeout_allowance`` set, an end's ceiling for a down also allows
+    for the probe timeout it had in force when the down's path went Suspect
+    (``timeouts``, by the down's stamp and the end, from
+    ``switch_timeouts``): the part of it above the floor,
+    ``TIMEOUT_FLOOR_MS``, is added to the ceiling, which the floor already
+    counts. At the floor, as on an unloaded host, the allowance is 0 and
+    the ceiling is ``max_ms`` exactly; an end with no timeout for the down
+    gets none, and the line says so. Each end's base, allowance and the
+    timeout it came from are printed. ``signalled_ms`` takes no allowance.
     """
     if not downs:
         return AssertionOutcome(
@@ -952,15 +1029,41 @@ def evaluate_switch_latency(
         )
     senders = senders or {}
     uncarried = uncarried or {}
+    timeouts = timeouts or {}
     delays = switch_delays(downs, switches)
 
     def sender(down_at: float, end: str) -> bool:
         """Whether ``end`` takes the dropped sender's ceiling for this down."""
         return cfg.sender_ms is not None and senders.get(down_at) == end
 
+    def base(down_at: float, end: str) -> int:
+        """The ceiling in ms before any allowance for this down and end."""
+        return cfg.sender_ms if sender(down_at, end) else cfg.max_ms
+
+    def allowance(down_at: float, end: str) -> int:
+        """The ms the end's probe timeout for this down adds to its ceiling."""
+        if not cfg.timeout_allowance or (down_at, end) not in timeouts:
+            return 0
+        return max(0, timeouts[(down_at, end)] - TIMEOUT_FLOOR_MS)
+
     def ceiling(down_at: float, end: str) -> int:
         """The ceiling in ms for ``end``'s first switch after this down."""
-        return cfg.sender_ms if sender(down_at, end) else cfg.max_ms
+        return base(down_at, end) + allowance(down_at, end)
+
+    def granted(down_at: float, end: str) -> str:
+        """How the end's ceiling for this down was made up, when it can
+        take an allowance."""
+        if not cfg.timeout_allowance:
+            return ""
+        got = timeouts.get((down_at, end))
+        source = (
+            "no Live to Suspect timeout line" if got is None
+            else f"from timeout_ms {got}"
+        )
+        return (
+            f" [base {base(down_at, end)} + allowance {allowance(down_at, end)}"
+            f" = {ceiling(down_at, end)}, {source}]"
+        )
 
     failures = []
     for down_at, a, b in downs:
@@ -988,6 +1091,7 @@ def evaluate_switch_latency(
                     )
                     failures.append(
                         f"{end}{role} after {a}--{b} down at {_stamp(down_at)}: {got}"
+                        f"{granted(down_at, end)}"
                     )
         elif not within:
             bound = (
@@ -1010,6 +1114,7 @@ def evaluate_switch_latency(
         f"{end}=not measured" if (t, end) in uncarried else
         f"{end}={'none' if d is None else f'{d * 1000:.0f}'}"
         + (" (dropped sender)" if sender(t, end) else "")
+        + granted(t, end)
         for t, end, d in delays
     )
     scope = "each end" if cfg.each_end else "either end"
@@ -1017,6 +1122,10 @@ def evaluate_switch_latency(
         f"ceiling {cfg.max_ms} ms"
         + (f", dropped sender {cfg.sender_ms} ms" if cfg.sender_ms is not None else "")
         + (f", signalled {cfg.signalled_ms} ms" if cfg.signalled_ms else "")
+        + (
+            f", plus each end's probe timeout above {TIMEOUT_FLOOR_MS} ms"
+            if cfg.timeout_allowance else ""
+        )
     )
     if failures:
         return AssertionOutcome(

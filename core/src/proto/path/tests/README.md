@@ -814,8 +814,14 @@ module of that file, sees its private items and keeps its test names.
   the timeout floor, Suspect at 1.8 s; the timeout follows three times the
   largest round trip in the window, capped, while a latest round trip
   above the cap keeps three times it and a sample older than the window
-  no longer counts (on `Liveness` directly); and a probe sent after a
-  late answer of 900 ms in the window is counted at 2.7 s, not 400 ms.
+  no longer counts (on `Liveness` directly); a probe sent after a
+  late answer of 900 ms in the window is counted at 2.7 s, not 400 ms;
+  and each change a probe's timeout makes, Suspect and Dead, carries the
+  timeout that probe was sent under and no other change carries one: 400
+  ms for the verdict held to the cap, not the 3 s its due instant was
+  moved by, 400 ms at the floor, 2.7 s after the 900 ms round trip, and
+  400 ms when a late answer has raised the path's timeout to 2.1 s
+  between the judged probes' sending and the change.
 - `view.rs`: the operator's view of a link's paths
   (`proto::path::tests::view::...`) through `Bundle::view`, driven as
   `choice.rs` drives its tests and with its helpers and `pin.rs`'s `pin`

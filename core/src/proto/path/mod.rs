@@ -32,6 +32,7 @@
 
 use alloc::vec::Vec;
 
+use crate::time::Duration;
 use crate::transport::{TransportAddr, TransportId};
 use wire::{PathAck, PathClose, PathProbe};
 
@@ -456,6 +457,13 @@ pub enum Output<D> {
         next: Option<PathState>,
         /// Why.
         why: Why,
+        /// For a change made by a probe timing out ([`Why::Timeout`],
+        /// [`Why::Retired`] and [`Why::Exhausted`]), the probe timeout in
+        /// force for the probe whose timeout made it: the timeout it was
+        /// sent under, which a verdict held for the peer's session datagrams
+        /// leaves as it was. `None` for every other change. Logged only,
+        /// and nowhere on the wire.
+        timeout: Option<Duration>,
     },
     /// The peer has shown it implements multipath; from now on the machine
     /// may send it path messages.

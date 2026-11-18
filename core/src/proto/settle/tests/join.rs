@@ -255,6 +255,7 @@ fn every_bundle_output() -> Vec<(path::Output<()>, Option<In>)> {
         from: Some(PathState::Probing),
         next,
         why: Why::Answered,
+        timeout: None,
     };
     vec![
         (
@@ -405,6 +406,7 @@ fn a_released_path_goes_to_the_link_moved_off() {
             from: None,
             next: Some(PathState::Live),
             why: Why::Probed,
+            timeout: None,
         },
     ];
     let cores: Vec<In> = joined(Event::Paths {

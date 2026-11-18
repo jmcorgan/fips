@@ -9,6 +9,10 @@ use alloc::vec::Vec;
 /// so it holds no verdict.
 const CAP: Duration = Duration::from_secs(3);
 
+/// The probe timeout every probe in these tests is sent under: each is
+/// due 400 ms after it goes.
+const WAIT: Duration = Duration::from_millis(400);
+
 /// The instant `ms` milliseconds after the test clock's epoch.
 fn at(ms: u64) -> TestInstant {
     TestInstant(ms)
@@ -258,7 +262,7 @@ fn only_an_answer_in_time_is_a_matching_one() {
     let mut l: Liveness<TestInstant> = Liveness::new();
     let first = l.send(at(0), at(400), 27, || 10).unwrap();
     let second = l.send(at(1), at(401), 27, || 10).unwrap();
-    assert_eq!(l.expire(at(400), false, CAP), Some(true));
+    assert_eq!(l.expire(at(400), false, CAP), Some((true, WAIT)));
     let late = l.answer(first).expect("a late answer");
     assert!(matches!(late, Answer::Late(_)));
     assert!(!late.matching(), "a late answer is not a matching one");
@@ -304,7 +308,11 @@ fn a_probe_sent_before_a_path_leaves_dead_times_out_uncounted_and_an_answer_in_t
     // The path leaves Dead with both outstanding.
     l.fresh();
     l.thaw();
-    assert_eq!(l.expire(at(400), false, CAP), Some(false), "not counted");
+    assert_eq!(
+        l.expire(at(400), false, CAP),
+        Some((false, WAIT)),
+        "not counted"
+    );
     assert_eq!(l.misses(), 0);
     let Some(Answer::InTime(sent)) = l.answer(second) else {
         panic!("an answer in time to a probe from before still matches");
@@ -313,7 +321,7 @@ fn a_probe_sent_before_a_path_leaves_dead_times_out_uncounted_and_an_answer_in_t
     assert!(matches!(l.answer(first), Some(Answer::Late(_))));
     // A probe sent since counts as before.
     l.send(at(500), at(900), 27, || 10).unwrap();
-    assert_eq!(l.expire(at(900), false, CAP), Some(true));
+    assert_eq!(l.expire(at(900), false, CAP), Some((true, WAIT)));
     assert_eq!(l.misses(), 1);
 }
 
@@ -328,10 +336,10 @@ fn the_first_counted_probe_id_is_dropped_once_no_probe_before_it_is_outstanding(
     // still told apart.
     l.send(at(100), at(500), 27, || 10).unwrap();
     assert_eq!(l.since, Some(11));
-    assert_eq!(l.expire(at(400), false, CAP), Some(false));
+    assert_eq!(l.expire(at(400), false, CAP), Some((false, WAIT)));
     // Dropped at the next probe, so the comparison never spans half the
     // `probe_id` space however long the path lives.
     l.send(at(450), at(850), 27, || 10).unwrap();
     assert_eq!(l.since, None);
-    assert_eq!(l.expire(at(500), false, CAP), Some(true));
+    assert_eq!(l.expire(at(500), false, CAP), Some((true, WAIT)));
 }

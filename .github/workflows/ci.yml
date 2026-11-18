@@ -114,10 +114,18 @@ jobs:
       # only pyyaml. Kept in step with ci-local.sh's run_chaos_schedule by hand.
       - name: Check the chaos draws do not depend on Python's hash seed
         run: python3 testing/check-chaos-schedule.py
-      # Hermetic: planted lines and results, no containers; needs only
-      # pyyaml. Kept in step with ci-local.sh's run_simassert by hand.
+      # Hermetic: planted lines and results, and a stand-in for the link
+      # cut's docker exec, no containers; needs only pyyaml. Kept in step
+      # with ci-local.sh's run_simassert by hand.
       - name: Check the chaos path assertions against planted input
-        run: python3 testing/chaos/sim-assert-test.py
+        run: |
+          python3 testing/chaos/sim-assert-test.py
+          python3 testing/chaos/sim-links-test.py
+          python3 testing/chaos/sim-allowance-test.py
+      # Hermetic: renders the chaos compose file for every scenario; needs
+      # pyyaml and jinja2. Kept in step with ci-local.sh's run_simcompose by hand.
+      - name: Check the chaos compose file pins each node's worker pools
+        run: python3 testing/chaos/sim-compose-test.py
       - name: Check nothing resolves the shared mutable test image
         run: bash testing/check-image-scoping.sh
       - name: Check every action is pinned to a commit SHA

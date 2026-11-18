@@ -28,6 +28,7 @@ use crate::proto::path::{
     Params, PathRef, PathState, PeerPath, Pin, Refusal, Role, Scope, Source, Switch, Why,
 };
 use crate::testutil::{SeededEntropy, TestClock, TestInstant, seed_entropy};
+use crate::time::Duration;
 use crate::transport::{TransportAddr, TransportId};
 
 std::thread_local! {
@@ -825,12 +826,14 @@ pub(crate) fn keep(out: Outputs<Slot>, kept: &mut Vec<Slot>) -> Vec<Out> {
                 from,
                 next,
                 why,
+                timeout,
             } => Output::State {
                 to,
                 path_id,
                 from,
                 next,
                 why,
+                timeout,
             },
             Output::Capable => Output::Capable,
             Output::NotCapable => Output::NotCapable,
@@ -1123,6 +1126,7 @@ pub(super) fn ruled(
             from,
             next,
             why,
+            ..
         } = o
         {
             let (t, a) = (to.transport, &to.addr);
@@ -1655,6 +1659,8 @@ pub(super) struct Log {
     pub(super) states: Vec<(u64, Change)>,
     /// Every connection asked for, with its pair.
     pub(super) connects: Vec<(u64, PathRef)>,
+    /// Every change of state that carried a probe timeout.
+    pub(super) waits: Vec<(u64, Waited)>,
 }
 
 impl Log {
@@ -1668,6 +1674,9 @@ impl Log {
         }
         for to in asked(out) {
             self.connects.push((at.0, to));
+        }
+        for waited in waited(out) {
+            self.waits.push((at.0, waited));
         }
     }
 
@@ -1742,6 +1751,30 @@ pub(super) fn scored(n: &Node, to: &PathRef, min: usize) -> Option<f64> {
 /// (`None` when it was discarded), the path taken, and why.
 pub(super) type Turn = (u64, Option<PathRef>, PathRef, Switch);
 
+/// A change of state that carried a probe timeout: the pair, from, next,
+/// why and the timeout.
+pub(super) type Waited = (PathRef, Option<PathState>, Option<PathState>, Why, Duration);
+
+/// The changes of state in `out` that carried a probe timeout.
+pub(super) fn waited(out: &[Out]) -> Vec<Waited> {
+    out.iter()
+        .filter_map(|o| {
+            let Output::State {
+                to,
+                from,
+                next,
+                why,
+                timeout: Some(timeout),
+                ..
+            } = o
+            else {
+                return None;
+            };
+            Some((to.clone(), *from, *next, *why, *timeout))
+        })
+        .collect()
+}
+
 /// The changes of active path in `out`, at `at` milliseconds.
 pub(super) fn turns(at: u64, out: &[Out]) -> Vec<Turn> {
     out.iter()
@@ -1764,6 +1797,9 @@ pub(super) struct Net<'r> {
     /// The answers on their way: when each arrives, on which pair, and
     /// the ack, in the order the probes went.
     queue: Vec<(u64, PathRef, PathAck)>,
+    /// Every change of state a step made that carried a probe timeout,
+    /// at its instant in milliseconds.
+    pub(super) waits: Vec<(u64, Waited)>,
 }
 
 impl<'r> Net<'r> {
@@ -1772,6 +1808,7 @@ impl<'r> Net<'r> {
         Self {
             rtt,
             queue: Vec::new(),
+            waits: Vec::new(),
         }
     }
 
@@ -1821,6 +1858,8 @@ impl<'r> Net<'r> {
             };
             let now = n.now.0;
             seen.extend(turns(now, &out));
+            self.waits
+                .extend(waited(&out).into_iter().map(|w| (now, w)));
             self.take(now, &out);
             watch(n, now);
         }
@@ -2019,6 +2058,7 @@ pub(super) fn states(out: &[Out]) -> Vec<Change> {
                 from,
                 next,
                 why,
+                ..
             } = o
             else {
                 return None;
@@ -2446,6 +2486,7 @@ fn each_shell_check_fails_on_an_output_that_breaks_it() {
         from,
         next: Some(PathState::Probing),
         why,
+        timeout: None,
     };
     let fine = |o: Out| ruled(&[o], &terms, first, &[]).is_ok();
     // A candidate admitted where it may not be probed.

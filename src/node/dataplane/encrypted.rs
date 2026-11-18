@@ -178,7 +178,11 @@ impl Node {
                     fmp_ciphertext_offset: header.ciphertext_offset(),
                     fallback_tx: self.decrypt_fallback_tx.clone(),
                 };
-                workers.dispatch_job(job);
+                if workers.dispatch_job(job) == crate::node::decrypt_worker::Dispatched::Full {
+                    self.metrics()
+                        .dataplane
+                        .record_reject(DataplaneReject::DecryptQueueFull);
+                }
                 return;
             }
         }

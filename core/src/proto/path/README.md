@@ -60,7 +60,9 @@ its node code steps it and acts on what it decides.
   module.
 - `live.rs`: `Liveness`, one path's outstanding probes, what their answers
   measured and the frames received on it: the ring of up to `RING` (8) probes
-  in send order, each with the instant it goes unanswered; the last four
+  in send order, each with the instant it goes unanswered and the probe
+  timeout it was sent under (`Sent::wait`, which a held verdict does not
+  change), returned by `expire` with whether it counted; the last four
   probes that timed out, so a late answer still gives a round trip; the path's
   `probe_id` sequence, from which a capability probe held outside the ring
   also takes its identifier (`take_id`), to be kept with the timed-out probes
@@ -228,7 +230,11 @@ its node code steps it and acts on what it decides.
   is not probed, nor
   a Dead path never acked, nor any path before the peer is capable. Three
   unanswered probes in a row make a Live path Suspect, ten more retire it
-  to Dead, and eight make a Probing path Dead; only a Live path's
+  to Dead, and eight make a Probing path Dead. Each of these three
+  changes comes out in its `Output::State` with `timeout`, the probe
+  timeout the probe whose timeout made it was sent under, so a reader of
+  the log can tell how long the node waited; every other change has
+  `None`. Only a Live path's
   timeouts are ETX losses, and a late answer gives a round trip and
   nothing else. Carrier loss and an unreachable send make a Live path
   Suspect; carrier's return, a fresh candidate report of the pair, a

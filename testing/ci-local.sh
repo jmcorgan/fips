@@ -596,6 +596,7 @@ GUARDS=(
     "run_trailing_log trailing-log"
     "run_chaos_schedule sim-schedule"
     "run_simassert sim-assertions"
+    "run_simcompose sim-compose"
     "run_image_scoping image-scoping"
     "run_action_pins action-pins"
     "run_base_pins base-pins"
@@ -3390,14 +3391,33 @@ run_chaos_schedule() {
 
 # The chaos assertions that read path lines, flap stamps and iperf3 results,
 # each fed planted input and checked for its verdict, so every one is shown
-# able to fail and to pass without a container. Hermetic and a few seconds.
-# Mirrored in ci.yml's ci-parity job by hand. Not named chaos-*, which this
-# script and the load annotation read as a scenario suite.
+# able to fail and to pass without a container; the link manager's down,
+# fed a slow stand-in install, checked to cut both directions at once; and the
+# switch ceiling's allowance for the probe timeout, fed planted lines.
+# Hermetic and a few seconds. Mirrored in ci.yml's ci-parity job by hand. Not
+# named chaos-*, which this script and the load annotation read as a
+# scenario suite.
 run_simassert() {
     local rc=0
     info "[sim-assertions] Checking the chaos path assertions against planted input"
     python3 "$SCRIPT_DIR/chaos/sim-assert-test.py" || rc=$?
+    python3 "$SCRIPT_DIR/chaos/sim-links-test.py" || rc=$?
+    python3 "$SCRIPT_DIR/chaos/sim-allowance-test.py" || rc=$?
     record "sim-assertions" "$rc"
+    return 0
+}
+
+# The compose file the chaos simulator writes, rendered for every scenario and
+# read back: each node must be given fixed worker-pool sizes, since the node's
+# own default follows the host's CPU count and at 20 CPUs held about 1 GiB a
+# node, enough for two overlapping nightly chaos parts to run the builder out
+# of memory. Hermetic, about ten seconds. Mirrored in ci.yml's ci-parity job
+# by hand. Not named chaos-*, as for sim-assertions.
+run_simcompose() {
+    local rc=0
+    info "[sim-compose] Checking the chaos compose file pins each node's worker pools"
+    python3 "$SCRIPT_DIR/chaos/sim-compose-test.py" || rc=$?
+    record "sim-compose" "$rc"
     return 0
 }
 

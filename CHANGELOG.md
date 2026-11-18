@@ -452,11 +452,14 @@ with v0.5.x or earlier peers.
   which journald and syslog already rotate.
 
 - `show_metrics` (`fipsctl stats metrics`) serves three more counter
-  families. `dataplane` counts the encrypted frames dropped before any peer
-  is looked up, which nothing counted before: `unknown_index`, a frame naming
-  a session index this node has not allocated, as the peer of a diverged link
-  produces when it keeps sealing for a session this node retired, and
-  `orphaned_index`, an index left pointing at a removed peer. `handshake` and
+  families. `dataplane` counts the encrypted frames dropped on the receive
+  path before they are authenticated, which nothing counted before:
+  `unknown_index`, a frame naming a session index this node has not
+  allocated, as the peer of a diverged link produces when it keeps sealing
+  for a session this node retired; `orphaned_index`, an index left pointing
+  at a removed peer; and `decrypt_queue_full`, a frame dropped because its
+  decrypt worker's queue was full, which only a rate-limited warning
+  reported. `handshake` and
   `session` serve the handshake and FSP session reject counters, which were
   kept but served by no query; they are as of the last tick, where the other
   families are read live. In `handshake`, `max_peers` counts the inbound
@@ -1285,6 +1288,12 @@ with v0.5.x or earlier peers.
   already logged them.
 
 #### Data plane and transports
+
+- A node's decrypt workers, one per CPU by default, hold about 2 MiB of
+  memory each from startup, down from about 27 MiB in 0.5.3 (about 0.31 GiB
+  on a 12-CPU host). Each worker's queue, allocated in full when the node
+  starts, now holds 16,384 packets instead of 32,768, and a session handed to
+  a worker no longer sets the size of every queue slot.
 
 - A frame the decrypt workers refuse as a replay is now counted. Only the
   inline receive path counted one, so a worker's refusal left no trace.
