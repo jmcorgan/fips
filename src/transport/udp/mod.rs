@@ -1366,7 +1366,7 @@ mod tests {
         assert_eq!(result.port(), 2121);
     }
 
-    /// A wildcard-IPv4 transport asked to send to an IPv6 address must fail
+    /// An IPv4-bound transport asked to send to an IPv6 address must fail
     /// with an error that names the family mismatch, not the kernel's
     /// "Address family not supported by protocol".
     #[tokio::test]

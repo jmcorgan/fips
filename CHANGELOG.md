@@ -292,8 +292,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an IPv6-only mobile carrier, a name with only an A record resolves with a
   synthesized AAAA first, so a transport bound to `0.0.0.0` failed every
   send to that peer with "Address family not supported by protocol" and
-  never linked. A send from an IPv4 socket to an IPv6 address is now refused
-  with an error that names both families and the bind address.
+  never linked. The IPv4 address is then reached through the platform's
+  464XLAT (CLAT on Android), which is how the fix was confirmed on such a
+  carrier. On an IPv6-only network without one an IPv4 socket still cannot
+  reach the peer, and the transport has to be bound to `[::]` to link. A send
+  from an IPv4 socket to an IPv6 address is now refused with an error that
+  names both families and the bind address.
 - A TCP link no longer resets on frames it should carry. On Linux, a frame
   above the local MSS but within the configured `mtu` used to reset it, as
   over WireGuard, Tailscale or an MSS-clamping middlebox. Between two peers
