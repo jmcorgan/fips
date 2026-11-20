@@ -2173,8 +2173,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handshake, on a first dial and at each link rekey, and the node reads every
   one, because dropping the attempt on a refused msg2 would let a forger end
   the genuine handshake. The wire format and the session keys are unchanged.
-  The number of forged msg2s a node reads during one handshake is still not
+  On a first dial, the number of forged msg2s a node reads is still not
   limited.
+- At a link rekey, the number of forged msg2s a node reads is now limited.
+  A rekey msg2 names its rekey by the index the msg1 carries in cleartext,
+  so anyone who saw the msg1 could make the node read any number of forged
+  msg2s, each costing a Diffie-Hellman operation, from any address. Once a
+  link rekey has read and refused 8 msg2s, the node reads a msg2 for it only
+  when it arrives on the peer's link, and drops the rest unread, counted in
+  the `off_link` handshake statistic. The genuine msg2 from the link is
+  always read, so a forger still cannot end the rekey; a peer that changes
+  address during a rekey that has refused 8 has its msg2 dropped, and the
+  msg1 resend draws the answer again. Each rekey attempt starts its own
+  count. A first dial and an end-to-end session's rekey are unchanged, and
+  nothing on the wire changes.
 
 #### Sessions
 
