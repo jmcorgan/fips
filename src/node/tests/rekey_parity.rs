@@ -1114,3 +1114,36 @@ async fn our_link_rekey_takes_the_inverse_of_the_k_bit_the_peer_was_last_seen_se
     assert_coherent(&mut nodes, "the end of the test, delivered until idle").await;
     cleanup_nodes(&mut nodes).await;
 }
+
+/// Our rekey revealed B's restart, and A still holds the pending it
+/// produced. A dial from B at its new epoch, ten minutes after A last heard
+/// it, is judged as A's rekey judges it, by the epoch the rekey took at the
+/// msg2: not a restart. A keeps its link and its pending and answers
+/// nothing.
+#[tokio::test]
+async fn a_dial_from_a_restarted_peer_quiet_past_the_interval_while_our_restart_pending_is_held_keeps_the_pending()
+ {
+    let mut r = restart_revealed_by_our_rekey().await;
+    let b_addr = r.b_addr;
+    let link = r.nodes[0].node.get_peer(&b_addr).unwrap().link_id();
+    crate::time::advance(Duration::from_secs(600));
+
+    let answered = crossing_dial_from_restarted_peer(&mut r).await;
+
+    let p = r.nodes[0]
+        .node
+        .get_peer(&b_addr)
+        .expect("A must keep its peering with B");
+    assert_eq!(
+        p.link_id(),
+        link,
+        "defect: A replaced its peering with B as a restart"
+    );
+    assert_eq!(
+        p.pending_our_index(),
+        Some(r.pending_index),
+        "A must keep the pending its rekey produced"
+    );
+    assert!(!answered, "the crossing dial must draw no msg2");
+    cleanup_nodes(&mut r.nodes).await;
+}

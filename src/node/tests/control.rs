@@ -1330,13 +1330,16 @@ fn plant_lost_dial(
     machine.set_conn_source_addr(addr.clone());
     machine.set_leg(conn.take_leg().unwrap());
     node.peer_machines.raw().insert(link_id, machine);
-    node.links.open(crate::transport::Link::connectionless(
-        link_id,
-        transport,
-        addr.clone(),
-        crate::transport::LinkDirection::Outbound,
-        std::time::Duration::from_millis(100),
-    ));
+    node.links.open(
+        &mut node.core,
+        crate::transport::Link::connectionless(
+            link_id,
+            transport,
+            addr.clone(),
+            crate::transport::LinkDirection::Outbound,
+            std::time::Duration::from_millis(100),
+        ),
+    );
     node.plant_dial_at((transport, index), link_id, None);
     link_id
 }

@@ -12,8 +12,11 @@ use crate::NodeAddr;
 use crate::node::diag::OrNone;
 use crate::node::settle::table::{Cell, Row, Transition, cell};
 use crate::node::{AddrKey, Node};
+#[cfg(test)]
 use crate::proto::fmp::EphemeralDigest;
+use crate::proto::settle::links::Pair;
 use crate::proto::settle::output::Why;
+use crate::transport::LinkId;
 use tracing::debug;
 
 /// What a removal hands the statements that follow it: why the peer went,
@@ -31,6 +34,26 @@ pub(in crate::node) struct Removed {
     /// Disconnect handler, which cannot await. A cell that notes it then
     /// runs nothing here.
     pub(in crate::node) noted: bool,
+    /// The peer's link, which the removal took out.
+    pub(in crate::node) link: Option<LinkId>,
+    /// The connections the removal's run closes at once, of those the
+    /// settlement core's `Retire` of the peer's link gave.
+    pub(in crate::node) closes: Vec<Pair>,
+}
+
+/// Who decided a removal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::node) enum By {
+    /// A test, by a removal of its own (test builds only).
+    #[cfg(test)]
+    Node,
+    /// The settlement core, which counted any silent session itself: the
+    /// node logs the refusal that starts, its identity having had `silent`
+    /// silent sessions counted before the core's removal.
+    Core {
+        /// The identity's silent-session count before the removal.
+        silent: Option<u32>,
+    },
 }
 
 /// What a removal's effects read beyond the transition: the removal.
@@ -51,15 +74,26 @@ impl Node {
     /// for pending tree announce (delivered on next tick).
     ///
     /// Returns `None`, having changed nothing, when no peer is held there.
-    pub(in crate::node) fn remove(&mut self, node_addr: &NodeAddr, why: Why) -> Option<Removed> {
+    ///
+    /// `by` says who decided it: the node, and the core stops holding the
+    /// peer here, or the settlement core, which no longer holds it and has
+    /// told its gates of a session that carried no frame.
+    pub(in crate::node) fn remove(
+        &mut self,
+        node_addr: &NodeAddr,
+        why: Why,
+        by: By,
+    ) -> Option<Removed> {
+        #[cfg(test)]
+        if by == By::Node {
+            self.unadopt(node_addr);
+        }
         let held = self.peer_link(node_addr);
         let Some(mut peer) = self.peers.take(node_addr) else {
             debug!(peer = %self.peer_display_name(node_addr), "Peer already removed");
             return None;
         };
         let link_id = peer.link_id();
-        #[cfg(test)]
-        self.shadow_remove(*node_addr, why);
         // Read while the machines are open: the transport for the bootstrap
         // cleanup below, and the startup epoch the silent-session note files
         // the refusal under.
@@ -76,8 +110,14 @@ impl Node {
         let (paths, out, carried) = peer.stop();
         let departed = peer.depart();
 
-        if !departed.frame_heard {
-            self.note_silent_session(node_addr, epoch, departed.ephemeral);
+        match by {
+            #[cfg(test)]
+            By::Node if !departed.frame_heard => {
+                self.note_silent_session(node_addr, epoch, departed.ephemeral);
+            }
+            #[cfg(test)]
+            By::Node => {}
+            By::Core { silent } => self.note_refusal(node_addr, epoch, silent),
         }
 
         // Log suppressed replay detection summary before teardown
@@ -148,11 +188,32 @@ impl Node {
             self.sessions.insert(*node_addr, entry);
         }
 
-        // Hand back every path's driver slot.
+        // Hand back every path's driver slot. A removal the core decided
+        // closes what its `Retire` gives, which its site queues; a test's
+        // own queues each path the peer has no further use for and no other
+        // link uses, as its release does.
+        #[cfg(test)]
+        let mut closes = Vec::new();
         for out in paths {
             if let fips_core::proto::path::Output::Released { to, driver, keep } = out {
+                #[cfg(test)]
+                if by == By::Node && !keep {
+                    self.resync();
+                    if !self.in_use(to.transport, &to.addr, link_id) {
+                        closes.push(Pair {
+                            transport: to.transport,
+                            addr: to.addr.clone(),
+                        });
+                    }
+                }
                 self.release_path(node_addr, link_id, to, driver, keep, true);
             }
+        }
+        // The mutation lane's break: the released paths' connections stay
+        // open.
+        #[cfg(test)]
+        if !node_fault!(ReleaseKeepsPairOpen) {
+            self.queue_closes(closes, *node_addr, link_id, true);
         }
         self.forget_connects(node_addr);
 
@@ -221,6 +282,8 @@ impl Node {
             why,
             held,
             noted: false,
+            link: Some(link_id),
+            closes: Vec::new(),
         })
     }
 
@@ -237,23 +300,17 @@ impl Node {
     /// The removal a test makes: the routine for a link its rekey machine
     /// ended, the one cause whose table runs nothing after the removal, so
     /// a test that leaves out what follows a removal leaves out nothing.
-    /// Since nothing follows it, it records the node's side of the removal
-    /// for the shadow core's comparison itself, as [`Node::removed`]'s run
-    /// would.
     #[cfg(test)]
     pub(in crate::node) fn remove_active_peer(&mut self, node_addr: &NodeAddr) -> Option<Removed> {
-        let removed = self.remove(node_addr, Why::Ended)?;
-        self.did(super::Did::Remove {
-            peer: *node_addr,
-            why: Why::Ended,
-        });
-        Some(removed)
+        self.remove(node_addr, Why::Ended, By::Node)
     }
 
     /// Count the session of the peer at `node_addr`, removed without having
     /// carried one authenticated frame, toward its identity's silent-session
     /// back-off at its startup `epoch`, and log the refusal this starts or
-    /// extends, with how many msg1s the identity's previous refusal refused.
+    /// extends, with how many msg1s the identity's previous refusal refused
+    /// (test builds only, for a test's own removal).
+    #[cfg(test)]
     fn note_silent_session(
         &mut self,
         node_addr: &NodeAddr,
@@ -261,20 +318,20 @@ impl Node {
         ephemeral: Option<EphemeralDigest>,
     ) {
         let params = self.gate_params();
-        let refusal = self.gates.ended(
+        let refusal = self.gates_mut().ended(
             *node_addr,
             epoch,
             ephemeral,
             crate::peer::peer_now(),
-            Self::memory_now(),
+            None,
             &params,
         );
         // A refusal the end starts reports what the record's previous one
         // refused, and counts again from none; a record the end started
         // afresh has refused nothing.
-        let silent = self.gates.silent(node_addr).unwrap_or(0);
+        let silent = self.gates().silent(node_addr).unwrap_or(0);
         if let Some(length) = refusal {
-            let prior = self.gates.take_refused(node_addr);
+            let prior = self.gates_mut().take_refused(node_addr);
             debug!(
                 peer = %self.peer_display_name(node_addr),
                 startup_epoch = %OrNone(epoch.map(hex::encode)),
@@ -285,6 +342,72 @@ impl Node {
             );
         }
     }
+}
+
+impl Node {
+    /// Run the connections `closes` the core's close rule closes as it
+    /// retires the link of the removal `removed`, by the table's cell for its
+    /// cause: an operator's disconnect closes the pair the peer was on at
+    /// once, in its run ([`close_held`]); every other is queued to close at
+    /// the drain now, with the removal's release of the peer's paths.
+    pub(in crate::node) fn retire_closes(
+        &mut self,
+        peer: NodeAddr,
+        removed: &mut Removed,
+        closes: Vec<Pair>,
+    ) {
+        let held = removed.held.as_ref().map(|(transport, addr)| Pair {
+            transport: *transport,
+            addr: addr.clone(),
+        });
+        let at_once = cell(Row::Connection, &Transition::Remove { why: removed.why })
+            == Cell::UnkeptQueuedCurrentClosed;
+        let (now, later): (Vec<Pair>, Vec<Pair>) = closes
+            .into_iter()
+            .partition(|p| at_once && Some(p) == held.as_ref());
+        removed.closes = now;
+        // The mutation lane's break: the released paths' connections stay
+        // open.
+        if !node_fault!(ReleaseKeepsPairOpen) {
+            // Link ids are numbered from 1, so 0 excepts no link.
+            let link = removed.link.unwrap_or(LinkId::new(0));
+            self.queue_closes(later, peer, link, true);
+        }
+    }
+
+    /// Log the silent-session refusal the settlement core's removal of the
+    /// peer at `node_addr` started or extended, if it did: its identity's
+    /// silent count moved from `before` and a refusal is in force.
+    fn note_refusal(&mut self, node_addr: &NodeAddr, epoch: Option<[u8; 8]>, before: Option<u32>) {
+        let silent = self.gates().silent(node_addr);
+        let Some(refusing) = self
+            .gates()
+            .refusing(node_addr, crate::peer::peer_now())
+            .filter(|_| silent != before)
+        else {
+            return;
+        };
+        let prior = self.core.take_refused(node_addr);
+        debug!(
+            peer = %self.peer_display_name(node_addr),
+            startup_epoch = %OrNone(epoch.map(hex::encode)),
+            silent = silent.unwrap_or(0),
+            refuse_s = refusing.remaining.as_millis().div_ceil(1000),
+            prior_refused = prior,
+            "Session ended without a frame, refusing the peer's msg1s at this epoch"
+        );
+    }
+}
+
+/// [`removal`], to write.
+fn removal_mut(r: &mut Run) -> Option<&mut Removed> {
+    let removed = match &mut r.facts {
+        Of::Remove(facts) => Some(&mut facts.removed),
+        Of::Install(facts) => facts.removed_mut(),
+        Of::None | Of::Cross(_) | Of::Paths(_) => None,
+    };
+    debug_assert!(removed.is_some(), "a removal's effect ran with no removal");
+    removed
 }
 
 /// The removal `r` runs the tail of: a removal's, or the one a replacement
@@ -326,14 +449,16 @@ pub(super) async fn unmark_held(node: &mut Node, r: &mut Run) {
     }
 }
 
-/// Close the transport's connection at the pair the peer was on, by the
-/// table's cell. Where the cell queues only the unkept paths, the removal's
-/// own release of the paths has done that.
+/// Close the pair the peer was on at once, where the table's cell says so,
+/// unguarded, as the core's close rule gave it for the removal; the other
+/// connections the rule closes were queued to close at the drain with the
+/// removal ([`Node::retire_closes`]).
 pub(super) async fn close_held(node: &mut Node, r: &mut Run) {
-    let Some(removed) = removal(r) else {
+    let c = cell(Row::Connection, &r.t);
+    let Some(removed) = removal_mut(r) else {
         return;
     };
-    let c = cell(Row::Connection, &r.t);
+    let closes = std::mem::take(&mut removed.closes);
     if c != Cell::UnkeptQueuedCurrentClosed {
         debug_assert!(c == Cell::UnkeptQueued, "a removal's connection is {c:?}");
         return;
@@ -342,19 +467,12 @@ pub(super) async fn close_held(node: &mut Node, r: &mut Run) {
     // transport, so on a connection-oriented transport the pool entry, the
     // socket and its inbound-slot accounting would otherwise survive the
     // peer the node has just forgotten: an operator who disconnects a peer
-    // to free a slot would not free the slot. This mirrors
-    // `cleanup_stale_connection`, and the reasoning there applies verbatim:
-    // closing twice is harmless, because every `close_connection`
-    // implementation is `if let Some(conn) = pool.remove(addr)` and the
-    // connectionless default is a no-op.
-    if !node_fault!(AdminKeepsConnection)
-        && let Some((transport_id, addr)) = &removed.held
-    {
-        #[cfg(test)]
-        node.closed(*transport_id, addr);
-        if let Some(transport) = node.transports.get(transport_id) {
-            transport.close_connection(addr).await;
-        }
+    // to free a slot would not free the slot. Closing twice is harmless,
+    // because every `close_connection` implementation is
+    // `if let Some(conn) = pool.remove(addr)` and the connectionless default
+    // is a no-op. The mutation lane's break: the connection stays open.
+    if !node_fault!(AdminKeepsConnection) {
+        node.close_each(closes).await;
     }
 }
 

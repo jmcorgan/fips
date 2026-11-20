@@ -485,7 +485,6 @@ impl Node {
         let mut address_changed = false;
         let mut first_frame = false;
         let mut present = false;
-        let mut first_heard = false;
         let mut prior = None;
         let mut wake = None;
         let mut heard_from = false;
@@ -549,8 +548,7 @@ impl Node {
             peer.link_stats_mut()
                 .record_recv(frame.len, frame.received_ms);
             first_frame = !peer.heard();
-            first_heard = !peer.is_heard();
-            peer.touch(frame.received_ms);
+            peer.frame_touch(frame.received_ms);
             if frame.slot == LinkSlot::Previous {
                 peer.count_previous();
             }
@@ -579,28 +577,17 @@ impl Node {
             let to = (frame.transport_id, frame.remote_addr.clone());
             self.roamed(*node_addr, link, from, &to, standby);
         }
-        // The shadow core hears the frame, after the roam the bundle made.
-        #[cfg(test)]
-        if present {
-            self.decide(crate::proto::settle::input::Input::Heard {
-                peer: *node_addr,
-                from: crate::proto::settle::links::Pair {
-                    transport: frame.transport_id,
-                    addr: frame.remote_addr.clone(),
-                },
-                kind: msg_type,
-            });
-        }
         // A session's first authenticated frame clears its identity's
         // silent-session record: one identity has one peer entry, and a
-        // record grows only when an unheard session ends.
+        // record grows only when an unheard session ends. The first
+        // authenticated frame of an unheard peering proves it live, so the
+        // memory of msg1s that promoted it unheard has nothing left to bound.
+        // The settlement core is told of every frame and forgets both.
         if first_frame {
             self.note_peer_heard(node_addr);
         }
-        // The first authenticated frame proves the peering live, so the
-        // memory of msg1s that promoted it unheard has nothing left to bound.
-        if first_heard {
-            self.gates.heard(node_addr);
+        if present {
+            self.hear(*node_addr, frame.transport_id, frame.remote_addr, msg_type);
         }
         // A roam: address rotation invalidates the per-peer connect()-ed UDP
         // socket, which is still pinned to the old 5-tuple, so the executor

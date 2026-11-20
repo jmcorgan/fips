@@ -6,63 +6,65 @@
 # line, or the file:line the panic must be at) is for a test that predates
 # the marker, or picks one `defect:` assertion of a test that has more than
 # one. See run.sh.
-MoveKeepsOldPair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_on_another_transport_moves_the_link_to_the_msg2s_transport_and_address	s takes the msg2's transport and source address as l's
-MoveKeepsOldPair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_from_another_address_moves_the_link_to_the_msg2s_address	s takes the msg2's transport and source address as l's
-MoveKeepsOldPair	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	node 0 keeps L2, the link its winning handshake ran on, pooled
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first	defect: crossed TCP dials lost the peering
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first	defect: crossed TCP dials lost the peering
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::a_crossed_dial_won_on_another_transport_leaves_a_coherent_pair	defect: the smaller node holds the larger at the winning msg2's transport and source
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::a_crossed_dial_won_from_another_address_leaves_a_coherent_pair	defect: the smaller node holds the larger at the winning msg2's transport and source
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_larger_dialer
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_another_transport_does_what_the_move_cells_say
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_a_second_ble_link_relinks_the_mark
+MoveKeepsOldPair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_on_another_transport_moves_the_link_to_the_msg2s_transport_and_address	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_from_another_address_moves_the_link_to_the_msg2s_address	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::a_crossed_dial_won_on_another_transport_leaves_a_coherent_pair	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::a_crossed_dial_won_from_another_address_leaves_a_coherent_pair	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_larger_dialer	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_another_transport_does_what_the_move_cells_say	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_a_second_ble_link_relinks_the_mark	held-entry
 MoveKeepsOldPair	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_tcp
 MoveKeepsOldPair	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_tcp_with_multipath_on
 MoveKeepsOldPair	red	fips-mesh	node::tests::settle::explore::parity::every_shared_schedule_gives_its_trace_on_real_nodes
 MoveKeepsOldPair	red	fips-mesh	node::tests::settle::explore::parity::every_shared_schedule_gives_its_trace_on_real_nodes_with_multipath_on
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_from_another_address_keeps_an_index_entry_for_its_link
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_from_another_address_keeps_an_index_entry_for_its_link_with_multipath_on
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_another_transport_keeps_an_index_entry_for_its_link
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_another_transport_keeps_an_index_entry_for_its_link_with_multipath_on
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_from_another_address_keeps_an_index_entry_for_its_link	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_from_another_address_keeps_an_index_entry_for_its_link_with_multipath_on	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_another_transport_keeps_an_index_entry_for_its_link	held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_another_transport_keeps_an_index_entry_for_its_link_with_multipath_on	held-entry
 MoveAnnouncesFirst	red	fips-mesh	node::tests::control::test_api_connect_to_a_second_address_of_a_quiet_peer_dials_it_and_leaves_the_link_on_its_path	heartbeat must authenticate at node
 MoveAnnouncesFirst	red	fips-mesh	node::tests::rekey_parity::an_alternate_path_dial_on_an_aged_session_leaves_both_ends_able_to_authenticate	S receives L's heartbeat on its current session
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first_with_multipath_on
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first_with_multipath_on
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first_with_multipath_on
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first_with_multipath_on
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_larger_dialer
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_larger_dialer_with_multipath_on
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer_with_multipath_on
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_larger_dialer
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_larger_dialer_with_multipath_on
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer_with_multipath_on
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path_with_multipath_on
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_dial_answered_after_a_crossing_ends_the_pin
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_dial_answered_after_a_crossing_ends_the_pin_with_multipath_on
-MoveKeepsInboundLink	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	node 0 closed L1, the link it left for the one it dialed
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::audit::the_audit_finds_no_breach_at_the_smaller_node_after_crossed_tcp_dials
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::audit::the_audit_finds_no_breach_at_the_smaller_node_after_crossed_tcp_dials_with_multipath_on
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first	link-cache
+MoveKeepsInboundLink	red	fips-core	proto::settle::table::tests::a_crossing_moves_the_smaller_node_and_retires_the_inbound_link	the inbound link is retired and its connection closed
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first_with_multipath_on	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first_with_multipath_on	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first_with_multipath_on	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first_with_multipath_on	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_larger_dialer	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_larger_dialer_with_multipath_on	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer_with_multipath_on	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_larger_dialer	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_larger_dialer_with_multipath_on	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it_dialed_smaller_dialer_with_multipath_on	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path_with_multipath_on	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_dial_answered_after_a_crossing_ends_the_pin	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_second_dial_answered_after_a_crossing_ends_the_pin_with_multipath_on	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::audit::the_audit_finds_no_breach_at_the_smaller_node_after_crossed_tcp_dials	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::audit::the_audit_finds_no_breach_at_the_smaller_node_after_crossed_tcp_dials_with_multipath_on	link-cache
 MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::explore::parity::every_shared_schedule_gives_its_trace_on_real_nodes
 MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::explore::parity::every_shared_schedule_gives_its_trace_on_real_nodes_with_multipath_on
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_smaller_first	defect: the smaller node holds a connection besides its dial's
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_smaller_first_with_multipath_on	defect: the smaller node holds a connection besides its dial's
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first	defect: the smaller node holds a connection besides its dial's
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first_with_multipath_on	defect: the smaller node holds a connection besides its dial's
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_smaller_first	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_smaller_first_with_multipath_on	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first_with_multipath_on	link-cache
 MoveKeepsInboundLink	pass	fips-mesh	node::tests::link_setup_diag::a_simultaneous_dial_tags_the_surviving_session_on_both_ends
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_settles_both_ends_on_the_smaller_nodes_dial_at_its_first_frame
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_settles_both_ends_on_the_smaller_nodes_dial_at_its_first_frame_with_multipath_on
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_settles_both_ends_on_the_smaller_nodes_dial_at_its_first_frame	link-cache
+MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_settles_both_ends_on_the_smaller_nodes_dial_at_its_first_frame_with_multipath_on	link-cache
 MachineLeftBehind	red	fips-mesh	node::tests::settle::crossing::a_moved_peers_control_machine_moves_with_it	peer machine present for the promoted cross-connection peer
 MachineLeftBehind	red	fips-mesh	node::tests::settle::crossing::a_moved_peers_control_machine_moves_with_it_with_multipath_on	peer machine present for the promoted cross-connection peer
 CarrierLeftBehind	red	fips-mesh	node::tests::settle::readings::a_no_carrier_reading_stays_across_a_move_and_goes_with_the_peer
 IgnoreOwnDial	red	fips-mesh	node::tests::handshake::heard::a_second_msg1_after_the_replaceable_age_from_the_larger_address_leaves_a_working_peering	the responder must have decrypted the dialer's frames on the peering that replaced the first
+IgnoreOwnDial	red	fips-core	proto::settle::table::tests::a_second_dial_to_a_peer_held_on_this_nodes_own_dial_moves_the_peer_onto_it
 IgnoreOwnDial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_leaves_a_working_peering_larger_dialer	defect: Err(
 IgnoreOwnDial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer	defect: Err(
 IgnoreOwnDial	pass	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer
@@ -70,9 +72,10 @@ IgnoreOwnDial	pass	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_t
 IgnoreOwnDial	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_loopback
 IgnoreOwnDial	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_loopback_with_multipath_on
 CrossedRunsKeep	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says
+CrossedRunsKeep	red	fips-core	proto::settle::table::tests::a_crossing_decided_by_the_tie_break_alone_moves_the_smaller_node_onto_its_dial
 CrossedRunsKeep	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says_with_multipath_on
-CrossedRunsKeep	red	fips-mesh	node::tests::handshake::test_cross_connection_both_initiate	the shadow core decided otherwise than the node
-CrossedRunsKeep	red	fips-mesh	node::tests::restart_dial::two_fresh_nodes_dialling_each_other_settle_on_one_session_in_either_message_order	the shadow core decided otherwise than the node
+CrossedRunsKeep	red	fips-mesh	node::tests::establish_chartests::chartest_cross_connection_tiebreak_winner_and_loser	winner (smaller addr) swaps to its outbound session index
+CrossedRunsKeep	red	fips-mesh	node::tests::restart_dial::two_fresh_nodes_dialling_each_other_settle_on_one_session_in_either_message_order	src/node/tests/restart_dial.rs:251
 ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_garbage_msg2s
 ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_replayed_msg2s
 OutputsBeforeInstall	red	fips-mesh	node::tests::decrypt_replay::a_promoted_session_reaches_the_decrypt_workers_with_the_peers_total
@@ -155,19 +158,19 @@ TreeOnWall	red	fips-mesh	node::tests::settle::clock::a_backward_wall_step_does_n
 TreeNoneAsZero	red	fips-mesh	node::tests::settle::clock::a_peer_never_sent_a_tree_announce_may_be_sent_one_at_the_clocks_first_instants
 IntervalOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_time_out_a_fresh_dial
 IntervalOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_sends_no_msg1_resend_early
-GateOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_loopback_peering_heard_just_now
-GateOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_peering_heard_just_now
-GateOnWall	red	fips-mesh	node::tests::settle::clock::a_heard_peering_quiet_past_the_restart_interval_is_replaced_by_a_restart_msg1
-UnheardAgeOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_an_unheard_peering_promoted_just_now
+IntervalOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_step_does_not_empty_the_replay_memory
+IntervalOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_loopback_peering_heard_just_now	defect: a peering heard just now was replaced because the wall clock stepped forward
+IntervalOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_peering_heard_just_now	defect: a peering heard just now was replaced because the system clock jumped ahead
+IntervalOnWall	red	fips-mesh	node::tests::settle::clock::a_heard_peering_quiet_past_the_restart_interval_is_replaced_by_a_restart_msg1	defect: a peering quiet past the restart interval was not replaced by a restart msg1
+IntervalOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_an_unheard_peering_promoted_just_now	defect: an unheard peering promoted just now was replaced because the wall clock stepped forward
 TouchKeepsHeardInstant	red	fips-mesh	node::tests::settle::clock::a_peering_heard_just_now_after_an_old_promotion_is_not_replaced_by_a_restart_msg1
-MemoryOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_step_does_not_empty_the_replay_memory
-MemoryOnWall	red	fips-mesh	node::tests::settle::clock::a_replay_memory_entry_ages_out_after_the_interval_across_a_backward_wall_step
-MemoryVerdictOnPacketStamp	red	fips-mesh	node::tests::settle::clock::a_forward_wall_step_does_not_empty_the_replay_memory
-MemoryVerdictOnPacketStamp	red	fips-mesh	node::tests::handshake::nine_distinct_captures_in_fifteen_seconds_promote_at_most_eight	every promotion of an unheard peering is remembered
+TouchKeepsHeardInstant	red	fips-core	proto::settle::table::tests::a_frame_moves_the_instant_of_the_peerings_last_frame
+HeldCacheStale	red	fips-mesh	node::tests::handshake::heard::a_responder_peering_that_has_decrypted_a_frame_still_refuses_a_replay_inside_the_interval	"last")
 MemoryNeverExpires	red	fips-mesh	node::tests::settle::clock::a_replay_memory_entry_ages_out_after_the_interval_across_a_backward_wall_step
 MoveKeepsReplayMemory	red	fips-core	proto::settle::table::tests::a_move_that_makes_the_peering_heard_forgets_its_replay_memory_and_keeps_its_silent_sessions
 MoveKeepsReplayMemory	red	fips-mesh	node::tests::settle::cells::a_move_forgets_the_replayed_msg1s_it_was_promoted_by
 MoveLeavesUnheard	red	fips-mesh	node::tests::settle::cells::a_crossing_leaves_the_smaller_node_heard
+MoveLeavesUnheard	red	fips-core	proto::settle::table::tests::a_move_onto_this_nodes_own_dial_makes_the_peering_heard
 MoveLeavesUnheard	red	fips-mesh	node::tests::settle::cells::a_crossing_leaves_the_smaller_node_heard_with_multipath_on
 MoveLeavesUnheard	red	fips-mesh	node::tests::settle::cells::a_move_heard_at_a_restart_gate_keeps_the_fifteen_second_floor
 MoveLeavesUnheard	red	fips-mesh	peer::data::tests::a_move_resets_what_its_cells_say_and_carries_the_rest
@@ -224,6 +227,9 @@ PathLaneShared	red	fips-mesh	transport::socks5::lane_tests::a_nym_path_message_i
 PathLaneShared	red	fips-mesh	transport::socks5::lane_tests::the_tor_writer_sends_a_waiting_path_message_before_the_data_queued_ahead_of_it
 PathLaneShared	red	fips-mesh	transport::socks5::lane_tests::the_nym_writer_sends_a_waiting_path_message_before_the_data_queued_ahead_of_it
 MovedLeavesEntry	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	entry-pair
+MovedLeavesEntry	red	fips-core	proto::settle::table::tests::a_path_moved_rekeys_the_links_index_entry_to_the_new_pair	and not at the pair it left
+EpochAtCutover	red	fips-core	proto::settle::table::tests::a_restarted_peers_epoch_its_rekey_took_makes_its_msg1_at_that_epoch_a_rekey
+EpochAtCutover	red	fips-mesh	node::tests::rekey_parity::a_dial_from_a_restarted_peer_quiet_past_the_interval_while_our_restart_pending_is_held_keeps_the_pending	"epoch")
 ReleaseKeepsPairOpen	red	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_another_closes_its_connection_as_the_table_says_with_multipath_on
 ReleaseKeepsPairOpen	pass	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_it_keeps_its_connection_as_the_table_says_with_multipath_on
 ReleaseKeepsPairOpen	red	fips-mesh	node::tests::settle::readings::a_close_queued_with_nothing_on_its_pair_still_closes
@@ -281,14 +287,14 @@ EndedSchedulesRetry	red	fips-mesh	node::tests::settle::table::remove::a_peer_who
 EndedSchedulesRetry	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say_with_multipath_on
 EndedSchedulesRetry	red	fips-mesh	node::tests::settle::table::remove::a_test_removal_runs_no_tail
 OrphanedNoRetry	red	fips-core	proto::settle::table::tests::an_orphaned_bundles_peer_is_retried
-OrphanedNoRetry	red	fips-mesh	node::tests::settle::table::remove::an_orphaned_peer_is_removed_as_its_cells_say	the shadow core decided otherwise than the node
+OrphanedNoRetry	red	fips-mesh	node::tests::settle::table::remove::an_orphaned_peer_is_removed_as_its_cells_say
 RestartNoRetry	red	fips-core	proto::settle::table::tests::a_restarted_or_replaced_peer_is_retried_in_each_of_the_three_ways
-RestartNoRetry	red	fips-mesh	node::tests::establish_chartests::an_accepted_restart_of_an_auto_connect_peer_notes_its_retry_and_clears_it_at_the_promotion	the shadow core decided otherwise than the node
 RedialNoRetry	red	fips-core	proto::settle::table::tests::a_peer_a_redials_swap_replaces_is_retried
 RedialSwapHeard	red	fips-core	proto::settle::table::tests::a_redials_swap_installs_the_peer_unheard_and_its_frames_heard_hears_it
+RedialSwapHeard	red	fips-mesh	node::tests::roam_redial::a_redial_from_a_new_address_on_an_aged_link_is_answered_and_settles_before_the_responder_would_reap_with_decrypt_workers_multipath_off	"heard")
 RemovalClosesEveryPair	red	fips-core	proto::settle::table::tests::an_orphaned_peer_closes_its_bundles_paths_and_not_a_setup_pair_released_to_keep
 RemovalClosesEveryPair	red	fips-core	proto::settle::table::tests::an_operator_disconnect_closes_the_peers_pair_though_a_dial_uses_it
-RemovalClosesEveryPair	red	fips-mesh	node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say_with_multipath_on	closes-agree: the shadow core decided otherwise than the node
+RemovalClosesEveryPair	red	fips-mesh	node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say_with_multipath_on	the site does not do what the table says
 LinksNotFed	red	fips-mesh	node::tests::settle::live::a_dialed_links_record_holds_its_original_path_live_and_one_off_its_bundle_fails	links-mirror
 LinksNotFed	red	fips-mesh	node::tests::settle::live::a_dialed_links_record_holds_its_original_path_live_and_one_off_its_bundle_fails_with_multipath_on	links-mirror
 LinksNotFed	red	fips-mesh	node::tests::settle::live::a_healthy_dial_passes_the_live_audit_at_every_entry	links-mirror
@@ -309,13 +315,12 @@ AttributeBySetupOnly	red	fips-mesh	node::tests::session::a_rekey_answered_on_the
 AttributeBySetupOnly	red	fips-mesh	node::tests::session::a_rekey_msg2_answers_on_the_peers_established_link_when_the_msg1_source_maps_to_it	nothing may be sent to the address the msg1 came from
 SwitchLeavesPeer	red	fips-core	proto::settle::table::tests::a_switch_moves_the_held_record_to_the_new_active_path_in_the_table
 HeardMovesPeer	red	fips-core	proto::settle::table::tests::a_frame_from_another_transport_moves_nothing_in_the_core
-HeardMovesPeer	red	fips-mesh	node::tests::multi_path::an_authentic_frame_on_another_transport_is_delivered_but_does_not_move_the_peer	the shadow core decided otherwise than the node
+HeardMovesPeer	red	fips-mesh	node::tests::multi_path::an_authentic_frame_on_another_transport_is_delivered_but_does_not_move_the_peer	"current")
 FollowResets	red	fips-core	proto::settle::table::tests::a_path_the_bundle_followed_moves_the_cores_record_and_resets_nothing
-FollowResets	red	fips-mesh	node::tests::settle::table::paths::a_probe_from_a_new_address_moves_a_path_of_a_two_path_link_with_multipath_on	the shadow core decided otherwise than the node
 SwitchWritesLive	red	fips-core	proto::settle::table::tests::a_switch_to_an_acknowledged_path_leaves_it_acknowledged
 SwitchWritesLive	red	fips-mesh	node::tests::settle::live::a_switch_to_an_acked_path_is_recorded_acked_and_the_mirror_holds_with_multipath_on	a switch to an acknowledged path is recorded Live
 MoveClosesNewPair	red	fips-core	proto::settle::table::tests::a_move_onto_a_dial_answered_from_the_peers_other_pair_keeps_that_pair_open
-MoveClosesNewPair	red	fips-mesh	node::tests::settle::crossing::a_move_leaves_a_connection_a_dial_in_flight_uses	closes-agree: the shadow core decided otherwise than the node
+MoveClosesNewPair	red	fips-mesh	node::tests::settle::table::crossing::an_own_dial_answered_on_an_aged_link_does_what_the_move_cells_say_with_multipath_on	the move closes other connections than its cell says
 MoveLeavesDialOpen	red	fips-core	proto::settle::table::tests::a_move_onto_a_dial_answered_from_the_peers_other_pair_closes_the_dials_own_connection
 MoveLeavesDialOpen	red	fips-mesh	node::tests::ble::a_crossed_dial_answered_over_the_peers_dial_connection_closes_the_connection_it_dialled
 MoveLeavesDialOpen	red	fips-mesh	node::tests::settle::table::crossing::an_own_dial_answered_on_an_aged_link_does_what_the_move_cells_say
@@ -331,8 +336,8 @@ IndexOldestWins	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_l
 IndexOldestWins	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_lost_at_a_proven_pair_does_what_the_keep_cells_say_with_multipath_on
 IndexNotRebuilt	red	fips-mesh	node::tests::settle::links::a_second_path_proven_through_frames_is_named_in_the_link_index_with_multipath_on	index-cache
 IndexNotRebuilt	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays	index-cache
-RoamNotFed	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays	links-mirror
-RoamNotFed	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays_with_multipath_on	links-mirror
+RoamNotFed	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays	"current")
+RoamNotFed	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays_with_multipath_on	"current")
 VerdictIgnoresData	red	fips-mesh	node::tests::path_load::a_pinned_lane_whose_queue_jumps_to_two_seconds_under_two_way_traffic_keeps_the_link
 VerdictIgnoresData	red	fips-mesh	node::tests::path_load::a_pinned_lane_whose_load_restarts_after_the_window_keeps_the_link_at_the_restart
 VerdictIgnoresData	red	fips-mesh	node::tests::path_load::an_unpinned_lane_whose_queue_grows_past_the_cap_goes_suspect_only_after_it_does
@@ -418,6 +423,7 @@ MediumMoveUnheld	red	fips-core	proto::path::tests::choice::load_that_follows_the
 MediumMoveUnheld	red	fips-core	proto::path::select::tests::a_move_to_a_cable_for_its_medium_waits_while_it_is_outside_the_margin_of_the_loaded_wifi_at_its_best
 MediumMoveUnheld	pass	fips-core	proto::path::tests::choice::a_cable_within_the_margin_of_a_better_scoring_wifi_takes_the_link_one_dwell_after_its_second_sample
 MediumMoveUnheld	pass	fips-core	proto::path::tests::choice::load_that_follows_the_link_does_not_flap_it_between_a_cable_and_a_wifi_slightly_faster_at_its_best
+StoredAnswersAny	red	fips-core	proto::settle::table::tests::a_msg1_from_the_address_of_a_sent_answer_is_read_unless_it_is_the_msg1_answered
 StoredAnswersAny	red	fips-mesh	node::tests::roam_replay::a_fresh_msg1_from_the_address_of_a_sent_unpromoted_leg_is_classified_not_answered_with_its_stored_msg2
 StoredAnswersAny	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_spoofed_from_another_held_peers_address_leaves_that_peers_rekey_and_traffic_untouched
 StoredAnswersAny	pass	fips-mesh	node::tests::roam_replay::a_byte_identical_resend_to_a_sent_unpromoted_leg_still_draws_its_stored_msg2
@@ -443,6 +449,7 @@ RedialTearsDownAtMsg1	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_fr
 RedialTearsDownAtMsg1	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_a_spoofed_address_leaves_the_old_session_up_and_delivering_and_its_pending_redial_expires_young_multipath_off
 RedialTearsDownAtMsg1	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_a_spoofed_address_leaves_the_old_session_up_and_delivering_and_its_pending_redial_expires_young_multipath_on
 RedialTearsDownAtMsg1	pass	fips-mesh	node::tests::roam_redial::a_redial_from_a_new_address_on_an_aged_link_is_answered_and_settles_before_the_responder_would_reap_multipath_off
+RedialTearsDownAtMsg1	red	fips-core	proto::settle::table::tests::a_redials_answer_leaves_the_held_peer_until_a_frame_proves_it
 RedialSwapsUnproven	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_a_spoofed_address_leaves_the_old_session_up_and_delivering_and_its_pending_redial_expires_aged_multipath_off
 RedialSwapsUnproven	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_a_spoofed_address_leaves_the_old_session_up_and_delivering_and_its_pending_redial_expires_aged_multipath_on
 RedialSwapsUnproven	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_a_spoofed_address_leaves_the_old_session_up_and_delivering_and_its_pending_redial_expires_with_decrypt_workers
@@ -453,15 +460,20 @@ RedialNeverExpires	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_
 RedialNeverExpires	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_a_spoofed_address_leaves_the_old_session_up_and_delivering_and_its_pending_redial_expires_with_decrypt_workers
 RedialNeverExpires	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_a_spoofed_address_leaves_the_old_session_up_and_delivering_and_its_pending_redial_expires_young_multipath_off
 RedialNeverExpires	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_a_spoofed_address_leaves_the_old_session_up_and_delivering_and_its_pending_redial_expires_young_multipath_on
+RedialNeverExpires	red	fips-core	proto::settle::table::tests::a_pending_redials_leg_is_reaped_at_its_deadline
 RedialSlotIgnored	red	fips-mesh	node::tests::roam_replay::a_second_redial_within_1_s_of_the_first_is_refused_and_the_first_settles_at_its_frame
 RedialSlotIgnored	red	fips-mesh	node::tests::roam_replay::a_genuine_redial_refused_behind_a_capture_is_answered_at_a_later_resend_of_the_same_dial
 RedialSlotIgnored	pass	fips-mesh	node::tests::roam_replay::a_redial_more_than_1_s_after_an_unproven_one_replaces_it_and_frees_its_index
+RedialSlotIgnored	red	fips-core	proto::settle::table::tests::a_second_redial_within_the_unheard_floor_of_the_first_is_held_back
 RedialMemoryIgnored	red	fips-mesh	node::tests::roam_replay::nine_distinct_replayed_msg1s_within_15_s_draw_at_most_eight_msg2s
 RedialMemoryIgnored	pass	fips-mesh	node::tests::roam_replay::a_replayed_msg1_sent_again_within_15_s_draws_no_second_msg2
+RedialMemoryIgnored	red	fips-core	proto::settle::table::tests::the_redial_memory_refuses_a_seen_ephemeral
 RedialSkipsDampener	red	fips-mesh	node::tests::roam_gates::a_redial_within_15_s_of_a_swap_is_refused_and_answered_at_its_first_resend_after_the_dampener_clears
 RedialSkipsDampener	red	fips-mesh	node::tests::roam_gates::a_redial_within_15_s_of_a_swap_is_refused_and_answered_at_its_first_resend_after_the_dampener_clears_with_decrypt_workers
+RedialSkipsDampener	red	fips-core	proto::settle::table::tests::a_redial_within_the_dampener_of_a_swap_is_refused
 RedialChargesHeld	red	fips-mesh	node::tests::roam_replay::a_frame_that_fails_to_open_under_a_pending_redial_changes_nothing_and_charges_the_held_peer_no_failure
 RedialEntryKeptAtPromote	red	fips-mesh	node::tests::roam_replay::a_pending_redial_promoted_by_a_msg2_resend_after_the_old_peering_was_removed_leaves_no_redial_entry_and_a_clean_audit	redial-leg
+RedialEntryKeptAtPromote	red	fips-core	proto::settle::table::tests::a_redials_leg_installed_at_its_send_is_no_longer_a_pending_redial
 RedialDropsIdentity	red	fips-mesh	node::tests::roam_rekey_unseen::a_rekey_msg1_from_an_address_the_responder_has_not_seen_is_answered_as_a_redial_and_both_ends_keep_tree_filter_and_traffic_multipath_off
 RedialDropsIdentity	red	fips-mesh	node::tests::roam_rekey_unseen::a_rekey_msg1_from_an_address_the_responder_has_not_seen_is_answered_as_a_redial_and_both_ends_keep_tree_filter_and_traffic_multipath_on
 RedialDropsIdentity	red	fips-mesh	node::tests::roam_redial::the_swap_keeps_the_redialers_tree_declaration_and_filter_and_the_responders_parent_when_the_redialer_was_its_parent
@@ -473,6 +485,8 @@ RedialNoSessionReopen	red	fips-mesh	node::tests::roam_rekey_unseen::a_rekey_msg1
 RedialSkipsAcl	red	fips-mesh	node::tests::roam_gates::a_redial_from_an_identity_the_acl_denies_is_refused_before_an_index_is_allocated
 RedialKeptAtDisconnect	red	fips-mesh	node::tests::roam_gates::an_admin_disconnect_of_the_held_peer_drops_its_pending_redial_and_a_later_frame_promotes_nothing
 RedialKeptAtDisconnect	red	fips-core	proto::settle::table::tests::an_operator_disconnect_abandons_the_peers_pending_redial
+AuthorizedRedialUnnoted	red	fips-core	proto::settle::table::tests::a_redial_abandoned_after_its_acl_passed_is_noted_in_the_redial_memory
+AuthorizedRedialUnnoted	red	fips-mesh	node::tests::roam_replay::redials_refused_for_want_of_a_session_index_fill_the_redial_memory_and_the_ninth_is_refused
 CapIgnored	red	fips-core	proto::rekey::tests::fmp::refused_replies_from_off_the_link_are_read_only_up_to_the_budget_and_the_genuine_one_completes
 CapIgnored	red	fips-mesh	node::tests::rekey_msg2_cap::a_spray_of_forged_rekey_msg2s_costs_at_most_its_budget_of_reads_and_the_genuine_one_completes
 CapIgnored	red	fips-mesh	node::tests::rekey_msg2_cap::a_spray_of_forged_rekey_msg2s_costs_at_most_its_budget_of_reads_and_the_genuine_one_completes_with_multipath_on
@@ -496,38 +510,37 @@ OriginIgnored	red	fips-mesh	node::tests::discovery_msg1_cap::a_discovery_directe
 ConnectingUnlinked	red	fips-core	proto::settle::table::tests::a_connecting_dials_pair_is_in_use_before_its_msg1_and_a_failed_connect_retires_it_with_no_lease
 ConnectingUnlinked	red	fips-core	proto::settle::table::tests::a_dial_after_its_connect_starts_its_leg_on_the_link_the_connect_opened
 ConnectingCloses	red	fips-core	proto::settle::table::tests::a_dial_given_up_while_connecting_closes_nothing
-ConnectingCloses	red	fips-mesh	node::tests::tcp::test_tcp_oriented_connect_failure_tears_down_link	closes-agree: the shadow core decided otherwise than the node
+ConnectingCloses	red	fips-mesh	node::tests::bootstrap::test_failed_adopted_traversal_cleans_up_transport	a dial given up before its msg1 closed
+ConnectingCloses	red	fips-mesh	node::tests::unit::a_failed_traversal_adoption_leaves_the_tun_mss_ceiling_where_it_was	a dial given up before its msg1 closed
 UnsendableCloses	red	fips-core	proto::settle::table::tests::an_answer_whose_msg2_cannot_be_sent_is_given_up_and_closes_nothing
-UnsendableCloses	red	fips-mesh	node::tests::rx_stall::msg2_reply_to_dead_tcp_link_returns_without_dialing	closes-agree: the shadow core decided otherwise than the node
 UnsendableKeepsRedial	red	fips-core	proto::settle::table::tests::a_redials_answer_given_up_as_unsendable_is_no_longer_a_pending_redial
+UnsendableKeepsRedial	red	fips-mesh	node::tests::handshake::heard::an_initiator_promoted_peering_refuses_a_replay_immediately	redial-leg
 TeardownIgnoresKeep	red	fips-core	proto::settle::table::tests::a_teardown_of_a_capable_link_closes_each_path_but_the_one_the_peer_sends_on
 TeardownIgnoresKeep	red	fips-core	proto::settle::table::tests::a_link_not_known_capable_keeps_its_other_paths_at_an_operator_disconnect
 TeardownIgnoresKeep	red	fips-core	proto::settle::table::tests::a_link_not_known_capable_keeps_its_other_paths_at_a_move
-TeardownIgnoresKeep	red	fips-mesh	node::tests::settle::table::remove::a_dead_peer_is_removed_as_its_cells_say_with_multipath_on	closes-agree: the shadow core decided otherwise than the node
-TeardownIgnoresKeep	red	fips-mesh	node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say	closes-agree: the shadow core decided otherwise than the node
-ConnectingUnlinked	red	fips-mesh	node::tests::settle::audit::the_audit_passes_a_single_tcp_dial_from_the_smaller_node	the shadow core decided otherwise than the node
+TeardownIgnoresKeep	red	fips-mesh	node::tests::settle::table::remove::a_dead_peer_is_removed_as_its_cells_say_with_multipath_on	the site does not do what the table says
+TeardownIgnoresKeep	red	fips-mesh	node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say	the site does not do what the table says
+ConnectingUnlinked	red	fips-mesh	node::tests::settle::audit::the_audit_passes_a_single_tcp_dial_from_the_smaller_node	a dial's msg1 gave Opened
 UnpinOwnOnly	red	fips-core	proto::settle::table::tests::a_move_onto_a_later_dial_to_a_peer_held_on_the_link_it_dialled_ends_the_pin
-UnpinOwnOnly	red	fips-mesh	node::tests::control::a_pin_ends_when_our_later_dial_from_the_smaller_address_is_promoted_afresh_by_a_peer_that_dropped_the_peering_it_dialled	the shadow core decided otherwise than the node
-UnpinOwnOnly	red	fips-mesh	node::tests::control::a_pin_ends_when_our_later_dial_from_the_smaller_address_moves_a_peering_the_peer_dialled_and_answered_as_a_rekey	the shadow core decided otherwise than the node
+UnpinOwnOnly	red	fips-mesh	node::tests::control::a_pin_ends_when_our_later_dial_from_the_smaller_address_is_promoted_afresh_by_a_peer_that_dropped_the_peering_it_dialled	the dialer's pin ends when its own later dial to a held peer is answered
+UnpinOwnOnly	red	fips-mesh	node::tests::control::a_pin_ends_when_our_later_dial_from_the_smaller_address_moves_a_peering_the_peer_dialled_and_answered_as_a_rekey	the dialer's pin ends when its own later dial to a held peer is answered
 FrameForgetsReplays	red	fips-core	proto::settle::table::tests::a_frame_on_a_peering_heard_from_its_install_keeps_the_replay_memory_and_forgets_the_silent_sessions
-FrameForgetsReplays	red	fips-mesh	node::tests::silent_backoff::one_authenticated_frame_clears_the_count_so_three_more_silent_sessions_are_needed	the shadow core decided otherwise than the node
+FrameForgetsReplays	red	fips-mesh	node::tests::settle::table::rekey::a_responders_cutover_does_what_its_cells_say
 SilentReadsHeard	red	fips-core	proto::settle::table::tests::an_own_dials_session_that_ends_before_the_peers_first_frame_counts_as_a_silent_session
 SilentReadsHeard	red	fips-mesh	node::tests::silent_backoff::an_own_dials_session_reaped_before_the_peers_first_frame_counts_in_the_node_and_the_core
 StandbyRoamResets	red	fips-core	proto::settle::join::tests::a_standby_paths_roam_is_moved_and_not_marked_a_roam
-StandbyRoamResets	red	fips-mesh	node::tests::settle::live::a_standby_paths_roam_resets_the_peer_in_neither_the_node_nor_the_shadow_core_with_multipath_on
 AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_refused_msg1_asks_for_no_answer
 AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_rekey_msg1_asks_for_no_answer
 AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_restarts_teardown_comes_before_its_answer_is_asked_for
-AnswerBeforeAdmit	red	fips-mesh	node::tests::handshake::a_first_epoch_change_against_a_silent_peering_still_restarts_it	the shadow core decided otherwise than the node
+AnswerBeforeAdmit	red	fips-mesh	node::tests::session::a_rekey_msg2_answers_on_the_peers_established_link_when_the_msg1_source_maps_to_it	nothing may be sent to the address the msg1 came from
 CapNotCounted	red	fips-core	proto::settle::table::tests::a_msg1_from_a_new_identity_at_the_peer_cap_is_refused_before_any_answer
 CapNotCounted	red	fips-core	proto::settle::table::tests::an_answer_sent_to_a_new_identity_once_the_peer_cap_filled_is_not_installed
 CapNotCounted	red	fips-core	proto::settle::table::tests::a_dial_completing_to_a_new_identity_at_the_peer_cap_is_not_installed
-CapNotCounted	red	fips-mesh	node::tests::unit::handle_msg1_silent_drops_at_cap_for_new_peer	the shadow core decided otherwise than the node
+CapNotCounted	red	fips-core	proto::settle::table::tests::a_replacement_for_an_identity_not_held_at_the_peer_cap_is_refused_before_any_answer
+CapNotCounted	red	fips-mesh	node::tests::unit::handle_msg1_silent_drops_at_cap_for_new_peer	Msg2 must NOT be sent in response when at max_peers cap
 OutboundGated	red	fips-core	proto::settle::gates::tests::an_own_msg2_restart_goes_through_the_gate_and_is_accepted_inside_its_floors	core/src/proto/settle/tests/gates.rs:154
 OutboundGated	red	fips-mesh	node::tests::restart_dial::both_ends_dialling_after_a_peer_restart_settle_on_one_session_in_either_message_order	src/node/tests/restart_dial.rs:208
 OutboundGated	red	fips-mesh	node::tests::restart_dial::one_dial_after_a_peer_restart_leaves_both_ends_on_one_session_with_end_to_end_sessions_cleared
 IntervalTen	red	fips-core	proto::settle::gates::tests::the_default_intervals_are_the_frcs	core/src/proto/settle/tests/gates.rs:432
 IntervalTen	red	fips-mesh	node::tests::handshake::a_second_epoch_restart_inside_the_interval_on_the_node_clock_is_refused_by_the_dampener_and_a_third_past_it_is_accepted
-ShadowKeepsLeases	red	fips-mesh	node::settle::decide::tests::the_shadow_frees_every_lease_it_takes_when_its_node_drops
 StandbyRoamUnfed	red	fips-mesh	node::tests::settle::live::a_standby_paths_roam_moves_its_links_record_with_multipath_on	links-mirror
-PlantSkipped	red	fips-mesh	node::settle::decide::tests::a_planted_peer_is_held_by_the_shadow_with_the_plants_epoch_and_instants

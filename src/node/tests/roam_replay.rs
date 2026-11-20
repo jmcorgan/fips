@@ -249,6 +249,55 @@ async fn nine_distinct_replayed_msg1s_within_15_s_draw_at_most_eight_msg2s() {
     cleanup_nodes(&mut pair.nodes).await;
 }
 
+/// B's allocator replaced by one that draws nothing and holds every index
+/// B's peers are bound to; the allocator it had, for the test to put back.
+fn exhaust(node: &mut Node) -> crate::utils::index::IndexAllocator {
+    let mut none = crate::utils::index::IndexAllocator::with_max_attempts(0);
+    for peer in node.peers.values() {
+        for ((_, index), _) in peer.link_bindings() {
+            none.reserve(SessionIndex::new(index))
+                .expect("precondition: each bound index once");
+        }
+    }
+    std::mem::replace(&mut node.index_allocator, none)
+}
+
+/// Eight distinct captures that the ACL admits and no session index can be
+/// drawn for, then a ninth once indices can be drawn again, all inside
+/// 15 s. Each of the eight passed the ACL, so its ephemeral is in the redial
+/// memory as an answered one's is, and the ninth finds the memory full and
+/// is refused unanswered.
+#[tokio::test]
+async fn redials_refused_for_want_of_a_session_index_fill_the_redial_memory_and_the_ninth_is_refused()
+ {
+    let mut pair = Pair::new(Multipath::On, true).await;
+    pair.run(60).await;
+    let was = counters(&pair);
+    let saved = exhaust(&mut pair.nodes[1].node);
+    for n in 0..8u32 {
+        let data = capture(&pair, 0xC0FF00 + n);
+        let tap = Tap::new(&pair);
+        replay(&mut pair, &tap.addr.clone(), data).await;
+    }
+    let refused = since(&counters(&pair), &was);
+    pair.nodes[1].node.index_allocator = saved;
+    let mut ninth = Tap::new(&pair);
+    let data = capture(&pair, 0xC0FF08);
+    replay(&mut pair, &ninth.addr.clone(), data).await;
+    ninth.gather();
+    let r = since(&counters(&pair), &was);
+    cleanup_nodes(&mut pair.nodes).await;
+    assert!(
+        refused.redials == 0 && refused.bad_state == 8,
+        "precondition: the eight were refused at the index draw: {refused:?}"
+    );
+    assert!(
+        ninth.msg2s.is_empty() && r.redial_seen == 1 && r.redials == 0,
+        "defect: the ninth capture drew {} msg2s, {r:?}",
+        ninth.msg2s.len()
+    );
+}
+
 /// A capture lands half a second before A's own redial from its new
 /// address. A's first msg1 meets the capture's pending redial under 1 s old
 /// and is refused; its first resend, a second later, replaces the capture's

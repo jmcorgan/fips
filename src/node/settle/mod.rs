@@ -55,7 +55,6 @@ macro_rules! reads {
 
 #[cfg(any(test, debug_assertions))]
 pub(in crate::node) mod audit;
-#[cfg(test)]
 mod decide;
 pub(in crate::node) mod exec;
 mod links;
@@ -66,7 +65,7 @@ pub(crate) mod table;
 mod tests;
 
 #[cfg(test)]
-pub(in crate::node) use decide::Shadow;
+pub(in crate::node) use decide::{current, held};
 pub(in crate::node) use links::LinkTable;
 #[cfg(test)]
 pub(in crate::node) use links::recorded;
@@ -78,21 +77,42 @@ pub(in crate::node) use params::leg_params;
 /// table's dial row says what each change does to them.
 pub(in crate::node) type Legs = crate::proto::settle::legs::Legs<crate::peer::PeerInstant>;
 
+/// The settlement core's restart gates as the node holds them, on the peer
+/// clock's instants.
+pub(in crate::node) type Gates = crate::proto::settle::gates::Gates<crate::peer::PeerInstant>;
+
+/// The settlement core's table as the node holds it, on the peer clock's
+/// instants: the one copy of the core's link records, handshake legs and
+/// restart gates in any build.
+pub(in crate::node) type Core = crate::proto::settle::table::Table<crate::peer::PeerInstant>;
+
 impl crate::node::Node {
     /// Audit the per-peer maps as the node entry `site` returns, panicking
     /// on a breach, in a debug build; nothing in a release build. Every
     /// node entry that can change one of the maps calls it on its way out.
     #[inline]
     pub(in crate::node) fn audit_live(&mut self, site: &str) {
-        // The shadow core takes what a test built past the decision sites
-        // since its last input before it is compared, as it would at its
-        // next input.
-        #[cfg(all(test, debug_assertions))]
-        self.shadow_resync(None);
         #[cfg(debug_assertions)]
         audit::live(self, site);
         #[cfg(not(debug_assertions))]
         let _ = site;
+    }
+
+    /// The settlement core's restart gates, the node's one copy.
+    pub(in crate::node) fn gates(&self) -> &Gates {
+        self.core.gates()
+    }
+
+    /// [`Node::gates`], to write past the core's decisions, for a test that
+    /// plants a memory (test builds only).
+    #[cfg(test)]
+    pub(in crate::node) fn gates_mut(&mut self) -> &mut Gates {
+        self.core.gates_mut().0
+    }
+
+    /// The settlement core's handshake legs, the node's one copy.
+    pub(in crate::node) fn legs(&self) -> &Legs {
+        self.core.legs()
     }
 
     /// Mark the node as built past its writers, for a test helper that makes

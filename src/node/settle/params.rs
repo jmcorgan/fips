@@ -13,9 +13,8 @@ use std::time::Duration;
 
 /// The settlement core's parameters for a node configured as `node`.
 ///
-/// The node's handshake legs take these through [`leg_params`]; only the
-/// shadow core of a test build steps a whole table yet, and it takes them
-/// through [`leg_params`] too, so its legs are reaped at the node's tick.
+/// The node's settlement core takes these through [`leg_params`], so its
+/// legs are reaped at the node's tick.
 pub(in crate::node) fn settle_params(node: &NodeConfig) -> Params {
     let rl = &node.rate_limit;
     Params {

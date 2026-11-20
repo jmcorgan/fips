@@ -52,7 +52,7 @@ helper that seeds a handshake machine by hand.
     every worker to handle what it was sent before (bounded at 60 s), then
     runs what the workers sent back, as the receive loop does (below), so a
     round never counts quiet with a frame on a worker.
-  - The world's tests: the shadow settlement core reaps a dial whose msg1
+  - The world's tests: the settlement core reaps a dial whose msg1
     was lost where the node does, in its peers' timers and not in
     `check_timeouts`, by its own reap and not by being handed the node's
     give-up; a dial is the one `initiate_connection` makes on each
@@ -100,7 +100,7 @@ helper that seeds a handshake machine by hand.
   within a few per cent of the default 2 MiB, and a runtime of its own, once
   fewer than `WALKS_AT_ONCE` walks run in the process (below), the thread
   `titled` for the test that started it, followed by `::walk`, so the
-  shadow core's lines and the audit's reach rows from a walk's nodes name
+  audit's reach rows from a walk's nodes name
   that test, while a panic on the walk's thread is not taken for the test
   thread's own by `testing/lib/test-verdict.sh` (`parity.rs` names its
   threads the same way); `parallel` runs a job per start and order that way

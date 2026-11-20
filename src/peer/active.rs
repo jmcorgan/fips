@@ -1506,14 +1506,31 @@ impl ActivePeer {
     // === State Updates ===
 
     /// Record an authenticated frame from this peer: refresh the last-seen
-    /// time and mark the peer, and the peering, heard.
-    pub fn touch(&mut self, current_time_ms: u64) {
-        if !node_fault!(TouchKeepsHeardInstant) {
-            self.data.heard_at = peer_now();
-        }
+    /// time and mark the peer, and the peering, heard. The instant of the
+    /// frame on the peer clock is the settlement core's, written after the
+    /// core hears the frame ([`Self::heard_at_core`]).
+    pub(crate) fn frame_touch(&mut self, current_time_ms: u64) {
         self.data.heard = true;
         self.data.last_seen = current_time_ms;
         self.data.frame_heard = true;
+    }
+
+    /// A test's record of a frame from this peer, past the settlement core:
+    /// what [`Self::frame_touch`] records, the instant of the frame now on
+    /// the clock the core hears frames on, as the core would hold it, and
+    /// the peer marked for the node's resync, which writes those facts into
+    /// the core's record of the peer (test builds only).
+    #[cfg(test)]
+    pub fn touch(&mut self, current_time_ms: u64) {
+        self.frame_touch(current_time_ms);
+        self.data.heard_at = crate::node::Node::settle_now();
+        self.past_feed = true;
+    }
+
+    /// Keep the instant of the peer's last frame as the settlement core
+    /// holds it, the instant the core heard the frame at.
+    pub(crate) fn heard_at_core(&mut self, at: PeerInstant) {
+        self.data.heard_at = at;
     }
 
     /// Set the last-seen time without marking the peer heard, as for a
@@ -1547,6 +1564,13 @@ impl ActivePeer {
     #[cfg(test)]
     pub(crate) fn test_backdate_promoted(&mut self, age: Duration) {
         self.past_feed = true;
+        // An unheard peering that has carried no frame was last heard at
+        // its promotion, the one instant both stamps hold, so both move.
+        if !self.data.heard && !self.data.frame_heard && self.data.heard_at == self.data.promoted_at
+        {
+            self.data.heard_at = fips_core::time::Instant::checked_sub(self.data.heard_at, age)
+                .expect("the peer clock reaches back past the backdate");
+        }
         self.data.promoted_at = fips_core::time::Instant::checked_sub(self.data.promoted_at, age)
             .expect("the peer clock reaches back past the backdate");
     }
@@ -1936,7 +1960,8 @@ impl ActivePeer {
     }
 
     /// The ephemeral digest of the link-setup msg1 this peering was promoted
-    /// from, or `None` for a peering this node dialled.
+    /// from, or `None` for a peering this node dialled. The settlement core
+    /// keeps it for the removal; a test's resync reads it.
     #[cfg(test)]
     pub(crate) fn setup_ephemeral(&self) -> Option<EphemeralDigest> {
         self.data.setup_ephemeral

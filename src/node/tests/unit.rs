@@ -839,13 +839,16 @@ fn test_node_pending_outbound_tracking() {
     let index = node.index_allocator.allocate().unwrap();
 
     // Track in pending_outbound: the dial's leg, on its link
-    node.links.open(Link::connectionless(
-        link_id,
-        transport_id,
-        TransportAddr::from_string("127.0.0.1:5000"),
-        LinkDirection::Outbound,
-        Duration::from_millis(100),
-    ));
+    node.links.open(
+        &mut node.core,
+        Link::connectionless(
+            link_id,
+            transport_id,
+            TransportAddr::from_string("127.0.0.1:5000"),
+            LinkDirection::Outbound,
+            Duration::from_millis(100),
+        ),
+    );
     node.plant_dial_at((transport_id, index.as_u32()), link_id, None);
 
     // Verify we can look it up
@@ -2442,8 +2445,6 @@ async fn dropping_an_unused_bootstrap_transport_restores_the_tun_mss_ceiling() {
         .find(|link| link.transport_id() == result.transport_id)
         .map(|link| link.link_id())
         .expect("the adoption opened a link on the adopted transport");
-    // Reaped past the node's timers, so the test tells the shadow core.
-    node.shadow_abandon(link_id);
     node.cleanup_stale_connection(link_id, 0).await;
 
     assert!(
@@ -4045,55 +4046,6 @@ async fn stranger_msg1_still_refused_when_bucket_drained() {
     );
 }
 
-/// A msg1 the rate limiter refuses is the node's resource admission, not a
-/// settlement decision: it reaches neither the shadow settlement core nor
-/// the record of what the node did, so the shadow's comparison finds no
-/// difference at the refusal. The admitted control msg1 is the one the
-/// shadow takes.
-#[tokio::test]
-async fn a_msg1_the_rate_limiter_refuses_is_kept_out_of_the_shadow_cores_comparison() {
-    let (mut node, _transport_id, wire_addr, mut packet_rx) =
-        node_with_single_stranger_token().await;
-    let socket_ok = tokio::net::UdpSocket::bind("127.0.0.1:0")
-        .await
-        .expect("bind sender socket");
-    craft_and_send_msg1(&node, &Identity::generate(), &socket_ok, wire_addr, 1000).await;
-    pump_one_msg1_into_node(&mut node, &mut packet_rx, 1000)
-        .await
-        .expect("control msg1 must reach packet_rx");
-    assert!(
-        poll_for_msg2(&socket_ok).await.is_some(),
-        "precondition: the control msg1 is answered"
-    );
-    let socket_refused = tokio::net::UdpSocket::bind("127.0.0.1:0")
-        .await
-        .expect("bind second sender socket");
-    craft_and_send_msg1(
-        &node,
-        &Identity::generate(),
-        &socket_refused,
-        wire_addr,
-        2000,
-    )
-    .await;
-    pump_one_msg1_into_node(&mut node, &mut packet_rx, 1000)
-        .await
-        .expect("refused msg1 must still reach packet_rx");
-    assert!(
-        poll_for_msg2(&socket_refused).await.is_none(),
-        "precondition: the second msg1 is refused by the drained bucket"
-    );
-    assert_eq!(
-        node.shadow.seen("Arrived"),
-        1,
-        "defect: the shadow took the msg1 the rate limiter refused"
-    );
-    assert!(
-        !node.shadow.diverged(),
-        "defect: the shadow's comparison found a difference at the rate limiter's refusal"
-    );
-}
-
 /// App-owned TUN seam: `enable_app_owned_tun` wires the embedder's packet
 /// channels (an Android `VpnService` owns the fd) and marks the TUN active so
 /// `start()` skips system-TUN creation.
@@ -5427,13 +5379,16 @@ async fn test_machine_carries_link_direction_and_address_on_dial_and_inbound() {
         link_id,
         PeerMachine::new_outbound(link_id, peer_identity, LegStamp::at(1000)),
     );
-    node.links.open(Link::connectionless(
-        link_id,
-        transport_id,
-        remote_addr.clone(),
-        LinkDirection::Outbound,
-        Duration::from_millis(100),
-    ));
+    node.links.open(
+        &mut node.core,
+        Link::connectionless(
+            link_id,
+            transport_id,
+            remote_addr.clone(),
+            LinkDirection::Outbound,
+            Duration::from_millis(100),
+        ),
+    );
     node.prepare_outbound_msg1(link_id, transport_id, &remote_addr, peer_identity)
         .unwrap();
 

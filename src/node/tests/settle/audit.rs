@@ -439,7 +439,7 @@ fn maps_agree(nodes: &[TestNode], i: usize, breaches: &mut Vec<Breach>) {
         let released = node
             .links
             .no(link)
-            .and_then(|no| node.links.core().get(no))
+            .and_then(|no| node.core.links().get(no))
             .is_some_and(|r| r.released);
         if node.links.index().get(&key) != Some(link) && !released {
             breaches.push(Breach::MapsAgree {

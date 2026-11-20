@@ -44,9 +44,6 @@ pub(in crate::node) struct Facts {
     /// The pair the promoted link runs on, which the transport marks for a
     /// dial of this node's.
     at: Option<AddrKey>,
-    /// The ephemeral of the msg1 that set the link up, which the setup note
-    /// reads and the unheard note remembers.
-    ephemeral: Option<EphemeralDigest>,
     /// What the control machine returned for the outcome, for the worklist
     /// of the step that promoted.
     follow: Vec<PeerAction>,
@@ -59,6 +56,11 @@ impl Facts {
     /// The removal a replacement's removal effects read.
     pub(super) fn removed(&self) -> Option<&Removed> {
         self.removed.as_ref()
+    }
+
+    /// [`Facts::removed`], to write.
+    pub(super) fn removed_mut(&mut self) -> Option<&mut Removed> {
+        self.removed.as_mut()
     }
 }
 
@@ -87,7 +89,6 @@ impl Run {
                 result: Some(result),
                 interval_ms: ambient.interval_ms,
                 at: Some((ambient.transport_id, ambient.remote_addr.clone())),
-                ephemeral: None,
                 follow: Vec::new(),
                 removed: None,
             }),
@@ -185,10 +186,6 @@ impl Node {
     /// installed: a promotion's whole plan, or what follows a replacement's
     /// removal.
     pub(in crate::node) async fn run_promotion(&mut self, r: &mut Run) {
-        #[cfg(test)]
-        if let Some(did) = super::from_node(r.peer, &r.t) {
-            self.did(did);
-        }
         let at = divide(&r.t);
         self.run_part(r, at..plan(&r.t).len()).await;
     }
@@ -252,6 +249,11 @@ impl Node {
         if node_fault!(NewPeerStartsRateLimited) {
             new_peer.set_last_tree_announce_sent_ms(Some(crate::time::mono_ms()));
         }
+        if let Some((carried, sent)) = self.tree_carry.take()
+            && carried == peer_node_addr
+        {
+            new_peer.set_last_tree_announce_sent_ms(sent);
+        }
 
         if node_fault!(OutputsBeforeInstall) {
             self.run_link_outputs(&peer_node_addr, out);
@@ -260,7 +262,7 @@ impl Node {
             self.peers.install(peer_node_addr, new_peer);
             self.run_link_outputs(&peer_node_addr, out);
         }
-        self.links.hold(&link_id, peer_node_addr);
+        self.links.held(&mut self.core, &link_id, peer_node_addr);
         for input in &core {
             self.feed(input);
         }
@@ -417,13 +419,4 @@ pub(super) async fn setup_note(node: &mut Node, r: &mut Run) {
         p.note_setup(&msg1, &msg2);
         p.note_setup_ephemeral(ephemeral);
     }
-    if let Some(f) = facts(r) {
-        f.ephemeral = ephemeral;
-    }
-}
-
-/// Remember an unheard peering's setup ephemeral.
-pub(super) async fn unheard_note(node: &mut Node, r: &mut Run) {
-    let ephemeral = facts(r).and_then(|f| f.ephemeral);
-    node.note_unheard_promotion(&r.peer, ephemeral);
 }

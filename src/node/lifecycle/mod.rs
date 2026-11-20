@@ -24,7 +24,6 @@ use crate::nostr::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::peer::machine::{DialOrigin, HandshakeCrypto, PeerEvent, PeerMachine};
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
-use crate::proto::settle::legs::Start;
 use crate::proto::settle::output::Why;
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
 use crate::utils::onlink::OnLinkPrefixes;
@@ -625,8 +624,25 @@ impl Node {
             )
         };
 
-        // The link, and its pair in the reverse lookup
-        self.links.open(link);
+        // The link, and its pair in the reverse lookup: the settlement core
+        // opens its record, with no leg until the msg1 is built, so the index
+        // names the pair and the close rule counts it in use from the dial,
+        // and notes where the peer is held now.
+        let connecting = crate::proto::settle::input::Input::Connecting {
+            peer: *peer_identity.node_addr(),
+            to: crate::proto::settle::links::Pair {
+                transport: transport_id,
+                addr: remote_addr.clone(),
+            },
+            resends: matches!(origin, DialOrigin::MdnsAdvert)
+                .then_some(crate::peer::machine::DISCOVERY_RESENDS),
+        };
+        let out = self.decide(connecting);
+        let Some(no) = Self::opened(&out) else {
+            debug_assert!(false, "a dial's connect opened no link: {out:?}");
+            return Err(NodeError::ConnectionNotFound(link_id));
+        };
+        self.links.bind(&mut self.core, link, no);
 
         // Persist the outbound control machine at dial, keyed by the same
         // `link_id` as the (soon-to-be-built) connection. It parks in
@@ -648,23 +664,6 @@ impl Node {
                 .map(|p| p.link_id()),
         );
         self.peer_machines.add(link_id, machine);
-
-        // The shadow core opens a dial on a connection still to be made
-        // with no leg, as the node's link and index entry exist from here.
-        #[cfg(test)]
-        if is_connection_oriented {
-            use crate::proto::settle::{input::Input, links::Pair};
-            let input = Input::Connecting {
-                peer: *peer_identity.node_addr(),
-                to: Pair {
-                    transport: transport_id,
-                    addr: remote_addr.clone(),
-                },
-                resends: matches!(origin, DialOrigin::MdnsAdvert)
-                    .then_some(crate::peer::machine::DISCOVERY_RESENDS),
-            };
-            self.decide_at(Some(link_id), input);
-        }
 
         if is_connection_oriented {
             // Connection-oriented: drive the machine to open the transport. The
@@ -777,11 +776,19 @@ impl Node {
         let our_lease = match fips_core::proto::rekey::allocate(&mut self.index_allocator) {
             Some(lease) => lease,
             None => {
-                // Clean up the link and dial-time machine we just created
-                #[cfg(test)]
-                self.shadow_abandon(link_id);
-                self.links
-                    .forget(&link_id, &(transport_id, remote_addr.clone()));
+                // Clean up the link and dial-time machine we just created:
+                // the core gives the dial up first, and its close rule
+                // closes nothing for a dial before its msg1.
+                let closes = self.give_up(link_id);
+                debug_assert!(
+                    closes.is_empty(),
+                    "a dial given up before its msg1 closed {closes:?}"
+                );
+                self.links.forget(
+                    &mut self.core,
+                    &link_id,
+                    &(transport_id, remote_addr.clone()),
+                );
                 self.remove_peer_machine(link_id);
                 return Err(NodeError::IndexAllocationFailed(
                     crate::utils::index::IndexError::Exhausted.to_string(),
@@ -804,14 +811,22 @@ impl Node {
         let noise_msg1 = match start_result {
             Ok(msg) => msg,
             Err(e) => {
-                // Clean up the index, link, and dial-time machine
+                // Clean up the index, link, and dial-time machine: the core
+                // gives the dial up first, and its close rule closes nothing
+                // for a dial before its msg1.
                 let _ = self
                     .index_allocator
                     .free(crate::utils::index::SessionIndex::new(our_lease.release()));
-                #[cfg(test)]
-                self.shadow_abandon(link_id);
-                self.links
-                    .forget(&link_id, &(transport_id, remote_addr.clone()));
+                let closes = self.give_up(link_id);
+                debug_assert!(
+                    closes.is_empty(),
+                    "a dial given up before its msg1 closed {closes:?}"
+                );
+                self.links.forget(
+                    &mut self.core,
+                    &link_id,
+                    &(transport_id, remote_addr.clone()),
+                );
                 self.remove_peer_machine(link_id);
                 return Err(NodeError::HandshakeFailed(e.to_string()));
             }
@@ -850,7 +865,6 @@ impl Node {
         // reached here without the dial-time `on_dial` write.
         machine.set_conn_transport_id(transport_id);
         let origin = machine.dial_origin();
-        let held = machine.held_link();
 
         // The dial's leg, the settlement core's: the msg1, its resends and
         // the handshake deadline, counted from this preparation on the
@@ -858,8 +872,6 @@ impl Node {
         // dial's msg2 completes it or the leg is reaped. A dial an mDNS
         // advert directs at a node this node is not configured to dial
         // resends fewer times. A leg the link already held is given up.
-        #[cfg(test)]
-        let shadow_msg1 = wire_msg1.clone();
         let Some(no) = self.links.no(&link_id) else {
             let _ = self
                 .index_allocator
@@ -867,46 +879,24 @@ impl Node {
             self.remove_peer_machine(link_id);
             return Err(NodeError::ConnectionNotFound(link_id));
         };
-        let start = Start {
-            link: no,
-            peer: Some(peer_node_addr),
+        let dial = crate::proto::settle::input::Dial {
+            peer: peer_node_addr,
+            to: crate::proto::settle::links::Pair {
+                transport: transport_id,
+                addr: remote_addr.clone(),
+            },
             msg1: wire_msg1,
             lease: our_lease,
             resends: matches!(origin, DialOrigin::MdnsAdvert)
                 .then_some(crate::peer::machine::DISCOVERY_RESENDS),
-            held: held.and_then(|link| self.links.no(&link)),
+            link: Some(no),
         };
-        let params = crate::node::settle::leg_params(&self.config().node);
-        if let Some(old) = self
-            .legs
-            .dial(start, crate::time::mono_at(at.interval_ms), &params)
-        {
-            let _ = self
-                .index_allocator
-                .free(crate::utils::index::SessionIndex::new(
-                    old.lease().release(),
-                ));
-        }
-
-        // The shadow core's dial, with its msg1 built: on the link a
-        // connection-oriented dial opened, or opening its own. Decided at
-        // the instant the dial's leg was stamped, as the node's leg is.
-        #[cfg(test)]
-        {
-            use crate::proto::settle::{input, links::Pair};
-            let dial = input::Dial {
-                peer: peer_node_addr,
-                to: Pair {
-                    transport: transport_id,
-                    addr: remote_addr.clone(),
-                },
-                msg1: shadow_msg1,
-                lease: self.shadow.lease(our_index.as_u32()),
-                resends: matches!(origin, DialOrigin::MdnsAdvert)
-                    .then_some(crate::peer::machine::DISCOVERY_RESENDS),
-                link: self.shadow.no(link_id),
-            };
-            self.decide_stamped(Some(link_id), input::Input::Dial(dial), at.interval_ms);
+        let input = crate::proto::settle::input::Input::Dial(dial);
+        for o in self.decide_at(input, crate::time::mono_at(at.interval_ms)) {
+            match o {
+                crate::proto::settle::output::Output::Free { lease } => self.free_lease(lease),
+                other => debug_assert!(false, "a dial's msg1 gave {other:?}"),
+            }
         }
 
         Ok(())
@@ -927,7 +917,7 @@ impl Node {
         remote_addr: &TransportAddr,
         interval_now: u64,
     ) {
-        let Some(leg) = self.links.no(&link_id).and_then(|no| self.legs.get(no)) else {
+        let Some(leg) = self.links.no(&link_id).and_then(|no| self.legs().get(no)) else {
             return;
         };
         let wire_msg1 = leg.msg1().to_vec();
@@ -1243,9 +1233,9 @@ impl Node {
                                 .collect();
                             for link_id in stale {
                                 // An adoption gives up the dial for a cause
-                                // the shadow core has no timer for.
-                                #[cfg(test)]
-                                self.shadow_abandon(link_id);
+                                // the core has no timer for, by the cleanup;
+                                // the connection closes by the core's close
+                                // rule.
                                 self.cleanup_stale_connection(link_id, now_ms).await;
                             }
                         }
@@ -1853,9 +1843,11 @@ impl Node {
                     "Transport connect failed"
                 );
 
-                // Clean up link and dial-time machine, then schedule retry
-                #[cfg(test)]
-                self.shadow_abandon(pending.link_id);
+                // Clean up link and dial-time machine, then schedule retry:
+                // the core gives the dial up first, and its close rule
+                // closes nothing for a dial still connecting.
+                let closes = self.give_up(pending.link_id);
+                self.close_each(closes).await;
                 self.remove_link(&pending.link_id);
                 self.remove_peer_machine(pending.link_id);
                 self.note_handshake_timeout(
@@ -3760,14 +3752,31 @@ impl Node {
         // and suppress any pending auto-reconnect, as the table says. Those
         // two run whether or not the notify's send already had the peer
         // removed.
-        self.remove(&node_addr, Why::Admin);
-        if !node_fault!(RedialKeptAtDisconnect) {
-            self.drop_redial(&node_addr).await;
+        // The core drops the peer's pending redial with it, so a later frame
+        // under the redial's leg promotes nothing: its leg's link retires,
+        // and the leg's machine and link go here.
+        let pending = self.redials.of(&node_addr).map(|r| r.link);
+        let (gone, _, rest) =
+            self.decide_removal(crate::proto::settle::input::Input::Admin { peer: node_addr });
+        for o in rest {
+            if let crate::proto::settle::output::Output::Retire { link, closes } = o
+                && let Some(id) = self.links.id(link).filter(|id| Some(*id) == pending)
+            {
+                debug!(
+                    peer = %self.peer_display_name(&node_addr),
+                    link_id = %id,
+                    "Dropping the pending redial of a peer disconnected by the operator"
+                );
+                self.retired_leg(id, closes).await;
+            }
         }
+        let (link, closes) = gone.map(|r| (r.link, r.closes)).unwrap_or_default();
         let removed = Removed {
             why: Why::Admin,
             held,
             noted: false,
+            link,
+            closes,
         };
         self.removed(&node_addr, removed).await;
 

@@ -1333,7 +1333,7 @@ impl PeerMachine {
     /// late-ACL gate passes, and the msg2/promote emission happens in Phase 2
     /// ([`Self::on_authorized`]), so a rejected/unauthorized msg1 allocates
     /// nothing (preserving the pre-refactor global index-allocation sequence).
-    fn inbound_classify(&mut self, link: LinkId, wire: &WireOutcome) -> Vec<PeerAction> {
+    pub(crate) fn inbound_classify(&mut self, link: LinkId, wire: &WireOutcome) -> Vec<PeerAction> {
         self.identity = Some(wire.peer_identity);
         self.conn.set_their_index(wire.their_index);
         self.pending_msg2_payload = Some(wire.msg2_payload.clone());

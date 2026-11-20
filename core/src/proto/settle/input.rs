@@ -132,7 +132,10 @@ pub enum Input {
     /// [`Input::Hello`] that follows draws a fresh
     /// [`Output::Answer`](super::output::Output::Answer), the shell records
     /// the msg1's ephemeral in the held link's machine
-    /// (`Rekey::note_redial`), so a copy of it is a copy from then on.
+    /// (`Rekey::note_redial`), so a copy of it is a copy from then on; the
+    /// shell records it there too when the ACL passed the redial and no
+    /// session index could be drawn for its answer
+    /// ([`Input::Abandon`]'s `authorized`).
     Redial(Read),
     /// A frame authenticated under the answer on `link`, a redial's leg
     /// that no peer holds, from `from`: the peer holds the redial's keys.
@@ -152,6 +155,11 @@ pub enum Input {
     Abandon {
         /// The link the ask named.
         link: LinkNo,
+        /// The ACL passed the msg1 and the refusal came after it, at the
+        /// session index's draw: a redial's ephemeral goes into the redial
+        /// memory as an answered redial's does, as the node notes it once
+        /// the ACL has passed it.
+        authorized: bool,
     },
     /// The msg2 of this node's own dial, authenticated.
     Msg2 {
@@ -168,6 +176,16 @@ pub enum Input {
         /// The peer.
         peer: NodeAddr,
         /// Its new epoch.
+        epoch: Epoch,
+    },
+    /// The peer's link rekey took `epoch` as the peer's, at the rekey whose
+    /// msg2 revealed the peer's restart, before the cutover reports the
+    /// restart ([`Input::Restarted`]): the peer is held at that epoch from
+    /// here, as its rekey judges what the peer sends.
+    PeerEpoch {
+        /// The peer.
+        peer: NodeAddr,
+        /// The epoch its rekey took.
         epoch: Epoch,
     },
     /// The rekey machine tore the peering down.

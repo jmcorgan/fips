@@ -103,15 +103,15 @@ fn sizes(node: &Node, others: &[NodeAddr]) -> Vec<(&'static str, usize)> {
         ("link_records", node.link_records.len()),
         (
             "restart_dampener",
-            node.gates
+            node.gates()
                 .known()
-                .filter(|p| node.gates.stamp(p).is_some())
+                .filter(|p| node.gates().stamp(p).is_some())
                 .count(),
         ),
     ];
     for peer in others {
-        sizes.push(("replayed_msg1s", node.gates.replays(peer)));
-        let silent = node.gates.silent(peer).unwrap_or(0);
+        sizes.push(("replayed_msg1s", node.gates().replays(peer)));
+        let silent = node.gates().silent(peer).unwrap_or(0);
         sizes.push(("silent_sessions", silent as usize));
     }
     sizes

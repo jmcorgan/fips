@@ -46,12 +46,6 @@ fn advert(npub: String, addr: std::net::SocketAddr) -> crate::mdns::LanEvent {
 /// timers once a second through 29 s, inside the 30 s handshake timeout, so
 /// only the one attempt is counted. Returns the msg1s the socket received.
 async fn msg1s_of_one_discovery_attempt(config: Config, npub: String) -> usize {
-    attempt(config, npub).await.0
-}
-
-/// [`msg1s_of_one_discovery_attempt`], with whether the shadow settlement
-/// core's comparison found the node and the core apart.
-async fn attempt(config: Config, npub: String) -> (usize, bool) {
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let target = sock.local_addr().unwrap();
     let mut node = lan_node_with(config).await;
@@ -71,23 +65,8 @@ async fn attempt(config: Config, npub: String) -> (usize, bool) {
         tokio::time::sleep(Duration::from_millis(5)).await;
         count += take_msg1s(&sock);
     }
-    let diverged = node.shadow.diverged();
     stop_transports(&mut node).await;
-    (count, diverged)
-}
-
-/// The timers above run at instants the test gives rather than the
-/// clock's, and the shadow settlement core decides and is compared at the
-/// same ones, so its dial resends with the node's and the comparison finds
-/// no difference.
-#[tokio::test]
-async fn an_attempt_whose_timers_run_at_given_instants_keeps_the_shadow_core_level_with_the_node() {
-    let (sent, diverged) = attempt(ten_resends(), make_peer_identity().npub()).await;
-    assert!(sent > 1, "precondition: the attempt resent its msg1");
-    assert!(
-        !diverged,
-        "defect: the shadow core's resends parted from the node's timers run at given instants"
-    );
+    count
 }
 
 /// A configuration allowing ten msg1 resends one second apart.

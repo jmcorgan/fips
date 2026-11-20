@@ -649,9 +649,9 @@ fn read(
                 e.is_initiator()
             ))
         ),
-        Row::Dampener => format!("{:?}", node.gates.stamp(peer)),
-        Row::Silent => format!("{:?}", node.gates.silent(peer)),
-        Row::Replayed => format!("{:?}", node.gates.replays(peer)),
+        Row::Dampener => format!("{:?}", node.gates().stamp(peer)),
+        Row::Silent => format!("{:?}", node.gates().silent(peer)),
+        Row::Replayed => format!("{:?}", node.gates().replays(peer)),
         Row::Reconnect => format!(
             "{:?}",
             node.peering.reconciler.retry_pending.get(peer).map(|r| (
@@ -864,13 +864,16 @@ pub(super) fn dial_aside(node: &mut Node, peer: &NodeAddr) {
         node.forget_leg(held);
     }
     let id = node.allocate_link_id();
-    node.links.open(Link::connectionless(
-        id,
-        spare.transport,
-        TransportAddr::from_string("spare:3"),
-        LinkDirection::Outbound,
-        Duration::from_millis(100),
-    ));
+    node.links.open(
+        &mut node.core,
+        Link::connectionless(
+            id,
+            spare.transport,
+            TransportAddr::from_string("spare:3"),
+            LinkDirection::Outbound,
+            Duration::from_millis(100),
+        ),
+    );
     node.plant_dial_at(planted_dial(&spare), id, None);
 }
 
@@ -937,7 +940,8 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
         Row::Link => {}
         Row::Index => {
             if let Some(id) = node.get_peer(peer).map(ActivePeer::link_id) {
-                node.links.claim(id, (spare.transport, spare.addr.clone()));
+                node.links
+                    .claim(&mut node.core, id, (spare.transport, spare.addr.clone()));
             }
         }
         // Acked, so the link's record holds the pair the Index row claimed
@@ -1040,25 +1044,19 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
                 PAST_THE_RESTART_INTERVAL,
             )
             .expect("precondition: the monotonic clock reaches back past the restart interval");
-            node.gates.plant(*peer, past);
+            node.gates_mut().plant(*peer, past);
         }
         Row::Silent => {
             let params = node.gate_params();
-            node.gates
+            node.gates_mut()
                 .ended(*peer, None, None, crate::peer::peer_now(), None, &params);
-            node.shadow_gates(|gates, now, params| {
-                gates.ended(*peer, None, None, now, None, params);
-            });
         }
         Row::Replayed => {
             let digest = crate::proto::fmp::EphemeralDigest::of_noise_msg1(&[0xd3; 64])
                 .expect("precondition: a digest of 64 bytes");
             let params = node.gate_params();
-            node.gates
+            node.gates_mut()
                 .promoted(*peer, digest, crate::peer::peer_now(), None, &params);
-            node.shadow_gates(|gates, now, params| {
-                gates.promoted(*peer, digest, now, None, params)
-            });
         }
         Row::Reconnect => {
             let npub = node
@@ -1249,13 +1247,16 @@ fn dirty_socket(_node: &mut Node, _peer: &NodeAddr) {}
 /// reports at its next entry.
 fn orphan_link(node: &mut Node, spare: PathRef) {
     let id = node.allocate_link_id();
-    node.links.open(crate::transport::Link::new(
-        id,
-        spare.transport,
-        spare.addr,
-        LinkDirection::Outbound,
-        Duration::from_millis(50),
-    ));
+    node.links.open(
+        &mut node.core,
+        crate::transport::Link::new(
+            id,
+            spare.transport,
+            spare.addr,
+            LinkDirection::Outbound,
+            Duration::from_millis(50),
+        ),
+    );
 }
 
 /// A framed link-setup msg1 of no real handshake, for the setup and replay
@@ -1556,32 +1557,6 @@ async fn dirtying_leaves_every_row_different_from_fresh_with_multipath_on() {
     dirtying_leaves_every_row_different(true).await;
     #[cfg(ble_available)]
     dirtying_reaches_the_ble_mark(true).await;
-}
-
-/// Dirtying a peering's gate rows writes the node's silent-session record
-/// and replay memory past its decisions, and gives the shadow settlement
-/// core's restart gates the same through their writers, so the shadow's
-/// comparison of the two memories finds them alike.
-#[tokio::test]
-async fn dirtying_the_gate_rows_gives_the_shadow_cores_gates_the_same_memory() {
-    let mut nodes = peered(false).await;
-    let b = *nodes[1].node.node_addr();
-    for row in [Row::Silent, Row::Replayed] {
-        dirty_row(&mut nodes[0].node, &b, row).await;
-    }
-    let node = &nodes[0].node;
-    let dirtied = (node.gates.silent(&b), node.gates.replays(&b));
-    let bad = crate::node::settle::audit::gates_agree(node);
-    cleanup_nodes(&mut nodes).await;
-    assert_eq!(
-        dirtied,
-        (Some(1), 1),
-        "precondition: the node's gate rows are dirtied"
-    );
-    assert!(
-        bad.is_empty(),
-        "defect: the shadow core's gates differ from the dirtied node's: {bad:?}"
-    );
 }
 
 /// The BLE mock transport.

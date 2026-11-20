@@ -165,24 +165,9 @@ files run off, which is what they test.
   refused, and two started nodes on real pools, pass. The settlement core's record of a
   dialed link holds its original path Live, follows a one-path roam, the
   roam of a link's one path while it is not the active path among them,
-  for which neither the node nor the shadow core resets the peer, and
-  records a switch to an acknowledged path Live, which `links-mirror` lets
-  off for the active path alone; a record off its bundle fails the clause.
-  A dial in flight agrees with the shadow core's leg on its deadline and
-  next resend, and `legs-agree` finds either moved on the node's side, and
-  a resend due on one side only, its two times 3 ms apart, alike; a
-  dial a test seeded past the writers is held by a leg at its machine's
-  instants, so the clause finds nothing; and one seeded after the shadow
-  last ran is in its records when the next audit compares. A dial the
-  node's timer reaps one millisecond past its deadline, while the shadow
-  core's leg is a tenth of a second from due, the core reaps itself,
-  within the legs' skew, and is not handed the node's give-up; and
-  `links-agree` passes over a peer a test re-pointed past the feed until
-  the node's resync, and compares its link again after. A peer promoted
-  past the sites onto a recorded link is taken with its bundle's paths.
-  A pending inbound link planted with its stored msg2 and no peer draws
-  that msg2 for any msg1 from its address in the node and the shadow core
-  alike, and a resend of it that fails is decided alike too.
+  which moves the record and resets nothing, and records a switch to an
+  acknowledged path Live, which `links-mirror` lets off for the active
+  path alone; a record off its bundle fails the clause.
   Tests that need the audit to run carry `#[cfg(debug_assertions)]`.
 - `table/`: the transition table checked on real nodes. Its `mod.rs` is
   the harness: a reading of every row of a peer's state on one node

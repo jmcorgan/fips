@@ -3,7 +3,7 @@
 use crate::NodeAddr;
 use crate::node::Node;
 use crate::node::settle::exec::Removed;
-use crate::proto::settle::output::Why;
+use crate::proto::settle::input::Input;
 use crate::transport::{TransportAddr, TransportId};
 use std::time::Instant;
 use tracing::{debug, info, trace};
@@ -124,9 +124,12 @@ impl Node {
             "Peer sent disconnect notification"
         );
 
-        let addr = *from;
-        let removed = self.remove(from, Why::Disconnect);
-        self.note_link_dead(addr, Self::peering_now());
-        removed.map(|r| Removed { noted: true, ..r })
+        // The core asks for the reconnect of a peer it removes; a
+        // `Disconnect` that finds no peer held is noted all the same.
+        let (removed, retry, _) = self.decide_removal(Input::Disconnect { peer: *from });
+        if retry || removed.is_none() {
+            self.note_link_dead(*from, Self::peering_now());
+        }
+        removed
     }
 }

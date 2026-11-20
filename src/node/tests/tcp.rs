@@ -1082,7 +1082,7 @@ async fn a_late_acl_refusal_of_a_fresh_inbound_tcp_msg1_closes_its_connection_at
     let refused_at = std::time::Instant::now();
     b.node.handle_msg1(packet).await;
     let held = (b.node.peer_count(), b.node.link_count());
-    let asked = b.node.shadow.seen("Abandon");
+    let asked = b.node.seen("Abandon");
     let after = pooled(&b, &from);
     let end = ended(&mut stream, refused_at, Duration::from_secs(1)).await;
     stop_tcp(&mut b).await;
@@ -1166,7 +1166,7 @@ async fn a_fresh_inbound_tcp_msg1_refused_for_want_of_a_session_index_closes_its
     let refused_at = std::time::Instant::now();
     b.node.handle_msg1(packet).await;
     let held = b.node.peer_count();
-    let asked = b.node.shadow.seen("Abandon");
+    let asked = b.node.seen("Abandon");
     let after = pooled(&b, &from).0;
     let end = ended(&mut stream, refused_at, Duration::from_secs(1)).await;
     stop_tcp(&mut b).await;

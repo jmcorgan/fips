@@ -122,9 +122,9 @@ impl Rig {
         session.test_set_authenticated_at(Node::now_ms() - idle_ms);
         session.test_backdate_heard(Duration::from_millis(idle_ms));
         session.test_backdate_promoted(Duration::from_millis(idle_ms));
-        let stamped: Vec<NodeAddr> = self.node.gates.known().copied().collect();
+        let stamped: Vec<NodeAddr> = self.node.gates().known().copied().collect();
         for peer in stamped {
-            self.node.gates.unstamp(&peer);
+            self.node.gates_mut().unstamp(&peer);
         }
     }
 
@@ -345,12 +345,12 @@ async fn one_authenticated_frame_clears_the_count_so_three_more_silent_sessions_
     drain_all_packets(&mut nodes, false).await;
     let peer = nodes[1].node.get_peer(&a).expect("node 1's dial completed");
     assert!(peer.heard(), "node 0's frames reached node 1");
-    assert_eq!(nodes[1].node.gates.silent(&a), None);
+    assert_eq!(nodes[1].node.gates().silent(&a), None);
 
     // A session that carried frames is not counted when it ends.
     nodes[1].node.remove_active_peer(&a);
     discard(&mut nodes[0]);
-    assert_eq!(nodes[1].node.gates.silent(&a), None);
+    assert_eq!(nodes[1].node.gates().silent(&a), None);
 
     // Two more silent sessions do not reach the limit again.
     for index in 5..=6 {
@@ -423,8 +423,8 @@ async fn sessions_that_carried_a_frame_never_count_toward_the_back_off() {
         discard(&mut nodes[0]);
         discard(&mut nodes[1]);
     }
-    assert_eq!(nodes[1].node.gates.silent(&a), None);
-    assert_eq!(nodes[0].node.gates.silent(&b), None);
+    assert_eq!(nodes[1].node.gates().silent(&a), None);
+    assert_eq!(nodes[0].node.gates().silent(&b), None);
     assert_eq!(nodes[1].node.stats().handshake.silent_backoff, 0);
 
     cleanup_nodes(&mut nodes).await;
@@ -475,12 +475,8 @@ async fn an_own_dials_session_reaped_before_the_peers_first_frame_counts_in_the_
     let gone = nodes[1].node.get_peer(&a).is_none();
     let planted = nodes[1].node.planted();
     let counts = (
-        nodes[1].node.gates.silent(&a),
-        nodes[1]
-            .node
-            .shadow
-            .table()
-            .and_then(|t| t.gates().silent(&a)),
+        nodes[1].node.gates().silent(&a),
+        nodes[1].node.core.gates().silent(&a),
     );
     cleanup_nodes(&mut nodes).await;
     assert!(
@@ -511,20 +507,12 @@ async fn an_unheard_session_whose_promotion_a_test_backdated_counts_in_the_node_
     // The node's next entry takes the backdate into the core as a plant,
     // as a msg1's would before it replaced the peering.
     rig.node.resync();
-    let planted = rig
-        .node
-        .shadow
-        .table()
-        .and_then(|t| t.held(&peer))
-        .map(|h| (h.heard, h.installed));
+    let planted = rig.node.core.held(&peer).map(|h| (h.heard, h.installed));
     let promoted = rig.node.get_peer(&peer).map(|p| (false, p.promoted_at()));
     rig.reap().await;
     let counts = (
-        rig.node.gates.silent(&peer),
-        rig.node
-            .shadow
-            .table()
-            .and_then(|t| t.gates().silent(&peer)),
+        rig.node.gates().silent(&peer),
+        rig.node.core.gates().silent(&peer),
     );
     assert_eq!(
         planted, promoted,

@@ -369,8 +369,6 @@ async fn reaping_a_handshake_leg_keeps_the_peer_link_it_shares() {
         ),
     );
 
-    // Reaped past the node's timers, so the test tells the shadow core.
-    node.shadow_abandon(leg);
     node.cleanup_stale_connection(leg, 2000).await;
 
     assert!(!nodes[0].node.links.contains_key(&leg), "the leg is reaped");

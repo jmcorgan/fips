@@ -41,8 +41,7 @@ const SNAPSHOT: &str = "a read copy the tick republishes from the live state";
 const PACING: &str = "a node-wide pacing stamp";
 const ANCHOR: &str = "a stateless decision anchor";
 const TEST: &str = "a test's override of a clock or a tick";
-const SHADOW: &str =
-    "the test-only copy of the settlement core beside the node, which decides nothing";
+const COUNT: &str = "a test's count of the inputs the node handed the settlement core";
 const BY_DEST: &str =
     "keyed by a destination, a link peer or not; no change to a held peer writes it";
 const BUDGET: &str = "a rate budget that refills on its own clock; no change to a peer clears it";
@@ -102,13 +101,16 @@ const NODE: &[(&str, Held)] = &[
     ("version_budget", Exempt(LATCH)),
     ("length_budget", Exempt(LATCH)),
     ("msgtype_budget", Exempt(LATCH)),
-    ("legs", Table),
     ("redials", Table),
     (
-        "gates",
+        "tree_carry",
+        Exempt("a mutation-lane break's stamp, taken by the install that follows"),
+    ),
+    (
+        "core",
         Facets(&[Facet::Dampener, Facet::Silent, Facet::Replayed]),
     ),
-    ("shadow", Exempt(SHADOW)),
+    ("inputs", Exempt(COUNT)),
     ("link_records", Facets(&[Facet::Records])),
     (
         "paths",
@@ -422,9 +424,11 @@ fn every_exemption_has_a_reason_every_facet_a_field_and_every_map_wrapper_the_ta
 
     for (_, field, ty) in fields(&NODE_SOURCE, "Node") {
         let listed = NODE.iter().find(|(f, _)| *f == field).map(|(_, held)| held);
-        // The shadow core beside the node is a type of this module and no
-        // map wrapper.
-        let wrapper = ty.starts_with("settle::") && ty != "settle::Shadow";
+        // The settlement core's table is no map wrapper: it holds the link
+        // records the link table's index is derived from, the handshake
+        // legs, keyed by the link table's numbers, the restart gates'
+        // facets and the peers it holds.
+        let wrapper = ty.starts_with("settle::") && ty != "settle::Core";
         assert_eq!(
             wrapper,
             matches!(listed, Some(Table)),

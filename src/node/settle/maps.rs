@@ -165,27 +165,28 @@ impl BindMap {
     }
 }
 
-/// One pending redial: the inbound link its leg runs on, the index the
-/// leg's msg2 named, and when the msg1 that armed it was answered, on the
-/// interval clock (`Node::interval_ms`).
+/// One pending redial: the inbound link its leg runs on, and the index the
+/// leg's msg2 named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::node) struct Redial {
     pub(in crate::node) link: LinkId,
     pub(in crate::node) index: SessionIndex,
-    pub(in crate::node) at: u64,
 }
 
-/// The pending redials, at most one per held identity.
+/// The pending redials, at most one per held identity: a cache of the
+/// settlement core's, by the node's link and the index each leg's msg2
+/// named, rebuilt after every step of the core.
 ///
 /// A redial is a fresh same-epoch msg1 that arrived off a held peer's
 /// established link. It is answered by a leg on its own inbound link,
 /// beside the held peering, and replaces the peering only when the peer's
-/// first frame authenticates under the leg's session. An entry is written
-/// when the leg is armed and forgotten when the leg is promoted, reaped or
-/// replaced; the audit's `redial-leg` clause holds each entry to a leg.
+/// first frame authenticates under the leg's session. The core marks the
+/// redial when its answer is built and forgets it when the leg is promoted,
+/// reaped or replaced; the audit's `redial-leg` clause holds each of the
+/// core's marks to a leg.
 ///
 /// The memory of the ephemerals that armed a redial is the restart gates'
-/// (`Node.gates`): per identity, the ephemerals of the last 15 s, so a
+/// (`Node.core`'s): per identity, the ephemerals of the last 15 s, so a
 /// capture is answered once per interval, kept apart from the replay memory
 /// of unheard promotions, which a frame forgets, and forgotten only at the
 /// identity's swap.
@@ -195,21 +196,25 @@ pub(in crate::node) struct RedialMap {
 }
 
 impl RedialMap {
-    /// The leg on `redial.link` answers a redial of `peer`.
-    pub(in crate::node) fn note(&mut self, peer: NodeAddr, redial: Redial) {
-        self.by_peer.insert(peer, redial);
-    }
-
-    /// Forget the redial whose leg runs on `link`, if any, returning the
-    /// identity it was for.
-    pub(in crate::node) fn forget(&mut self, link: LinkId) -> Option<NodeAddr> {
-        let peer = self
-            .by_peer
-            .iter()
-            .find(|(_, r)| r.link == link)
-            .map(|(peer, _)| *peer)?;
-        self.by_peer.remove(&peer);
-        Some(peer)
+    /// Rebuild the cache from the core's pending redials, `pending`, each
+    /// an identity and its leg's link, where the node names that link
+    /// `id`, and the leg there holds a lease of index `index`. A mark whose
+    /// link or leg is gone is left out.
+    pub(in crate::node) fn rebuild(
+        &mut self,
+        pending: impl Iterator<Item = (NodeAddr, Option<LinkId>, Option<u32>)>,
+    ) {
+        self.by_peer = pending
+            .filter_map(|(peer, link, index)| {
+                Some((
+                    peer,
+                    Redial {
+                        link: link?,
+                        index: SessionIndex::new(index?),
+                    },
+                ))
+            })
+            .collect();
     }
 
     /// The pending redial of `peer`.

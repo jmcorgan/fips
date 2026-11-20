@@ -367,6 +367,7 @@ impl Links {
             | Input::Abandon { .. }
             | Input::Msg2 { .. }
             | Input::Restarted { .. }
+            | Input::PeerEpoch { .. }
             | Input::Ended { .. }
             | Input::Orphaned { .. }
             | Input::Heard { .. }

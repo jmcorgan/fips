@@ -15,6 +15,7 @@ use crate::node::settle::table::Transition;
 use crate::peer::machine::CrossConnOutcome;
 use crate::peer::{LinkOutputs, UdpSlot};
 use crate::proto::fmp::Msg1Digest;
+use crate::proto::settle::links::Pair;
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use fips_core::proto::path::Outputs;
@@ -57,6 +58,9 @@ pub(in crate::node) struct Facts {
     /// The link the crossing tears down: at a move that holds the peer on
     /// the dial's link, the link it left; otherwise the dial's.
     pub(in crate::node) loser: Option<LinkId>,
+    /// The connections the settlement core's close rule closes as it
+    /// retires the losing link, as its `Retire` gave them.
+    pub(in crate::node) closes: Vec<Pair>,
 }
 
 impl Run {
@@ -73,15 +77,6 @@ impl Run {
             | super::Facts::Paths(_)
             | super::Facts::Remove(_) => unreachable!("set to a crossing's above"),
         }
-    }
-
-    /// Whether a resolved crossing moves the peer onto this node's dial, as
-    /// the decision `swap` says. `tie` says the tie-break decided it, with
-    /// neither this node's own nor a later dial in play.
-    pub(in crate::node) fn swaps(swap: bool, tie: bool) -> bool {
-        // The mutation lane's break: the smaller node keeps, as the larger
-        // does.
-        swap && !(tie && node_fault!(CrossedRunsKeep))
     }
 }
 
@@ -129,6 +124,32 @@ pub(super) async fn renewed(node: &mut Node, r: &mut Run) {
     let left = left(r);
     let paths = std::mem::take(&mut r.crossing().paths);
     node.run_renewed(&r.peer, left, paths);
+    // The paths of the link left that its bundle does not keep are queued
+    // to close as their release queues them; the losing link's own
+    // connection and the dial's close at once, with the losing link.
+    let Some(left) = left else {
+        return;
+    };
+    let dial = dial(&r.t).map(|(link, _)| link);
+    let setup = |link: LinkId| {
+        node.links.get(&link).map(|l| Pair {
+            transport: l.transport_id(),
+            addr: l.remote_addr().clone(),
+        })
+    };
+    let now: Vec<Pair> = [Some(left), dial]
+        .into_iter()
+        .flatten()
+        .filter_map(setup)
+        .collect();
+    let closes = std::mem::take(&mut r.crossing().closes);
+    let (at_once, queued): (Vec<Pair>, Vec<Pair>) =
+        closes.into_iter().partition(|p| now.contains(p));
+    r.crossing().closes = at_once;
+    // The mutation lane's break: the released paths' connections stay open.
+    if !node_fault!(ReleaseKeepsPairOpen) {
+        node.queue_closes(queued, r.peer, left, false);
+    }
 }
 
 /// Hold the peer on the dial's link, if the move left another: the core's
@@ -139,7 +160,7 @@ pub(super) async fn hold_dial(node: &mut Node, r: &mut Run) {
     let (Some(left), Some((dial, _))) = (left(r), dial(&r.t)) else {
         return;
     };
-    node.links.hold(&dial, r.peer);
+    node.links.held(&mut node.core, &dial, r.peer);
     // The mutation lane's break: the machine stays under the link left.
     if !node_fault!(MachineLeftBehind) {
         node.peer_machines.rekey(left, dial);
@@ -220,23 +241,24 @@ pub(super) async fn machine_crossed(node: &mut Node, r: &mut Run) {
     }
 }
 
-/// Close the losing link's connection, the link a move left or the dial's:
-/// a separate socket on TCP, a no-op when connectionless, and left open
-/// while a live link uses it, such as the very connection the peer runs on
-/// (BLE). A move that held the peer on the dial's link at a pair other than
-/// the one it dialled also closes the dial's own connection once no path
-/// and no handshake uses it, the dial's link included and the link left
-/// excepted, since it goes next.
+/// Close what the core's close rule closes at once as the crossing retires
+/// the losing link, the link a move left or the dial's: a separate socket on
+/// TCP, a no-op when connectionless, and left open while a live link uses
+/// it, such as the very connection the peer runs on (BLE). With the losing
+/// link's connection goes the connection a move that held the peer on the
+/// dial's link at a pair other than the one it dialled leaves to no path and
+/// no handshake; the paths of the link left that its bundle does not keep
+/// were queued at the renewal. A move the node could not carry out, which
+/// leaves the peer where it was, closes the dial's connection by the rule.
 pub(super) async fn loser_close(node: &mut Node, r: &mut Run) {
-    if let Some(link) = loser(r) {
-        node.close_unused(link).await;
+    if matches!(r.t, Transition::Move { built: false, .. }) {
+        if let Some(link) = loser(r) {
+            node.close_unused(link).await;
+        }
+        return;
     }
-    // The mutation lane's break: the dial's own connection stays open.
-    if let (Some(left), Some((dial, _))) = (left(r), dial(&r.t))
-        && !node_fault!(MoveLeavesDialOpen)
-    {
-        node.close_setup(dial, left).await;
-    }
+    let closes = std::mem::take(&mut r.crossing().closes);
+    node.close_each(closes).await;
 }
 
 /// Remove the losing link, the link a move left or the dial's.
@@ -272,12 +294,19 @@ pub(super) async fn lease_freed(node: &mut Node, r: &mut Run) {
     }
 }
 
-/// Forget the msg1s remembered against replay for a peering the move made
-/// heard, as its first authenticated frame would: the memory bounds the
-/// replacements of an unheard peering, and this one is heard.
+/// The msg1s remembered against replay for a peering the move made heard
+/// are forgotten, as its first authenticated frame would forget them: the
+/// memory bounds the replacements of an unheard peering, and this one is
+/// heard. The core's move forgot them, under the mutation lane's break
+/// that keeps them until the peer's removal; a test build checks it.
 pub(super) async fn replay_forget(node: &mut Node, r: &mut Run) {
-    // The mutation lane's break: the memory stays until the peer's removal.
-    if r.crossing().first_heard && !node_fault!(MoveKeepsReplayMemory) {
-        node.gates.forget(&r.peer);
-    }
+    #[cfg(test)]
+    debug_assert!(
+        !r.crossing().first_heard
+            || node_fault!(MoveKeepsReplayMemory)
+            || node.gates().replays(&r.peer) == 0,
+        "a move that made the peering heard left its replay memory"
+    );
+    #[cfg(not(test))]
+    let _ = (node, r);
 }

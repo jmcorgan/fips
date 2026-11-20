@@ -244,6 +244,37 @@ fn switched(link: LinkNo, to: u16) -> Input {
     }
 }
 
+/// The peer's rekey revealed its restart at its msg2 and took the new
+/// epoch, and the cutover that reports the restart has not come: a msg1
+/// at that epoch is judged as the peer's rekey judges it, a rekey, as the
+/// node judges it from the rekey's epoch.
+#[test]
+fn a_restarted_peers_epoch_its_rekey_took_makes_its_msg1_at_that_epoch_a_rekey() {
+    let (mut table, _) = dialer(1);
+    go(
+        &mut table,
+        Input::PeerEpoch {
+            peer: large(),
+            epoch: E2,
+        },
+        1_000,
+    );
+    assert_eq!(
+        table.held(&large()).map(|h| h.epoch),
+        Some(E2),
+        "defect: the core holds the peer at the epoch its rekey left"
+    );
+    let input = Input::Msg1 {
+        read: read(large(), 7, 1, E2),
+        reachable: true,
+    };
+    let out = go(&mut table, input, 1_000);
+    assert!(
+        out.iter().any(|o| matches!(o, Output::Rekey { .. })),
+        "defect: a msg1 at the epoch the peer's rekey took was not a rekey: {out:?}"
+    );
+}
+
 #[test]
 fn a_path_moved_rekeys_the_links_index_entry_to_the_new_pair() {
     let (mut table, link) = dialer(1);
@@ -1030,6 +1061,96 @@ fn a_crossing_moves_the_smaller_node_and_retires_the_inbound_link() {
     assert!(table.links().get(inbound).is_none());
 }
 
+/// A crossing with neither this node's own dial held nor a dial made while
+/// the peer was held is decided by the tie-break alone: the smaller node
+/// moves the peering onto its dial and leaves the inbound session.
+#[test]
+fn a_crossing_decided_by_the_tie_break_alone_moves_the_smaller_node_onto_its_dial() {
+    let (table, dialed, _, out) = crossing();
+    assert!(
+        out.iter().any(|o| matches!(
+            o,
+            Output::Swapped {
+                own: false,
+                unpin: false,
+                ..
+            }
+        )),
+        "defect: the smaller node kept its inbound session at a crossing the tie-break decides: {out:?}"
+    );
+    assert_eq!(table.held(&large()).map(|h| h.link), Some(dialed));
+}
+
+/// The larger node's second dial to a peer held on its own first dial
+/// moves the peer onto the second whatever the tie-break says: the link it
+/// holds is this node's own dial.
+#[test]
+fn a_second_dial_to_a_peer_held_on_this_nodes_own_dial_moves_the_peer_onto_it() {
+    let mut table = Table::new(large(), Params::default());
+    let first = opened(&go(&mut table, Input::Dial(dial(small(), 1, 1)), 0));
+    let msg2 = Input::Msg2 {
+        link: first,
+        epoch: E1,
+        from: pair(1),
+    };
+    go(&mut table, msg2, 0);
+    let second = opened(&go(&mut table, Input::Dial(dial(small(), 2, 5)), 2_000));
+    let msg2 = Input::Msg2 {
+        link: second,
+        epoch: E1,
+        from: pair(5),
+    };
+    let out = go(&mut table, msg2, 2_000);
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::Swapped { own: true, .. })),
+        "defect: the larger node kept the peer off its own second dial: {out:?}"
+    );
+    assert_eq!(table.held(&small()).map(|h| h.link), Some(second));
+}
+
+/// A move onto this node's own dial makes the peering heard, as a
+/// completed dial of this node's is (FRC-1201 Section 5.5).
+#[test]
+fn a_move_onto_this_nodes_own_dial_makes_the_peering_heard() {
+    let (table, dialed, _, _) = crossing();
+    assert_eq!(
+        table.held(&large()).map(|h| h.link),
+        Some(dialed),
+        "precondition: the crossing moved the peering onto the dial"
+    );
+    assert_eq!(
+        table.held(&large()).map(|h| h.heard),
+        Some(true),
+        "defect: the move left the peering unheard"
+    );
+}
+
+/// A frame of a held peering moves the instant of its last frame to the
+/// frame's, which the restart gates read the heard floor from.
+#[test]
+fn a_frame_moves_the_instant_of_the_peerings_last_frame() {
+    let mut table = Table::new(small(), Params::default());
+    let inbound = answered(&hi(&mut table, large(), 2, 12, 0));
+    go(&mut table, Input::Sent { link: inbound }, 0);
+    let heard = Input::Heard {
+        peer: large(),
+        from: pair(12),
+        kind: heartbeat(),
+    };
+    go(&mut table, heard, 5_000);
+    assert_eq!(
+        table.held(&large()).map(|h| h.heard),
+        Some(true),
+        "precondition: the frame made the peering heard"
+    );
+    assert_eq!(
+        table.held(&large()).and_then(|h| h.last),
+        Some(t(5_000)),
+        "defect: the frame left the instant of the peering's last frame where it was"
+    );
+}
+
 /// The smaller node's dial to `at(2)` is answered over the larger node's
 /// dial connection, from `at(12)`, the pair its msg1 came from: the move
 /// lands the peering on that pair, so the inbound link it retires leaves
@@ -1610,7 +1731,14 @@ fn an_abandoned_answer_frees_its_link_and_takes_no_lease() {
     let out = go(&mut table, msg1(large(), 10, 9), 0);
     let link = asked(&out).expect("precondition: the msg1 is admitted");
     assert!(indexed(&table, 9, link), "precondition: its link is open");
-    let out = go(&mut table, Input::Abandon { link }, 0);
+    let out = go(
+        &mut table,
+        Input::Abandon {
+            link,
+            authorized: false,
+        },
+        0,
+    );
     assert_eq!(
         kinds(&out),
         ["Retire"],
@@ -1695,6 +1823,25 @@ fn a_msg1_from_a_new_identity_at_the_peer_cap_is_refused_before_any_answer() {
         "defect: a new identity's msg1 at the peer cap is not refused for it: {out:?}"
     );
     assert!(asked(&out).is_none(), "and no answer is asked for: {out:?}");
+    assert!(table.legs().answering() == 0, "no leg is opened");
+    assert!(table.held(&large()).is_none());
+}
+
+#[test]
+fn a_replacement_for_an_identity_not_held_at_the_peer_cap_is_refused_before_any_answer() {
+    // The rekey machine asks for a replacement only for a held peer, but
+    // the core takes the input as given: one for an identity it does not
+    // hold is a msg1 from a new identity, refused at the cap before any
+    // answer, not answered and then refused at its install.
+    let mut table = capped(2, 2);
+    let Input::Msg1 { read, .. } = msg1(large(), 1, 1) else {
+        unreachable!("msg1 builds a msg1");
+    };
+    let out = go(&mut table, Input::Replace(read), 0);
+    assert!(
+        cap(&out) && asked(&out).is_none(),
+        "defect: a replacement for an identity not held at the peer cap is answered: {out:?}"
+    );
     assert!(table.legs().answering() == 0, "no leg is opened");
     assert!(table.held(&large()).is_none());
 }
@@ -2009,6 +2156,35 @@ fn a_redial_opens_a_leg_and_leaves_the_held_peer() {
     assert!(table.legs().get(link).is_some());
 }
 
+/// Once sent, a stored answer answers only the msg1 it was written for:
+/// another msg1 from its address, such as a fresh dial of the peer or a
+/// capture spoofed from it, is read and classified, as the node reads it,
+/// while the byte-identical resend still draws the stored msg2.
+#[test]
+fn a_msg1_from_the_address_of_a_sent_answer_is_read_unless_it_is_the_msg1_answered() {
+    let mut table = held_heard();
+    let link = redialed(&mut table, 2, 8, 40_100);
+    let stored = Output::Answer {
+        link,
+        msg2: answer(2),
+        stored: true,
+    };
+    let other = go(&mut table, msg1(large(), 3, 8), 40_200);
+    assert!(
+        !other.contains(&stored),
+        "defect: another msg1 from a sent answer's address drew its stored msg2: {other:?}"
+    );
+    assert!(
+        other.iter().any(|o| matches!(o, Output::Rekey { .. })),
+        "the other msg1 is classified as the held peer's: {other:?}"
+    );
+    let resend = go(&mut table, msg1(large(), 2, 8), 40_300);
+    assert!(
+        resend.contains(&stored),
+        "the answered msg1's resend draws the stored msg2: {resend:?}"
+    );
+}
+
 #[test]
 fn a_frame_under_a_sent_redial_leg_replaces_the_held_peer_for_redial() {
     let mut table = held_heard();
@@ -2199,6 +2375,185 @@ fn a_reap_of_one_leg_reaps_only_that_leg_and_only_from_its_deadline() {
     assert!(
         left,
         "defect: the reap of one leg reaped another at its deadline too"
+    );
+}
+
+/// A second redial of the identity under the unheard floor of the first
+/// is held back, and the first stays pending: the slot rule.
+#[test]
+fn a_second_redial_within_the_unheard_floor_of_the_first_is_held_back() {
+    let mut table = held_heard();
+    let first = redialed(&mut table, 2, 8, 40_100);
+    let early = greet(
+        &mut table,
+        Input::Redial(read(large(), 3, 7, E1)),
+        3,
+        40_500,
+    );
+    let held = early.iter().any(|o| {
+        matches!(
+            o,
+            Output::Reject {
+                why: Denial::Held,
+                ..
+            }
+        )
+    });
+    assert!(
+        held && table.redialing(&large()) == Some(first),
+        "defect: a second redial within the floor was not held back: {early:?}"
+    );
+}
+
+/// A redial within the dampener's interval of a swap that replaced a heard
+/// peering is refused by the dampener, as a restart there is.
+#[test]
+fn a_redial_within_the_dampener_of_a_swap_is_refused() {
+    let mut table = held_heard();
+    let link = redialed(&mut table, 2, 8, 40_100);
+    go(
+        &mut table,
+        Input::LegHeard {
+            link,
+            from: pair(8),
+        },
+        40_200,
+    );
+    go(
+        &mut table,
+        Input::Heard {
+            peer: large(),
+            from: pair(8),
+            kind: heartbeat(),
+        },
+        40_300,
+    );
+    let again = greet(
+        &mut table,
+        Input::Redial(read(large(), 3, 7, E1)),
+        3,
+        45_000,
+    );
+    assert!(
+        again.iter().any(|o| matches!(
+            o,
+            Output::Reject {
+                why: Denial::Gate(Refusal::Dampened),
+                ..
+            }
+        )),
+        "defect: a redial within the dampener of a swap was answered: {again:?}"
+    );
+}
+
+/// A redial's answer leaves the held peer as it is: only a frame under the
+/// answer's keys replaces it.
+#[test]
+fn a_redials_answer_leaves_the_held_peer_until_a_frame_proves_it() {
+    let mut table = held_heard();
+    let old = table.held(&large()).map(|h| h.link);
+    let out = greet(
+        &mut table,
+        Input::Redial(read(large(), 2, 8, E1)),
+        2,
+        40_100,
+    );
+    let replaced = out
+        .iter()
+        .any(|o| matches!(o, Output::Remove { .. } | Output::Install(_)));
+    assert!(
+        !replaced && table.held(&large()).map(|h| h.link) == old,
+        "defect: a redial's answer replaced the held peer with no frame: {out:?}"
+    );
+}
+
+/// A pending redial's leg that no frame proves is reaped at the handshake
+/// deadline, as any answer's is.
+#[test]
+fn a_pending_redials_leg_is_reaped_at_its_deadline() {
+    let mut table = held_heard();
+    let link = redialed(&mut table, 2, 8, 40_100);
+    let out = drain(table.poll(t(40_100 + 30_000)));
+    let reaped = out
+        .iter()
+        .any(|o| matches!(o, Output::Retire { link: l, .. } if *l == link));
+    assert!(
+        reaped && table.legs().get(link).is_none(),
+        "defect: a pending redial's leg outlived its deadline: {out:?}"
+    );
+}
+
+/// A redial's leg installed at its send, once the peer it would have
+/// replaced is gone, is no longer a pending redial.
+#[test]
+fn a_redials_leg_installed_at_its_send_is_no_longer_a_pending_redial() {
+    let mut table = held_heard();
+    let out = greet(
+        &mut table,
+        Input::Redial(read(large(), 2, 8, E1)),
+        2,
+        40_100,
+    );
+    let link = answered(&out);
+    go(&mut table, Input::Dead { peer: large() }, 40_150);
+    go(&mut table, Input::Sent { link }, 40_200);
+    assert_eq!(
+        (
+            table.held(&large()).map(|h| h.link),
+            table.redialing(&large())
+        ),
+        (Some(link), None),
+        "defect: the installed leg is still a pending redial"
+    );
+}
+
+/// A redial the shell's ACL passed and no session index could be drawn
+/// for has its ephemeral noted in the redial memory, as the node notes it
+/// before the draw: the same ephemeral is refused as seen afterwards. One
+/// the ACL refused leaves no mark.
+#[test]
+fn a_redial_abandoned_after_its_acl_passed_is_noted_in_the_redial_memory() {
+    let mut table = held_heard();
+    let out = go(&mut table, Input::Redial(read(large(), 2, 8, E1)), 40_100);
+    let link = asked(&out).expect("precondition: the redial is asked for");
+    go(
+        &mut table,
+        Input::Abandon {
+            link,
+            authorized: true,
+        },
+        40_100,
+    );
+    let again = greet(
+        &mut table,
+        Input::Redial(read(large(), 2, 7, E1)),
+        2,
+        40_200,
+    );
+    assert!(
+        again.iter().any(|o| matches!(
+            o,
+            Output::Reject {
+                why: Denial::Gate(Refusal::Redialed),
+                ..
+            }
+        )),
+        "defect: an authorized redial left no mark in the redial memory: {again:?}"
+    );
+    let out = go(&mut table, Input::Redial(read(large(), 3, 6, E1)), 40_300);
+    let link = asked(&out).expect("precondition: the second redial is asked for");
+    go(
+        &mut table,
+        Input::Abandon {
+            link,
+            authorized: false,
+        },
+        40_300,
+    );
+    let refused = go(&mut table, Input::Redial(read(large(), 3, 5, E1)), 40_400);
+    assert!(
+        asked(&refused).is_some(),
+        "a redial the ACL refused is judged again at its resend: {refused:?}"
     );
 }
 

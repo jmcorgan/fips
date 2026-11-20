@@ -145,10 +145,12 @@ fn link(id: u64, addr: &str) -> Link {
 fn a_pair_two_links_are_set_up_at_names_the_newest_and_then_the_one_left() {
     let (one, two) = (LinkId::new(1), LinkId::new(2));
     let mut table = LinkTable::default();
-    table.open(link(1, "10.0.0.1:2121"));
+    let mut core =
+        crate::node::settle::Core::new(crate::NodeAddr::from_bytes([0; 16]), Default::default());
+    table.open(&mut core, link(1, "10.0.0.1:2121"));
     assert_eq!(table.index().get(&key("10.0.0.1:2121")), Some(&one));
 
-    table.open(link(2, "10.0.0.1:2121"));
+    table.open(&mut core, link(2, "10.0.0.1:2121"));
     assert_eq!(
         table.index().get(&key("10.0.0.1:2121")),
         Some(&two),
@@ -156,7 +158,7 @@ fn a_pair_two_links_are_set_up_at_names_the_newest_and_then_the_one_left() {
     );
     assert!(table.contains_key(&one), "the first link stays open");
 
-    let closed = table.close(&two).expect("the link is open");
+    let closed = table.close(&mut core, &two).expect("the link is open");
     assert_eq!(closed.link_id(), two, "close hands back the link");
     assert_eq!(
         table.index().get(&key("10.0.0.1:2121")),
@@ -164,19 +166,24 @@ fn a_pair_two_links_are_set_up_at_names_the_newest_and_then_the_one_left() {
         "closing the second link leaves the pair naming the first"
     );
     assert!(table.contains_key(&one) && !table.contains_key(&two));
-    assert!(table.close(&two).is_none(), "a second close finds nothing");
+    assert!(
+        table.close(&mut core, &two).is_none(),
+        "a second close finds nothing"
+    );
 }
 
 #[test]
 fn closing_a_link_drops_every_entry_naming_it_and_leaves_other_links_entries() {
     let (one, two) = (LinkId::new(1), LinkId::new(2));
     let mut table = LinkTable::default();
-    table.open(link(1, "10.0.0.1:2121"));
-    table.open(link(2, "10.0.0.2:2121"));
-    table.claim(one, key("10.0.0.3:2121"));
+    let mut core =
+        crate::node::settle::Core::new(crate::NodeAddr::from_bytes([0; 16]), Default::default());
+    table.open(&mut core, link(1, "10.0.0.1:2121"));
+    table.open(&mut core, link(2, "10.0.0.2:2121"));
+    table.claim(&mut core, one, key("10.0.0.3:2121"));
     assert_eq!(table.index().len(), 3, "precondition: three entries");
 
-    table.close(&one);
+    table.close(&mut core, &one);
     assert!(
         !table.index().contains_key(&key("10.0.0.1:2121")),
         "the link's own key goes"
@@ -196,16 +203,18 @@ fn closing_a_link_drops_every_entry_naming_it_and_leaves_other_links_entries() {
 fn forgetting_a_link_retires_it_and_leaves_the_entry_naming_another_link() {
     let (one, two) = (LinkId::new(1), LinkId::new(2));
     let mut table = LinkTable::default();
-    table.open(link(1, "10.0.0.1:2121"));
-    table.open(link(2, "10.0.0.1:2121"));
-    table.claim(one, key("10.0.0.3:2121"));
+    let mut core =
+        crate::node::settle::Core::new(crate::NodeAddr::from_bytes([0; 16]), Default::default());
+    table.open(&mut core, link(1, "10.0.0.1:2121"));
+    table.open(&mut core, link(2, "10.0.0.1:2121"));
+    table.claim(&mut core, one, key("10.0.0.3:2121"));
     assert_eq!(
         table.index().get(&key("10.0.0.1:2121")),
         Some(&two),
         "precondition: the key names the second link"
     );
 
-    table.forget(&one, &key("10.0.0.1:2121"));
+    table.forget(&mut core, &one, &key("10.0.0.1:2121"));
     assert!(!table.contains_key(&one), "the link is dropped");
     assert!(table.contains_key(&two), "the other link stays");
     assert_eq!(
@@ -223,15 +232,17 @@ fn forgetting_a_link_retires_it_and_leaves_the_entry_naming_another_link() {
 fn a_moved_path_moves_the_links_entry_with_its_record_and_its_setup_pair_stays() {
     let (one, three) = (LinkId::new(1), LinkId::new(3));
     let mut table = LinkTable::default();
-    table.open(link(1, "10.0.0.1:2121"));
-    table.open(link(2, "10.0.0.2:2121"));
-    table.open(link(3, "10.0.0.3:2121"));
+    let mut core =
+        crate::node::settle::Core::new(crate::NodeAddr::from_bytes([0; 16]), Default::default());
+    table.open(&mut core, link(1, "10.0.0.1:2121"));
+    table.open(&mut core, link(2, "10.0.0.2:2121"));
+    table.open(&mut core, link(3, "10.0.0.3:2121"));
     let no = table.no(&one).expect("precondition: the link has a number");
     let at = |addr: &str| {
         let (transport, addr) = key(addr);
         crate::proto::settle::links::Pair { transport, addr }
     };
-    table.claim(one, key("10.0.0.1:2121"));
+    table.claim(&mut core, one, key("10.0.0.1:2121"));
     let moved = |from: &str, to: &str| crate::proto::settle::input::Input::Moved {
         link: no,
         from: at(from),
@@ -239,7 +250,7 @@ fn a_moved_path_moves_the_links_entry_with_its_record_and_its_setup_pair_stays()
         roam: true,
     };
 
-    table.mirror(&moved("10.0.0.1:2121", "10.0.0.4:2121"));
+    table.mirror(&mut core, &moved("10.0.0.1:2121", "10.0.0.4:2121"));
     assert_eq!(
         table.index().get(&key("10.0.0.4:2121")),
         Some(&one),
@@ -251,8 +262,8 @@ fn a_moved_path_moves_the_links_entry_with_its_record_and_its_setup_pair_stays()
         "the setup pair the path roamed from stays named"
     );
 
-    table.claim(one, key("10.0.0.5:2121"));
-    table.mirror(&moved("10.0.0.5:2121", "10.0.0.6:2121"));
+    table.claim(&mut core, one, key("10.0.0.5:2121"));
+    table.mirror(&mut core, &moved("10.0.0.5:2121", "10.0.0.6:2121"));
     assert!(
         !table.index().contains_key(&key("10.0.0.5:2121")),
         "another pair the path left goes"
@@ -263,7 +274,7 @@ fn a_moved_path_moves_the_links_entry_with_its_record_and_its_setup_pair_stays()
         "and the pair it moved to names the link"
     );
 
-    table.mirror(&moved("10.0.0.6:2121", "10.0.0.3:2121"));
+    table.mirror(&mut core, &moved("10.0.0.6:2121", "10.0.0.3:2121"));
     assert_eq!(
         table.index().get(&key("10.0.0.3:2121")),
         Some(&three),
@@ -275,16 +286,18 @@ fn a_moved_path_moves_the_links_entry_with_its_record_and_its_setup_pair_stays()
 fn a_claimed_path_takes_only_a_free_key() {
     let (one, two) = (LinkId::new(1), LinkId::new(2));
     let mut table = LinkTable::default();
-    table.open(link(1, "10.0.0.1:2121"));
-    table.open(link(2, "10.0.0.2:2121"));
+    let mut core =
+        crate::node::settle::Core::new(crate::NodeAddr::from_bytes([0; 16]), Default::default());
+    table.open(&mut core, link(1, "10.0.0.1:2121"));
+    table.open(&mut core, link(2, "10.0.0.2:2121"));
 
-    table.claim(one, key("10.0.0.3:2121"));
+    table.claim(&mut core, one, key("10.0.0.3:2121"));
     assert_eq!(
         table.index().get(&key("10.0.0.3:2121")),
         Some(&one),
         "a free key names the link"
     );
-    table.claim(one, key("10.0.0.2:2121"));
+    table.claim(&mut core, one, key("10.0.0.2:2121"));
     assert_eq!(
         table.index().get(&key("10.0.0.2:2121")),
         Some(&two),
@@ -296,16 +309,18 @@ fn a_claimed_path_takes_only_a_free_key() {
 fn an_unclaimed_pair_loses_only_an_entry_naming_the_link() {
     let (one, two) = (LinkId::new(1), LinkId::new(2));
     let mut table = LinkTable::default();
-    table.open(link(1, "10.0.0.1:2121"));
-    table.open(link(2, "10.0.0.2:2121"));
-    table.claim(one, key("10.0.0.3:2121"));
+    let mut core =
+        crate::node::settle::Core::new(crate::NodeAddr::from_bytes([0; 16]), Default::default());
+    table.open(&mut core, link(1, "10.0.0.1:2121"));
+    table.open(&mut core, link(2, "10.0.0.2:2121"));
+    table.claim(&mut core, one, key("10.0.0.3:2121"));
 
-    table.unclaim(one, &key("10.0.0.3:2121"));
+    table.unclaim(&mut core, one, &key("10.0.0.3:2121"));
     assert!(
         !table.index().contains_key(&key("10.0.0.3:2121")),
         "an entry naming the link goes"
     );
-    table.unclaim(one, &key("10.0.0.2:2121"));
+    table.unclaim(&mut core, one, &key("10.0.0.2:2121"));
     assert_eq!(
         table.index().get(&key("10.0.0.2:2121")),
         Some(&two),
@@ -336,16 +351,18 @@ fn only_the_ways_past_the_writers_mark_a_map_planted() {
     indices.bind(1, addr);
     indices.unbind(&1);
     let mut links = LinkTable::default();
-    links.open(self::link(1, "10.0.0.1:2121"));
-    links.claim(link, key("10.0.0.2:2121"));
-    links.follow();
-    links.unclaim(link, &key("10.0.0.3:2121"));
+    let mut core =
+        crate::node::settle::Core::new(crate::NodeAddr::from_bytes([0; 16]), Default::default());
+    links.open(&mut core, self::link(1, "10.0.0.1:2121"));
+    links.claim(&mut core, link, key("10.0.0.2:2121"));
+    links.follow(&mut core);
+    links.unclaim(&mut core, link, &key("10.0.0.3:2121"));
     if let Some(l) = links.get_mut(&link) {
         l.set_connected();
     }
-    links.close(&link);
-    links.open(self::link(1, "10.0.0.1:2121"));
-    links.forget(&link, &key("10.0.0.1:2121"));
+    links.close(&mut core, &link);
+    links.open(&mut core, self::link(1, "10.0.0.1:2121"));
+    links.forget(&mut core, &link, &key("10.0.0.1:2121"));
     assert!(
         !machines.planted() && !peers.planted() && !indices.planted() && !links.planted(),
         "no writer marks its map"
@@ -391,7 +408,7 @@ fn the_live_audit_fails_a_peer_whose_link_is_not_in_the_link_map() {
 #[should_panic(expected = "audit_live: test: link-named")]
 fn the_live_audit_fails_a_link_no_peer_machine_or_dial_names() {
     let mut node = bare();
-    node.links.open(link(1, "10.0.0.1:2121"));
+    node.links.open(&mut node.core, link(1, "10.0.0.1:2121"));
     audit::live(&node, "test");
 }
 
@@ -400,9 +417,9 @@ fn the_live_audit_fails_a_link_no_peer_machine_or_dial_names() {
 #[should_panic(expected = "audit_live: test: dial-link")]
 fn the_live_audit_fails_a_pending_dial_whose_link_is_not_in_the_link_map() {
     let mut node = bare();
-    node.links.open(link(1, "10.0.0.1:2121"));
+    node.links.open(&mut node.core, link(1, "10.0.0.1:2121"));
     node.plant_dial_at((TransportId::new(1), 5), LinkId::new(1), None);
-    node.links.close(&LinkId::new(1));
+    node.links.close(&mut node.core, &LinkId::new(1));
     audit::live(&node, "test");
 }
 
@@ -411,7 +428,7 @@ fn the_live_audit_fails_a_pending_dial_whose_link_is_not_in_the_link_map() {
 #[should_panic(expected = "audit_live: test: entry-live")]
 fn the_live_audit_fails_an_index_entry_naming_no_live_link() {
     let mut node = bare();
-    node.links.open(link(1, "10.0.0.1:2121"));
+    node.links.open(&mut node.core, link(1, "10.0.0.1:2121"));
     node.plant_dial_at((TransportId::new(1), 5), LinkId::new(1), None);
     node.links.plant_entry(key("10.0.0.2:2121"), LinkId::new(2));
     audit::live(&node, "test");
@@ -423,9 +440,9 @@ fn the_live_audit_fails_an_index_entry_naming_no_live_link() {
 fn the_live_audit_fails_an_index_entry_off_its_links_pair_and_every_path() {
     let mut node = bare();
     let one = LinkId::new(1);
-    node.links.open(link(1, "10.0.0.1:2121"));
+    node.links.open(&mut node.core, link(1, "10.0.0.1:2121"));
     node.plant_dial_at((TransportId::new(1), 5), one, None);
-    node.links.claim(one, key("10.0.0.9:2121"));
+    node.links.claim(&mut node.core, one, key("10.0.0.9:2121"));
     audit::live(&node, "test");
 }
 
@@ -435,8 +452,9 @@ fn the_live_audit_fails_an_index_entry_off_its_links_pair_and_every_path() {
 fn the_live_audit_fails_a_held_link_no_index_entry_names() {
     let mut node = bare();
     let one = LinkId::new(1);
-    node.links.open(link(1, "10.0.0.1:2121"));
-    node.links.unclaim(one, &key("10.0.0.1:2121"));
+    node.links.open(&mut node.core, link(1, "10.0.0.1:2121"));
+    node.links
+        .unclaim(&mut node.core, one, &key("10.0.0.1:2121"));
     let (addr, held) = peer(one);
     node.peers.install(addr, held);
     audit::live(&node, "test");
@@ -451,8 +469,9 @@ fn the_live_audit_fails_a_handshake_leg_whose_pair_names_no_live_link() {
     let identity = PeerIdentity::from_pubkey(Identity::generate().pubkey());
     node.seed_handshake_machine(crate::node::HandshakeSeed::outbound(one, identity, 1000))
         .expect("precondition: the leg is seeded");
-    node.links.open(link(1, "10.0.0.1:2121"));
-    node.links.unclaim(one, &key("10.0.0.1:2121"));
+    node.links.open(&mut node.core, link(1, "10.0.0.1:2121"));
+    node.links
+        .unclaim(&mut node.core, one, &key("10.0.0.1:2121"));
     audit::live(&node, "test");
 }
 

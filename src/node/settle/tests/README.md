@@ -31,41 +31,6 @@ tests.
   default configuration, at each multipath setting, against the ones
   `fips_core::proto::settle::parity` states for the schedules a real node
   and the joint world both run, so the two run alike.
-- `decide.rs`: the settlement core beside the node in a test build, the
-  shadow: the leases it takes from a dial, an answered msg1 and a reap, all
-  released once its node is dropped; and a peer a test planted past the
-  writers held by the shadow after the node's resync, with the plant's
-  epoch, pair and instants; every decision site's file making its shadow
-  call under `#[cfg(test)]` once per site, by a scan that counts each call
-  and finds any one site's call removed, a call other sites in its file
-  share included; the shadow's count of the inputs it took, by kind; a
-  leg the node reaps at its deadline reaped by the core's own reap within
-  the legs' skew of the node's instant, and held past it, never handed
-  the node's give-up; and
-  a test's removal of a peer recorded on the node's side as the core
-  decides it; `gates-agree` reading an identity only the node's replay
-  memory or silent-session record holds; `links-agree` passing over a
-  planted link the node's table has not recorded, and the link of a
-  planted peer the node's link map does not hold; a link whose leg
-  the shadow reaped not taken for a plant while the node still holds it;
-  a link opened past the decision sites on a node not planted taken by
-  the resync; neither a link a decision site named nor one the shadow
-  retired at an input taken; a peer planted afresh on a new link taken
-  again, at its new link and epoch; `links-agree` passing over a link
-  the node records from a planted index entry with no link in its map;
-  and a first difference `shadow.txt` does not list failing the test at
-  its node's drop and not at the audit, each line of the file naming one
-  test, site and clause; and `CORE_READS` holding exactly the switches the
-  core's settlement sources read by `node_fault!`. It is a child module of `../decide.rs`, declared there with `#[path]`, as
-  `node::settle::decide::tests`.
-- `shadow.txt`: the settlement core's known first differences from the
-  node, one per line, tab-separated test, site and clause, which the
-  shadow core's comparison in the live audit reads (`audit::SHADOW_KNOWN`),
-  failing a test on any other when its node is dropped, `placement-agrees`
-  among its clauses; its header records the reach gaps, each
-  switch of the core whose node half reds no root test through the shadow,
-  with the reason, and the switches whose node half reds root tests by
-  behaviour ahead of it. It holds no line for a planted node.
 - `params.rs`: the settlement core's parameters a node's configuration
   gives, against the core's defaults at the default configuration, and
   against the node's own resend schedule (the first resend one interval

@@ -340,9 +340,13 @@ pub(crate) struct Departed {
     /// initiated it (`ActivePeer::is_heard`).
     pub heard: bool,
     /// Whether an authenticated frame arrived since the promotion
-    /// (`ActivePeer::heard`).
+    /// (`ActivePeer::heard`), which only a test's own removal reads: the
+    /// settlement core counts a silent session from its own record.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub frame_heard: bool,
-    /// The digest of the ephemeral the peering was promoted from.
+    /// The digest of the ephemeral the peering was promoted from, which
+    /// only a test's own removal reads.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub ephemeral: Option<EphemeralDigest>,
     /// Replays refused since the last session reset
     /// (`ActivePeer::replay_suppressed_count`).

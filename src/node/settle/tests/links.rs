@@ -27,13 +27,15 @@ fn at(addr: &str) -> Pair {
 fn the_core_records_a_link_from_its_open_to_its_close_or_its_forget() {
     let (one, two) = (LinkId::new(1), LinkId::new(2));
     let mut table = LinkTable::default();
-    table.open(link(1, "10.0.0.1:2121"));
-    table.open(link(2, "10.0.0.2:2121"));
+    let mut core =
+        crate::node::settle::Core::new(crate::NodeAddr::from_bytes([0; 16]), Default::default());
+    table.open(&mut core, link(1, "10.0.0.1:2121"));
+    table.open(&mut core, link(2, "10.0.0.2:2121"));
     let no = table
         .no(&one)
         .expect("defect: an open link has no core record");
-    let rec = table
-        .core()
+    let rec = core
+        .links()
         .get(no)
         .expect("defect: the number names no record");
     assert_eq!(rec.setup, at("10.0.0.1:2121"), "defect: the setup pair");
@@ -42,33 +44,33 @@ fn the_core_records_a_link_from_its_open_to_its_close_or_its_forget() {
     assert!(rec.paths.is_empty(), "defect: a new link holds no path");
 
     let (peer, _) = super::peer(one);
-    table.hold(&one, peer);
+    table.hold(&mut core, &one, peer);
     assert_eq!(
-        table.core().get(no).map(|r| r.holder),
+        core.links().get(no).map(|r| r.holder),
         Some(Holder::Peer(peer)),
         "defect: a promotion holds the record for its peer"
     );
 
-    table.close(&one);
+    table.close(&mut core, &one);
     assert!(
         table.no(&one).is_none(),
         "defect: a closed link keeps a number"
     );
     assert!(
-        table.core().get(no).is_none(),
+        core.links().get(no).is_none(),
         "defect: a closed link's record stays"
     );
     let other = table
         .no(&two)
         .expect("defect: another link loses its number");
     assert!(
-        table.core().get(other).is_some(),
+        core.links().get(other).is_some(),
         "defect: closing one link retires another's record"
     );
 
-    table.forget(&two, &key("10.0.0.2:2121"));
+    table.forget(&mut core, &two, &key("10.0.0.2:2121"));
     assert!(
-        table.no(&two).is_none() && table.core().get(other).is_none(),
+        table.no(&two).is_none() && core.links().get(other).is_none(),
         "defect: a forgotten dial's record stays"
     );
 }
@@ -86,12 +88,12 @@ fn a_link_turning_capable_marks_the_nodes_record_capable() {
     let mut node = crate::node::tests::make_node();
     let remote = Identity::generate();
     let (one, two) = (LinkId::new(1), LinkId::new(2));
-    node.links.open(link(1, "127.0.0.1:1"));
-    node.links.open(link(2, "127.0.0.1:2"));
+    node.links.open(&mut node.core, link(1, "127.0.0.1:1"));
+    node.links.open(&mut node.core, link(2, "127.0.0.1:2"));
     let peer = keyed_peer(&node, &remote, one, 0);
     let addr = *peer.node_addr();
     node.peers.install(addr, peer);
-    node.links.hold(&one, addr);
+    node.links.hold(&mut node.core, &one, addr);
     let no = node
         .links
         .no(&one)
@@ -99,7 +101,7 @@ fn a_link_turning_capable_marks_the_nodes_record_capable() {
     let capable = |node: &crate::node::Node, id: &LinkId| {
         node.links
             .no(id)
-            .and_then(|no| node.links.core().get(no))
+            .and_then(|no| node.core.links().get(no))
             .is_some_and(|r| r.capable)
     };
     assert!(
@@ -138,16 +140,18 @@ fn a_link_turning_capable_marks_the_nodes_record_capable() {
 fn forgetting_a_dial_leaves_the_held_links_entry() {
     let (held, dial) = (LinkId::new(1), LinkId::new(2));
     let mut table = LinkTable::default();
-    table.open(link(1, "10.0.0.1:2121"));
+    let mut core =
+        crate::node::settle::Core::new(crate::NodeAddr::from_bytes([0; 16]), Default::default());
+    table.open(&mut core, link(1, "10.0.0.1:2121"));
     let (peer, _) = super::peer(held);
-    table.hold(&held, peer);
-    table.open(link(2, "10.0.0.1:2121"));
+    table.hold(&mut core, &held, peer);
+    table.open(&mut core, link(2, "10.0.0.1:2121"));
     assert_eq!(
         table.index().get(&key("10.0.0.1:2121")),
         Some(&dial),
         "precondition: the pair names the dial's link while it lives"
     );
-    table.forget(&dial, &key("10.0.0.1:2121"));
+    table.forget(&mut core, &dial, &key("10.0.0.1:2121"));
     assert_eq!(
         table.index().get(&key("10.0.0.1:2121")),
         Some(&held),
@@ -165,8 +169,8 @@ fn forgetting_a_dial_leaves_the_held_links_entry() {
 fn a_flagged_peer_is_the_only_one_links_mirror_skips() {
     let mut node = crate::node::tests::make_node();
     let (one, two) = (LinkId::new(1), LinkId::new(2));
-    node.links.open(link(1, "10.0.0.1:2121"));
-    node.links.open(link(2, "10.0.0.2:2121"));
+    node.links.open(&mut node.core, link(1, "10.0.0.1:2121"));
+    node.links.open(&mut node.core, link(2, "10.0.0.2:2121"));
     let (flagged, mut first) = peer(one);
     let (wrong, second) = peer(two);
     first.rebind_transport(
@@ -181,7 +185,7 @@ fn a_flagged_peer_is_the_only_one_links_mirror_skips() {
     node.peers.install(flagged, first);
     node.peers.install(wrong, second);
     node.links
-        .plant_path(&two, &key("10.0.0.2:2121"), Proven::Live);
+        .plant_path(&mut node.core, &two, &key("10.0.0.2:2121"), Proven::Live);
 
     let found = audit::links_mirror(&node);
     assert_eq!(
@@ -200,7 +204,8 @@ fn a_flagged_peer_is_the_only_one_links_mirror_skips() {
     // reads that peer, ahead of `links-mirror`.
     #[cfg(debug_assertions)]
     {
-        node.links.unclaim(one, &key("10.0.0.1:2121"));
+        node.links
+            .unclaim(&mut node.core, one, &key("10.0.0.1:2121"));
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             audit::live(&node, "test");
         }));
@@ -289,7 +294,7 @@ fn record_and_bundle(node: &Node, peer: &NodeAddr) -> (Paths, Paths) {
     let rec = node
         .links
         .no(&p.link_id())
-        .and_then(|no| node.links.core().get(no))
+        .and_then(|no| node.core.links().get(no))
         .map(|r| r.paths.clone())
         .unwrap_or_default();
     (order(rec), order(recorded(p)))
@@ -301,8 +306,8 @@ fn held_node(remote: &Identity) -> (Node, NodeAddr) {
     let mut node = crate::node::tests::make_node();
     let peer = keyed_peer(&node, remote, LinkId::new(1), 0);
     let addr = *peer.identity().node_addr();
-    node.links.open(link(1, "127.0.0.1:1"));
-    node.links.hold(&LinkId::new(1), addr);
+    node.links.open(&mut node.core, link(1, "127.0.0.1:1"));
+    node.links.hold(&mut node.core, &LinkId::new(1), addr);
     node.peers.install(addr, peer);
     (node, addr)
 }
@@ -451,7 +456,7 @@ async fn a_planted_link_and_a_planted_index_entry_are_in_the_records_after_a_res
     let mut node = crate::node::tests::make_node();
     let (planted, other, missing) = (LinkId::new(1), LinkId::new(2), LinkId::new(3));
     node.links.raw().insert(planted, link(1, "10.0.0.1:2121"));
-    node.links.open(link(2, "10.0.0.2:2121"));
+    node.links.open(&mut node.core, link(2, "10.0.0.2:2121"));
     node.links.raw_index().insert(key("10.0.0.3:2121"), other);
     node.links.raw_index().insert(key("10.0.0.4:2121"), missing);
     node.close_unused(LinkId::new(99)).await;
@@ -459,7 +464,7 @@ async fn a_planted_link_and_a_planted_index_entry_are_in_the_records_after_a_res
     let rec = node
         .links
         .no(&planted)
-        .and_then(|no| node.links.core().get(no))
+        .and_then(|no| node.core.links().get(no))
         .expect("defect: the planted link has no record");
     assert_eq!(
         (rec.setup.clone(), rec.holder),
@@ -472,10 +477,10 @@ async fn a_planted_link_and_a_planted_index_entry_are_in_the_records_after_a_res
     );
     let no = node.links.no(&other);
     let paths = no
-        .and_then(|no| node.links.core().get(no))
+        .and_then(|no| node.core.links().get(no))
         .map(|r| r.paths.clone())
         .unwrap_or_default();
-    let named: Vec<_> = node.links.core().at(&at("10.0.0.3:2121")).collect();
+    let named: Vec<_> = node.core.links().at(&at("10.0.0.3:2121")).collect();
     assert_eq!(
         (named, paths.is_empty()),
         (no.into_iter().collect(), true),
@@ -484,7 +489,7 @@ async fn a_planted_link_and_a_planted_index_entry_are_in_the_records_after_a_res
     let opened = node
         .links
         .no(&missing)
-        .and_then(|no| node.links.core().get(no))
+        .and_then(|no| node.core.links().get(no))
         .map(|r| (r.setup.clone(), r.holder));
     assert_eq!(
         opened,

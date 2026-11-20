@@ -1405,8 +1405,6 @@ async fn two_dials(nodes: &mut [TestNode]) -> LinkId {
 /// Reap the dial whose link is `first` at node 0, as its handshake timeout
 /// does.
 async fn reap(nodes: &mut [TestNode], first: LinkId) {
-    // Reaped before its deadline, so the test tells the shadow core.
-    nodes[0].node.shadow_abandon(first);
     nodes[0].node.cleanup_stale_connection(first, 0).await;
     assert!(
         !nodes[0].node.links.contains_key(&first),

@@ -565,6 +565,7 @@ impl MasterParty {
                 | In::Sent { .. }
                 | In::SendFailed { .. }
                 | In::Unsendable { .. }
+                | In::PeerEpoch { .. }
                 | In::HeldFrame { .. }
                 | In::HoldLost { .. }) => {
                     self.s.audit.push(format!(

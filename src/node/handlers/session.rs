@@ -3114,7 +3114,7 @@ impl Node {
     /// only when the mutation lane's `IntervalOnWall` moves that clock. The
     /// rekey timers, the path bundles and everything else that reads
     /// `crate::peer::peer_now` do not take it.
-    pub(in crate::node) fn settle_now() -> crate::peer::PeerInstant {
+    pub(crate) fn settle_now() -> crate::peer::PeerInstant {
         crate::time::mono_at(Self::interval_ms())
     }
 

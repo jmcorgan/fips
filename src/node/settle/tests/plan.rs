@@ -98,10 +98,6 @@ const PROMOTE_IN: &[(Effect, &str)] = &[
         "p.set_handshake_msg2(..); p.note_setup(&msg1, msg2); p.note_setup_ephemeral(ephemeral)",
     ),
     (
-        Effect::UnheardNote,
-        "self.note_unheard_promotion(&peer, ephemeral)",
-    ),
-    (
         Effect::TreeAnnounce,
         "self.send_tree_announce_to_peer(&peer).await",
     ),

@@ -866,10 +866,9 @@ async fn a_release(peer_on_q: bool) {
         .map(ActivePeer::link_id)
         .expect("precondition: node 0 holds node 1");
     let q = pair.q.clone();
-    pair.nodes[0]
-        .node
-        .links
-        .claim(link, (q.transport, q.addr.clone()));
+    let node = &mut pair.nodes[0].node;
+    node.links
+        .claim(&mut node.core, link, (q.transport, q.addr.clone()));
     if peer_on_q {
         pair.peer_on_q().await;
     }

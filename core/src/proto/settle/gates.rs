@@ -499,6 +499,13 @@ impl<I: Instant> Gates<I> {
         self.peers.get(peer).map_or(0, |m| m.replays.len())
     }
 
+    /// How many ephemerals that armed a redial of `peer` the redial memory
+    /// holds, lapsed ones not yet pruned included.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn redials(&self, peer: &NodeAddr) -> usize {
+        self.peers.get(peer).map_or(0, |m| m.redials.len())
+    }
+
     /// The silent sessions counted in a row for `peer`, if it has a record.
     pub fn silent(&self, peer: &NodeAddr) -> Option<u32> {
         self.peers

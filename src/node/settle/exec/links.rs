@@ -57,13 +57,11 @@ pub(in crate::node) fn pathed(
 
 impl Node {
     /// Apply the core input `input` to the core's record of the link it
-    /// names: a path's state, move, switch or release, or the peer turning
-    /// capable. Every other input
-    /// changes no record, and the node acts on it, if at all, where the join
-    /// gave it.
+    /// names: a path's state, move or switch, or the peer turning capable.
+    /// A release reaches the core through its own run, and every other
+    /// input changes no record, and the node acts on it, if at all, where
+    /// the join gave it.
     pub(in crate::node) fn feed(&mut self, input: &Input) {
-        #[cfg(test)]
-        self.shadow_feed(input);
         match input {
             // The mutation lane's break: a path's state never reaches the
             // record.
@@ -71,11 +69,31 @@ impl Node {
             // The mutation lane's break: the peer turning capable never
             // reaches the record.
             Input::Capable { .. } if node_fault!(CapableUnmirrored) => {}
-            Input::State { .. }
-            | Input::Moved { .. }
-            | Input::Switched { .. }
-            | Input::Capable { .. }
-            | Input::Released { .. } => self.links.mirror(input),
+            Input::State { link, pair, proven } => self.pathed_core(Input::State {
+                link: *link,
+                pair: pair.clone(),
+                proven: *proven,
+            }),
+            Input::Moved {
+                link,
+                from,
+                to,
+                roam,
+            } => self.pathed_core(Input::Moved {
+                link: *link,
+                from: from.clone(),
+                to: to.clone(),
+                roam: *roam,
+            }),
+            Input::Switched { link, to, proven } => self.pathed_core(Input::Switched {
+                link: *link,
+                to: to.clone(),
+                proven: *proven,
+            }),
+            Input::Capable { link } => self.pathed_core(Input::Capable { link: *link }),
+            // The release's own run steps the core with it, and queues the
+            // closes its `Release` gives (`release_path`).
+            Input::Released { .. } => {}
             Input::Dial(_)
             | Input::Connecting { .. }
             | Input::Punched(_)
@@ -89,6 +107,7 @@ impl Node {
             | Input::Abandon { .. }
             | Input::Msg2 { .. }
             | Input::Restarted { .. }
+            | Input::PeerEpoch { .. }
             | Input::Ended { .. }
             | Input::Orphaned { .. }
             | Input::Heard { .. }
@@ -99,6 +118,15 @@ impl Node {
             | Input::SendFailed { .. }
             | Input::Unsendable { .. } => {}
         }
+    }
+
+    /// Step the core with the path input `input`, so its link record and
+    /// the record of the peer held on the link follow the bundle, and
+    /// rebuild the caches. The node runs a roam's reset itself, at the
+    /// path's own output, so the core's reset is not run here.
+    fn pathed_core(&mut self, input: Input) {
+        let _ = self.core.step(input, Self::settle_now());
+        self.stepped();
     }
 
     /// The one path of `peer`'s link `link` moved inside its transport from

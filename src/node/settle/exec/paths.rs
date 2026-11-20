@@ -18,6 +18,9 @@ use super::{Facts as Of, Run};
 use crate::NodeAddr;
 use crate::node::settle::table::{Cell, Row, Transition, cell};
 use crate::node::{AddrKey, Node};
+use crate::proto::settle::input::Input;
+use crate::proto::settle::links::Pair;
+use crate::proto::settle::output::Output;
 use crate::transport::LinkId;
 use fips_core::proto::path::{PathRef, Switch};
 use tracing::{debug, info};
@@ -37,6 +40,9 @@ pub(in crate::node) struct Facts {
     why: Option<Switch>,
     /// Whether the release is part of the peer's removal.
     removed: bool,
+    /// The connections the settlement core's close rule closes for the
+    /// release, as its `Release` gave them.
+    closes: Vec<Pair>,
 }
 
 impl Run {
@@ -74,7 +80,7 @@ impl Run {
             from,
             to: Some(to),
             why: Some(why),
-            removed: false,
+            ..Facts::default()
         };
         Self {
             facts: Of::Paths(facts),
@@ -137,7 +143,6 @@ impl Node {
                 | Effect::RelinkInitiator
                 | Effect::PromotedNote
                 | Effect::SetupNote
-                | Effect::UnheardNote
                 | Effect::RunLinkOutputs
                 | Effect::RunRenewed
                 | Effect::HoldDial
@@ -176,6 +181,17 @@ fn of(r: &Run) -> Option<&Facts> {
     }
 }
 
+/// [`of`], to write.
+fn of_mut(r: &mut Run) -> Option<&mut Facts> {
+    match &mut r.facts {
+        Of::Paths(facts) => Some(facts),
+        Of::None | Of::Install(_) | Of::Cross(_) | Of::Remove(_) => {
+            debug_assert!(false, "a path change runs with its facts");
+            None
+        }
+    }
+}
+
 /// The path's pair as the link's lookup keys it.
 fn key(path: &PathRef) -> AddrKey {
     (path.transport, path.addr.clone())
@@ -184,7 +200,7 @@ fn key(path: &PathRef) -> AddrKey {
 /// Rebuild the link's lookup at the path's move; the link's record follows
 /// the move when the feed applies it.
 pub(super) fn link_follow(node: &mut Node, _: &mut Run) {
-    node.links.follow();
+    node.links.follow(&mut node.core);
 }
 
 /// Log the path's move.
@@ -224,7 +240,7 @@ pub(super) fn link_claim(node: &mut Node, r: &mut Run) {
     if let Some(f) = of(r)
         && let (Some(link), Some(to)) = (f.link, &f.to)
     {
-        node.links.claim(link, key(to));
+        node.links.claimed(&mut node.core, link, key(to));
     }
 }
 
@@ -278,32 +294,88 @@ fn switch_name(why: Switch) -> &'static str {
     }
 }
 
-/// Unclaim the released pair from the link's lookup while the link lives;
-/// a removal drops the whole link.
+/// Tell the settlement core of the release while the link lives, and
+/// unclaim the released pair from the link's lookup; a removal drops the
+/// whole link, and its connections are the removal's to close. The core's
+/// close rule says which connection the release leaves unused.
 pub(super) fn link_unclaim(node: &mut Node, r: &mut Run) {
-    if let Some(f) = of(r)
+    let keep = matches!(r.t, Transition::Release { keep: true });
+    if let Some(f) = of_mut(r)
         && !f.removed
-        && let (Some(link), Some(to)) = (f.link, &f.to)
+        && let (Some(link), Some(to)) = (f.link, f.to.clone())
     {
-        node.links.unclaim(link, &key(to));
+        f.closes = node.release_core(link, &key(&to), keep);
     }
 }
 
-/// Queue the released pair's connection to close where the table's cell
-/// says a release closes it, the peer having no further use for it, unless
-/// another peer's link uses it (draft Section 5.8).
+/// Queue each connection the core's close rule closes for the release, where
+/// the table's cell says a release closes one: the peer has no further use
+/// for it and no other live link uses it (draft Section 5.8). The drain asks
+/// the rule again before it closes.
 pub(super) fn close_queued(node: &mut Node, r: &mut Run) {
-    if cell(Row::Connection, &r.t) != Cell::QueuedDrained || node_fault!(ReleaseKeepsPairOpen) {
+    if cell(Row::Connection, &r.t) != Cell::QueuedDrained {
         return;
     }
-    #[cfg(test)]
-    node.resync();
-    if let Some(f) = of(r)
-        && let (Some(link), Some(to)) = (f.link, &f.to)
-        && !node.in_use(to.transport, &to.addr, link)
-    {
+    let peer = r.peer;
+    let Some(f) = of_mut(r) else {
+        return;
+    };
+    let closes = std::mem::take(&mut f.closes);
+    // The mutation lane's break: the release's connection stays open.
+    if node_fault!(ReleaseKeepsPairOpen) {
+        return;
+    }
+    if let Some(link) = f.link {
+        node.queue_closes(closes, peer, link, f.removed);
+    }
+}
+
+impl Node {
+    /// Step the settlement core with the release of the path at `key` of
+    /// the link `link`, `keep` if the peer may still send there, and
+    /// unclaim the pair from the link's lookup. The connections the core's
+    /// close rule closes for it.
+    fn release_core(&mut self, link: LinkId, key: &AddrKey, keep: bool) -> Vec<Pair> {
+        let Some(no) = self.links.no(&link) else {
+            return Vec::new();
+        };
         #[cfg(test)]
-        node.closed(to.transport, &to.addr);
-        node.paths.close_later(to.clone(), r.peer, link, f.removed);
+        self.resync();
+        let input = Input::Released {
+            link: no,
+            pair: super::super::links::pair(key),
+            keep,
+        };
+        let out = self.core.step(input, Self::settle_now());
+        self.links.unclaimed(&mut self.core, link, key);
+        self.stepped();
+        out.into_iter()
+            .find_map(|o| {
+                if let Output::Release { closes, .. } = o {
+                    Some(closes)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    /// Queue the connection at each pair of `closes`, which the core's close
+    /// rule found the peer at `peer`'s link `link` leaves unused, to close at
+    /// the drain; `removed` says the link went with the peer's removal.
+    pub(in crate::node) fn queue_closes(
+        &mut self,
+        closes: Vec<Pair>,
+        peer: NodeAddr,
+        link: LinkId,
+        removed: bool,
+    ) {
+        for pair in closes {
+            let to = PathRef {
+                transport: pair.transport,
+                addr: pair.addr,
+            };
+            self.paths.close_later(to, peer, link, removed);
+        }
     }
 }

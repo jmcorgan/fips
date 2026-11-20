@@ -313,7 +313,7 @@ impl Drop for Place {
 
 /// A thread builder that names the thread for the thread that calls, which
 /// in a test run is the test's, followed by `::walk`, so what a walk's
-/// nodes record by thread (the shadow core's lines, the audit's reach rows)
+/// nodes record by thread (the audit's reach rows)
 /// names the test, while a panic on the walk's thread is not read as the
 /// test thread's own by the lanes that classify a test's run by its
 /// thread's first panic (`testing/lib/test-verdict.sh`).
@@ -403,8 +403,8 @@ pub(super) fn named(start: &Start, order: Order, on: bool, path: Path) -> String
 // ---------------------------------------------------------------------------
 
 /// A walk runs on a thread named for the test that started it, followed by
-/// `::walk`, so a line the shadow core writes from a walk's node names that
-/// test, and a panic on it is not the test thread's own.
+/// `::walk`, so a line the audit writes from a walk's node names that test,
+/// and a panic on it is not the test thread's own.
 #[test]
 fn each_walk_runs_on_a_thread_named_for_the_test_that_started_it() {
     let job = jobs(Medium::Loopback, &[false])

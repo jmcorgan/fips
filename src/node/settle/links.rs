@@ -13,12 +13,17 @@ use crate::NodeAddr;
 use crate::node::AddrKey;
 #[cfg(test)]
 use crate::peer::ActivePeer;
-use crate::peer::PeerInstant;
+#[cfg(test)]
 use crate::proto::settle::input::Input;
 #[cfg(test)]
 use crate::proto::settle::join;
-use crate::proto::settle::legs::{LegOut, Legs};
-use crate::proto::settle::links::{Dir, Holder, LinkNo, Links, Pair, Placement, Proven};
+#[cfg(test)]
+use crate::proto::settle::links::Holder;
+#[cfg(test)]
+use crate::proto::settle::links::Proven;
+use crate::proto::settle::links::{Dir, LinkNo, Links, Pair, Placement};
+
+use super::Core;
 use crate::transport::{Link, LinkDirection, LinkId};
 
 /// The node's links, keyed by `LinkId`, and the index from a
@@ -47,11 +52,15 @@ use crate::transport::{Link, LinkDirection, LinkId};
 /// link's bundle reports through the core's join. It names each live link at
 /// its setup pair, unless the bundle released the path there, and at each of
 /// its Live or acknowledged paths; a pair several links use names the link
-/// with the newest number. The table keeps that as a cache, rebuilt by every
-/// writer, since every change to the records goes through one: the records
-/// are private to the table, and the feed reaches them through
-/// [`LinkTable::mirror`] and [`LinkTable::hold`]. The live audit's
-/// `index-cache` clause holds the cache to the records.
+/// with the newest number. The records are the node's settlement core's
+/// (`Node.core`), the one copy in any build; the table holds the numbers
+/// and the index, and each writer takes the records. The table keeps the
+/// index as a cache, rebuilt by every writer and after every step of the
+/// core over the records, since every change to them goes through one: the
+/// feed reaches them through [`LinkTable::mirror`] and [`LinkTable::hold`],
+/// and the legs' resends and reaps through [`LinkTable::poll`] and
+/// [`LinkTable::reap`]. The live audit's `index-cache` clause holds the
+/// cache to the records.
 ///
 /// The links are reached by `Deref` for reads, and by `get_mut` for a change
 /// to a link that leaves the table as it is; the index by `index`. Every
@@ -61,8 +70,6 @@ pub(in crate::node) struct LinkTable {
     links: HashMap<LinkId, Link>,
     /// The index the records give, rebuilt at every writer.
     index: HashMap<AddrKey, LinkId>,
-    /// The settlement core's record of each link.
-    core: Links,
     /// The core's number for each link.
     nos: HashMap<LinkId, LinkNo>,
     #[cfg(test)]
@@ -87,16 +94,16 @@ pub(in crate::node) struct LinkTable {
 reads!(LinkTable, links, HashMap<LinkId, Link>);
 
 impl LinkTable {
-    /// A new link: the link is added, and the core records it, set up at
-    /// its pair and held by its handshake leg.
-    pub(in crate::node) fn open(&mut self, link: Link) {
+    /// A new link outside any handshake: the link is added, and the core
+    /// records it, set up at its pair and held by its handshake leg.
+    pub(in crate::node) fn open(&mut self, core: &mut Core, link: Link) {
         let id = link.link_id();
         let key = (link.transport_id(), link.remote_addr().clone());
         let dir = match link.direction() {
             LinkDirection::Inbound => Dir::Inbound,
             LinkDirection::Outbound => Dir::Outbound,
         };
-        let no = self.core.open(pair(&key), dir, Holder::Leg);
+        let no = core.open_link(pair(&key), dir);
         self.nos.insert(id, no);
         self.links.insert(id, link);
         #[cfg(test)]
@@ -104,17 +111,32 @@ impl LinkTable {
             self.taken.remove(&key);
             self.overlay.remove(&key);
         }
-        self.rebuild();
+        self.rebuild(core);
     }
 
-    /// The link is closed: it is taken out, and the core's record of it is
-    /// retired, so the index names it nowhere.
-    pub(in crate::node) fn close(&mut self, id: &LinkId) -> Option<Link> {
+    /// A new link, which the core opened a record for and numbered `no`,
+    /// at a dial or an admitted msg1: the link is added under that number.
+    pub(in crate::node) fn bind(&mut self, core: &mut Core, link: Link, no: LinkNo) {
+        let id = link.link_id();
+        #[cfg(test)]
+        {
+            let key = (link.transport_id(), link.remote_addr().clone());
+            self.taken.remove(&key);
+            self.overlay.remove(&key);
+        }
+        self.nos.insert(id, no);
+        self.links.insert(id, link);
+        self.rebuild(core);
+    }
+
+    /// The link is closed: it is taken out, and the index, rebuilt from the
+    /// core's records, which retired it, names it nowhere.
+    pub(in crate::node) fn close(&mut self, core: &mut Core, id: &LinkId) -> Option<Link> {
         let link = self.links.remove(id)?;
         #[cfg(test)]
         let named = self.named(id);
-        self.retire(id);
-        self.rebuild();
+        self.retire(core, id);
+        self.rebuild(core);
         // The mutation lane's break: the link's own pair and every pair it
         // was named at are taken from whichever link the index names there.
         #[cfg(test)]
@@ -122,24 +144,24 @@ impl LinkTable {
             self.taken
                 .insert((link.transport_id(), link.remote_addr().clone()));
             self.taken.extend(named);
-            self.rebuild();
+            self.rebuild(core);
         }
         Some(link)
     }
 
-    /// A dial is abandoned: its link is dropped and the core's record of it
-    /// retired, as at a close. `key` is the dial's pair, which another
-    /// link may still name.
-    pub(in crate::node) fn forget(&mut self, id: &LinkId, key: &AddrKey) {
+    /// A dial is abandoned: its link is dropped, as at a close, once the
+    /// core gave it up. `key` is the dial's pair, which another link may
+    /// still name.
+    pub(in crate::node) fn forget(&mut self, core: &mut Core, id: &LinkId, key: &AddrKey) {
         self.links.remove(id);
-        self.retire(id);
-        self.rebuild();
+        self.retire(core, id);
+        self.rebuild(core);
         // The mutation lane's break: the dial's pair is taken from whichever
         // link it named.
         #[cfg(test)]
         if node_fault!(ForgetTakesKey) {
             self.taken.insert(key.clone());
-            self.rebuild();
+            self.rebuild(core);
         }
         #[cfg(not(test))]
         let _ = key;
@@ -147,41 +169,69 @@ impl LinkTable {
 
     /// The link's path moved. The core's record follows when the feed
     /// applies the move, so this only rebuilds the index.
-    pub(in crate::node) fn follow(&mut self) {
-        self.rebuild();
+    pub(in crate::node) fn follow(&mut self, core: &mut Core) {
+        self.rebuild(core);
     }
 
-    /// The link switched to a path at `to`. A record that lacks the path
-    /// gains it acknowledged, the least a switch's target holds; a path it
-    /// holds keeps its state, which the feed of the switch that follows in
-    /// the same step sets to the bundle's.
-    pub(in crate::node) fn claim(&mut self, id: LinkId, to: AddrKey) {
-        if let Some(no) = self.no(&id) {
-            let at = pair(&to);
-            let held = self
-                .core
+    /// The link switched to a path at `to`, which the core's record gains
+    /// when the feed steps it with the switch: the index is rebuilt from
+    /// the records.
+    pub(in crate::node) fn claimed(&mut self, core: &mut Core, id: LinkId, to: AddrKey) {
+        debug_assert!(
+            self.no(&id).is_none_or(|no| core
+                .links()
                 .get(no)
-                .is_some_and(|r| r.paths.iter().any(|(p, _)| *p == at));
-            if !held {
-                self.core.path(no, at, Proven::Acked);
-            }
-        }
+                .is_some_and(|r| r.paths.iter().any(|(p, _)| *p == pair(&to)))),
+            "the core's record of link {id} lacks the pair it switched to"
+        );
         #[cfg(test)]
         self.taken.remove(&to);
-        self.rebuild();
+        #[cfg(not(test))]
+        let _ = to;
+        self.rebuild(core);
     }
 
-    /// The link released its path at `key`, which its record no longer
-    /// holds. A released setup pair leaves the index.
-    pub(in crate::node) fn unclaim(&mut self, id: LinkId, key: &AddrKey) {
-        if let Some(no) = self.no(&id) {
-            let _closes = self.core.release(no, &pair(key), true);
-        }
+    /// The link released its path at `key`, which the core's record no
+    /// longer holds once it stepped with the release: a released setup pair
+    /// leaves the index.
+    pub(in crate::node) fn unclaimed(&mut self, core: &mut Core, id: LinkId, key: &AddrKey) {
         #[cfg(test)]
         if self.overlay.get(key) == Some(&id) {
             self.overlay.remove(key);
         }
-        self.rebuild();
+        #[cfg(not(test))]
+        let _ = (id, key);
+        self.rebuild(core);
+    }
+
+    /// The link switched to a path at `to`, for a test that drives the
+    /// table alone: a record that lacks the path gains it acknowledged,
+    /// the least a switch's target holds, as the core's switch does
+    /// (test builds only).
+    #[cfg(test)]
+    pub(in crate::node) fn claim(&mut self, core: &mut Core, id: LinkId, to: AddrKey) {
+        if let Some(no) = self.no(&id) {
+            let at = pair(&to);
+            let links = core.records();
+            let held = links
+                .get(no)
+                .is_some_and(|r| r.paths.iter().any(|(p, _)| *p == at));
+            if !held {
+                links.path(no, at, Proven::Acked);
+            }
+        }
+        self.claimed(core, id, to);
+    }
+
+    /// The link released its path at `key`, for a test that drives the
+    /// table alone: the record lets it go, as the core's release does
+    /// (test builds only).
+    #[cfg(test)]
+    pub(in crate::node) fn unclaim(&mut self, core: &mut Core, id: LinkId, key: &AddrKey) {
+        if let Some(no) = self.no(&id) {
+            let _closes = core.records().release(no, &pair(key), true);
+        }
+        self.unclaimed(core, id, key);
     }
 
     /// The close rule, the settlement core's over its records: whether a
@@ -190,18 +240,28 @@ impl LinkTable {
     /// handshake leg, or a link whose record holds no path, by its setup
     /// pair ([`Links::in_use`]). A leg in flight thus keeps its connection
     /// from another leg's close.
-    pub(in crate::node) fn used(&self, key: &AddrKey, except: LinkId) -> bool {
+    pub(in crate::node) fn used(&self, core: &Links, key: &AddrKey, except: LinkId) -> bool {
         // A link with no number has no record to except.
         let except = self.no(&except).unwrap_or(LinkNo(u64::MAX));
-        self.core.in_use(&pair(key), except)
+        core.in_use(&pair(key), except)
     }
 
-    /// Retire the core's record of the link `id`, and drop any entry a test
-    /// wrote naming it. The connections the core would close are the node's
-    /// to close, by its own rule, until the core decides them.
-    fn retire(&mut self, id: &LinkId) {
+    /// Drop the link `id`'s number, whose record the core retired at the
+    /// removal, crossing or given-up dial that closes the link, and any
+    /// entry a test wrote naming it. In a test build a record still open
+    /// is retired here: a link a test closes past the core's decisions,
+    /// after its own removal of the peer.
+    fn retire(&mut self, core: &mut Core, id: &LinkId) {
         if let Some(no) = self.nos.remove(id) {
-            let _closes = self.core.retire(no);
+            #[cfg(test)]
+            {
+                let _closes = core.records().retire(no);
+            }
+            #[cfg(not(test))]
+            debug_assert!(
+                core.links().get(no).is_none(),
+                "a link closed while the core still holds its record"
+            );
         }
         #[cfg(test)]
         {
@@ -224,25 +284,31 @@ impl LinkTable {
     /// records first name each link at the pairs a test wrote in the index
     /// for it past the writers ([`Links::name`]), so the records answer
     /// for the index the test wrote.
-    fn rebuild(&mut self) {
+    fn rebuild(&mut self, core: &mut Core) {
         #[cfg(test)]
+        self.rebuild_records(core.records());
+        #[cfg(not(test))]
         {
-            let named = self
-                .overlay
-                .iter()
-                .filter_map(|(key, id)| Some((pair(key), self.no(id)?)))
-                .collect();
-            self.core.name(named);
+            self.index = reduce(core.links().index(), &self.nos);
         }
-        self.index = reduce(self.core.index(), &self.nos);
-        #[cfg(test)]
-        {
-            for key in &self.taken {
-                self.index.remove(key);
-            }
-            for (key, id) in &self.overlay {
-                self.index.insert(key.clone(), *id);
-            }
+    }
+
+    /// [`LinkTable::rebuild`] over the records themselves (test builds
+    /// only).
+    #[cfg(test)]
+    fn rebuild_records(&mut self, core: &mut Links) {
+        let named = self
+            .overlay
+            .iter()
+            .filter_map(|(key, id)| Some((pair(key), self.no(id)?)))
+            .collect();
+        core.name(named);
+        self.index = reduce(core.index(), &self.nos);
+        for key in &self.taken {
+            self.index.remove(key);
+        }
+        for (key, id) in &self.overlay {
+            self.index.insert(key.clone(), *id);
         }
     }
 
@@ -263,87 +329,73 @@ impl LinkTable {
     /// one of the node's links expects.
     pub(in crate::node) fn placement(
         &self,
+        core: &Links,
         key: &AddrKey,
         leg: impl Fn(LinkId) -> Option<NodeAddr>,
     ) -> Placement {
-        self.core
-            .placement(&pair(key), |no| self.id(no).and_then(&leg))
-    }
-
-    /// The core's link records.
-    #[cfg(any(test, debug_assertions))]
-    pub(in crate::node) fn core(&self) -> &Links {
-        &self.core
+        core.placement(&pair(key), |no| self.id(no).and_then(&leg))
     }
 
     /// The index the core's records give now, computed afresh rather than
     /// read from the cache.
     #[cfg(any(test, debug_assertions))]
-    pub(in crate::node) fn derived(&self) -> HashMap<AddrKey, LinkId> {
-        reduce(&self.core.derived(), &self.nos)
+    pub(in crate::node) fn derived(&self, core: &Links) -> HashMap<AddrKey, LinkId> {
+        reduce(&core.derived(), &self.nos)
     }
 
-    /// Run the handshake legs' timers at `now`: the resends due, and the
-    /// legs past their deadline, each reaped leg's record retired from the
-    /// core's records by the close rule, which names the connections its
-    /// retirement closes. The index is rebuilt after, as at every writer.
-    pub(in crate::node) fn poll(
-        &mut self,
-        legs: &mut Legs<PeerInstant>,
-        now: PeerInstant,
-    ) -> Vec<LegOut> {
-        let out = legs.poll(now, &mut self.core);
-        if node_fault!(IndexNotRebuilt) {
-            return out;
+    /// The link `id` is now held by the peer at `peer`, as the core's
+    /// install or move that the caller runs holds its record: the index is
+    /// rebuilt from the records.
+    ///
+    /// A test that promotes a peer past the core, by a direct call of the
+    /// promotion, has the record held as the core's install would hold it,
+    /// as the resync does for a peer planted past the writers (test builds
+    /// only).
+    pub(in crate::node) fn held(&mut self, core: &mut Core, id: &LinkId, peer: NodeAddr) {
+        #[cfg(test)]
+        if core.held(&peer).is_none() {
+            self.hold(core, id, peer);
+            return;
         }
-        self.rebuild();
-        out
+        debug_assert!(
+            self.no(id)
+                .is_none_or(|no| core.links().get(no).map(|r| r.holder)
+                    == Some(crate::proto::settle::links::Holder::Peer(peer))),
+            "the core holds the link {id} for another than the peer installed on it"
+        );
+        self.rebuild(core);
     }
 
-    /// [`LinkTable::poll`]'s reap of the leg on the core's link `no` alone,
-    /// if it is past its deadline at `now`, its record retired by the close
-    /// rule and the index rebuilt after.
-    pub(in crate::node) fn reap(
-        &mut self,
-        legs: &mut Legs<PeerInstant>,
-        no: LinkNo,
-        now: PeerInstant,
-    ) -> Vec<LegOut> {
-        let out = legs.reap_one(no, now, &mut self.core);
-        if node_fault!(IndexNotRebuilt) {
-            return out;
-        }
-        self.rebuild();
-        out
-    }
-
-    /// The link `id` is now held by the peer at `peer`.
-    pub(in crate::node) fn hold(&mut self, id: &LinkId, peer: NodeAddr) {
+    /// The link `id` is now held by the peer at `peer`, for a test that
+    /// drives the table alone, as the core's install holds it (test builds
+    /// only).
+    #[cfg(test)]
+    pub(in crate::node) fn hold(&mut self, core: &mut Core, id: &LinkId, peer: NodeAddr) {
         if let Some(no) = self.no(id) {
-            self.core.hold(no, Holder::Peer(peer));
+            core.records().hold(no, Holder::Peer(peer));
         }
-        self.rebuild();
+        self.rebuild(core);
     }
 
     /// Apply what a link's bundle reported, `input`, to the core's record of
-    /// the link, and rebuild the index. The connections a released path
-    /// leaves to close are the node's to close, by its own rule, until the
-    /// core decides them.
-    pub(in crate::node) fn mirror(&mut self, input: &Input) {
-        match input {
-            // The mutation lane's break: a moved path's old pair stays in
-            // the record, and so in the index.
-            Input::Moved { link, to, .. } if node_fault!(MovedLeavesEntry) => {
-                self.core.path(*link, to.clone(), Proven::Live);
-            }
-            _ => {
-                let _closes = self.core.mirror(input);
-            }
-        }
+    /// the link, and rebuild the index, as a test drives the table alone
+    /// (the node steps the core with it, [`Node::feed`]).
+    #[cfg(test)]
+    pub(in crate::node) fn mirror(&mut self, core: &mut Core, input: &Input) {
+        let _closes = core.records().mirror(input);
+        self.stepped(core);
+    }
+
+    /// Rebuild the index after a step of the core changed its records: an
+    /// install or a move that holds a link for its peer, a bundle's report
+    /// applied to them, or a leg's resends and reaps run over them.
+    pub(in crate::node) fn stepped(&mut self, core: &mut Core) {
+        // The mutation lane's break: the index is left as it was, whatever
+        // the step changed.
         if node_fault!(IndexNotRebuilt) {
             return;
         }
-        self.rebuild();
+        self.rebuild(core);
     }
 
     /// Write into the core's records what a test changed past the writers,
@@ -366,6 +418,7 @@ impl LinkTable {
     #[cfg(test)]
     pub(in crate::node) fn resync(
         &mut self,
+        core: &mut Core,
         held: Vec<(LinkId, NodeAddr, Paths, bool)>,
         unrecorded: Vec<(LinkId, NodeAddr, Pair, Paths, bool)>,
         holders: &HashMap<LinkId, NodeAddr>,
@@ -383,13 +436,18 @@ impl LinkTable {
                 (*id, at, dir)
             })
             .collect();
+        // Whether the records gain anything here, or a test's index entries
+        // are to be named through them: with neither, the index the records
+        // give is the one the last writer built, and is left as it is.
+        let mut wrote = !planted.is_empty() || !self.overlay.is_empty();
+        let core = core.records();
         for (id, at, dir) in planted {
             if self.orphans.remove(&id)
                 && let Some(no) = self.nos.remove(&id)
             {
-                let _closes = self.core.retire(no);
+                let _closes = core.retire(no);
             }
-            self.adopt(id, at, dir, holders);
+            self.adopt(core, id, at, dir, holders);
         }
         let mut entries: Vec<(AddrKey, LinkId)> = self
             .overlay
@@ -399,44 +457,55 @@ impl LinkTable {
         entries.sort_by(|(a, _), (b, _)| pair(a).cmp(&pair(b)));
         for (key, id) in entries {
             let at = pair(&key);
-            if self.no(&id).is_some() || self.core.at(&at).next().is_some() {
+            if self.no(&id).is_some() || core.at(&at).next().is_some() {
                 continue;
             }
             // An entry naming a link with no record names a link the map
             // lacks, whose direction nothing gives. It is no inbound
             // link of the node's, so no duplicate msg1 is answered on it,
             // until a test puts the link in the map.
-            self.adopt(id, at, Dir::Outbound, holders);
+            self.adopt(core, id, at, Dir::Outbound, holders);
             self.orphans.insert(id);
         }
         for (id, peer, at, paths, capable) in unrecorded {
             if self.no(&id).is_none() {
-                self.adopt(id, at, Dir::Inbound, holders);
+                wrote = true;
+                self.adopt(core, id, at, Dir::Inbound, holders);
                 if let Some(no) = self.no(&id) {
-                    self.core.hold(no, Holder::Peer(peer));
-                    self.core.resync(no, paths, capable);
+                    core.hold(no, Holder::Peer(peer));
+                    core.resync(no, paths, capable);
                 }
             }
         }
         for (id, peer, paths, capable) in held {
             if let Some(no) = self.no(&id) {
-                self.core.resync(no, paths, capable);
-                if self.core.get(no).map(|r| r.holder) != Some(Holder::Peer(peer)) {
-                    self.core.hold(no, Holder::Peer(peer));
+                wrote = true;
+                core.resync(no, paths, capable);
+                if core.get(no).map(|r| r.holder) != Some(Holder::Peer(peer)) {
+                    core.hold(no, Holder::Peer(peer));
                 }
             }
         }
-        self.rebuild();
+        if wrote {
+            self.rebuild_records(core);
+        }
     }
 
     /// Open a record for the link `id`, which has none, as a leg at `at`,
     /// held by the peer `holders` puts on the link, if any.
     #[cfg(test)]
-    fn adopt(&mut self, id: LinkId, at: Pair, dir: Dir, holders: &HashMap<LinkId, NodeAddr>) {
-        let no = self.core.open(at, dir, Holder::Leg);
+    fn adopt(
+        &mut self,
+        core: &mut Links,
+        id: LinkId,
+        at: Pair,
+        dir: Dir,
+        holders: &HashMap<LinkId, NodeAddr>,
+    ) {
+        let no = core.open(at, dir, Holder::Leg);
         self.nos.insert(id, no);
         if let Some(peer) = holders.get(&id) {
-            self.core.hold(no, Holder::Peer(*peer));
+            core.hold(no, Holder::Peer(*peer));
         }
     }
 
@@ -482,14 +551,15 @@ impl LinkTable {
     #[cfg(test)]
     pub(in crate::node) fn plant_path(
         &mut self,
+        core: &mut Core,
         id: &LinkId,
         key: &AddrKey,
         state: crate::proto::settle::links::Proven,
     ) {
         if let Some(no) = self.no(id) {
-            self.core.path(no, pair(key), state);
+            core.records().path(no, pair(key), state);
         }
-        self.rebuild();
+        self.rebuild(core);
     }
 
     /// Count one live audit of the node this table is in.

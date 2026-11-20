@@ -319,7 +319,7 @@ pub(super) async fn dial_at(
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    initiator.node.links.open(link);
+    initiator.node.links.open(&mut initiator.node.core, link);
     initiator
         .node
         .plant_dial_at((transport_id, our_index.as_u32()), link_id, None);

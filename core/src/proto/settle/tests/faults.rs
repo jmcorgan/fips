@@ -668,7 +668,15 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::MoveLeavesUnheard,
-        &[SIM_REACHED, PARITY_MODEL, PARITY_JOINT],
+        &[
+            (
+                TABLE,
+                "a_move_onto_this_nodes_own_dial_makes_the_peering_heard",
+            ),
+            SIM_REACHED,
+            PARITY_MODEL,
+            PARITY_JOINT,
+        ],
     ),
     // Not in the joint world: no joint test, scripted start or sweep of the
     // default build reds with it on. A move makes a peering heard only where
@@ -682,8 +690,40 @@ pub const ROWS: &[Row] = &[
         )],
     ),
     (
+        Fault::CrossedRunsKeep,
+        &[(
+            TABLE,
+            "a_crossing_decided_by_the_tie_break_alone_moves_the_smaller_node_onto_its_dial",
+        )],
+    ),
+    (
+        Fault::TouchKeepsHeardInstant,
+        &[(
+            TABLE,
+            "a_frame_moves_the_instant_of_the_peerings_last_frame",
+        )],
+    ),
+    (
+        Fault::EpochAtCutover,
+        &[(
+            TABLE,
+            "a_restarted_peers_epoch_its_rekey_took_makes_its_msg1_at_that_epoch_a_rekey",
+        )],
+    ),
+    (
+        Fault::MovedLeavesEntry,
+        &[(
+            TABLE,
+            "a_path_moved_rekeys_the_links_index_entry_to_the_new_pair",
+        )],
+    ),
+    (
         Fault::IgnoreOwnDial,
         &[
+            (
+                TABLE,
+                "a_second_dial_to_a_peer_held_on_this_nodes_own_dial_moves_the_peer_onto_it",
+            ),
             AGREES,
             IN_ORDER_LARGER,
             (
@@ -730,7 +770,46 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::RedialSlotIgnored,
-        &[(TABLE, "one_redial_leg_per_identity")],
+        &[
+            (TABLE, "one_redial_leg_per_identity"),
+            (
+                TABLE,
+                "a_second_redial_within_the_unheard_floor_of_the_first_is_held_back",
+            ),
+        ],
+    ),
+    (
+        Fault::RedialEntryKeptAtPromote,
+        &[(
+            TABLE,
+            "a_redials_leg_installed_at_its_send_is_no_longer_a_pending_redial",
+        )],
+    ),
+    (
+        Fault::RedialMemoryIgnored,
+        &[(TABLE, "the_redial_memory_refuses_a_seen_ephemeral")],
+    ),
+    (
+        Fault::RedialSkipsDampener,
+        &[(TABLE, "a_redial_within_the_dampener_of_a_swap_is_refused")],
+    ),
+    (
+        Fault::RedialTearsDownAtMsg1,
+        &[(
+            TABLE,
+            "a_redials_answer_leaves_the_held_peer_until_a_frame_proves_it",
+        )],
+    ),
+    (
+        Fault::RedialNeverExpires,
+        &[(TABLE, "a_pending_redials_leg_is_reaped_at_its_deadline")],
+    ),
+    (
+        Fault::AuthorizedRedialUnnoted,
+        &[(
+            TABLE,
+            "a_redial_abandoned_after_its_acl_passed_is_noted_in_the_redial_memory",
+        )],
     ),
     (
         Fault::RedialLegKept,
@@ -1034,6 +1113,10 @@ pub const ROWS: &[Row] = &[
             ),
             (
                 TABLE,
+                "a_replacement_for_an_identity_not_held_at_the_peer_cap_is_refused_before_any_answer",
+            ),
+            (
+                TABLE,
                 "an_answer_sent_to_a_new_identity_once_the_peer_cap_filled_is_not_installed",
             ),
             (
@@ -1259,6 +1342,13 @@ pub const ROWS: &[Row] = &[
                 "the_sweep_of_start_10_keeps_the_properties_off_with_off",
             ),
         ],
+    ),
+    (
+        Fault::StoredAnswersAny,
+        &[(
+            TABLE,
+            "a_msg1_from_the_address_of_a_sent_answer_is_read_unless_it_is_the_msg1_answered",
+        )],
     ),
     (Fault::YieldKept, &[SIM_REACHED, SIM_DATAGRAM]),
     (Fault::RekeyOutlivesPeer, &[SIM_REACHED, SIM_STREAM]),

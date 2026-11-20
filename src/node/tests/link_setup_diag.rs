@@ -142,8 +142,8 @@ pub(super) async fn established_from(age: u64, config: Config) -> Established {
 }
 
 /// Mark `e`'s peer heard now, as a frame from it would, and return it. The
-/// touch is past the frame path that tells the shadow core of a frame, so
-/// the peer is also marked for the shadow's resync to take its heard state:
+/// touch is past the frame path that tells the settlement core of a frame,
+/// so the peer is also marked for the resync to take its heard state:
 /// otherwise the core holds the peering unheard since its promotion, and
 /// refuses a msg1 by the unheard floor only while that is under a second
 /// old, which a loaded host's slow setup outlasts.

@@ -7,10 +7,13 @@ use crate::node::handlers::path_intake::Feed;
 use crate::node::session::SessionInstant;
 use crate::peer::machine::DialOrigin;
 use crate::proto::fmp::{ConnAction, ConnSnapshot, LifecycleView};
-use crate::proto::settle::legs::LegOut;
+use crate::proto::settle::input::Input as Settle;
+use crate::proto::settle::links::LinkNo;
+use crate::proto::settle::output::Output;
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use fips_core::proto::path::{Input, Source};
 use fips_core::time::Instant;
+use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -25,12 +28,6 @@ impl LifecycleView for Node {
         self.peer_machines
             .iter()
             .filter(|(_, machine)| machine.leg().is_some())
-            // The mutation lane's break: a pending redial's leg is never
-            // reaped.
-            .filter(|(link_id, _)| {
-                !(node_fault!(RedialNeverExpires)
-                    && self.redials.iter().any(|(_, r)| r.link == **link_id))
-            })
             .filter(|(link_id, machine)| {
                 machine.is_failed()
                     || (machine.conn_is_timed_out(interval_now, timeout_ms)
@@ -127,18 +124,9 @@ impl Node {
                             "Pending redial expired with no frame"
                         );
                     }
-                    // The shadow core polls its legs once, where the node
-                    // resends and reaps its dials (`drive_peer_timers`). A
-                    // failed leg, which the core has no timer for, it is
-                    // told of as the node gives it up; an idle one with no
-                    // machine timer it reaps here by its own deadline, or
-                    // the comparison finds it still held.
-                    #[cfg(test)]
-                    if is_failed {
-                        self.shadow_abandon(link);
-                    } else {
-                        self.shadow_reap(link);
-                    }
+                    // A failed leg, or one past its timeout with no leg in
+                    // the core's legs, is given up for the core too, by the
+                    // cleanup.
                     self.cleanup_stale_connection(link, now_ms).await;
                 }
                 #[allow(unreachable_patterns)]
@@ -181,15 +169,17 @@ impl Node {
 
     /// Remove a handshake connection and all associated state.
     ///
-    /// Frees the session index, the dial's leg's or else the machine's,
-    /// closes the underlying transport connection, and cleans up the link and
-    /// address mapping. Does not log — callers provide context-appropriate log
-    /// messages.
+    /// Gives the leg up for the settlement core first, then frees the
+    /// session index, the dial's leg's or else the machine's, closes the
+    /// underlying transport connections the core's close rule closed as it
+    /// gave the leg up, and cleans up the link and address mapping. Does not
+    /// log — callers provide context-appropriate log messages.
     pub(in crate::node) async fn cleanup_stale_connection(
         &mut self,
         link_id: LinkId,
         _now_ms: u64,
     ) {
+        let closes = self.give_up(link_id);
         // Take the connection off its machine BEFORE disposing the machine
         // (the machine owns it), keeping it readable for the index/link
         // cleanup below. The machine shares the connection's `link_id` and
@@ -208,7 +198,7 @@ impl Node {
         // Read the transport ID off the surviving carrier, and the session
         // index from the dial's leg or else the carrier, before disposing the
         // machine (the leg no longer projects them).
-        let leased = self.take_leg(link_id).map(|leg| leg.lease());
+        let leased = self.take_leg(link_id);
         let (transport_id, our_index) = match self.peer_machines.get_mut(&link_id) {
             Some(machine) => (
                 machine.conn_transport_id(),
@@ -236,7 +226,13 @@ impl Node {
         // then drop a link cannot be disturbed by this. A connection an active
         // peer also runs on (both legs of a BLE handshake share one) is left
         // open: it is that peer's, not the stale handshake's.
-        self.close_unused(link_id).await;
+        if closes.is_empty() {
+            debug!(
+                link_id = %link_id,
+                "Handshake link shares its connection with another live link; leaving it open"
+            );
+        }
+        self.close_each(closes).await;
 
         // Remove the link and its index entries
         self.remove_link(&link_id);
@@ -259,14 +255,8 @@ impl Node {
     /// (`Node::interval_ms`), which the timers' deadlines and the legs'
     /// activity stamps are kept on.
     pub(in crate::node) async fn drive_peer_timers(&mut self, interval_now: u64) {
-        // The shadow core decides, and is compared, at the instant the
-        // timers run at, which a test may give.
-        #[cfg(test)]
-        self.shadow_clock(Some(interval_now));
         self.timers_body(interval_now).await;
         self.audit_live("drive_peer_timers");
-        #[cfg(test)]
-        self.shadow_clock(None);
     }
 
     /// The work of [`Self::drive_peer_timers`], which audits the per-peer maps
@@ -280,11 +270,6 @@ impl Node {
     /// tick. A reaped dial takes the outbound retry reflex, and its link's
     /// retirement closes the connections no other live link uses.
     async fn timers_body(&mut self, interval_now: u64) {
-        // The shadow core runs its legs' timers where the node resends and
-        // reaps its dials; what `check_timeouts` reaps is handed to it
-        // there.
-        #[cfg(test)]
-        self.shadow_tick();
         self.run_legs(crate::time::mono_at(interval_now)).await;
     }
 
@@ -296,22 +281,72 @@ impl Node {
         // first, so the reap retires it.
         #[cfg(test)]
         self.resync();
-        #[cfg(test)]
-        self.redials_never_expire();
-        for out in self.links.poll(&mut self.legs, now) {
-            match out {
-                LegOut::Resend { link, bytes } => self.resend_msg1(link, &bytes, now).await,
-                LegOut::Reaped {
-                    link,
-                    peer,
-                    dialed,
-                    closes,
-                    lease,
-                } => {
-                    self.reap_leg(link, peer.filter(|_| dialed), closes, lease)
-                        .await
+        let dials = self.dials();
+        let redials = self.redialing();
+        let out = self.core_tick(now);
+        self.run_legs_out(out, &dials, &redials, now).await;
+    }
+
+    /// The identity each of this node's own dials in the core's legs dialed,
+    /// by the dial's link, read before a poll that may reap one: the reap's
+    /// outputs name only the link.
+    fn dials(&self) -> HashMap<LinkNo, NodeAddr> {
+        self.legs()
+            .iter()
+            .filter(|leg| *leg.kind() == crate::proto::settle::legs::Kind::Dial)
+            .filter_map(|leg| Some((leg.link(), leg.peer()?)))
+            .collect()
+    }
+
+    /// The identity of each pending redial, by its leg's link, read before
+    /// a poll or reap that may reap one: the core forgets the redial with
+    /// its leg.
+    fn redialing(&self) -> HashMap<LinkNo, NodeAddr> {
+        self.core.redials().map(|(peer, no)| (no, *peer)).collect()
+    }
+
+    /// Carry out what a poll or reap of the core's legs at `now` asked,
+    /// `out`: each resend sent, and each leg reaped, its lease (the `Free`
+    /// before its link's `Retire`) back to the allocator, for a dial of
+    /// `dials` with the outbound retry reflex, and for a redial of
+    /// `redials` with its expiry logged.
+    async fn run_legs_out(
+        &mut self,
+        out: Vec<Output>,
+        dials: &HashMap<LinkNo, NodeAddr>,
+        redials: &HashMap<LinkNo, NodeAddr>,
+        now: crate::peer::PeerInstant,
+    ) {
+        let mut freed = None;
+        for o in out {
+            match o {
+                Output::Resend { link, bytes } => self.resend_msg1(link, &bytes, now).await,
+                Output::Free { lease } => {
+                    if let Some(old) = freed.replace(lease) {
+                        self.free_lease(old);
+                    }
                 }
+                Output::Retire { link, closes } => match freed.take() {
+                    Some(lease) => {
+                        if let (Some(peer), Some(link_id)) =
+                            (redials.get(&link), self.links.id(link))
+                        {
+                            debug!(
+                                peer = %self.peer_display_name(peer),
+                                link_id = %link_id,
+                                "Pending redial expired with no frame"
+                            );
+                        }
+                        self.reap_leg(link, dials.get(&link).copied(), closes, lease)
+                            .await
+                    }
+                    None => debug_assert!(false, "a reaped leg's link retired with no lease"),
+                },
+                other => debug_assert!(false, "a poll of the legs gave {other:?}"),
             }
+        }
+        if let Some(lease) = freed {
+            self.free_lease(lease);
         }
     }
 
@@ -325,7 +360,6 @@ impl Node {
         bytes: &[u8],
         now: crate::peer::PeerInstant,
     ) {
-        let params = crate::node::settle::leg_params(&self.config().node);
         let Some(link) = self.links.id(no) else {
             return;
         };
@@ -353,17 +387,22 @@ impl Node {
             },
             None => false,
         };
-        #[cfg(test)]
-        self.shadow_sent(link, sent);
+        let told = if sent {
+            Settle::Sent { link: no }
+        } else {
+            Settle::SendFailed { link: no }
+        };
+        let out = self.decide_at(told, now);
+        debug_assert!(
+            out.is_empty(),
+            "a dial's resend sent or failed gave {out:?}"
+        );
         if sent {
-            self.legs.resent(no, now, &params);
             debug!(
                 link_id = %link,
-                resend = self.legs.get(no).map_or(0, |leg| leg.sent()),
+                resend = self.legs().get(no).map_or(0, |leg| leg.sent()),
                 "Resent handshake msg1"
             );
-        } else {
-            self.legs.unsent(no, now, &params);
         }
     }
 
@@ -375,52 +414,16 @@ impl Node {
         // first, so the reap retires it.
         #[cfg(test)]
         self.resync();
-        #[cfg(test)]
-        self.redials_never_expire();
-        let answers: Vec<crate::proto::settle::links::LinkNo> = self
-            .legs
+        let redials = self.redialing();
+        let answers: Vec<LinkNo> = self
+            .legs()
             .iter()
             .filter(|leg| matches!(leg.kind(), crate::proto::settle::legs::Kind::Answer { .. }))
             .map(|leg| leg.link())
             .collect();
         for no in answers {
-            for out in self.links.reap(&mut self.legs, no, now) {
-                if let LegOut::Reaped {
-                    link,
-                    peer,
-                    dialed,
-                    closes,
-                    lease,
-                } = out
-                {
-                    self.reap_leg(link, peer.filter(|_| dialed), closes, lease)
-                        .await;
-                }
-            }
-        }
-    }
-
-    /// The mutation lane's break: a pending redial's leg is never reaped.
-    /// Under it, each pending redial's answer leg has its deadline put a day
-    /// out before the legs are polled or reaped; otherwise nothing. Test
-    /// builds only, as the legs are replanted only there.
-    #[cfg(test)]
-    fn redials_never_expire(&mut self) {
-        if !node_fault!(RedialNeverExpires) {
-            return;
-        }
-        let never = crate::peer::peer_now()
-            .checked_add(Duration::from_secs(86_400))
-            .unwrap_or_else(crate::peer::peer_now);
-        let nos: Vec<_> = self
-            .redials
-            .iter()
-            .filter_map(|(_, r)| self.links.no(&r.link))
-            .collect();
-        for no in nos {
-            if let Some(next) = self.legs.get(no).map(|leg| leg.next_resend()) {
-                self.legs.replant(no, never, next);
-            }
+            let out = self.reap(no, now);
+            self.run_legs_out(out, &HashMap::new(), &redials, now).await;
         }
     }
 
@@ -458,17 +461,6 @@ impl Node {
             ),
             _ => debug!(link_id = %link, "Handshake connection timed out"),
         }
-        if let Some((peer, _)) = self.redials.iter().find(|(_, r)| r.link == link) {
-            debug!(
-                peer = %self.peer_display_name(peer),
-                link_id = %link,
-                "Pending redial expired with no frame"
-            );
-        }
-        // The shadow core reaps the dial by its own deadline, or the
-        // comparison finds it still held.
-        #[cfg(test)]
-        self.shadow_reap(link);
         let transport_id = self
             .peer_machines
             .get_mut(&link)
@@ -479,8 +471,6 @@ impl Node {
             .unwrap_or(None);
         self.remove_peer_machine(link);
         for pair in closes {
-            #[cfg(test)]
-            self.closed(pair.transport, &pair.addr);
             if let Some(transport) = self.transports.get(&pair.transport) {
                 transport.close_connection(&pair.addr).await;
             }

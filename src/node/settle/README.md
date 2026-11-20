@@ -19,15 +19,24 @@ field, at once.
 
 - `mod.rs`: the module doc, the `reads!` macro that gives each wrapper its
   `Deref`, its `&wrapper` iteration and, under `cfg(test)`, its `raw` and
-  `planted`, the re-exports `Node` uses, `Legs`, the settlement core's
-  handshake legs as the node holds them, and the three `Node` methods of
-  this level: `audit_live`, which each node entry that can change a map
-  calls on its way out (the audit in a debug build, nothing in a release
-  one), and, for tests, `plant` and `planted`.
+  `planted`, the re-exports `Node` uses, `Core`, `Legs` and `Gates`, the
+  settlement core's table, handshake legs and restart gates as the node
+  holds them (`Node.core` is its one copy of the table, in any build, and
+  decides through `Table::step`), and the `Node` methods of this level:
+  `gates` and `legs`, which read those parts of `Node.core`, and under
+  `cfg(test)` `gates_mut`, for a test that plants a memory; `audit_live`, which each node entry that can
+  change a map calls on its way out (the audit in a debug build, nothing
+  in a release one); and, for tests, `plant` and `planted`.
 - `links.rs`: `LinkTable`, the node's links and the reverse lookup from a
-  `(transport, address)` pair to the link at it (`open`, `close`, `forget`;
-  the path driver's `follow`, `claim` and `unclaim`; `get_mut`; `index` for
-  reads of the lookup, and under `cfg(test)` `raw_index`). Its doc carries
+  `(transport, address)` pair to the link at it, each writer taking the
+  core (`Node.core`), whose records it reads and never writes outside a
+  test: `bind` and `open` add a link the core numbered or opened, `close`
+  and `forget` drop one the core retired, `held`, the path driver's
+  `follow`, `claimed` and `unclaimed`, and `stepped` rebuild the lookup
+  after a step of the core; `get_mut`; `index` for reads of the lookup, and
+  under `cfg(test)` `raw_index`, and `hold`, `claim`, `unclaim` and
+  `mirror` for a test that drives the table alone, writing the records as
+  the core would. Its doc carries
   the warning about the lookup's key form. `used` is the node's close rule,
   asked of the core's records (`Links::in_use`): whether a live link other
   than the one closing uses a pair, a held link by the Live or acknowledged
@@ -45,7 +54,7 @@ field, at once.
   under the core's number for it (`no`): opened and retired with the link,
   held for a promoted peer (`hold`), and fed what the link's bundle reports
   (`mirror`) from `exec/links.rs`. `poll` runs the node's handshake legs
-  (`Node.legs`, the core's `Legs`, keyed by the same numbers) at the
+  (the core's `Legs` in `Node.core`, keyed by the same numbers) at the
   peers' timers (`drive_peer_timers`): the resends due, and each leg past
   its deadline reaped, its record retired by the close rule, which names
   the connections to close, and the index rebuilt after. `reap` is the
@@ -86,87 +95,44 @@ field, at once.
   the authenticated peers (`install`, `take`, and `get_mut`, `values_mut`
   and `iter_mut` for a change to a peer that leaves the map as it is); and
   `BindMap`, our session indices and the peer each names (`bind`, `unbind`).
-- `RedialMap`, in `maps.rs`: the pending redials, one per held identity at
-  most, each naming the inbound link its leg runs on, the index its msg2
-  named and when it was armed, beside the memory of the msg1 ephemerals that
-  armed one in the last 15 s. An entry is written when a redial is armed
-  (`handlers/redial.rs`) and forgotten when its machine is removed or its
-  link promoted. The `redial-leg` clause holds each entry to a leg still at
-  `Handshaking{ReceivedMsg1}` for that identity and index, an index no peer
-  is bound to, on an open link.
+- `RedialMap`, in `maps.rs`: a cache of the settlement core's pending
+  redials, one per held identity at most, each naming the inbound link its
+  leg runs on and the index its msg2 named, for the dataplane's lookup by
+  index and the tests. `Node::stepped` rebuilds it from the core after
+  every step; nothing else writes it. The memory of the msg1 ephemerals
+  that armed a redial is the core's restart gates'. The `redial-leg` clause
+  holds each entry to a leg still at `Handshaking{ReceivedMsg1}` for that
+  identity and index, an index no peer is bound to, on an open link.
 - `params.rs`: `settle_params`, the settlement core's parameters for a
   node's configuration: the core's defaults with the handshake timeout,
   the msg1 resend interval, multiplier and count, the cap on answers in
   flight and the max-peers cap taken from the configuration, and nothing
   else, so the gate constants stay the core's; and `leg_params`, the same
-  for the node's own handshake legs (`Node.legs`), with the deadline one
+  for the node's own handshake legs (the core's, in `Node.core`), with the deadline one
   millisecond later, since the node reaps a leg once it has been idle
   longer than the timeout in whole milliseconds and the core reaps at its
-  deadline. The node's restart gates (`Node.gates`, the core's `Gates`)
-  read `settle_params`. The shadow below, the only reader that steps a
-  whole table yet, reads `leg_params`, so its legs, opened at the instant
-  the node stamped its own, are reaped at the node's tick.
-- `decide.rs`: test builds only. `Shadow`, the settlement core beside the
-  node (`Node.shadow`): a copy of the core's `Table` that each decision site
-  feeds the input it would build, after its own decision, through
-  `Node::decide` (or `decide_at`, for an input that opens a link, whose
-  number then names the node's link) and `Node::shadow_tick`, the one callers of
-  the shadow's `Table::step` and `Table::poll` (`shadow_tick` runs where the node
-  resends and reaps its dials, in `drive_peer_timers`; a leg the node
-  reaps at its deadline, at its dial timer or in the stale sweep, the core
-  reaps by its own poll's reap of that leg at the node's instant plus the
-  legs' skew, `shadow_reap`, and a leg it still holds then is the
-  comparison's to find; a leg the node gives up for a cause the core has
-  no timer for, a failed connect, a traversal's adoption or a test, is
-  fed as given up, through `shadow_abandon`, and an answer whose msg2
-  could not be sent at all through `shadow_unsendable`), and the site
-  helpers built
-  on them: `shadow_abandon`, `shadow_unsendable`, `shadow_reap`,
-  `shadow_unasked`, `shadow_hello`,
-  `shadow_sent`, `shadow_remove` and, from the feed of the node's own link
-  records, `shadow_feed`. The shadow decides nothing: of its outputs it runs
-  only its own bookkeeping, its numbers for the node's links and its
-  leases, which are `IndexLease::for_test` of the index the node drew,
-  counted minted and released in `Leases`; a dropped node closes its
-  shadow and releases what its legs and installed peers hold. Feeding it
-  writes nothing of the node's. `Node::shadow_resync`, which `decide` and
-  `shadow_tick` call first, the live audit calls before it compares, and the
-  node's `resync` calls before it clears the test mutators' flags, writes into the shadow what a test wrote past the
-  writers on a planted node (its links and index entries); on any node, a
-  held peer by its facts, through the core's `Table::plant` (and, on a
-  planted node, a peer a test planted afresh on a link the shadow does not
-  number, over one the shadow holds, whose old record goes when the
-  node's map lacks that link), and a
-  handshake machine as a leg reaped and resent at the machine's own
-  instants (`audit::leg_times`), where a test built either past the decision
-  sites (a seeded machine, a peer installed directly); and the paths and
-  facts of each peer a test mutator or setter flagged, a peer taken by its
-  facts bringing its bundle's paths to its link's record (an unheard peer
-  holds no last frame, whatever a backdate did to its instants, so its end
-  counts as silent in the core as in the node); and, on any node, a
-  link a test opened through the table's writer but past the sites (a dial
-  noted with no handshake), as a record held as a leg. A link a decision
-  site named as the one its input opens is never taken for a plant, nor a
-  link whose record the shadow retired, by its own timers or at an input,
-  while the node still holds it, nor a peer on such a link. `shadow_gates`
-  gives the shadow's restart gates, through their writers, what a test
-  wrote into the node's own restart gates past its decisions. `shadow_link`, the
-  site helpers' lookup of the shadow's number for a link, resyncs first.
-  `Node::did` records what the node did in the words it shares with the
-  core (`exec::Did`), at each transition `Node::run` or `run_promotion`
-  runs, each reconnect noted, each refusal, ask and answer of a msg1 (a
-  stored answer resent for a duplicate msg1 is recorded when the node
-  decides it, and its send is then told to the shadow as sent or failed;
-  a msg1 the rate limiter refuses, the node's resource admission, is neither
-  fed to the shadow nor recorded), the
-  refusal of a promotion at the max-peers cap, and a crossing's swap; the
-  shadow records what it decided beside it, and the live audit compares
-  the two. `Node::closed` records likewise each connection the node closes
-  where a decision closes one (`close_pair`, a removal's close, a queued
-  release, a refused own dial), and the shadow each pair its outputs close
-  (`Shadow::closes`). `line` appends to the file `FIPS_CORE_SHADOW`
-  names, if any: a test's first difference, and at each node's drop a
-  `seen` row counting the inputs of each kind its shadow took.
+  deadline. The node's restart gates (the core's `Gates`, in `Node.core`)
+  read `settle_params`, and `Node.core`, the node's one copy of the core's
+  table, is built with them. The handshake legs in that table are counted
+  from `leg_params`' deadline, so a leg opened at the instant the node
+  stamped it is reaped at the node's tick.
+- `decide.rs`: the settlement core's decisions, taken by the node. Each
+  decision site builds the core's `Input` after any Noise read and hands
+  it to `Node::decide` (or `decide_at`, for an input that opens a leg the
+  node stamped earlier), which steps `Node.core` at `Node::settle_now` and
+  returns the outputs for the site to run in order; `Node::core_tick` runs
+  the legs' timers and `Node::reap` one leg's reap. `Node::stepped`, after
+  every step, rebuilds the caches of the core's state the node reads on
+  its hot paths: the link table's index and the pending redials by their
+  legs' indices (`RedialMap`). `decide_removal` runs a removal the core
+  decides (a dead link, an orphaned bundle, a `Disconnect`, an operator
+  disconnect or a rekey teardown), `give_up` tells the core of a dial the
+  node gave up for a cause the core has no timer for, and `close_each`
+  closes the connections a close rule named. `adopt` and `unadopt` still
+  write the core's record of a peer from the node's after an install or a
+  move the node carries out. In a test build `decide` first runs the
+  node's `resync`, which writes into `Node.core` what a test wrote past
+  the writers, and counts the inputs by kind (`Node::seen`).
 - `audit.rs`: the coherence of the maps, one function per clause, each
   naming what breaks it, and `live`, which runs every clause and panics on
   the first that fails, naming the node entry and the clause. Compiled in
@@ -177,56 +143,15 @@ field, at once.
   audit's reach when `FIPS_AUDIT_REACH` names a file
   (`testing/check-audit-reach.py`). The `index-cache` clause, after the
   other index clauses, holds the link table's cached lookup to the one its
-  records give now. The last clause, `links-mirror`, holds
+  records give now, and `link-cache` holds each held peer's link, which
+  the send path reads per frame, to the link the core holds it on. The
+  last clause, `links-mirror`, holds
   each held peer's core link record to its bundle, capable when the bundle
   is and holding its paths, each in the state the bundle holds it, a
   switched-to path too; it skips a peer a test mutator of the peer's paths
   changed past the feed (`ActivePeer::past_feed`, test builds only), and
   records each skip in the reach file, where the check holds them to a
-  ceiling. In a test, after `index-cache`, five clauses compare the shadow
-  settlement core with the node, on every node, a planted one included,
-  which the node's own clauses skip: `core-agrees`, what the node did
-  since the last audit against what the shadow decided, order aside;
-  `closes-agree`, the connections the node closed since the last audit at
-  the close sites its decisions reach (each calls `Node::closed`) against
-  the pairs of the shadow's `Retire`, `Release` and `Close` outputs, each
-  pair once, order aside, the connect's and the BLE sweep's closes and the
-  drain's second look at a queued close being the shell's and not
-  compared; `links-agree`, each link's record, by setup pair, direction, holder,
-  paths and capability, passing over a link the node's table has not
-  recorded, a planted peer's link the link map lacks, a link the node
-  records from a planted index entry with no link in its map, and the link of a
-  peer a test changed past the feed until the node's resync takes the
-  change; `gates-agree`, each identity's dampener stamp,
-  aged on the peer clock, replay memory and silent sessions, between the
-  node's restart gates (`Node.gates`) and the shadow's; and `legs-agree`, each handshake's
-  end, identity, resends sent, whether more may follow, deadline, whether
-  a resend is due at the next tick, and when the next is, its instants
-  on the interval clock within a quarter second (a resend due on one side
-  only agrees while its two times are within that skew). While the node's timers
-  run (`drive_peer_timers`) the shadow decides, and `legs-agree` compares,
-  at the instant they run at, which a test may give in place of the
-  clock's (`Node::shadow_clock`). The shadow decides a dial and an answer
-  at the instant the node stamped the leg (`Node::decide_stamped`), so
-  the work between, a Noise step among it, never shows as a difference
-  however long it takes. A fifth clause, `placement-agrees`, runs
-  at the one question the node still asks of a msg1's source before any
-  Diffie-Hellman by its own reading, the duplicate msg1 check's read of the
-  index, rather than at the audit, since what it reads moves before the
-  next one (`audit::placed`): the node's answer against the one
-  `Links::placement` gives over the node's own link records
-  (`Node::placement`), which already answer the node's other attribution
-  questions. A test's first difference is one line
-  to `FIPS_CORE_SHADOW`, with a reach row `diverged`, and the node is
-  compared no further; and unless `tests/shadow.txt` lists it by test,
-  site and clause (`SHADOW_KNOWN`, read by `known`), it fails the test
-  when the node is dropped (`Shadow::fail`), and not before, so a test
-  that breaks the node fails at its own assertion first; and not at all
-  while a switch of the mutation lane is on that the settlement core does
-  not read (`node_broken`, against `CORE_READS`, which a scan of the
-  core's settlement sources holds to them), since the node it breaks is
-  then not the spec. The exception is a node-side site switch whose break
-  the comparison is to fail a test on (`SHADOW_REDS`: `CrossedRunsKeep`).
+  ceiling.
 - `table.rs`: `Transition`, each thing the code does to a held peer; `Row`,
   each piece of what the node holds per peer, with `DataRow` for the peer's
   record; `Cell` and `DataCell`, what a transition does to a row; `Owner` and

@@ -108,17 +108,6 @@ faults! {
     /// A rekey machine that yields to a peer's completed attempt keeps its
     /// own attempt instead of abandoning it.
     YieldKeepsOwnAttempt,
-    /// The restart gate measures a heard peering's idle time on the wall
-    /// clock instead of the peer clock.
-    GateOnWall,
-    /// The restart gate measures an unheard peering's age from the msg1's
-    /// wall-clock stamp instead of on the peer clock from its promotion.
-    UnheardAgeOnWall,
-    /// The replay memory of msg1s that promoted an unheard peering is kept
-    /// and read on the wall clock.
-    MemoryOnWall,
-    /// The replay memory is read at the packet's wall-clock stamp.
-    MemoryVerdictOnPacketStamp,
     /// The replay memory never ages an entry out.
     MemoryNeverExpires,
     /// A move that makes a peering heard keeps the replay memory of the
@@ -129,6 +118,9 @@ faults! {
     /// An authenticated frame marks the peer heard without moving the
     /// instant it was last heard.
     TouchKeepsHeardInstant,
+    /// The node's copy of the instant of a held peer's last frame is not
+    /// written from the settlement core's record when a frame is heard.
+    HeldCacheStale,
     /// A move onto this node's own dial leaves the peering unheard until
     /// the peer's first frame.
     MoveLeavesUnheard,
@@ -241,6 +233,11 @@ faults! {
     /// queue, behind the data and refused when it is full, instead of in
     /// their own queue, which its writer drains first.
     PathLaneShared,
+    /// The settlement core takes a restarted peer's epoch only at the
+    /// cutover that reports the restart, not at the rekey msg2 that revealed
+    /// it, where the peer's rekey takes it: a msg1 at the new epoch in
+    /// between is a restart to the core and a rekey to the peer's machine.
+    EpochAtCutover,
     /// A moved path's old pair stays in the link's record, so the index
     /// derived from it keeps an entry there, beside the one at the pair it
     /// moved to.
@@ -365,8 +362,10 @@ faults! {
     /// A pair several links use names the link opened first, not the one
     /// opened last.
     IndexOldestWins,
-    /// Applying a bundle's report to a link's record leaves the index as it
-    /// was, so a path the record gains or loses is not reflected in it.
+    /// A step of the settlement core over its link records, a bundle's
+    /// report applied to them or a leg's reap, leaves the link index, a
+    /// cache of the records, as it was, so a path or link a record gains or
+    /// loses is not reflected in it.
     IndexNotRebuilt,
     /// A one-path roam or a bind, which the bundle reports in no output, is
     /// not told to the core, so the link's record keeps the old pair.
@@ -518,6 +517,11 @@ faults! {
     /// and by the settlement core, whose disconnect abandons the pending
     /// redial as the node drops it.
     RedialKeptAtDisconnect,
+    /// A redial the ACL passed and no session index could be drawn for
+    /// leaves no mark in the redial memory, so its resends and the
+    /// ephemerals after it are judged as if it never arrived. Read by the
+    /// settlement core at the shell's abandon of the redial's ask.
+    AuthorizedRedialUnnoted,
     /// A link rekey reads every msg2 under its attempt's index, however
     /// many it has refused, as before the cap: a party that saw the rekey's
     /// msg1 makes it read as many forged msg2s as it sends. The node half
@@ -617,13 +621,6 @@ faults! {
     /// refuses. The node half of the core parameters' switch of the same
     /// name.
     IntervalTen,
-    /// The node's test-only shadow of the settlement core is dropped with
-    /// its node still holding the leases of its legs and installed peers.
-    ShadowKeepsLeases,
-    /// The node's test-only resync writes nothing into its shadow of the
-    /// settlement core, so a peer, link, index entry or handshake a test
-    /// planted, or a fact a test setter changed, is missing from it.
-    PlantSkipped,
     /// A frame that roams a link's one path while it is not the active
     /// path tells the settlement core's record nothing of the pair it left,
     /// so the record gains the new pair and keeps the old.

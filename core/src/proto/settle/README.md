@@ -41,7 +41,7 @@ release build.
   own msg2 or a rekey msg2. It holds the memory per identity the gates
   read (the dampener's stamp, the replay memory, the ephemerals that armed
   a redial and the silent-session record), and judges as the current node
-  does. The node holds one (`Node.gates`) as its own restart gates. The
+  does. The node holds one, in its `Table`, as its own restart gates. The
   memory holds only identities with something live: a question about an
   identity with no memory inserts none, and an identity whose stamp,
   replays, silence and redial memory have all lapsed is dropped; a frame
@@ -85,13 +85,17 @@ release build.
 - `table.rs`: the judgements. `Table` holds the links, the legs, the peer
   held for each identity and the gates; `step` takes one input and
   returns the outputs, `poll` runs the legs' timers and `close` gives
-  everything back. Under the test hooks `plant`, `plant_leg` and
+  everything back. `gates` lends the gates' memory for a shell's reads;
+  hidden from the docs, `count_refused` and `take_refused` keep a shell's
+  count of the msg1s a silent-session back-off refused, for its log,
+  `drop_leg` ends a leg for a cause the table has no input for, with the
+  answer and the redial it carried, and `open_link` opens a record for a
+  link a shell adds outside any handshake. Under the test hooks `plant`, `plant_leg` and
   `records` write a held peer, a leg and the link records outright, for a
   shell that resyncs into its copy of the table what a test planted past
   its writers (a responder's leg planted as an answer whose send failed,
   the one state in which a node keeps a responder's handshake with no
-  peer), `gates` lends the gates' memory for a shell's comparison,
-  and `gates_mut` lends it, with the table's parameters, for a shell's
+  peer), and `gates_mut` lends the gates' memory, with the table's parameters, for a shell's
   test that writes its own memory past its decisions and gives the gates
   the same through their writers. It judges a msg1 from an identity not held or at a new
   epoch through the gate, refuses an identity not held at the max-peers

@@ -33,12 +33,14 @@
 
 use crate::PeerIdentity;
 use crate::identity::NodeAddr;
+use crate::node::handlers::handshake::Installed;
 use crate::node::reject::{HandshakeReject, RejectReason};
-use crate::node::settle::exec::Removed;
 use crate::node::settle::exec::Run;
 use crate::node::{Node, NodeError};
 use crate::peer::machine::{LostKind, PeerAction, PeerEvent};
 use crate::proto::fmp::wire::build_msg2;
+use crate::proto::settle::input::Input;
+use crate::proto::settle::output::Output;
 use crate::proto::settle::output::Why;
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
@@ -173,9 +175,13 @@ impl Node {
                                     });
                             }
                             Err(_e) => {
-                                #[cfg(test)]
-                                self.shadow_abandon(link);
-                                self.links.forget(&link, &(transport_id, remote_addr));
+                                let closes = self.give_up(link);
+                                self.close_each(closes).await;
+                                self.links.forget(
+                                    &mut self.core,
+                                    &link,
+                                    &(transport_id, remote_addr),
+                                );
                                 self.remove_peer_machine(link);
                                 return;
                             }
@@ -248,34 +254,58 @@ impl Node {
                                     error = %e,
                                     "Deferred msg2: the transport is between interfaces"
                                 );
-                                #[cfg(test)]
-                                self.shadow_sent(link, false);
+                                if let Some(no) = self.links.no(&link) {
+                                    let _ = self.decide(Input::SendFailed { link: no });
+                                }
                                 return;
                             }
                             // Restored pre-refactor msg2-send-failure warn!
                             // (`handle_msg1` L665): the send error text is surfaced
                             // at the executor point where the failure is now handled.
                             warn!(link_id = %link, error = %e, "Failed to send msg2");
-                            #[cfg(test)]
-                            self.shadow_unsendable(link);
-                            // The answer's leg goes; its index is freed below.
-                            if let Some(leg) = self.take_leg(link) {
-                                let _ = leg.lease().release();
+                            // The core gives the answer up: its leg goes and
+                            // its lease comes back, and its close rule closes
+                            // nothing for it.
+                            if let Some(no) = self.links.no(&link) {
+                                for o in self.decide(Input::Unsendable { link: no }) {
+                                    match o {
+                                        Output::Free { lease } => self.free_lease(lease),
+                                        Output::Retire { closes, .. } => {
+                                            self.close_each(closes).await;
+                                        }
+                                        other => {
+                                            debug_assert!(
+                                                false,
+                                                "an unsendable answer gave {other:?}"
+                                            )
+                                        }
+                                    }
+                                }
                             }
                             self.links.forget(
+                                &mut self.core,
                                 &link,
                                 &(ambient.transport_id, ambient.remote_addr.clone()),
                             );
-                            if let Some(idx) = ambient.our_index {
-                                let _ = self.index_allocator.free(idx);
-                            }
                             self.remove_peer_machine(link);
                             self.stats_mut()
                                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                             return;
                         }
-                        #[cfg(test)]
-                        self.shadow_sent(link, true);
+                        // The msg2 went out, or there was no transport to
+                        // send it on: the core installs the leg, refuses it
+                        // at the max-peers cap, or leaves it for a peer held
+                        // through another link, and the promotion queued
+                        // after the send follows what it decided.
+                        if let Some(no) = self.links.no(&link) {
+                            let out = self.decide(Input::Sent { link: no });
+                            match self.installed(link, out, ambient) {
+                                Installed::Yes(_) => {}
+                                Installed::No => queue
+                                    .retain(|a| !matches!(a, PeerAction::PromoteToActive { .. })),
+                                Installed::Refused => return,
+                            }
+                        }
                     } else {
                         // msg1: the shell already allocated the index, ran the
                         // Noise leaf, and armed the wire on the connection at dial
@@ -304,13 +334,6 @@ impl Node {
                         ambient.now_ms,
                     ) {
                         Ok(result) => {
-                            // A promoted link is no longer a pending
-                            // redial's, however it was promoted: by the
-                            // redial's first frame, or by a msg2 resend once
-                            // the peering it would have replaced was gone.
-                            if !node_fault!(RedialEntryKeptAtPromote) {
-                                self.redials.forget(promote_link);
-                            }
                             // A promotion that created a peer has already
                             // offered its session to the decrypt workers: the
                             // link's rekey machine is built knowing whether a
@@ -404,41 +427,13 @@ impl Node {
                     );
                 }
                 PeerAction::InvalidateSendState => {
-                    // The FULL teardown. The removal closes the peer's link
-                    // rekey machine, whose outputs free every index its
-                    // sessions hold (current, pending, previous), drop their
-                    // `peers_by_index` entries and unregister their decrypt
-                    // workers, frees the rekey handshake's index, and removes
-                    // the FSP `sessions` entry; the packets held for the peer
-                    // stay for its next session. The machine emits NO
-                    // `FreeIndex` for those slots, so there is no double-free.
-                    //
-                    // Every step that emits this says why: a context that
-                    // does not is one the table does not know.
+                    // The settlement core decides every removal, and the
+                    // node steps the control machine with no event whose
+                    // step tears a peer down, so this is never reached.
                     debug_assert!(
-                        ambient.why.is_some(),
-                        "a peer was removed by its control machine with no cause"
+                        false,
+                        "a control machine asked for a removal the settlement core decides"
                     );
-                    let gone = *ambient.verified_identity.node_addr();
-                    let why = ambient.why.unwrap_or(Why::Replacement);
-                    // The machine notes the loss for a reconnect itself, as
-                    // its next action.
-                    let removed = self.remove(&gone, why).map(|removed| Removed {
-                        noted: true,
-                        ..removed
-                    });
-                    if let Some(removed) = removed {
-                        if matches!(why, Why::Dead | Why::Orphaned) {
-                            self.removed(&gone, removed).await;
-                        } else {
-                            // A replacement's first part. Its promotion runs
-                            // the rest once the ACL check and the index
-                            // allocation pass, either of which may stop it
-                            // here with the old peer gone.
-                            let mut run = Run::replacement(link, removed, ambient);
-                            self.run_removal(&mut run).await;
-                        }
-                    }
                 }
                 PeerAction::RegisterDecryptSession { index } => {
                     let _ = index;

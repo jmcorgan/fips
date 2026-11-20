@@ -123,6 +123,18 @@ pub(crate) enum Fault {
     /// An own dial completing on a held link this node dialed is judged by
     /// the tie-break alone.
     IgnoreOwnDial,
+    /// A crossing the tie-break alone decides keeps the peer on its inbound
+    /// session at the smaller node, as at the larger.
+    CrossedRunsKeep,
+    /// A frame marks the peering heard without moving the instant of its
+    /// last frame.
+    TouchKeepsHeardInstant,
+    /// A moved path's old pair stays in the link's record beside the pair
+    /// it moved to.
+    MovedLeavesEntry,
+    /// A restarted peer's epoch, which its rekey took at the msg2 that
+    /// revealed the restart, is taken only at the cutover that reports it.
+    EpochAtCutover,
     /// At a late second dial the core keeps the link moved off, as the
     /// model keeps its fallback.
     ModelFallbackInCore,
@@ -143,6 +155,22 @@ pub(crate) enum Fault {
     /// A redial's mark outlives its leg: reaped, or installed at its send
     /// once its peer is gone.
     RedialLegKept,
+    /// A redial's mark outlives its leg's install at its send once its
+    /// peer is gone.
+    RedialEntryKeptAtPromote,
+    /// A redial's ephemeral is neither asked of the redial memory nor
+    /// noted in it.
+    RedialMemoryIgnored,
+    /// The restart dampener does not hold a redial back.
+    RedialSkipsDampener,
+    /// A redial passes no slot, memory or dampener, and its answer
+    /// replaces the held peer at once.
+    RedialTearsDownAtMsg1,
+    /// A redial's leg is never reaped.
+    RedialNeverExpires,
+    /// A redial the ACL passed and no session index could be drawn for
+    /// leaves no mark in the redial memory.
+    AuthorizedRedialUnnoted,
     /// The redial memory keeps no identity of its own: a frame of the held
     /// peering, or the lapse of the identity's other memory, drops the
     /// ephemerals that armed a redial of it.
@@ -263,6 +291,9 @@ pub(crate) enum Fault {
     PacketStamp,
     /// An answer not yet sent is drawn only by its own msg1, byte for byte.
     StoredByBytes,
+    /// An answer once sent is drawn by any msg1 from its address, not only
+    /// by the msg1 it was written for.
+    StoredAnswersAny,
     /// The comparison keeps the larger node's own rekey after it yielded
     /// it at a simultaneous rekey.
     YieldKept,
@@ -421,6 +452,10 @@ impl Fault {
         Self::MoveLeavesUnheard,
         Self::MoveKeepsReplayMemory,
         Self::IgnoreOwnDial,
+        Self::CrossedRunsKeep,
+        Self::TouchKeepsHeardInstant,
+        Self::MovedLeavesEntry,
+        Self::EpochAtCutover,
         Self::ModelFallbackInCore,
         Self::ReplacementUngated,
         Self::RedialInstallsAtSent,
@@ -429,6 +464,12 @@ impl Fault {
         Self::RedialHeardFloored,
         Self::RedialSlotIgnored,
         Self::RedialLegKept,
+        Self::RedialEntryKeptAtPromote,
+        Self::RedialMemoryIgnored,
+        Self::RedialSkipsDampener,
+        Self::RedialTearsDownAtMsg1,
+        Self::RedialNeverExpires,
+        Self::AuthorizedRedialUnnoted,
         Self::RedialMemoryLapses,
         Self::RedialSwapHeard,
         Self::RedialKeptAtDisconnect,
@@ -479,6 +520,7 @@ impl Fault {
         Self::ModelDropsFallback,
         Self::PacketStamp,
         Self::StoredByBytes,
+        Self::StoredAnswersAny,
         Self::YieldKept,
         Self::RekeyOutlivesPeer,
         Self::PreviousUnheard,

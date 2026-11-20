@@ -59,8 +59,6 @@ listed! {
         PromotedNote,
         /// Store the setup's msg2, msg1 and ephemeral on the peer.
         SetupNote,
-        /// Remember an unheard peering's setup ephemeral.
-        UnheardNote,
 
         /// Run the rekey machine's outputs from the move.
         RunLinkOutputs,
@@ -147,7 +145,6 @@ const PROMOTE_IN: &[Effect] = &[
     Effect::MachineResolved,
     Effect::PathsRenewed,
     Effect::SetupNote,
-    Effect::UnheardNote,
     Effect::TreeAnnounce,
     Effect::BloomMark,
     Effect::BackoffReset,
@@ -178,7 +175,6 @@ const REPLACE_IN: &[Effect] = &[
     Effect::MachineResolved,
     Effect::PathsRenewed,
     Effect::SetupNote,
-    Effect::UnheardNote,
     Effect::TreeAnnounce,
     Effect::BloomMark,
     Effect::BackoffReset,

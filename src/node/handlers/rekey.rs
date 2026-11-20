@@ -22,7 +22,7 @@ use crate::proto::fsp::{SessionAck, SessionMsg3, SessionSetup};
 use crate::proto::link::SessionDatagram;
 use crate::proto::settle::input::Input as In;
 use crate::proto::settle::join::{Event, Step, join};
-use crate::proto::settle::output::Why;
+use crate::proto::settle::output::{Denial, Output as Decided};
 use crate::proto::stp::{TreeCoordinate, coords_wire_size, encode_coords};
 use crate::utils::index::SessionIndex;
 use fips_core::proto::rekey::{
@@ -247,13 +247,26 @@ impl Node {
         let local = self.session_node_keys();
         let workers = self.link_workers();
         let peer = self.peers.get_mut(node_addr)?;
-        Some(peer.step_link(
+        let out = peer.step_link(
             peer_now(),
             input,
             &mut self.index_allocator,
             &local,
             workers,
-        ))
+        );
+        // A rekey that revealed the peer's restart takes its new epoch at
+        // the msg2, ahead of the cutover that reports the restart; the core
+        // holds the peer at the epoch its rekey judges it by.
+        let epoch = self.peers.get(node_addr).and_then(|p| p.remote_epoch());
+        if let Some(epoch) = epoch
+            && self.core.held(node_addr).is_some_and(|h| h.epoch != epoch)
+        {
+            let _ = self.decide(In::PeerEpoch {
+                peer: *node_addr,
+                epoch,
+            });
+        }
+        Some(out)
     }
 
     /// Whether a decrypt-worker pool exists now, to which a link's new
@@ -309,29 +322,27 @@ impl Node {
                 // announces the reset sends are sealed under the session
                 // the restarted peer holds.
                 Step::Core(In::Restarted { epoch, .. }) => {
-                    #[cfg(test)]
-                    self.decide(In::Restarted {
-                        peer: *node_addr,
-                        epoch,
-                    });
-                    // The restart gates pass a restart a rekey msg2 reveals,
-                    // as the reply to this node's own rekey.
-                    if let Some(refusal) =
-                        self.gate_msg2(*node_addr, true, Some(epoch), Self::now_ms())
-                    {
-                        debug!(
-                            peer = %self.peer_display_name(node_addr),
-                            reason = ?refusal,
-                            "Restart found during FMP rekey refused by the restart gates"
-                        );
-                        #[cfg(test)]
-                        self.did(crate::node::settle::exec::Did::Reject {
-                            peer: Some(*node_addr),
-                        });
-                        continue;
-                    }
-                    if !node_fault!(RestartNotRouted) {
-                        self.reset_restarted(node_addr, epoch).await;
+                    // The settlement core asks the restart gates of a
+                    // restart a rekey msg2 reveals, which they pass as the
+                    // reply to this node's own rekey, and takes the epoch.
+                    let peer = *node_addr;
+                    for o in self.decide(In::Restarted { peer, epoch }) {
+                        match o {
+                            Decided::Reject {
+                                why: Denial::Gate(refusal),
+                                ..
+                            } => {
+                                debug!(
+                                    peer = %self.peer_display_name(node_addr),
+                                    reason = ?refusal,
+                                    "Restart found during FMP rekey refused by the restart gates"
+                                );
+                            }
+                            Decided::Reset { .. } if !node_fault!(RestartNotRouted) => {
+                                self.reset_restarted(node_addr, epoch).await;
+                            }
+                            _ => {}
+                        }
                     }
                     continue;
                 }
@@ -347,7 +358,8 @@ impl Node {
                             "Link rekey machine ended the link"
                         );
                     }
-                    if let Some(removed) = self.remove(node_addr, Why::Ended) {
+                    let (removed, _, _) = self.decide_removal(In::Ended { peer: *node_addr });
+                    if let Some(removed) = removed {
                         self.removed(node_addr, removed).await;
                     }
                     report.removed = true;
