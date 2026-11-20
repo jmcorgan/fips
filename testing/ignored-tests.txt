@@ -22,7 +22,6 @@ benchmark     fips-core  proto::settle::tests::joint::explore::the_cold_start_is
 known-defect  fips-core  proto::settle::tests::regress::after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey  core/src/proto/settle/tests/regress.rs
 known-defect  fips-core  proto::settle::tests::regress::after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_larger_dialer  core/src/proto/settle/tests/regress.rs
 known-defect  fips-core  proto::settle::tests::regress::after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_smaller_dialer  core/src/proto/settle/tests/regress.rs
-known-defect  fips-core  proto::settle::tests::joint::pins::a_crossing_moved_onto_the_pair_of_the_peers_dial_keeps_that_connection_open  core/src/proto/settle/tests/joint/pins.rs
 known-defect  fips-core  proto::settle::tests::joint::pins::a_proven_path_whose_connection_failed_is_not_counted_in_use_without_a_connection  core/src/proto/settle/tests/joint/pins.rs
 
 # fips-mesh

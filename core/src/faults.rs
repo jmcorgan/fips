@@ -338,6 +338,14 @@ faults! {
     /// the settlement core's and the node's, whatever state the bundle holds
     /// it in.
     SwitchWritesLive,
+    /// The settlement core's move retires the link it leaves before the
+    /// moved-onto link's record holds the msg2's pair, so it closes the
+    /// connection the peering moved onto.
+    MoveClosesNewPair,
+    /// A move onto this node's dial at a pair other than the dial's own
+    /// leaves the connection the dial was set up at open, though no path and
+    /// no handshake uses it, in the settlement core and in the node.
+    MoveLeavesDialOpen,
     /// Closing a link takes the index's entry at each pair it was named at
     /// from any other link that uses the pair, as the written index did.
     ShadowLosesEntry,

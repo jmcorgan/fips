@@ -196,8 +196,10 @@ can rebuild any state by replaying the path that reached it.
   poll by one that polls between ticks, but never past the dial's last
   resend, the stored msg2
   drawn by any msg1 from its address, an orphaned bundle, the admission
-  cap, the links a crossing and a late second dial retire, the reset a
-  move hands the per-peer data, the table and a record of its own
+  cap, the links a crossing and a late second dial retire, the connection
+  a move keeps open when the dial was answered from the pair the peer
+  dialled from and the dial's own connection that move closes, the reset
+  a move hands the per-peer data, the table and a record of its own
   reading the bundle's reports the same way through `Links::mirror`, a
   dial on a connection still to be opened: its address in the index and
   in use before its msg1, its link retired with no lease when the

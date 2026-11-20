@@ -3233,6 +3233,15 @@ impl Node {
     /// separate sockets at different addresses, and a connectionless
     /// transport's close is a no-op, so both are unaffected.
     pub(in crate::node) async fn close_unused(&mut self, link_id: LinkId) {
+        self.close_setup(link_id, link_id).await;
+    }
+
+    /// Close the transport connection at the pair link `link_id` was set up
+    /// at, unless a live link other than `except` uses it: as
+    /// [`Self::close_unused`] when `except` is `link_id`, and with `link_id`'s
+    /// own paths counted when it is another link, such as the link a move
+    /// left, which goes next.
+    pub(in crate::node) async fn close_setup(&mut self, link_id: LinkId, except: LinkId) {
         #[cfg(test)]
         self.resync();
         let Some(link) = self.links.get(&link_id) else {
@@ -3240,12 +3249,16 @@ impl Node {
         };
         let transport_id = link.transport_id();
         let addr = link.remote_addr();
-        if self.in_use(transport_id, addr, link_id) {
-            tracing::debug!(
-                link_id = %link_id,
-                addr = %addr,
-                "Handshake link shares its connection with another live link; leaving it open"
-            );
+        if self.in_use(transport_id, addr, except) {
+            // A dial whose own paths keep its connection is the usual case
+            // after a move, and not worth a line.
+            if except == link_id {
+                tracing::debug!(
+                    link_id = %link_id,
+                    addr = %addr,
+                    "Handshake link shares its connection with another live link; leaving it open"
+                );
+            }
             return;
         }
         if let Some(transport) = self.transports.get(&transport_id) {

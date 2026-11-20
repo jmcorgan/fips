@@ -861,8 +861,14 @@ fn a_msg1_past_the_admission_cap_is_rejected_and_holds_no_leg() {
 }
 
 /// The smaller node's crossing: its dial to `at(2)`, the larger node's
-/// msg1 from `at(12)` answered and sent, then the dial's msg2.
+/// msg1 from `at(12)` answered and sent, then the dial's msg2 from `at(2)`.
 fn crossing() -> (Table<TestInstant>, LinkNo, LinkNo, Vec<Output>) {
+    crossed(2)
+}
+
+/// The smaller node's crossing as [`crossing`] makes it, with the dial's
+/// msg2 from `at(from)`.
+fn crossed(from: u16) -> (Table<TestInstant>, LinkNo, LinkNo, Vec<Output>) {
     let mut table = Table::new(small(), Params::default());
     let dialed = opened(&go(&mut table, Input::Dial(dial(large(), 1, 2)), 0));
     let inbound = answered(&hi(&mut table, large(), 2, 12, 0));
@@ -870,7 +876,7 @@ fn crossing() -> (Table<TestInstant>, LinkNo, LinkNo, Vec<Output>) {
     let msg2 = Input::Msg2 {
         link: dialed,
         epoch: E1,
-        from: pair(2),
+        from: pair(from),
     };
     let out = go(&mut table, msg2, 0);
     (table, dialed, inbound, out)
@@ -889,6 +895,51 @@ fn a_crossing_moves_the_smaller_node_and_retires_the_inbound_link() {
         "the inbound link is retired and its connection closed: {out:?}"
     );
     assert!(table.links().get(inbound).is_none());
+}
+
+/// The smaller node's dial to `at(2)` is answered over the larger node's
+/// dial connection, from `at(12)`, the pair its msg1 came from: the move
+/// lands the peering on that pair, so the inbound link it retires leaves
+/// that connection open, as the node keeps it by renewing the bundle there
+/// before it closes the link it leaves.
+#[test]
+fn a_move_onto_a_dial_answered_from_the_peers_other_pair_keeps_that_pair_open() {
+    let (table, dialed, inbound, out) = crossed(12);
+    assert_eq!(
+        table.held(&large()).map(|h| (h.link, h.current.clone())),
+        Some((dialed, pair(12))),
+        "precondition: the peering moved onto the dial, at the msg2's pair"
+    );
+    let closes = retired(&out);
+    assert!(
+        !closes.contains(&pair(12)),
+        "defect: the move closed the connection the peering moved onto: {out:?}"
+    );
+    assert!(
+        table.links().in_use(&pair(12), inbound),
+        "the moved-onto link uses the msg2's pair"
+    );
+}
+
+/// The same move leaves the dial's own connection, at `at(2)`, used by no
+/// path of the moved-onto link and by no handshake, so it closes with the
+/// link the move retires, as the node closes it once the move is done.
+#[test]
+fn a_move_onto_a_dial_answered_from_the_peers_other_pair_closes_the_dials_own_connection() {
+    let (table, dialed, inbound, out) = crossed(12);
+    assert_eq!(
+        table.held(&large()).map(|h| (h.link, h.current.clone())),
+        Some((dialed, pair(12))),
+        "precondition: the peering moved onto the dial, at the msg2's pair"
+    );
+    assert!(
+        !table.links().in_use(&pair(2), inbound),
+        "precondition: no link uses the dial's own connection after the move"
+    );
+    assert!(
+        retired(&out).contains(&pair(2)),
+        "defect: the move left the dial's own connection open with no link using it: {out:?}"
+    );
 }
 
 #[test]

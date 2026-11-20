@@ -17,14 +17,17 @@ use super::super::oracle::{Breach, Oracle, heal, healed};
 use super::super::starts::{BLE, TCP, second};
 use super::super::world::{Dir, State, World};
 
+/// A crossing whose own dial is answered over the peer's dial connection
+/// moves the peering onto that connection's pair and keeps the connection
+/// open, as the node does; `MoveClosesNewPair` puts back the close.
 #[test]
-#[ignore = "known defect: a crossing whose own dial is answered over the peer's dial connection moves the peering onto that connection's pair and closes the connection in the same step, so both ends then lose the link"]
 fn a_crossing_moved_onto_the_pair_of_the_peers_dial_keeps_that_connection_open() {
     // The named start with two paths as `../starts.rs` writes it, with no
     // paths, its nodes joint nodes at Off at both ends: node 0 dials node 1
-    // on BLE, and node 1 dials node 0 from its second BLE address. Its first three script steps: node 1 reads node 0's msg1
-    // and answers, node 0 reads node 1's msg1 and answers, and node 0 reads
-    // the answer to its own dial, which came over node 1's dial connection.
+    // on BLE, and node 1 dials node 0 from its second BLE address. Its
+    // first three script steps: node 1 reads node 0's msg1 and answers,
+    // node 0 reads node 1's msg1 and answers, and node 0 reads the answer
+    // to its own dial, which came over node 1's dial connection.
     let mut st = super::super::starts::starts()
         .into_iter()
         .find(|s| s.number == 12)

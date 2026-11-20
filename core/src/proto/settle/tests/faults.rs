@@ -523,6 +523,10 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::MoveKeepsOldPair,
+        // The seeded clean runs and the scripted run at Off with Off see this
+        // switch only because a move never closes the connection its msg2
+        // came over: closed, it takes the stale pair away and the redial
+        // heals the run with no oracle firing.
         &[
             AGREES,
             (
@@ -584,6 +588,30 @@ pub const ROWS: &[Row] = &[
                 LEGACY,
                 "a_model_of_the_node_on_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
             ),
+        ],
+    ),
+    (
+        Fault::MoveClosesNewPair,
+        &[
+            (
+                TABLE,
+                "a_move_onto_a_dial_answered_from_the_peers_other_pair_keeps_that_pair_open",
+            ),
+            (
+                JOINT_PINS,
+                "a_crossing_moved_onto_the_pair_of_the_peers_dial_keeps_that_connection_open",
+            ),
+        ],
+    ),
+    (
+        Fault::MoveLeavesDialOpen,
+        &[
+            (
+                TABLE,
+                "a_move_onto_a_dial_answered_from_the_peers_other_pair_closes_the_dials_own_connection",
+            ),
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
         ],
     ),
     (
@@ -1640,10 +1668,6 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     ),
     (
         "after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey",
-        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
-    ),
-    (
-        "a_crossing_moved_onto_the_pair_of_the_peers_dial_keeps_that_connection_open",
         "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
     ),
     (

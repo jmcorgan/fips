@@ -32,7 +32,9 @@ field, at once.
   than the one closing uses a pair, a held link by the Live or acknowledged
   paths of its record and a handshake leg by its setup pair. `Node::in_use`
   asks it for every close site, the connect's and the drain's, and
-  `Node::close_unused` closes a link's setup pair only when it answers no.
+  `Node::close_unused` closes a link's setup pair only when it answers no;
+  `Node::close_setup` asks the same with another link excepted, as a move
+  closes its dial's own connection with the link it left excepted.
   The lookup is
   derived from the settlement core's record of each link (`Links`), kept
   under the core's number for it (`no`): opened and retired with the link,

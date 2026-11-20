@@ -1019,9 +1019,10 @@ impl<I: Instant> Table<I> {
         out.push(Output::Reset { peer, transition });
     }
 
-    /// Move the held peer onto this node's completed dial on `link`, and
-    /// retire the link it leaves. `own` says the held link was one this
-    /// node dialed. The move ends an operator's pin of the peer's path when
+    /// Move the held peer onto this node's completed dial on `link`, at the
+    /// msg2's pair `from`, which `link`'s record takes as a path, and retire
+    /// the link it leaves. `own` says the held link was one this node
+    /// dialed. The move ends an operator's pin of the peer's path when
     /// `own`, or when the dial was made while the peer was held on the link
     /// it leaves, as the node's `own_dial || later_dial` reads it.
     fn moveto(
@@ -1041,6 +1042,9 @@ impl<I: Instant> Table<I> {
         let later = leg.held() == Some(old) && !fault!(UnpinOwnOnly) && !node_fault!(UnpinOwnOnly);
         let unpin = own || later;
         h.link = link;
+        // Read before `from` is taken: whether the msg2 came over the
+        // connection the dial was set up at.
+        let answered = self.links.get(link).is_some_and(|r| r.setup == from);
         if !fault!(MoveKeepsOldPair) {
             h.current = from;
         }
@@ -1052,6 +1056,13 @@ impl<I: Instant> Table<I> {
         }
         let pair = h.current.clone();
         self.links.hold(link, Holder::Peer(peer));
+        // The shell renews the bundle at the install's pair only after this
+        // step, so the record takes that path now, Live as the renewal makes
+        // it: the node renews before it closes the link it leaves, and the
+        // retire below must count the connection the peering moved onto.
+        if !(fault!(MoveClosesNewPair) || node_fault!(MoveClosesNewPair)) {
+            self.links.path(link, pair.clone(), Proven::Live);
+        }
         let retire = !kept(own);
         #[cfg(test)]
         let retire = retire && !self.hold_moved_off(peer, before, own, out);
@@ -1071,8 +1082,31 @@ impl<I: Instant> Table<I> {
         }
         out.push(Output::Swapped { peer, own, unpin });
         if retire {
-            let closes = self.links.retire(old);
+            let mut closes = self.links.retire(old);
+            if !answered {
+                self.unused(link, old, &mut closes);
+            }
             out.push(Output::Retire { link: old, closes });
+        }
+    }
+
+    /// Add to `closes` the pair `link` was set up at when no live link uses
+    /// it, `link` itself included, once `old` is retired: a move onto a dial
+    /// answered from another pair leaves the dial's own connection to no
+    /// path and no handshake, and the node closes it with the link the move
+    /// left. The move calls it only when the msg2 came from another pair:
+    /// the peer has just answered over the connection it came on, so a
+    /// record that does not name that pair in use is wrong, not the
+    /// connection unused.
+    fn unused(&self, link: LinkNo, old: LinkNo, closes: &mut Vec<Pair>) {
+        if fault!(MoveLeavesDialOpen) || node_fault!(MoveLeavesDialOpen) {
+            return;
+        }
+        let Some(setup) = self.links.get(link).map(|r| r.setup.clone()) else {
+            return;
+        };
+        if !closes.contains(&setup) && !self.links.in_use(&setup, old) {
+            closes.push(setup);
         }
     }
 

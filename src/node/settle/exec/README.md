@@ -48,7 +48,12 @@ statements at its site.
   `Facts.loser` names the link torn down, the one the move left or, at a
   refused move and a keep, the dial's, which `LoserClose` and
   `LoserRemoved` close by the close rule (`Node::close_unused`) and
-  remove; the renewal's released paths go to the link left.
+  remove; the renewal's released paths go to the link left. After a move
+  that held the peer on the dial's link, `LoserClose` also closes the
+  connection the dial was set up at when no path and no handshake uses it,
+  the dial's link counted and the link left not (`Node::close_setup`): a
+  dial answered from another pair, such as over the peer's own dial
+  connection, leaves its own connection to nothing.
 - `paths.rs`: a followed, switched or released path's effects, which are
   plain functions because a removal reaches a release where it cannot
   await, with `Node::run_now`, which walks such a plan without awaiting;

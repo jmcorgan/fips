@@ -933,19 +933,22 @@ async fn next_packet(tn: &mut TestNode) -> ReceivedPacket {
         .expect("the receive channel stays open")
 }
 
-/// Crossed dials on two links between one pair: node 0, the smaller, dials
-/// over L2 and node 1 over L1. Node 0 keeps its outbound handshake, whose
-/// msg2 comes over L2, so it holds node 1 on L2, the link it dialed, keeps
-/// L2 pooled, moves node 1's verification there, and closes L1, which no
-/// link uses once the move has left it.
-#[tokio::test(start_paused = true)]
-async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link() {
-    let mut nodes = vec![
-        make_test_node_ble_identified(1).await,
-        make_test_node_ble_identified(2).await,
-    ];
-    larger_second(&mut nodes);
-    let (_, a1, a0x, a1x) = two_links(&nodes).await;
+/// Crossed dials on two links between one pair, as [`two_links`] opens
+/// them: node 0, the smaller, dials over L2 and node 1 over L1. Runs until
+/// node 0 holds node 1 on L1, promoted on node 1's msg1, and returns node
+/// 1's msg2 answering node 0's dial, not yet handed, node 0's session index
+/// on that dial, and node 1's addresses `(a1, a1x)` at L1 and L2. Frames
+/// node 1 sends after its msg2 are never handed: one would mark the link it
+/// arrived on as node 1's.
+async fn crossed_on_two_links(
+    nodes: &mut [TestNode],
+) -> (
+    ReceivedPacket,
+    SessionIndex,
+    crate::transport::TransportAddr,
+    crate::transport::TransportAddr,
+) {
+    let (_, a1, a0x, a1x) = two_links(nodes).await;
     let (a1, a0x, a1x) = (
         a1.to_transport_addr(),
         a0x.to_transport_addr(),
@@ -956,8 +959,8 @@ async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification
     let n1 = *nodes[1].node.node_addr();
 
     // Node 0's msg1 goes out on L2, node 1's on L1.
-    dial_at(&mut nodes, 0, 1, a1x.clone()).await;
-    initiate_handshake(&mut nodes, 1, 0).await;
+    dial_at(nodes, 0, 1, a1x.clone()).await;
+    initiate_handshake(nodes, 1, 0).await;
     let outbound = {
         let keys: Vec<_> = nodes[0].node.pending_outbound.keys().copied().collect();
         assert_eq!(keys.len(), 1, "precondition: node 0 has one dial pending");
@@ -977,16 +980,14 @@ async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification
     );
 
     // Node 1's msg1 comes over L1 and its msg2 over L2, each link read by
-    // its own task, so their order is not assumed. Frames node 1 sends after
-    // its msg2 are held, unhanded, until the assertions are done: one would
-    // mark the link it arrived on as node 1's.
-    let (mut msg1, mut msg2, mut held) = (None, None, Vec::new());
+    // its own task, so their order is not assumed.
+    let (mut msg1, mut msg2) = (None, None);
     while msg1.is_none() || msg2.is_none() {
         let packet = next_packet(&mut nodes[0]).await;
         match phase(&packet) {
             Some(PHASE_MSG1) if msg1.is_none() => msg1 = Some(packet),
             Some(PHASE_MSG2) if msg2.is_none() => msg2 = Some(packet),
-            Some(PHASE_ESTABLISHED) => held.push(packet),
+            Some(PHASE_ESTABLISHED) => {}
             other => panic!("precondition: an unexpected packet at node 0 ({other:?})"),
         }
     }
@@ -997,13 +998,10 @@ async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification
         "precondition: node 1's msg1 reaches node 0 over L1"
     );
     hand(&mut nodes[0].node, msg1).await;
-    let pair = |tn: &TestNode| {
-        let peer = tn.node.get_peer(&n1).expect("node 0 holds node 1");
-        (peer.transport_id(), peer.current_addr().cloned())
-    };
+    let peer = nodes[0].node.get_peer(&n1).expect("node 0 holds node 1");
     assert_eq!(
-        pair(&nodes[0]),
-        (Some(t), Some(a1.clone())),
+        (peer.transport_id(), peer.current_addr()),
+        (Some(t), Some(&a1)),
         "precondition: node 0 promoted on node 1's msg1, holding it on L1"
     );
     assert_eq!(
@@ -1011,6 +1009,31 @@ async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification
         (t, &a1x),
         "precondition: node 1's msg2 reaches node 0 over L2"
     );
+    (msg2, outbound, a1, a1x)
+}
+
+/// The transport and address node 0 holds node 1 at.
+fn held_at(nodes: &[TestNode]) -> (Option<TransportId>, Option<crate::transport::TransportAddr>) {
+    let n1 = *nodes[1].node.node_addr();
+    let peer = nodes[0].node.get_peer(&n1).expect("node 0 holds node 1");
+    (peer.transport_id(), peer.current_addr().cloned())
+}
+
+/// Crossed dials on two links between one pair: node 0, the smaller, dials
+/// over L2 and node 1 over L1. Node 0 keeps its outbound handshake, whose
+/// msg2 comes over L2, so it holds node 1 on L2, the link it dialed, keeps
+/// L2 pooled, moves node 1's verification there, and closes L1, which no
+/// link uses once the move has left it.
+#[tokio::test(start_paused = true)]
+async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link() {
+    let mut nodes = vec![
+        make_test_node_ble_identified(1).await,
+        make_test_node_ble_identified(2).await,
+    ];
+    larger_second(&mut nodes);
+    let (msg2, outbound, a1, a1x) = crossed_on_two_links(&mut nodes).await;
+    let t = nodes[0].transport_id;
+    let n1 = *nodes[1].node.node_addr();
     hand(&mut nodes[0].node, msg2).await;
     assert_eq!(
         nodes[0].node.get_peer(&n1).and_then(|p| p.our_index()),
@@ -1023,7 +1046,7 @@ async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification
         "node 0 keeps L2, the link its winning handshake ran on, pooled"
     );
     assert_eq!(
-        pair(&nodes[0]),
+        held_at(&nodes),
         (Some(t), Some(a1x.clone())),
         "node 0 holds node 1 on L2, where the msg2 came from"
     );
@@ -1037,8 +1060,47 @@ async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification
         None,
         "node 0 closed L1, the link it left for the one it dialed"
     );
-    drop(held);
     assert_coherent(&mut nodes, "the end of the test").await;
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// Crossed dials on two links as above, but node 1's answer to node 0's
+/// dial comes over L1, node 1's own dial connection, as a host that answers
+/// from the connection it dialled on sends it. Node 0 moves node 1 onto its
+/// dial at L1 and keeps L1 open, since the dial now uses it; L2, the
+/// connection node 0 dialled, is then used by no link and no handshake, and
+/// node 0 closes it with the link the move left.
+#[tokio::test(start_paused = true)]
+async fn a_crossed_dial_answered_over_the_peers_dial_connection_closes_the_connection_it_dialled() {
+    let mut nodes = vec![
+        make_test_node_ble_identified(1).await,
+        make_test_node_ble_identified(2).await,
+    ];
+    larger_second(&mut nodes);
+    let (mut msg2, outbound, a1, a1x) = crossed_on_two_links(&mut nodes).await;
+    let t = nodes[0].transport_id;
+    let n1 = *nodes[1].node.node_addr();
+    msg2.remote_addr = a1.clone();
+    hand(&mut nodes[0].node, msg2).await;
+    assert_eq!(
+        nodes[0].node.get_peer(&n1).and_then(|p| p.our_index()),
+        Some(outbound),
+        "precondition: node 0 swapped to its outbound session"
+    );
+    assert_eq!(
+        held_at(&nodes),
+        (Some(t), Some(a1.clone())),
+        "precondition: node 0 holds node 1 on its dial at L1, where the msg2 came from"
+    );
+    assert!(
+        verified_at(&nodes[0], &a1).await.is_some(),
+        "node 0 keeps L1, the connection its peering moved onto, pooled"
+    );
+    assert_eq!(
+        verified_at(&nodes[0], &a1x).await,
+        None,
+        "defect: node 0 left L2, the connection it dialled, open with no link using it"
+    );
     cleanup_nodes(&mut nodes).await;
 }
 

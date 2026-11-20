@@ -42,8 +42,9 @@ struct MoveScript {
     /// closes, the one the test planted with it.
     own: bool,
     /// A connection at a pair the readings cover was asked to close: the
-    /// link the peer left, where no live link uses its pair, or a released
-    /// path's.
+    /// link the peer left, where no live link uses its pair, a released
+    /// path's, or the one the dial was set up at, where a move answered
+    /// from another pair leaves it unused.
     closed: bool,
     /// The peering was unheard before the move, promoted on the peer's
     /// msg1: the move makes it heard and forgets the msg1s remembered
@@ -656,9 +657,10 @@ async fn a_second_dial_answered_does_what_the_move_cells_say_larger_dialer_with_
 /// quiet past link-dead, since until then a capable peer's link is live and
 /// is not dialled; the renewal releases that path, which is queued to close
 /// and closed by the unpin step's drain. With it off no link is capable,
-/// and nothing closes: the peer holds the dial's link, whose connection is
-/// the one it was dialed on, and the link it left is at the msg2's pair,
-/// which the peer's renewed path uses.
+/// and nothing is released. At either setting the peer holds the dial's
+/// link at the msg2's pair, which its renewed path uses, so the link it
+/// left keeps that connection, and the connection the dial was set up at,
+/// the second address, which no path and no handshake uses, closes.
 async fn own_dial_on_an_aged_link(on: bool) {
     use super::super::super::control::quieten;
     use super::super::super::paths::{beacon, capable_at, quiet_for, state_at};
@@ -719,13 +721,14 @@ async fn own_dial_on_an_aged_link(on: bool) {
         own: true,
         built: true,
     };
-    // Only the released paths close, where the link is capable.
+    // The dial's own connection closes, and the released paths where the
+    // link is capable.
     let script = MoveScript {
         on,
         moved: false,
         reseeded: false,
         own: true,
-        closed: on,
+        closed: true,
         unheard: false,
         queued: on,
     };
@@ -733,14 +736,14 @@ async fn own_dial_on_an_aged_link(on: bool) {
     run_move(&mut nodes[s].node, &l_addr, msg2, &also, None, t, script).await;
     // Which closes the connection cell's one reading is made of: the
     // released paths' only where the link is capable, the spare pair
-    // `dirty` admitted and, with multipath on, the beaconed one. The dial's
-    // connection is the link the peer now holds, and none is asked to close.
+    // `dirty` admitted and, with multipath on, the beaconed one; and the
+    // dial's own connection, at the second address, at either setting.
     let closes: Vec<usize> = also[1..]
         .iter()
         .chain([&spare])
         .map(|to| closes_at(&nodes[s].node, to))
         .collect();
-    let want = if on { vec![1, 0, 1] } else { vec![0, 0] };
+    let want = if on { vec![1, 1, 1] } else { vec![1, 0] };
     cleanup_nodes(&mut nodes).await;
     assert_eq!(
         closes,

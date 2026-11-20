@@ -360,14 +360,7 @@ builds, and changes no line of the core, the machine or the bundle.
   ignored, listed in `testing/ignored-tests.txt` and run by the
   known-defect lane, which reds when one passes; the fix that turns one
   green un-ignores it in the same change, and it then runs in every
-  build. Ignored today, two. A crossing
-  in which the smaller node's own dial is answered over the larger node's
-  dial connection, from the larger node's second address (the named
-  start with two paths as `../starts.rs` writes it, its nodes joint
-  nodes); the core moves the
-  peering onto that pair and, in the same step, retires the inbound link
-  and closes the pair, since the moved link's record does not yet hold
-  it, so both ends then lose the link and redial. A proven second path
+  build. Ignored today, one: a proven second path
   whose connection fails: the bundle asks for a connection only for a
   path it admitted or whose connect failed, so the path stays
   acknowledged with no connection until its Dead grace ends, and the link
@@ -385,12 +378,18 @@ builds, and changes no line of the core, the machine or the bundle.
   as it is to the node, since the transport's removal released the path
   there and took the pair out of the index, a shape that now needs
   `SwitchLeavesPeer` and `AttributeByCurrent` both, so it is
-  characterisation; and a msg1 from the pair a frame
+  characterisation; a msg1 from the pair a frame
   from another transport came from is off the link to the core (start 2
   at Off), as is one from a pair whose path the bundle still holds
   probing (start 2 at On with On, found by its sweep), shapes that now
   need `HeardMovesPeer` and `AttributeByCurrent` both, so they are
-  characterisation too.
+  characterisation too; and a crossing in which the smaller node's own
+  dial is answered over the larger node's dial connection, from the
+  larger node's second address (the named start with two paths as
+  `../starts.rs` writes it, its nodes joint nodes), keeps that connection
+  open, since the moved-onto link's record takes the pair before the
+  inbound link is retired (`MoveClosesNewPair` puts back the close, after
+  which both ends lose the link and redial).
 - `runs.rs`: the per-start runs the switches' rows name, each the
   cheapest test that shows a guard can fail in a world of joint nodes:
   every start's script with its heal at On with On (its twin at Off with

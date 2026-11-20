@@ -98,6 +98,13 @@ pub(crate) enum Fault {
     MoveKeepsOldPair,
     /// A move retires nothing, so the link it leaves stays.
     MoveKeepsInboundLink,
+    /// A move retires the link it leaves before the moved-onto link's
+    /// record holds the msg2's pair, so it closes the connection the
+    /// peering moved onto.
+    MoveClosesNewPair,
+    /// A move onto a pair other than the dial's own leaves the connection
+    /// the dial was set up at open with no link using it.
+    MoveLeavesDialOpen,
     /// A move hands the per-peer data no reset.
     MoveNoReset,
     /// A move leaves the peering unheard until the peer's first frame.
@@ -371,6 +378,8 @@ impl Fault {
         Self::UnsentPastCap,
         Self::MoveKeepsOldPair,
         Self::MoveKeepsInboundLink,
+        Self::MoveClosesNewPair,
+        Self::MoveLeavesDialOpen,
         Self::MoveNoReset,
         Self::MoveLeavesUnheard,
         Self::IgnoreOwnDial,

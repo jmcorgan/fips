@@ -294,6 +294,11 @@ HeardMovesPeer	red	fips-core	proto::settle::table::tests::a_frame_from_another_t
 FollowResets	red	fips-core	proto::settle::table::tests::a_path_the_bundle_followed_moves_the_cores_record_and_resets_nothing
 SwitchWritesLive	red	fips-core	proto::settle::table::tests::a_switch_to_an_acknowledged_path_leaves_it_acknowledged
 SwitchWritesLive	red	fips-mesh	node::tests::settle::live::a_switch_to_an_acked_path_is_recorded_acked_and_the_mirror_holds_with_multipath_on	a switch to an acknowledged path is recorded Live
+MoveClosesNewPair	red	fips-core	proto::settle::table::tests::a_move_onto_a_dial_answered_from_the_peers_other_pair_keeps_that_pair_open
+MoveLeavesDialOpen	red	fips-core	proto::settle::table::tests::a_move_onto_a_dial_answered_from_the_peers_other_pair_closes_the_dials_own_connection
+MoveLeavesDialOpen	red	fips-mesh	node::tests::ble::a_crossed_dial_answered_over_the_peers_dial_connection_closes_the_connection_it_dialled
+MoveLeavesDialOpen	red	fips-mesh	node::tests::settle::table::crossing::an_own_dial_answered_on_an_aged_link_does_what_the_move_cells_say
+MoveLeavesDialOpen	red	fips-mesh	node::tests::settle::table::crossing::an_own_dial_answered_on_an_aged_link_does_what_the_move_cells_say_with_multipath_on
 # A crossed dial from another address or transport retires a link that is
 # named at no pair by the time it closes, so this break has nothing to
 # take from the held link there. Those tests' check that the held link stays

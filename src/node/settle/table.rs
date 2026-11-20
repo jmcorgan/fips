@@ -391,7 +391,8 @@ pub(crate) enum Cell {
     DialClosedUnlessProven,
     /// The connection of the link the peer left closed unless a live link
     /// uses its pair, as at [`Cell::DialClosedUnlessProven`], with released
-    /// paths as [`Cell::UnkeptQueued`].
+    /// paths as [`Cell::UnkeptQueued`], and the connection the dial was set
+    /// up at closed when no link uses it, the dial's own included.
     LeftClosedReleasedQueued,
     /// Queued unless another peer proves it, and drained in the same step.
     QueuedDrained,

@@ -171,7 +171,14 @@ to the model, and nothing in `model/` refers to a core item; the scans in
   or a `Disconnect` keeps the old link's connections open, as the current
   node does; only an operator disconnect, an orphaned bundle and `close`
   apply the close rule to a held peer's link. A crossing's losing link and
-  the link a late second dial moves off are retired by the close rule.
+  the link a late second dial moves off are retired by the close rule,
+  after the moved-onto link's record takes the msg2's pair as a Live path:
+  the node renews the bundle there before it closes the link it leaves, so
+  a dial answered over the peer's own dial connection keeps that
+  connection. That retire also closes the pair the dial was set up at when
+  no link uses it, the moved-onto link included, as the node closes it
+  after such a move; never when the msg2 came over that pair, since the
+  peer has just answered there, whatever the record says of it.
 - An orphaned bundle and an operator disconnect close what the node's
   removal closes: the paths the bundle still holds that no other link
   uses, never a setup pair whose path the bundle released first (that

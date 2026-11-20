@@ -223,10 +223,19 @@ pub(super) async fn machine_crossed(node: &mut Node, r: &mut Run) {
 /// Close the losing link's connection, the link a move left or the dial's:
 /// a separate socket on TCP, a no-op when connectionless, and left open
 /// while a live link uses it, such as the very connection the peer runs on
-/// (BLE).
+/// (BLE). A move that held the peer on the dial's link at a pair other than
+/// the one it dialled also closes the dial's own connection once no path
+/// and no handshake uses it, the dial's link included and the link left
+/// excepted, since it goes next.
 pub(super) async fn loser_close(node: &mut Node, r: &mut Run) {
     if let Some(link) = loser(r) {
         node.close_unused(link).await;
+    }
+    // The mutation lane's break: the dial's own connection stays open.
+    if let (Some(left), Some((dial, _))) = (left(r), dial(&r.t))
+        && !node_fault!(MoveLeavesDialOpen)
+    {
+        node.close_setup(dial, left).await;
     }
 }
 
