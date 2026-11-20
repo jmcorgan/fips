@@ -110,12 +110,36 @@ pub enum Event {
         hs: Hs,
     },
     /// A frame from the peer authenticates under the session of handshake
-    /// `hs`, from `from`.
+    /// `hs`, from `from`. A party with no path bundle builds it with
+    /// [`Event::frame`].
     Frame {
         /// The handshake whose session the frame authenticated under.
         hs: Hs,
         /// The frame's source address.
         from: Addr,
+        /// How many paths the bundle of the peer's link held when the
+        /// frame arrived; 0 at a node with no path bundle, the deployed
+        /// release, whose address rule follows every frame's source.
+        paths: u8,
+        /// The frame is a path message (a probe, an ack or a close) on a
+        /// link whose bundle runs multipath.
+        message: bool,
+    },
+    /// The path bundle of the peer's link switched its active path to
+    /// `to`: this node's frames to the peer go there now.
+    Switch {
+        /// The new active path's address.
+        to: Addr,
+    },
+    /// The path bundle of the peer's link moved its path at `from` to
+    /// `to`, following a path message attributed to that path from a new
+    /// address on its transport, which it does once the link holds more
+    /// than its original path (multipath v1 draft, Section 5.3).
+    Follow {
+        /// The address the path left.
+        from: Addr,
+        /// The address it is at now.
+        to: Addr,
     },
     /// This node starts its own rekey of the peer, handshake `hs`.
     RekeyStart {
@@ -143,4 +167,18 @@ pub enum Event {
     Lost,
     /// This node's own process restarts and forgets everything.
     Restart,
+}
+
+impl Event {
+    /// A frame of handshake `hs` from `from` on a link of one path, and no
+    /// path message: what a party that holds no bundle of its own tells of
+    /// a node that does.
+    pub fn frame(hs: Hs, from: Addr) -> Self {
+        Self::Frame {
+            hs,
+            from,
+            paths: 1,
+            message: false,
+        }
+    }
 }

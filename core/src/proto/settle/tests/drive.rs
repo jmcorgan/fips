@@ -278,7 +278,11 @@ impl Drive {
                     self.effects(out, &mut did);
                 }
             }
-            Event::Frame { hs, from } => self.frame(hs, from, &mut did),
+            Event::Frame { hs, from, .. } => self.frame(hs, from, &mut did),
+            // A switch or a follow is the bundle's own decision, which the
+            // driver's real bundle makes or does not; a history cannot force
+            // one.
+            Event::Switch { .. } | Event::Follow { .. } => {}
             Event::RekeyStart { hs } => self.start(hs, &mut did),
             Event::RekeyMsg2 { hs, epoch: e } => self.reply(hs, e, &mut did),
             Event::RekeyCutover => self.cutover(&mut did),
@@ -345,6 +349,8 @@ impl Drive {
             to: pair(to),
             msg1: msg1.clone(),
             lease,
+            resends: None,
+            link: None,
         };
         let out = self.core(Input::Dial(d));
         for o in &out {
@@ -553,9 +559,12 @@ impl Drive {
         // that index.
         let wire = names::msg1(self.peer, e, self.me, hs, b.0);
         let tok = read_msg1(&self.kit.local, &wire).expect("a msg1 to this node reads");
-        let (hello, mut built) = route::answer(&mut self.kit, tok.get(), hs, &wire, from);
+        let read = route::read(tok.get(), &wire, from);
         let reachable = self.reachable();
-        let mut out = self.core(Input::Msg1 { hello, reachable });
+        let mut out = self.core(Input::Msg1 {
+            read: read.clone(),
+            reachable,
+        });
         let arrival = out.iter().find_map(|o| {
             if let Output::Rekey { arrival, .. } = o {
                 Some(*arrival)
@@ -570,16 +579,19 @@ impl Drive {
             if asked == Asked::Nothing {
                 return;
             }
-            let (hello, again) = route::answer(&mut self.kit, tok.get(), hs, &wire, from);
-            built = again;
             out = match asked {
                 Asked::Redial(e) => {
                     redial = Some(e);
-                    self.core(Input::Redial(hello))
+                    self.core(Input::Redial(read))
                 }
-                Asked::Replace | Asked::Nothing => self.core(Input::Replace(hello)),
+                Asked::Replace | Asked::Nothing => self.core(Input::Replace(read)),
             };
         }
+        let built = route::asked(&out).map(|link| {
+            let (hello, built) = route::answer(&mut self.kit, tok.get(), hs, link);
+            out.extend(self.core(Input::Hello(hello)));
+            built
+        });
         let answered = out
             .iter()
             .any(|o| matches!(o, Output::Answer { stored: false, .. }));
@@ -594,13 +606,14 @@ impl Drive {
     }
 
     /// The outputs of an admission: a stored answer, a refusal, or a fresh
-    /// answer sent at once or not.
+    /// answer, built once the core asked for it (`built`), sent at once or
+    /// not.
     fn admitted(
         &mut self,
         out: Vec<Output>,
         hs: Hs,
         wire: &[u8],
-        built: Built,
+        built: Option<Built>,
         sent: bool,
         did: &mut Did,
     ) {
@@ -628,6 +641,7 @@ impl Drive {
                     });
                 }
                 Output::Opened { .. }
+                | Output::Ask { .. }
                 | Output::Resend { .. }
                 | Output::Rekey { .. }
                 | Output::Install(_)
@@ -637,6 +651,7 @@ impl Drive {
                 | Output::Release { .. }
                 | Output::Close { .. }
                 | Output::Free { .. }
+                | Output::Swapped { .. }
                 | Output::Retry { .. }
                 | Output::Hold { .. }
                 | Output::Settle { .. } => {}
@@ -649,7 +664,7 @@ impl Drive {
         if did.class.is_none() {
             did.class = Some(Class::NotHeld);
         }
-        let (done, record, _) = built;
+        let (done, record, _) = built.expect("a fresh answer was asked for");
         self.runs.push(Run {
             hs,
             link,
@@ -707,6 +722,7 @@ impl Drive {
         let out = self.core(Input::Heard {
             peer,
             from: pair(from),
+            kind: crate::proto::link::LinkMessageType::Heartbeat.to_byte(),
         });
         self.effects(out, did);
         let moved = self.routed(None, roamed);
@@ -838,10 +854,12 @@ impl Drive {
                     }
                 }
                 Output::Opened { .. }
+                | Output::Ask { .. }
                 | Output::Answer { .. }
                 | Output::Resend { .. }
                 | Output::Rekey { .. }
                 | Output::Reset { .. }
+                | Output::Swapped { .. }
                 | Output::Retry { .. }
                 | Output::Reject { .. }
                 | Output::Hold { .. }
@@ -980,5 +998,6 @@ pub fn refusal(d: Denial) -> Refusal {
         Denial::Gate(Gated::Silent) => Refusal::Silent,
         Denial::Full => Refusal::Full,
         Denial::Held => Refusal::Gate(Gate::Slot),
+        Denial::Cap => Refusal::Cap,
     }
 }

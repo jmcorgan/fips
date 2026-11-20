@@ -237,7 +237,8 @@ pub trait Profile: Sized + Debug + 'static {
     type Transport: Copy + Eq + Debug;
     /// The authenticated link peer a setup arrived over (FSP) or `()`.
     type Carrier: Copy + Eq + Debug;
-    /// The coordinates the peer's handshake message carried (FSP) or `()`.
+    /// The coordinates the peer's handshake message carried (FSP), where a
+    /// reply arrived (FMP), or `()`.
     type Route: Clone + Debug;
     /// Per-epoch state the shell reads through `view` (MMP receiver, spin).
     type Ext: Default + Debug;
@@ -310,4 +311,10 @@ pub trait Profile: Sized + Debug + 'static {
     /// Whether `plaintext` is a probe (an FSP CoordsWarmup); always false
     /// for FMP.
     fn is_probe(plaintext: &[u8]) -> bool;
+
+    /// Where a reply that carried `route` arrived, for a profile that caps
+    /// the refused reads of its own attempt: `Some(true)` on the peer's
+    /// established link, `Some(false)` off it. `None` for a profile with
+    /// no cap, whose replies are all read and none counted.
+    fn arrived(route: &Self::Route) -> Option<bool>;
 }

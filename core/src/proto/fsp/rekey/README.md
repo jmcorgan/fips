@@ -23,7 +23,9 @@ keys, under the exemption that module's README states.
   msg3 and cuts over there, the initiator probes and waits for evidence,
   frames found by trial, a `CoordsWarmup` as the prompt (and a probe when
   sealed under a pending epoch), candidates per carrier, the silence
-  trigger and an RTT-scaled setup ladder. Its `Wire` values are the bare
+  trigger and an RTT-scaled setup ladder. Its acks are never capped by
+  where they arrived (`arrived` answers `None`): the cap on refused reads
+  is the link's. Its `Wire` values are the bare
   33-byte msg1, the 106-byte msg2 and the 73-byte msg3, the last two
   followed by the encrypted negotiation payload on a session's first
   handshake only; `SessionLocal` tells it per call whether the session

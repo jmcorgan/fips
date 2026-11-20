@@ -25,3 +25,7 @@ so they can name its private items.
   - `xx_reply_from_another_key_keeps_the_attempt`: an ack from a third
     key reads, fails the bond, sends no msg3 and leaves the attempt and
     its deadline as they were; the peer's ack then completes it.
+  - `the_session_profile_puts_no_ack_under_the_link_cap_on_refused_reads`:
+    `arrived` answers `None` for an ack at any depth, so the rekey machine
+    neither counts a session's refused acks nor drops one unread: the cap
+    on refused reads is the link's alone.

@@ -40,9 +40,25 @@
 //! acceptance stamps nothing; the swap its first frame proves does
 //! ([`Gates::swapped`]), so a replayer, which sends no frame, cannot.
 //!
+//! The silent-session record also counts the msg1s refused while its
+//! refusal runs, which the shell's lines report, so the count lapses with
+//! the record.
+//!
 //! A new epoch in a msg2 is the reply to this node's own handshake, so
 //! neither msg2 source is refused or stamps the dampener. A frame that
-//! authenticates forgets the peer's replay memory and silent sessions.
+//! makes the peering heard forgets the peer's replay memory and silent
+//! sessions; the first frame of a peering already heard forgets its silent
+//! sessions alone, and a move that makes the peering heard its replay
+//! memory alone.
+//!
+//! The memory holds only identities with something live, as the node's
+//! replay memory, dampener and silent-session record each do: a question
+//! about an identity with no memory inserts none, and every call that
+//! takes an instant first drops each identity whose stamp, replays and
+//! silence have all lapsed. A lapsed entry decides nothing, so dropping it
+//! changes no answer; it bounds the memory by the identities whose state
+//! still counts, where a sender minting identities would otherwise grow it
+//! by one entry per msg1.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -80,6 +96,16 @@ impl Source {
         match self {
             Self::NotHeld | Self::Restart | Self::Replacement | Self::Redial => true,
             Self::OwnMsg2 | Self::RekeyMsg2 => false,
+        }
+    }
+
+    /// The source of a new epoch a msg2 reveals: a link rekey's msg2 when
+    /// `rekey`, else the msg2 of this node's own dial.
+    pub fn msg2(rekey: bool) -> Self {
+        if rekey {
+            Self::RekeyMsg2
+        } else {
+            Self::OwnMsg2
         }
     }
 }
@@ -131,6 +157,21 @@ pub struct Ask<I> {
     pub ephemeral: Option<EphemeralDigest>,
     /// The epoch the msg1 or msg2 carries.
     pub epoch: Option<Epoch>,
+    /// The instant the replay memory is read at, for a shell whose replay
+    /// memory is measured on another clock than the one `now` is read on;
+    /// `None` reads it at `now`.
+    pub memory: Option<I>,
+}
+
+/// A silent-session refusal in force.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Silencing {
+    /// The epoch of the sessions counted; a msg1 at another is not refused.
+    pub epoch: Option<Epoch>,
+    /// Sessions counted in a row at that epoch.
+    pub silent: u32,
+    /// How long the refusal still has to run.
+    pub remaining: Duration,
 }
 
 /// A silent-session record.
@@ -146,6 +187,9 @@ struct Silence<I> {
     until: Option<I>,
     /// The setup ephemerals already counted.
     counted: Vec<EphemeralDigest>,
+    /// Msg1s refused since the refusal in force started, for the shell's
+    /// line that reports them; it goes with the record.
+    refused: u32,
 }
 
 /// What the gates remember of one identity. It outlives the peering, since
@@ -209,7 +253,13 @@ impl<I: Instant> Gates<I> {
         now: I,
         params: &Params,
     ) -> Option<Refusal> {
-        let mem = self.peers.entry(peer).or_default();
+        let memory = ask.memory.unwrap_or(now);
+        self.lapse(now, memory, params);
+        if kept() {
+            self.peers.entry(peer).or_default();
+        }
+        let none = Memory::default();
+        let mem = self.peers.get(&peer).unwrap_or(&none);
         let silenced = match ask.source {
             Source::NotHeld | Source::Replacement | Source::Redial => mem.silencing(ask.epoch, now),
             Source::Restart | Source::OwnMsg2 | Source::RekeyMsg2 => false,
@@ -226,43 +276,60 @@ impl<I: Instant> Gates<I> {
         }
         let gated = match ask.source {
             Source::Restart | Source::Replacement | Source::Redial => true,
-            Source::OwnMsg2 => fault!(OutboundGated),
+            Source::OwnMsg2 => fault!(OutboundGated) || node_fault!(OutboundGated),
             Source::NotHeld | Source::RekeyMsg2 => false,
         };
         if !gated {
             if fault!(DampenerAtMsg2) {
-                mem.stamp = Some(now);
+                self.peers.entry(peer).or_default().stamp = Some(now);
             }
             return None;
         }
-        let refusal = mem.judge(&ask, held, now, params);
+        let refusal = mem.judge(&ask, held, now, memory, params);
         if (refusal.is_none() && held.heard) || (refusal.is_some() && fault!(DampenerFromRefusal)) {
-            mem.stamp = Some(now);
+            self.peers.entry(peer).or_default().stamp = Some(now);
         }
         refusal
     }
 
+    /// Drop every identity whose stamp, replays, silence and redial memory
+    /// have all lapsed at `now`, the replays and the redial memory read at
+    /// `memory`, and the lapsed replays of the rest.
+    fn lapse(&mut self, now: I, memory: I, params: &Params) {
+        if kept() {
+            return;
+        }
+        self.peers.retain(|_, mem| {
+            mem.prune(memory, params);
+            mem.live(now, memory, params)
+        });
+    }
+
     /// An unheard peering of `peer` was promoted from a msg1 with
-    /// `ephemeral` at `now`.
+    /// `ephemeral` at `now`. The replay memory is read and the ephemeral
+    /// remembered at `memory`, as for [`Ask::memory`]; `None` uses `now`.
     pub fn promoted(
         &mut self,
         peer: NodeAddr,
         ephemeral: EphemeralDigest,
         now: I,
+        memory: Option<I>,
         params: &Params,
     ) {
+        let memory = memory.unwrap_or(now);
+        self.lapse(now, memory, params);
         let mem = self.peers.entry(peer).or_default();
-        mem.prune(now, params);
+        mem.prune(memory, params);
         if !mem.replays.iter().any(|(e, _)| *e == ephemeral) {
-            mem.replays.push((ephemeral, now));
+            mem.replays.push((ephemeral, memory));
         }
         if mem.replays.len() > params.replays && !fault!(ReplayUnbounded) {
             mem.replays.remove(0);
         }
     }
 
-    /// A frame from `peer` authenticated: forget its replay memory and its
-    /// silent sessions.
+    /// A frame from `peer` that makes its peering heard authenticated:
+    /// forget its replay memory and its silent sessions.
     pub fn heard(&mut self, peer: &NodeAddr) {
         if fault!(HeardKeepsMemory) {
             return;
@@ -270,21 +337,66 @@ impl<I: Instant> Gates<I> {
         if let Some(mem) = self.peers.get_mut(peer) {
             mem.replays.clear();
             mem.silence = None;
+            if mem.stamp.is_none()
+                && (mem.redials.is_empty() || fault!(RedialMemoryLapses))
+                && !kept()
+            {
+                self.peers.remove(peer);
+            }
+        }
+    }
+
+    /// The first frame of a session of `peer` that was heard already, by
+    /// this node's own dial or a move, authenticated: forget its silent
+    /// sessions, and keep its replay memory, which only a frame or a move
+    /// that makes the peering heard forgets.
+    pub fn framed(&mut self, peer: &NodeAddr) {
+        if fault!(HeardKeepsMemory) {
+            return;
+        }
+        if let Some(mem) = self.peers.get_mut(peer) {
+            mem.silence = None;
+            if mem.stamp.is_none()
+                && mem.replays.is_empty()
+                && (mem.redials.is_empty() || fault!(RedialMemoryLapses))
+                && !kept()
+            {
+                self.peers.remove(peer);
+            }
+        }
+    }
+
+    /// A move made the peering of `peer` heard: forget its replay memory,
+    /// as its first authenticated frame would, and keep its silent
+    /// sessions, which a frame forgets and a move does not.
+    pub fn forget(&mut self, peer: &NodeAddr) {
+        if let Some(mem) = self.peers.get_mut(peer) {
+            mem.replays.clear();
+            if mem.stamp.is_none()
+                && mem.silence.is_none()
+                && (mem.redials.is_empty() || fault!(RedialMemoryLapses))
+                && !kept()
+            {
+                self.peers.remove(peer);
+            }
         }
     }
 
     /// A session of `peer` at `epoch`, promoted from a msg1 with `setup`
     /// (none for a session this node dialed), ended at `now` without one
     /// authenticated frame. Returns the length of the refusal this starts,
-    /// if it starts one.
+    /// if it starts one. The replay memory is read at `memory`, as for
+    /// [`Ask::memory`]; `None` reads it at `now`.
     pub fn ended(
         &mut self,
         peer: NodeAddr,
         epoch: Option<Epoch>,
         setup: Option<EphemeralDigest>,
         now: I,
+        memory: Option<I>,
         params: &Params,
     ) -> Option<Duration> {
+        self.lapse(now, memory.unwrap_or(now), params);
         let mem = self.peers.entry(peer).or_default();
         let fresh = || Silence {
             epoch,
@@ -292,6 +404,7 @@ impl<I: Instant> Gates<I> {
             last: now,
             until: None,
             counted: Vec::new(),
+            refused: 0,
         };
         let rec = match mem.silence.take() {
             Some(r) if !r.expired(now, params) && !differ(r.epoch, epoch) => r,
@@ -338,7 +451,8 @@ impl<I: Instant> Gates<I> {
             .is_some_and(|m| m.silencing(epoch, now))
     }
 
-    /// A redial of `peer` was armed by a msg1 with `ephemeral` at `now`.
+    /// A redial of `peer` was armed by a msg1 with `ephemeral` at `now`, an
+    /// instant on the clock the redial memory is read on ([`Ask::memory`]).
     pub fn redialed(
         &mut self,
         peer: NodeAddr,
@@ -363,22 +477,107 @@ impl<I: Instant> Gates<I> {
     /// peer's frame: the dampener is stamped if the peering it replaced was
     /// `heard`, and the redial memory is forgotten.
     pub fn swapped(&mut self, peer: NodeAddr, heard: bool, now: I) {
-        let mem = self.peers.entry(peer).or_default();
         if heard {
-            mem.stamp = Some(now);
+            self.peers.entry(peer).or_default().stamp = Some(now);
         }
-        mem.redials.clear();
+        if let Some(mem) = self.peers.get_mut(&peer) {
+            mem.redials.clear();
+        }
+    }
+
+    /// The identities the gates remember anything of, for a shell's
+    /// comparison of its own memory.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn known(&self) -> impl Iterator<Item = &NodeAddr> {
+        self.peers.keys()
+    }
+
+    /// How many ephemerals that promoted an unheard peering of `peer` the
+    /// replay memory holds, lapsed ones not yet pruned included.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn replays(&self, peer: &NodeAddr) -> usize {
+        self.peers.get(peer).map_or(0, |m| m.replays.len())
+    }
+
+    /// How many ephemerals that armed a redial of `peer` the redial memory
+    /// holds, lapsed ones not yet pruned included.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn redials(&self, peer: &NodeAddr) -> usize {
+        self.peers.get(peer).map_or(0, |m| m.redials.len())
+    }
+
+    /// The silent sessions counted in a row for `peer`, if it has a record.
+    pub fn silent(&self, peer: &NodeAddr) -> Option<u32> {
+        self.peers
+            .get(peer)
+            .and_then(|m| m.silence.as_ref())
+            .map(|r| r.count)
     }
 
     /// When a restart or replacement of `peer` last stamped the dampener.
     pub fn stamp(&self, peer: &NodeAddr) -> Option<I> {
         self.peers.get(peer).and_then(|m| m.stamp)
     }
+
+    /// The silent-session refusal in force for `peer` at `now`, if one is:
+    /// what a shell that classifies a msg1 before it asks the gate reads.
+    pub fn refusing(&self, peer: &NodeAddr, now: I) -> Option<Silencing> {
+        let rec = self.peers.get(peer)?.silence.as_ref()?;
+        let until = rec.until.filter(|u| *u > now)?;
+        Some(Silencing {
+            epoch: rec.epoch,
+            silent: rec.count,
+            remaining: until.saturating_duration_since(now),
+        })
+    }
+
+    /// Count one msg1 of `peer` refused while its silent-session refusal
+    /// runs, returning how many its record has refused since that refusal
+    /// started, or `None` when it has no record.
+    pub fn count_refused(&mut self, peer: &NodeAddr) -> Option<u32> {
+        let rec = self.peers.get_mut(peer)?.silence.as_mut()?;
+        rec.refused = rec.refused.saturating_add(1);
+        Some(rec.refused)
+    }
+
+    /// The msg1s `peer`'s silent-session record has refused since its
+    /// refusal started, 0 with no record, and count again from none: for a
+    /// refusal a session's end starts, which reports what the previous one
+    /// refused, and for a frame about to forget the record.
+    pub fn take_refused(&mut self, peer: &NodeAddr) -> u32 {
+        self.peers
+            .get_mut(peer)
+            .and_then(|m| m.silence.as_mut())
+            .map_or(0, |r| core::mem::take(&mut r.refused))
+    }
+
+    /// Stamp the dampener for `peer` at `at`, as an accepted restart of a
+    /// heard peering would, for a test that plants the memory.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn plant(&mut self, peer: NodeAddr, at: I) {
+        self.peers.entry(peer).or_default().stamp = Some(at);
+    }
+
+    /// Forget the dampener's stamp for `peer`, for a test that wants a
+    /// restart judged with none.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn unstamp(&mut self, peer: &NodeAddr) {
+        if let Some(mem) = self.peers.get_mut(peer) {
+            mem.stamp = None;
+        }
+    }
 }
 
 impl<I: Instant> Memory<I> {
     /// The replay memory, floors and dampener, in the current node's order.
-    fn judge(&self, ask: &Ask<I>, held: Liveness<I>, now: I, params: &Params) -> Option<Refusal> {
+    fn judge(
+        &self,
+        ask: &Ask<I>,
+        held: Liveness<I>,
+        now: I,
+        memory: I,
+        params: &Params,
+    ) -> Option<Refusal> {
         if ask.source.msg1()
             && !held.heard
             && let Some(e) = ask.ephemeral
@@ -386,7 +585,7 @@ impl<I: Instant> Memory<I> {
             let live = self
                 .replays
                 .iter()
-                .filter(|(_, at)| recent(*at, now, params));
+                .filter(|(_, at)| remembered(*at, memory, params));
             let mut n = 0;
             for (seen, _) in live {
                 if *seen == e && !fault!(ReplaySeenIgnored) {
@@ -434,10 +633,11 @@ impl<I: Instant> Memory<I> {
             return None;
         }
         if let Some(e) = ask.ephemeral {
+            let memory = ask.memory.unwrap_or(now);
             let live: Vec<&EphemeralDigest> = self
                 .redials
                 .iter()
-                .filter(|(_, at)| recent(*at, now, params))
+                .filter(|(_, at)| recent(*at, memory, params))
                 .map(|(e, _)| e)
                 .collect();
             if live.contains(&&e) || live.len() >= params.replays {
@@ -465,7 +665,27 @@ impl<I: Instant> Memory<I> {
 
     /// Drop the replay entries older than the interval.
     fn prune(&mut self, now: I, params: &Params) {
-        self.replays.retain(|(_, at)| recent(*at, now, params));
+        self.replays.retain(|(_, at)| remembered(*at, now, params));
+    }
+
+    /// Whether anything here still counts at `now`: a stamp within the
+    /// interval, a replay or a redial ephemeral within it at `memory`, or a
+    /// silent-session record within its horizon.
+    fn live(&self, now: I, memory: I, params: &Params) -> bool {
+        self.stamp.is_some_and(|t| recent(t, now, params))
+            || self
+                .replays
+                .iter()
+                .any(|(_, at)| remembered(*at, memory, params))
+            || (!fault!(RedialMemoryLapses)
+                && self
+                    .redials
+                    .iter()
+                    .any(|(_, at)| recent(*at, memory, params)))
+            || self
+                .silence
+                .as_ref()
+                .is_some_and(|r| !r.expired(now, params))
     }
 }
 
@@ -477,9 +697,22 @@ impl<I: Instant> Silence<I> {
     }
 }
 
+/// Whether the memory keeps every identity that was ever asked about, as
+/// it did before it dropped what had lapsed.
+fn kept() -> bool {
+    fault!(MemoryNeverDropped) || node_fault!(MemoryNeverDropped)
+}
+
 /// Whether `at` is within the interval before `now`.
 fn recent<I: Instant>(at: I, now: I, params: &Params) -> bool {
     now.saturating_duration_since(at) < params.interval
+}
+
+/// Whether the replay memory still holds an entry taken at `at`: within the
+/// interval before `now`, or at any age while the replay memory is broken to
+/// keep every entry.
+fn remembered<I: Instant>(at: I, now: I, params: &Params) -> bool {
+    node_fault!(MemoryNeverExpires) || recent(at, now, params)
 }
 
 #[cfg(test)]

@@ -44,7 +44,7 @@ use super::super::joint::names;
 use super::super::joint::party::{BEAT, deadline, session, store};
 use super::super::joint::route::{self, Ctx, Routed, Send};
 use super::super::party::{Configured, binding};
-use super::super::shadow::{Entry, Rec, Refusal};
+use super::super::shadow::{self, Entry, Rec, Refusal};
 use super::super::world::{
     Dir, HANDSHAKE, HEARTBEAT, Input, Kind, Ms, Net, Party, PathEv, PeerView, Pkt, RESEND, RESENDS,
     RETRY, State as Open, View,
@@ -522,10 +522,33 @@ impl MasterParty {
                 In::Restarted { .. } => change = Some(Transition::Restarted),
                 In::Ended { .. } | In::Orphaned { .. } => self.lost(net, peer),
                 In::Released { link, pair, keep } => self.release(no(link), addr(&pair), keep),
-                // The index reads a moved, switched or changed path from the
-                // bundle, so the node does nothing else with it.
-                In::Moved { .. } | In::Switched { .. } | In::State { .. } => {}
+                // The node sends to the peer where the bundle switched to,
+                // and the model holds the peer there too.
+                In::Switched { to, .. } => {
+                    let now = net.now;
+                    self.note(now, peer, Event::Switch { to: addr(&to) }, Rec::default());
+                }
+                // A path the bundle followed at a path message moves the
+                // model's peer with it, if it was there; a one-path roam is
+                // the frame's own, which the model rules on.
+                In::Moved {
+                    from,
+                    to,
+                    roam: false,
+                    ..
+                } => {
+                    let now = net.now;
+                    let ev = Event::Follow {
+                        from: addr(&from),
+                        to: addr(&to),
+                    };
+                    self.note(now, peer, ev, Rec::default());
+                }
+                // The index reads a moved or changed path from the bundle,
+                // so the node does nothing else with it.
+                In::Moved { .. } | In::State { .. } | In::Capable { .. } => {}
                 i @ (In::Dial(_)
+                | In::Connecting { .. }
                 | In::Punched(_)
                 | In::ConnectFailed { .. }
                 | In::Arrived { .. }
@@ -533,6 +556,8 @@ impl MasterParty {
                 | In::Replace(_)
                 | In::Redial(_)
                 | In::LegHeard { .. }
+                | In::Hello(_)
+                | In::Abandon { .. }
                 | In::Msg2 { .. }
                 | In::Heard { .. }
                 | In::Disconnect { .. }
@@ -540,6 +565,8 @@ impl MasterParty {
                 | In::Admin { .. }
                 | In::Sent { .. }
                 | In::SendFailed { .. }
+                | In::Unsendable { .. }
+                | In::PeerEpoch { .. }
                 | In::HeldFrame { .. }
                 | In::HoldLost { .. }) => {
                     self.s.audit.push(format!(
@@ -1877,9 +1904,11 @@ impl MasterParty {
         let first = !p.heard;
         p.heard = true;
         p.last = now;
+        let (paths, message) = p.machines.told(kind);
         let (moved, unpathed) =
             p.machines
                 .account(&mut self.s.kit, now, src, local, bytes.len(), kind);
+        let mark = self.log.len();
         // A one-path roam leaves the index as it is: the setup address keeps
         // its entry.
         let roamed = moved.iter().any(|e| matches!(e, Ev::Roamed { .. }));
@@ -1904,15 +1933,22 @@ impl MasterParty {
         } else {
             swapped.or(roamed.then_some(Transition::Roam))
         };
+        let later = shadow::bundled(&mut self.log, mark);
         self.note(
             now,
             id,
-            Event::Frame { hs, from: src },
+            Event::Frame {
+                hs,
+                from: src,
+                paths,
+                message,
+            },
             Rec {
                 change,
                 ..Rec::default()
             },
         );
+        self.log.extend(later);
     }
 
     /// A connection this node sees at `at` closed. The node removes no

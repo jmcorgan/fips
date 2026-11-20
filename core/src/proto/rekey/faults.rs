@@ -50,6 +50,13 @@ pub(crate) enum Fault {
     NoOpeningTeardown,
     /// A refused IK msg1 is not recorded.
     RefusalUnrecorded,
+    /// An own attempt reads every reply, however many it has refused, as
+    /// before the link's msg2s were capped.
+    CapIgnored,
+    /// Past the budget of refused reads an own attempt drops a reply from
+    /// the established link unread too, so a forger who spends the budget
+    /// keeps the peer's genuine msg2 from completing the rekey.
+    CapDropsOnLink,
     /// The larger node keeps its attempt against a fresh eligible msg1.
     LargerKeepsOwn,
     /// A cutover on evidence keeps every candidate.
@@ -263,6 +270,8 @@ impl Fault {
         Self::RecordUnbounded,
         Self::GlobalJitter,
         Self::TriggerForced,
+        Self::CapIgnored,
+        Self::CapDropsOnLink,
     ];
 
     /// The switch whose variant name is `name`.

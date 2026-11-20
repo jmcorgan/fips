@@ -76,9 +76,11 @@ statements at its site.
   link's bundle returned through the core's join, each output followed by
   the core input it stands for, for the path machine's executor in
   `../../handlers/path.rs`; `Node::roamed`, which tells the join of a
-  one-path roam or a bind, which the bundle reports in no output, for the
-  frame's accounting in `../../dataplane/encrypted.rs`; and `Node::feed`,
-  which applies a path's state, move, switch or release to the record. A
+  one-path roam or a bind, which the bundle reports in no output, and
+  whether it was a standby path's, for the frame's accounting in
+  `../../dataplane/encrypted.rs`; and `Node::feed`, which applies a path's
+  state, move, switch or release, or the link turning capable, to the
+  record. A
   promotion, in `install.rs`, holds the record for its peer and records the
   new bundle's original path. Nothing reads the records to decide anything
   yet.

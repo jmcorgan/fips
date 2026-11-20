@@ -39,7 +39,10 @@ can rebuild any state by replaying the path that reached it.
   fails in every build. `testing/ci-local.sh --explorers` runs it in the
   explorers' build too. A row
   names the cheapest tests its switch reds; the core explorer appears only
-  in the rows where it is the closest observation of the defect.
+  in the rows where it is the closest observation of the defect. A row
+  whose switch the joint world reaches names a joint test or scripted
+  start it reds there; a row whose switch no joint test, scripted start
+  or sweep reds says why in a comment above it.
 - `world.rs`: the world. Three transport models (connectionless;
   connection-oriented with a connect window, replies on the arrival
   connection and an end-of-stream to the far end; BLE-like, one
@@ -141,7 +144,9 @@ can rebuild any state by replaying the path that reached it.
   as that peer writes it from the handshake's name (`joint/names.rs`), a
   history's exact msg1 bytes being the sender's index, which a copy with a
   rewritten header changes and the msg1's tag does not cover. It maps each
-  event to the core's inputs, hands a same-epoch msg1 to the machine with
+  event but a switch or a follow of a path, which its real bundle makes or
+  does not on its own, to the core's inputs, builds a msg1's answer only
+  once the core asks for it, hands a same-epoch msg1 to the machine with
   the core's arrival, routes what the machines ask back to the core by the
   joint world's routing, starts an own rekey through the machine's trigger
   and reports each step in the model step's fields. A held peer's
@@ -155,12 +160,19 @@ can rebuild any state by replaying the path that reached it.
   differences applied; a second test asserts each named difference is
   still met where it should be. An own rekey in a history starts past the
   machine's start floors, one check beyond the ages a msg1 is judged by.
-- `regress.rs`: the two late-dial cases left for later, pinned as known
-  defects with joint nodes at both ends, multipath off (a late second dial whose msg2s are
-  read in the other order, both dialers; the larger node's dial on the
-  smaller node's aged link, then its own rekey), each with a control that
-  passes (the same dials answered in order; the dial on a link too young
-  to rekey). They are run by `testing/known-defect-lane.sh`. Beside them,
+- `regress.rs`: the two late-dial cases, with joint nodes at both ends,
+  multipath off, each with a control that passes. A late second dial
+  whose msg2s are read in the other order, both dialers, splits the pair,
+  an accepted behaviour: its tests show that within one heal one end's
+  link-dead timer removes the peer and the redial settles both ends on a
+  handshake of its own (`TimerNever`, the timer that never fires, reds
+  them); its control is the same dials answered in order. The larger
+  node's dial on the smaller node's aged link, then its own rekey, is a
+  known defect left for a later fix, pinned and run by
+  `testing/known-defect-lane.sh`: the pair keeps one session and no timer
+  fires, while the smaller node refuses the larger node's rekeys until its
+  own rekey clears the pending; its control dials on a link too young to
+  rekey. Beside them,
   one schedule per earlier settlement defect the core can see, each
   reaching the state that defect broke and asserting it holds: a removed
   link's index entries, a crossing over two transports, a crossing's move
@@ -182,25 +194,50 @@ can rebuild any state by replaying the path that reached it.
   fails with the same property at the same node (`FIPS_SETTLE_SIM_NOSHRINK`
   reports it unshrunk).
 - `table.rs`: the unit tests of `../table.rs`, attached from it with
-  `#[path]`: the path events, attribution by a proven path, a punched
-  dial, a failed msg2 send, the stored msg2 drawn by any msg1 from its
-  address, an orphaned bundle, the admission cap, the
-  links a crossing and a late second dial retire, the reset a move
-  hands the per-peer data, and the table and a record of its own reading
-  the bundle's reports the same way through `Links::mirror`.
+  `#[path]`: the path events, attribution by a proven path, a capable
+  peer's setup pair off the link, a msg1 off the link from the pair the
+  core holds the peer at, from a probing path and from a setup pair the
+  index no longer names the link at, a punched
+  dial, a failed msg2 send, a failed dial resend tried again once a
+  tick by an executor that sleeps until the next wake and at the next
+  poll by one that polls between ticks, but never past the dial's last
+  resend, the stored msg2
+  drawn by any msg1 from its address, an orphaned bundle, the admission
+  cap, the links a crossing and a late second dial retire, the connection
+  a move keeps open when the dial was answered from the pair the peer
+  dialled from and the dial's own connection that move closes, the reset
+  a move hands the per-peer data, the table and a record of its own
+  reading the bundle's reports the same way through `Links::mirror`, a
+  dial on a connection still to be opened: its address in the index and
+  in use before its msg1, its link retired with no lease when the
+  connection fails, and its leg started on that link, with that dial's
+  resend cap, when its msg1 follows; whether a move onto this node's
+  own dial ends an operator's pin, for a later dial to a peer held on the
+  link it dialed, a dial made before the peer was held, and a second such
+  dial answered after a crossing; a msg1's answer asked for only once
+  it is admitted and after any teardown, with the link of an answer the
+  shell refused retired; the max-peers cap at a msg1, at a sent
+  answer and at a completed dial; and the test hook's reap of one leg,
+  which reaps that leg alone and only from its deadline.
 - `links.rs`: the unit tests of `../links.rs`, attached from it with
   `#[path]` (so it is that module's child, not declared in `mod.rs`): the
-  derived index, and the close rule's cases with a link a leg holds, a
-  live path, a probing path and a release marked keep.
+  derived index, the close rule's cases with a link a leg holds, a
+  live path, a probing path and a release marked keep, and each question
+  `Placement` answers, over a table of states, as the node answers it.
 - `gates.rs`: the unit tests of `../gates.rs`, attached from it with
   `#[path]`: each gate edge and source, the replay memory and its bound,
   the silent-session refusal and its doubling, the frame that forgets
-  both, the default intervals against the model's, and the gates run
-  beside a model `Judge` on the model's own gate histories.
+  both, the memory holding no entry once an identity's state has lapsed
+  (ten thousand identities asked about, a hundred with live state, then
+  an hour), the default intervals against the model's, and the gates run
+  beside a model `Judge` on the model's own gate histories, comparing
+  the dampener's stamp while it counts, since the model keeps its last
+  stamp for good.
 - `join.rs`: the unit tests of `../join.rs`, attached from it with
   `#[path]`: what each rekey output and each bundle output becomes, a
   removal's outputs reaching no link, a released path going to the link
-  the peer moved off, a roam and a bind, the order of a step's outputs,
+  the peer moved off, a roam and a bind, a standby path's roam left
+  unmarked, the order of a step's outputs,
   and a rekey step allocating nothing, counted by the crate's test
   allocator; and on stub keys, a move refused for a setup of another key
   leaving both machines as they were, a removal handing back what the
@@ -210,7 +247,9 @@ can rebuild any state by replaying the path that reached it.
   comment.
 - `legs.rs`: the unit tests of `../legs.rs`, attached from it with
   `#[path]`: a leg reaped at its deadline with its lease, the resend
-  schedule within and past the deadline, the stored answer to a resend,
+  schedule within and past the deadline, the schedule at a configured
+  multiplier as the node truncates it, a dial stopped at its own resend
+  cap and never past the configured count, the stored answer to a resend,
   a poll before the next wake, a deadline at the end of a short clock's
   range, and `close` returning every lease with no leak.
 - `parity.rs`: the unit tests of `../parity.rs` and its trace, attached
@@ -255,6 +294,10 @@ can rebuild any state by replaying the path that reached it.
   depth, states, frontier per depth and time; `FIPS_SETTLE_EXPLORE_TRACE=1`
   prints the frontier as it grows) and record the run when a change moves
   the counts.
+- A test whose doc line says it records current behaviour asserts an
+  incidental rule of `../rules.txt` and is listed in `../current.txt`;
+  rename, move or delete it only with its line there, and change what it
+  asserts of that rule only with the rule's line.
 - The explorer's key is the world's digest. A connection's direction keeps
   its order there, and everything else in flight is a set, so deliveries
   that commute reach one state. It prints a packet's bytes, not its wire
@@ -304,8 +347,10 @@ can rebuild any state by replaying the path that reached it.
   and a frame that would not open or a pair's machines not converged only
   beside such a split of the same sessions; nothing else on the path is
   exempt: a split of other sessions, a pending, a configured peer not
-  held. The two defects left for later, `LaterDialFirst` and `DialAsRekey`
-  (`Shape::pinned`), only the runs against the models of deployed nodes
+  held. The two late-dial shapes, `LaterDialFirst` (the accepted split
+  that the link-dead timer and the redial end) and `DialAsRekey` (the
+  aged-link defect left for a later fix) (`Shape::pinned`), only the runs
+  against the models of deployed nodes
   exempt (`oracle::by_any_shape`), where a dial on an aged link also
   spares a pending, or a split, that names the pending it left: the
   model's convergence with itself and the core explorer exclude the

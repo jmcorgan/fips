@@ -975,7 +975,14 @@ impl MaintParty {
         let Some(p) = self.s.peers.get_mut(&id.0) else {
             return;
         };
-        let ev = Event::Frame { hs, from: src };
+        // The deployed release has no path bundle: its address follows
+        // every frame's source, which the model is told as no paths.
+        let ev = Event::Frame {
+            hs,
+            from: src,
+            paths: 0,
+            message: false,
+        };
         let cut = p.rekey.frame(now, hs);
         if cut.is_none() && p.rekey.cur != hs && !p.rekey.draining(hs) {
             self.note(now, id, ev, Rec::default());

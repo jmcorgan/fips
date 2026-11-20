@@ -66,6 +66,8 @@ pub(super) struct Attempt<P: Profile, I> {
     /// A resend of the first message has been sent, so a reply no longer
     /// measures the round trip.
     pub(super) resent: bool,
+    /// Replies read and refused, counted for a profile that caps them.
+    pub(super) misreads: u8,
 }
 
 /// An own attempt that completed.

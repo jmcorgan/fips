@@ -85,6 +85,10 @@ faults! {
     /// A move onto the dial's link leaves the peer's carrier readings under
     /// the link the peer left.
     CarrierLeftBehind,
+    /// The settlement core's decision for a msg2 completing beside a held
+    /// peer ignores that the link the peer is held on was this node's own
+    /// dial, so only the tie-break decides between moving and keeping.
+    IgnoreOwnDial,
     /// The smaller node of a crossed dial keeps the peer on its inbound
     /// session and closes its own dial, as the larger node does, where the
     /// tie-break moves it onto its dial.
@@ -101,11 +105,19 @@ faults! {
     /// The restart gate measures a heard peering's idle time on the wall
     /// clock instead of the peer clock.
     GateOnWall,
+    /// The replay memory never ages an entry out.
+    MemoryNeverExpires,
+    /// A move that makes a peering heard keeps the replay memory of the
+    /// msg1s that promoted it unheard.
+    MoveKeepsReplayMemory,
     /// The node's interval clock reads the wall clock.
     IntervalOnWall,
     /// An authenticated frame marks the peer heard without moving the
     /// instant it was last heard.
     TouchKeepsHeardInstant,
+    /// A move onto this node's own dial leaves the peering unheard until
+    /// the peer's first frame.
+    MoveLeavesUnheard,
     /// A peer never sent a tree announce counts as sent one at instant 0.
     TreeNoneAsZero,
     /// The tree announce rate limit reads the wall clock.
@@ -177,6 +189,11 @@ faults! {
     /// queue, behind the data and refused when it is full, instead of in
     /// their own queue, which its writer drains first.
     PathLaneShared,
+    /// The settlement core takes a restarted peer's epoch only at the
+    /// cutover that reports the restart, not at the rekey msg2 that revealed
+    /// it, where the peer's rekey takes it: a msg1 at the new epoch in
+    /// between is a restart to the core and a rekey to the peer's machine.
+    EpochAtCutover,
     /// A moved path's old pair stays in the link's record, so the index
     /// derived from it keeps an entry there, beside the one at the pair it
     /// moved to.
@@ -217,16 +234,72 @@ faults! {
     DisconnectKeepsVerified,
     /// A link its rekey machine ended schedules a reconnect to the peer.
     EndedSchedulesRetry,
+    /// The settlement core removes a peer whose bundle was orphaned with no
+    /// reconnect, though the node notes that loss for one as it does a dead
+    /// link.
+    OrphanedNoRetry,
+    /// The settlement core removes a peer for a restart, a replacement or
+    /// an own-dial restart with no reconnect, though the node notes each
+    /// loss for one before the new session is promoted.
+    RestartNoRetry,
+    /// The settlement core removes a peer a redial's swap replaces with no
+    /// reconnect, though the node notes the loss for one before the
+    /// redial's leg is promoted.
+    RedialNoRetry,
+    /// The settlement core installs the peer a redial's swap promotes
+    /// heard at the swap, forgetting its replay memory and silent sessions
+    /// there, where the node promotes the redial's leg unheard, noting its
+    /// ephemeral, and hears it at the proving frame's own entry, a later
+    /// one under decrypt workers.
+    RedialSwapHeard,
+    /// The settlement core's removal of an orphaned or disconnected peer
+    /// closes every pair of its link no other link uses, a setup pair the
+    /// bundle released to keep included, and leaves the pair a
+    /// disconnected peer was held at open while another link uses it.
+    RemovalClosesEveryPair,
     /// The core's record of a link is never told a path's state, so a new
     /// bundle's original path and every later change of a path's state are
     /// missing from it.
     LinksNotFed,
-    /// The live audit lets off any acknowledged path the core records Live,
-    /// not only the active path a switch made Live.
-    MirrorLetsAckedOff,
     /// A link's setup address stays in the index derived from the link
     /// records after its bundle released the path there.
     ReleasedSetupIndexed,
+    /// The settlement core counts a msg1 from a held link's setup pair as on
+    /// the link whether or not the peer is capable, where the node counts a
+    /// capable peer's pair that its bundle holds no path at as off it.
+    CapableIgnored,
+    /// The settlement core counts a msg1 from the pair its record of the
+    /// peer is at as on the link, and a msg1 from the setup pair whatever
+    /// the state of the path there, where the node counts only the proven
+    /// paths, and the index at a pair the bundle holds no path at.
+    AttributeByCurrent,
+    /// The settlement core counts a msg1 as on a held peer's link only from
+    /// the link's setup pair, as a post-move msg1 classified by the old
+    /// setup address would be.
+    AttributeBySetupOnly,
+    /// The settlement core leaves its record of where a peer is at the
+    /// path its bundle switched away from.
+    SwitchLeavesPeer,
+    /// The settlement core moves its record of where a peer is to the
+    /// source of each frame, wherever the frame came from, and not when the
+    /// bundle moves the path the peer is at.
+    HeardMovesPeer,
+    /// The settlement core resets a peer's data as a roam when the bundle
+    /// moves the path the peer is at at a path message, which the node runs
+    /// as a move of that path and no roam.
+    FollowResets,
+    /// A switch records the path switched to Live in the link's record,
+    /// the settlement core's and the node's, whatever state the bundle holds
+    /// it in.
+    SwitchWritesLive,
+    /// The settlement core's move retires the link it leaves before the
+    /// moved-onto link's record holds the msg2's pair, so it closes the
+    /// connection the peering moved onto.
+    MoveClosesNewPair,
+    /// A move onto this node's dial at a pair other than the dial's own
+    /// leaves the connection the dial was set up at open, though no path and
+    /// no handshake uses it, in the settlement core and in the node.
+    MoveLeavesDialOpen,
     /// Closing a link takes the index's entry at each pair it was named at
     /// from any other link that uses the pair, as the written index did.
     ShadowLosesEntry,
@@ -336,6 +409,9 @@ faults! {
     /// as soon as the Wi-Fi path's window score passes the cable's, and the
     /// Wi-Fi path takes it back once the load has followed, over and over.
     MediumMoveUnheld,
+    /// A pending inbound link's stored msg2, once sent, answers any msg1
+    /// from the link's address, not only the msg1 it was written for.
+    StoredAnswersAny,
     /// A fresh same-epoch msg1 off the established link of a heard peering
     /// is refused as off the link while that link is reachable, and asks
     /// for a replacement on a link too young to rekey, as before redials
@@ -345,11 +421,137 @@ faults! {
     /// the msg1, so a redial the node then refuses has its resends refused
     /// as copies for as long as the link lives.
     RedialRecordsAtJudge,
+    /// A redial is answered by tearing the held peering down at the msg1,
+    /// and promoting the msg1 at once, as a replacement is.
+    RedialTearsDownAtMsg1,
+    /// A pending redial is never reaped at the handshake timeout.
+    RedialNeverExpires,
+    /// A second redial for an identity replaces its pending one however
+    /// young that one is.
+    RedialSlotIgnored,
+    /// A redial's ephemeral is not remembered, so a capture is answered
+    /// each time it is sent.
+    RedialMemoryIgnored,
+    /// A redial of a peering this node replaced within 15 s is answered
+    /// anyway: the restart dampener is not consulted.
+    RedialSkipsDampener,
     /// A fresh msg1 off the established link of a peering not yet heard
     /// from is answered into a redial, as one of a heard peering is, where
     /// it should be replaced at the msg1 (rule 3.3) or refused as off the
     /// link (rule 4.1) as before.
     RedialCoversUnheard,
+    /// A pending redial's entry survives the promotion of its link by a
+    /// msg2 resend.
+    RedialEntryKeptAtPromote,
+    /// An operator disconnect of a held peer leaves its pending redial, so
+    /// the redial's first frame promotes the peer again. Read by the node
+    /// and by the settlement core, whose disconnect abandons the pending
+    /// redial as the node drops it.
+    RedialKeptAtDisconnect,
+    /// A redial the ACL passed and no session index could be drawn for
+    /// leaves no mark in the redial memory, so its resends and the
+    /// ephemerals after it are judged as if it never arrived. Read by the
+    /// settlement core at the shell's abandon of the redial's ask.
+    AuthorizedRedialUnnoted,
+    /// A link rekey reads every msg2 under its attempt's index, however
+    /// many it has refused, as before the cap: a party that saw the rekey's
+    /// msg1 makes it read as many forged msg2s as it sends. The node half
+    /// of the rekey machine's switch of the same name.
+    CapIgnored,
+    /// Past its budget of refused reads a link rekey drops a msg2 from the
+    /// established link unread too, so a forger who spends the budget
+    /// keeps the peer's genuine msg2 from completing the rekey. The node
+    /// half of the rekey machine's switch of the same name.
+    CapDropsOnLink,
+    /// The settlement core's restart gates keep a memory entry for every
+    /// identity they were ever asked about and never drop one, however
+    /// long its stamp, replays and silence have lapsed.
+    MemoryNeverDropped,
+    /// A settlement core dial resend whose send failed stays due at the
+    /// instant it was missed, so the core's next wake stays in the past and
+    /// every poll until the dial's deadline asks for it again.
+    UnsentStaysDue,
+    /// A settlement core dial resend whose send failed is due only at the
+    /// wake it reports, one tick on, not at the next poll, so a poll that
+    /// falls before that instant does not try it again.
+    UnsentDueAtWake,
+    /// A settlement core dial whose last resend was sent takes a failed
+    /// send reported after it as one more resend to try again.
+    UnsentPastCap,
+    /// The settlement core's msg1 resend waits double from the first
+    /// interval, whatever multiplier the node is configured with, so a node
+    /// configured with another multiplier would resend on another schedule
+    /// than the one it runs today.
+    BackoffDoubles,
+    /// The settlement core sends a dial's first msg1 resend one configured
+    /// resend interval after the msg1, where the node sends it a second
+    /// after, whatever the interval, so a node configured with another
+    /// interval would send its first resend at another instant.
+    FirstResendAtInterval,
+    /// The settlement core ignores a dial's own resend cap, so a dial an
+    /// mDNS advert directs at a node not configured to dial resends the
+    /// configured count, where the node stops it at its discovery cap.
+    OriginIgnored,
+    /// The settlement core opens no link record for a dial on a connection
+    /// still to be opened until its msg1, so the connection being opened is
+    /// in no index and in use by nothing, where the node's link and index
+    /// entry exist from the dial.
+    ConnectingUnlinked,
+    /// The settlement core closes the pair a dial still connecting dialed
+    /// when the dial is given up, where the node closes nothing for a dial
+    /// it gives up before its msg1.
+    ConnectingCloses,
+    /// The settlement core closes the msg1's pair when it gives up an
+    /// answer whose msg2 could not be sent at all, where the node forgets
+    /// the link and closes nothing.
+    UnsendableCloses,
+    /// The settlement core gives up a redial's answer whose msg2 could not
+    /// be sent and keeps the identity's pending redial on its retired link,
+    /// where the node forgets the redial with the leg's machine.
+    UnsendableKeepsRedial,
+    /// The settlement core closes a torn-down link's paths by its records
+    /// alone, not by its bundle's keep, where the node closes, on a capable
+    /// link, each path other than the one the peer sends on, and on any
+    /// other none.
+    TeardownIgnoresKeep,
+    /// The settlement core says a move onto this node's own dial ends an
+    /// operator's pin of the peer's path only when the link it left was
+    /// this node's dial, where the node also ends it when the dial was made
+    /// while the peer was held on that link (`own_dial || later_dial`).
+    UnpinOwnOnly,
+    /// The settlement core's frame on a peering heard already, by this
+    /// node's own dial or a move, forgets the replay memory an earlier
+    /// unheard peering left, where the node forgets it only at the frame or
+    /// move that makes the peering heard.
+    FrameForgetsReplays,
+    /// The settlement core counts a removed session toward the identity's
+    /// silent-session back-off only when the peering was unheard, so a
+    /// session of this node's own dial that ends before the peer's first
+    /// frame is not counted, where the node counts every session that
+    /// carried no frame.
+    SilentReadsHeard,
+    /// The settlement core resets a peer, as at a roam, when its link's one
+    /// path roams while it is not the active path, where the node moves the
+    /// path and resets nothing.
+    StandbyRoamResets,
+    /// The settlement core asks for a msg1's answer before it classifies
+    /// the msg1, so a refused or rekey msg1 would cost a msg2 write and an
+    /// index draw, as the answer built before the decision did.
+    AnswerBeforeAdmit,
+    /// The settlement core's max-peers cap counts no peer, so at the cap a
+    /// msg1 from a new identity is answered and a dial to one installed,
+    /// where the node drops the msg1 and refuses the promotion.
+    CapNotCounted,
+    /// The settlement core's restart gates judge a new epoch in the msg2 of
+    /// this node's own dial as they judge a msg1 restart, by the floors and
+    /// the dampener, where the node accepts it as the reply to its own
+    /// msg1. The node half of the gates' switch of the same name.
+    OutboundGated,
+    /// The settlement core's restart interval is 10 s, so the dampener
+    /// accepts a second restart 12 s after the first, which the node
+    /// refuses. The node half of the core parameters' switch of the same
+    /// name.
+    IntervalTen,
 }
 
 impl Fault {

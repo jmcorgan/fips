@@ -40,6 +40,9 @@ pub(crate) enum Fault {
     KeepIgnored,
     /// A setup address whose path the bundle released stays in the index.
     ReleasedSetupIndexed,
+    /// A msg1 from a capable peer's setup pair, at which the bundle holds
+    /// no path, counts as on the link.
+    CapableIgnored,
     /// The unheard floor refuses at exactly its age as well.
     UnheardInclusive,
     /// The heard floor counts from the peering's installation only.
@@ -61,6 +64,17 @@ pub(crate) enum Fault {
     ReplaySeenIgnored,
     /// A frame forgets neither the replay memory nor the silent sessions.
     HeardKeepsMemory,
+    /// A frame on a peering heard already, by this node's own dial or a
+    /// move, forgets the replay memory an earlier unheard peering left.
+    FrameForgetsReplays,
+    /// A removed session counts as silent only when its peering was
+    /// unheard, so an own dial's session with no frame is not counted.
+    SilentReadsHeard,
+    /// A standby path's roam is marked a roam, so the core resets the peer.
+    StandbyRoamResets,
+    /// The gates keep a memory entry for every identity they were asked
+    /// about, and never drop one whose state has lapsed.
+    MemoryNeverDropped,
     /// The silent-session refusal starts one session early.
     SilentEarly,
     /// The silent-session refusal does not double.
@@ -79,17 +93,48 @@ pub(crate) enum Fault {
     DeadlineWraps,
     /// Closing the legs keeps one leg's lease.
     LeaseKept,
+    /// A dial resend whose send failed stays due at the instant it was
+    /// missed, so the next wake stays in the past.
+    UnsentStaysDue,
+    /// A dial resend whose send failed is due only at the wake it reports,
+    /// one tick on, not at the next poll.
+    UnsentDueAtWake,
+    /// A dial whose last resend was sent takes a failed send reported
+    /// after it as one more resend to try again.
+    UnsentPastCap,
     /// A move keeps the peer's address where it was.
     MoveKeepsOldPair,
     /// A move retires nothing, so the link it leaves stays.
     MoveKeepsInboundLink,
+    /// A move retires the link it leaves before the moved-onto link's
+    /// record holds the msg2's pair, so it closes the connection the
+    /// peering moved onto.
+    MoveClosesNewPair,
+    /// A move onto a pair other than the dial's own leaves the connection
+    /// the dial was set up at open with no link using it.
+    MoveLeavesDialOpen,
     /// A move hands the per-peer data no reset.
     MoveNoReset,
     /// A move leaves the peering unheard until the peer's first frame.
     MoveLeavesUnheard,
+    /// A move that makes a peering heard keeps the replay memory of the
+    /// msg1s that promoted it unheard.
+    MoveKeepsReplayMemory,
     /// An own dial completing on a held link this node dialed is judged by
     /// the tie-break alone.
     IgnoreOwnDial,
+    /// A crossing the tie-break alone decides keeps the peer on its inbound
+    /// session at the smaller node, as at the larger.
+    CrossedRunsKeep,
+    /// A frame marks the peering heard without moving the instant of its
+    /// last frame.
+    TouchKeepsHeardInstant,
+    /// A moved path's old pair stays in the link's record beside the pair
+    /// it moved to.
+    MovedLeavesEntry,
+    /// A restarted peer's epoch, which its rekey took at the msg2 that
+    /// revealed the restart, is taken only at the cutover that reports it.
+    EpochAtCutover,
     /// At a late second dial the core keeps the link moved off, as the
     /// model keeps its fallback.
     ModelFallbackInCore,
@@ -110,12 +155,56 @@ pub(crate) enum Fault {
     /// A redial's mark outlives its leg: reaped, or installed at its send
     /// once its peer is gone.
     RedialLegKept,
+    /// A redial's mark outlives its leg's install at its send once its
+    /// peer is gone.
+    RedialEntryKeptAtPromote,
+    /// A redial's ephemeral is neither asked of the redial memory nor
+    /// noted in it.
+    RedialMemoryIgnored,
+    /// The restart dampener does not hold a redial back.
+    RedialSkipsDampener,
+    /// A redial passes no slot, memory or dampener, and its answer
+    /// replaces the held peer at once.
+    RedialTearsDownAtMsg1,
+    /// A redial's leg is never reaped.
+    RedialNeverExpires,
+    /// A redial the ACL passed and no session index could be drawn for
+    /// leaves no mark in the redial memory.
+    AuthorizedRedialUnnoted,
+    /// The redial memory keeps no identity of its own: a frame of the held
+    /// peering, or the lapse of the identity's other memory, drops the
+    /// ephemerals that armed a redial of it.
+    RedialMemoryLapses,
+    /// A redial's swap installs the peer heard, forgetting its replay
+    /// memory and silent sessions at the swap, rather than unheard until
+    /// the frame's own `Heard`.
+    RedialSwapHeard,
+    /// An operator disconnect of a held peer leaves its pending redial.
+    RedialKeptAtDisconnect,
+    /// A redial's answer given up as unsendable leaves the redial's mark.
+    UnsendableKeepsRedial,
     /// A msg1 counts as on the link only from the link's setup address.
     AttributeBySetupOnly,
+    /// A msg1 from the pair the core's record of the peer is at counts as
+    /// on the link, and one from the setup pair whatever its path's state.
+    AttributeByCurrent,
     /// A path's move leaves its pair where it was.
     PathMoveIgnored,
     /// A switch to a new path adds nothing.
     SwitchIgnored,
+    /// A switch leaves the core's record of where the peer is at the path
+    /// switched away from.
+    SwitchLeavesPeer,
+    /// A frame moves the core's record of where the peer is to its
+    /// source, wherever it came from, and a path's move leaves that record
+    /// where it was.
+    HeardMovesPeer,
+    /// A path the bundle moved at a path message, where the peer is held,
+    /// resets the peer's data as a one-path roam does.
+    FollowResets,
+    /// A switch records the path switched to Live, whatever state the
+    /// bundle holds it in.
+    SwitchWritesLive,
     /// A released path's pair stays in the link's record.
     ReleaseKeepsPair,
     /// A path's state change is ignored.
@@ -126,8 +215,24 @@ pub(crate) enum Fault {
     SendFailedDropsLeg,
     /// An orphaned bundle removes nothing.
     OrphanedIgnored,
+    /// An orphaned bundle's peer is removed with no reconnect.
+    OrphanedNoRetry,
+    /// A peer removed for a restart, a replacement or an own-dial restart
+    /// is removed with no reconnect.
+    RestartNoRetry,
+    /// A peer a redial's swap replaces is removed with no reconnect.
+    RedialNoRetry,
+    /// An orphaned or disconnected peer's removal closes every pair of its
+    /// link no other link uses, and a disconnect guards the peer's pair.
+    RemovalClosesEveryPair,
     /// The admission cap is lifted.
     CapLifted,
+    /// A msg1's answer is asked for before the msg1 is classified, so a
+    /// refused or rekey msg1 costs an answer too.
+    AnswerBeforeAdmit,
+    /// The max-peers cap counts no peer, so a new identity is admitted
+    /// and installed past it.
+    CapNotCounted,
     /// Every start's state cap is set one depth below what it explores.
     ReachOneMore,
     /// The world keeps its flight in hash-map order.
@@ -186,6 +291,9 @@ pub(crate) enum Fault {
     PacketStamp,
     /// An answer not yet sent is drawn only by its own msg1, byte for byte.
     StoredByBytes,
+    /// An answer once sent is drawn by any msg1 from its address, not only
+    /// by the msg1 it was written for.
+    StoredAnswersAny,
     /// The comparison keeps the larger node's own rekey after it yielded
     /// it at a simultaneous rekey.
     YieldKept,
@@ -233,10 +341,6 @@ pub(crate) enum Fault {
     /// A joint node does not tell the core of a restart its rekey machine
     /// found at its own rekey's msg2.
     RestartDropped,
-    /// A joint node sends to the peer, and counts its link's use, at the
-    /// core's record of where the peer is, in place of the bundle's active
-    /// path.
-    SendsByHeld,
     /// A joint node's state key holds what its machines show (`view` and
     /// `bindings`) in place of every field that can change.
     KeyFromView,
@@ -277,6 +381,36 @@ pub(crate) enum Fault {
     /// A joint node does not tell the core that a peer's bundle was
     /// orphaned, so the core keeps a peer the node would remove.
     OrphanKept,
+    /// A dial's resend waits double from the first interval, whatever
+    /// multiplier the node is configured with.
+    BackoffDoubles,
+    /// A dial's first resend comes one configured resend interval after
+    /// its msg1, not the node's fixed second.
+    FirstResendAtInterval,
+    /// A dial's own resend cap is ignored, so a dial an mDNS advert directs
+    /// at a node not configured to dial resends the configured count.
+    OriginIgnored,
+    /// A dial on a connection still to be opened has no link record until
+    /// its msg1, so its address is in no index and in use by nothing.
+    ConnectingUnlinked,
+    /// A dial given up while still connecting closes the pair it dialed.
+    ConnectingCloses,
+    /// An answer whose msg2 could not be sent at all closes the msg1's
+    /// pair when it is given up.
+    UnsendableCloses,
+    /// A teardown closes its link's paths by the link's records alone,
+    /// not by its bundle's keep: a removal other than an orphaned bundle's,
+    /// an operator disconnect's and the core's close closes none, and those
+    /// and a move close every path.
+    TeardownIgnoresKeep,
+    /// A move onto this node's own dial ends an operator's pin of the
+    /// peer's path only when the link it left was this node's dial, not
+    /// when the dial was made while the peer was held on that link.
+    UnpinOwnOnly,
+    /// A joint node's liveness timer never fires: its party reports no
+    /// link-dead deadline, so a peer silent past the link-dead timeout is
+    /// kept, and a split neither end hears across is never ended.
+    TimerNever,
 }
 
 impl Fault {
@@ -288,6 +422,7 @@ impl Fault {
         Self::ProbingCounts,
         Self::KeepIgnored,
         Self::ReleasedSetupIndexed,
+        Self::CapableIgnored,
         Self::UnheardInclusive,
         Self::HeardFromInstall,
         Self::HeardNeedsFrame,
@@ -297,6 +432,10 @@ impl Fault {
         Self::ReplayUnbounded,
         Self::ReplaySeenIgnored,
         Self::HeardKeepsMemory,
+        Self::FrameForgetsReplays,
+        Self::SilentReadsHeard,
+        Self::StandbyRoamResets,
+        Self::MemoryNeverDropped,
         Self::SilentEarly,
         Self::SilentFlat,
         Self::IntervalTen,
@@ -306,11 +445,21 @@ impl Fault {
         Self::PollAhead,
         Self::DeadlineWraps,
         Self::LeaseKept,
+        Self::UnsentStaysDue,
+        Self::UnsentDueAtWake,
+        Self::UnsentPastCap,
         Self::MoveKeepsOldPair,
         Self::MoveKeepsInboundLink,
+        Self::MoveClosesNewPair,
+        Self::MoveLeavesDialOpen,
         Self::MoveNoReset,
         Self::MoveLeavesUnheard,
+        Self::MoveKeepsReplayMemory,
         Self::IgnoreOwnDial,
+        Self::CrossedRunsKeep,
+        Self::TouchKeepsHeardInstant,
+        Self::MovedLeavesEntry,
+        Self::EpochAtCutover,
         Self::ModelFallbackInCore,
         Self::ReplacementUngated,
         Self::RedialInstallsAtSent,
@@ -319,15 +468,36 @@ impl Fault {
         Self::RedialHeardFloored,
         Self::RedialSlotIgnored,
         Self::RedialLegKept,
+        Self::RedialEntryKeptAtPromote,
+        Self::RedialMemoryIgnored,
+        Self::RedialSkipsDampener,
+        Self::RedialTearsDownAtMsg1,
+        Self::RedialNeverExpires,
+        Self::AuthorizedRedialUnnoted,
+        Self::RedialMemoryLapses,
+        Self::RedialSwapHeard,
+        Self::RedialKeptAtDisconnect,
+        Self::UnsendableKeepsRedial,
         Self::AttributeBySetupOnly,
+        Self::AttributeByCurrent,
         Self::PathMoveIgnored,
         Self::SwitchIgnored,
+        Self::SwitchLeavesPeer,
+        Self::HeardMovesPeer,
+        Self::FollowResets,
+        Self::SwitchWritesLive,
         Self::ReleaseKeepsPair,
         Self::StateIgnored,
         Self::PunchedDropped,
         Self::SendFailedDropsLeg,
         Self::OrphanedIgnored,
+        Self::OrphanedNoRetry,
+        Self::RestartNoRetry,
+        Self::RedialNoRetry,
+        Self::RemovalClosesEveryPair,
         Self::CapLifted,
+        Self::AnswerBeforeAdmit,
+        Self::CapNotCounted,
         Self::ReachOneMore,
         Self::FlightByHash,
         Self::FrameOpensAny,
@@ -354,6 +524,7 @@ impl Fault {
         Self::ModelDropsFallback,
         Self::PacketStamp,
         Self::StoredByBytes,
+        Self::StoredAnswersAny,
         Self::YieldKept,
         Self::RekeyOutlivesPeer,
         Self::PreviousUnheard,
@@ -370,7 +541,6 @@ impl Fault {
         Self::ReplaceDropped,
         Self::PathsUnmirrored,
         Self::RestartDropped,
-        Self::SendsByHeld,
         Self::KeyFromView,
         Self::KeyOmitsBundle,
         Self::HeardFeedDropped,
@@ -384,6 +554,15 @@ impl Fault {
         Self::LeaseForgotten,
         Self::CloseSkipped,
         Self::OrphanKept,
+        Self::BackoffDoubles,
+        Self::FirstResendAtInterval,
+        Self::OriginIgnored,
+        Self::ConnectingUnlinked,
+        Self::ConnectingCloses,
+        Self::UnsendableCloses,
+        Self::TeardownIgnoresKeep,
+        Self::UnpinOwnOnly,
+        Self::TimerNever,
     ];
 
     /// The switch whose variant name is `name`.

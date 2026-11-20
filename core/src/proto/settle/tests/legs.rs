@@ -35,6 +35,8 @@ fn start(link: LinkNo, peer: Option<NodeAddr>, index: u32) -> Start {
         peer,
         msg1: MSG1.to_vec(),
         lease: IndexLease::for_test(index),
+        resends: None,
+        held: None,
     }
 }
 
@@ -65,6 +67,8 @@ fn release(out: Vec<LegOut>) -> Vec<LegOut> {
         .collect()
 }
 
+/// Records current behaviour (rule S-52: the 30 s deadline): open to change by decision. Its
+/// other assertions are not.
 #[test]
 fn a_dial_leg_is_reaped_at_its_deadline_and_returns_its_lease() {
     let p = Params::default();
@@ -97,6 +101,33 @@ fn a_dial_leg_is_reaped_at_its_deadline_and_returns_its_lease() {
     assert!(links.get(link).is_none() && legs.get(link).is_none());
 }
 
+/// Run the dial leg on `link` to its end, polling at each wake and
+/// reporting each resend sent there, and return the instants of its
+/// resends. Each resend must repeat the msg1 byte for byte.
+fn resends(legs: &mut Legs<TestInstant>, links: &mut Links, link: LinkNo, p: &Params) -> Vec<u64> {
+    let mut times = Vec::new();
+    let mut polls = 0;
+    while let Some(wake) = legs.next_wake() {
+        polls += 1;
+        assert!(polls < 20, "the leg is still held after {polls} wakes");
+        for o in release(legs.poll(wake, links)) {
+            let LegOut::Resend { link: l, bytes } = o else {
+                unreachable!("reaps are released")
+            };
+            assert_eq!(
+                (l, bytes.as_slice()),
+                (link, MSG1),
+                "the msg1, byte for byte"
+            );
+            times.push(wake.0);
+            legs.resent(link, wake, p);
+        }
+    }
+    times
+}
+
+/// Records current behaviour (rules S-47 and S-54: the resend times and count): open to change
+/// by decision. Its other assertions are not.
 #[test]
 fn resends_follow_the_backoff_and_repeat_the_msg1_byte_for_byte() {
     // Run to the end at each wake: within the 30 s deadline the resends
@@ -113,28 +144,101 @@ fn resends_follow_the_backoff_and_repeat_the_msg1_byte_for_byte() {
         let mut links = Links::new();
         let mut legs = Legs::new();
         let link = dialed(&mut legs, &mut links, 6, 0, &p);
-        let mut times = Vec::new();
-        let mut polls = 0;
-        while let Some(wake) = legs.next_wake() {
-            polls += 1;
-            assert!(polls < 20, "the leg is still held after {polls} wakes");
-            for o in release(legs.poll(wake, &mut links)) {
-                let LegOut::Resend { link: l, bytes } = o else {
-                    unreachable!("reaps are released")
-                };
-                assert_eq!(
-                    (l, bytes.as_slice()),
-                    (link, MSG1),
-                    "the msg1, byte for byte"
-                );
-                times.push(wake.0);
-                legs.resent(link, wake, &p);
-            }
-        }
+        let times = resends(&mut legs, &mut links, link, &p);
         assert_eq!(times, want, "with a {handshake} s deadline");
     }
 }
 
+/// Records current behaviour (rule S-47: the resend waits): open to change by decision. Its
+/// other assertions are not.
+#[test]
+fn a_configured_multiplier_spaces_the_resends_as_the_node_truncates_them() {
+    // The node's schedule: the first resend one interval after the dial,
+    // and after the n-th the interval times the multiplier to the n-th
+    // power, truncated to the millisecond. At 1.3333 the waits are 1333,
+    // 1777, 2370 and 3160 ms; doubling would give 2, 4, 8 and 16 s.
+    for (multiplier, want) in [
+        (1.3333, alloc::vec![1_000, 2_333, 4_110, 6_480, 9_640]),
+        (1.5, alloc::vec![1_000, 2_500, 4_750, 8_125, 13_187]),
+        (2.0, alloc::vec![1_000, 3_000, 7_000, 15_000, 31_000]),
+        (2.5005, alloc::vec![1_000, 3_500, 9_752, 25_386, 64_479]),
+    ] {
+        let p = Params {
+            handshake: Duration::from_secs(120),
+            backoff: f64::to_bits(multiplier),
+            ..Params::default()
+        };
+        let mut links = Links::new();
+        let mut legs = Legs::new();
+        let link = dialed(&mut legs, &mut links, 6, 0, &p);
+        let times = resends(&mut legs, &mut links, link, &p);
+        assert_eq!(
+            times, want,
+            "defect: at a multiplier of {multiplier} the resends are not where the node sends them"
+        );
+    }
+}
+
+#[test]
+fn a_dials_first_resend_comes_a_second_after_its_msg1_whatever_the_configured_interval() {
+    // The node arms a dial's first resend a second after its msg1, whatever
+    // the configured interval, and spaces the later ones from the configured
+    // interval: after the n-th, the interval times the multiplier to the
+    // n-th power.
+    for (interval, want) in [
+        (500, alloc::vec![1_000, 2_000, 4_000, 8_000, 16_000]),
+        (1_000, alloc::vec![1_000, 3_000, 7_000, 15_000, 31_000]),
+        (3_000, alloc::vec![1_000, 7_000, 19_000, 43_000, 91_000]),
+    ] {
+        let p = Params {
+            handshake: Duration::from_secs(120),
+            resend: Duration::from_millis(interval),
+            ..Params::default()
+        };
+        let mut links = Links::new();
+        let mut legs = Legs::new();
+        let link = dialed(&mut legs, &mut links, 6, 0, &p);
+        let times = resends(&mut legs, &mut links, link, &p);
+        assert_eq!(
+            times, want,
+            "defect: at a resend interval of {interval} ms the resends are not where the node sends them"
+        );
+    }
+}
+
+#[test]
+fn an_mdns_directed_dial_stops_at_its_resend_cap() {
+    // Configured for eight resends, with a deadline past all of them. The
+    // node caps a dial an mDNS advert directs at an unconfigured node at
+    // five (`DISCOVERY_RESENDS`, as `Start.resends`), which never raises
+    // the configured count.
+    let p = Params {
+        handshake: Duration::from_secs(600),
+        resends: 8,
+        ..Params::default()
+    };
+    let all = alloc::vec![
+        1_000, 3_000, 7_000, 15_000, 31_000, 63_000, 127_000, 255_000
+    ];
+    for (cap, want) in [(Some(5), &all[..5]), (None, &all[..]), (Some(10), &all[..])] {
+        let mut links = Links::new();
+        let mut legs = Legs::new();
+        let link = links.open(pair(6), Dir::Outbound, Holder::Leg);
+        let start = Start {
+            resends: cap,
+            ..start(link, Some(peer()), 6)
+        };
+        assert!(legs.dial(start, t(0), &p).is_none());
+        let times = resends(&mut legs, &mut links, link, &p);
+        assert_eq!(
+            times, want,
+            "defect: a dial capped at {cap:?} resends is not stopped at its cap"
+        );
+    }
+}
+
+/// Records current behaviour (rule S-52: the 30 s deadline): open to change by decision. Its
+/// other assertions are not.
 #[test]
 fn a_responder_leg_answers_a_resend_with_its_stored_msg2_and_is_reclaimed() {
     let p = Params::default();

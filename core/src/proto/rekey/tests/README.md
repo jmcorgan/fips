@@ -21,7 +21,9 @@ oracles.
     messages with candidates: the session shape), `XkFrame` (as `Xk`,
     with a responder that cuts over on the initiator's frame) and `Xx`
     (three messages, index-bearing, a delayed initiator cutover and a
-    leg table's completions: the shape only next selects).
+    leg table's completions: the shape only next selects). `Ik`'s reply
+    route is whether the reply arrived on the link, so its replies are
+    capped as the link profile's are; the others cap none.
   - Stub handshakes: an ephemeral is an attempt identifier from a
     per-node counter, and every message carries a keyed hash over its
     transcript in place of an AEAD tag, so forged, replayed, corrupt and
@@ -51,7 +53,8 @@ oracles.
     were tried in.
 - `fmp.rs`: the two-message tables: trigger, the `trigger` hook held by
   each condition of a scheduled start, attempt and ladder, every
-  IK msg1 and msg2 cell, the answer's route with arrival replies on and
+  IK msg1 and msg2 cell, the cap on refused replies from off the link,
+  the answer's route with arrival replies on and
   off (a msg1 accepted off an unreachable link is answered on the link,
   one on the link on its arrival path, and a resend follows the first
   answer), the poll cutover, adoption by frame, the drain, restart in a
@@ -60,8 +63,9 @@ oracles.
 - `fsp.rs`: the three-message tables: setups, acks and the msg3
   dispatcher, probes and the confirmation deadline, the assumed cutover
   and its revert, prompts answering probes, Karn's rule, the silence
-  trigger and its doubling, restart, the trial order, and the first
-  handshake.
+  trigger and its doubling, restart, the trial order, the first
+  handshake, and that a session reads every ack whatever the link's cap
+  on refused replies.
 - `next.rs`: the rows only next's profiles select: leg completions, the
   delayed cutover and its retained msg3, and a frame-driven session
   responder.

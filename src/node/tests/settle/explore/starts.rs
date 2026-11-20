@@ -136,9 +136,11 @@ pub(super) struct Start {
     /// `1 + 2n` and `1 + 3n`.
     pub(super) reach: usize,
     /// The clauses not asserted on any of the start's paths, because a
-    /// pinned defect breaks them on its scripted path; the map names the
-    /// pin, and `the_explorer_finds_each_pinned_defect_at_its_oracle`
-    /// asserts it there.
+    /// pinned defect, or a split accepted as behaviour, breaks them on its
+    /// scripted path. The map names a defect's pin, and
+    /// `the_explorer_finds_each_pinned_defect_at_its_oracle` asserts it
+    /// there; an accepted split has no pin, and the node tests that assert
+    /// it end at link-dead and a redial name it instead.
     pub(super) pinned: &'static [Clause],
 }
 
@@ -336,8 +338,10 @@ pub(super) fn starts() -> Vec<Start> {
             11,
         ),
         // The scripted path leaves the two ends on different sessions,
-        // which the leaf's heal does not mend in its time: the pinned
-        // second msg2 first.
+        // which the leaf's heal does not mend in its time: the second msg2
+        // first, a split accepted as behaviour, which link-dead and a
+        // redial end (`crossing.rs`, the tests named `..._with_its_msg2_first_
+        // ..._after_link_dead_and_a_redial_...`).
         Start {
             pinned: &[Clause::Settled, Clause::Split, Clause::Quiet],
             ..s(
@@ -453,6 +457,13 @@ pub(super) enum Reach {
     /// On the scripted path of the start named, in the order given: the
     /// clause given breaks, at the node given (in the world's indices) or at
     /// any node.
+    #[cfg_attr(
+        feature = "explorers",
+        expect(
+            dead_code,
+            reason = "no pin names a start since the start-6 split became accepted behaviour; the map and the oracle still read the variant for the next pin a start reaches"
+        )
+    )]
     Start {
         name: &'static str,
         order: Order,
@@ -466,12 +477,6 @@ pub(super) enum Reach {
 /// The reason the aged-link pins reach no start.
 const AGED: &str = "the dial is to a second address of the peer on the link's own transport, after both ends aged past the rekey trigger with no rekey started; the world dials a second address only as a second transport, and ages a session only by starting a rekey (start 7 is not run)";
 
-/// The reason the heard-floor crossing pins reach no start.
-const SILENT: &str = "the smaller node reads the crossed msg1 16 s after it last heard the larger, past the heard floor; the explorer varies packets and not time, and the pins backdate the heard time where a world would have to stay silent";
-
-/// The reason the aged rekey pins reach no start.
-const AGED_REKEY: &str = "the dial follows the smaller node's own completed rekey, with the larger node's frames after the cutover lost and the dial made to a second address on the link's own transport; the world loses no established frame and dials a second address only as a second transport";
-
 /// Every `fips-mesh` known-defect line of `testing/ignored-tests.txt`, by
 /// the test's path and its multipath setting, and where the explorer finds
 /// its defect. Written before the explorer's first run, so a miss cannot
@@ -483,86 +488,6 @@ pub(super) const PINS: &[(&str, bool, Reach)] = &[
         Reach::None(
             "a defect of the Ethernet transport's blocking send, not of settlement: no start runs that transport",
         ),
-    ),
-    (
-        "node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer",
-        false,
-        Reach::Start {
-            name: "late second dial, second msg2 first",
-            order: Order::Larger,
-            clause: Clause::Settled,
-            node: None,
-        },
-    ),
-    (
-        "node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer_with_multipath_on",
-        true,
-        Reach::Start {
-            name: "late second dial, second msg2 first",
-            order: Order::Larger,
-            clause: Clause::Settled,
-            node: None,
-        },
-    ),
-    (
-        "node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_smaller_dialer",
-        false,
-        Reach::Start {
-            name: "late second dial, second msg2 first",
-            order: Order::Smaller,
-            clause: Clause::Settled,
-            node: None,
-        },
-    ),
-    (
-        "node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_smaller_dialer_with_multipath_on",
-        true,
-        Reach::Start {
-            name: "late second dial, second msg2 first",
-            order: Order::Smaller,
-            clause: Clause::Settled,
-            node: None,
-        },
-    ),
-    (
-        "node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer",
-        false,
-        Reach::Start {
-            name: "late second dial, second msg2 first",
-            order: Order::Larger,
-            clause: Clause::Split,
-            node: None,
-        },
-    ),
-    (
-        "node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer_with_multipath_on",
-        true,
-        Reach::Start {
-            name: "late second dial, second msg2 first",
-            order: Order::Larger,
-            clause: Clause::Split,
-            node: None,
-        },
-    ),
-    (
-        "node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_smaller_dialer",
-        false,
-        Reach::Start {
-            name: "late second dial, second msg2 first",
-            order: Order::Smaller,
-            clause: Clause::Split,
-            node: None,
-        },
-    ),
-    (
-        "node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_smaller_dialer_with_multipath_on",
-        true,
-        Reach::Start {
-            name: "late second dial, second msg2 first",
-            order: Order::Smaller,
-            clause: Clause::Split,
-            node: None,
-        },
     ),
     (
         "node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered",
@@ -584,54 +509,4 @@ pub(super) const PINS: &[(&str, bool, Reach)] = &[
         true,
         Reach::None(AGED),
     ),
-    (
-        "node::tests::settle::crossing::a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session",
-        false,
-        Reach::None(SILENT),
-    ),
-    (
-        "node::tests::settle::crossing::a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session_with_multipath_on",
-        true,
-        Reach::None(SILENT),
-    ),
-    (
-        "node::tests::settle::crossing::a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session",
-        false,
-        Reach::None(SILENT),
-    ),
-    (
-        "node::tests::settle::crossing::a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session_with_multipath_on",
-        true,
-        Reach::None(SILENT),
-    ),
-    (
-        "node::tests::settle::crossing::a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session",
-        false,
-        Reach::None(AGED_REKEY),
-    ),
-    (
-        "node::tests::settle::crossing::a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session_with_multipath_on",
-        true,
-        Reach::None(AGED_REKEY),
-    ),
-    (
-        "node::tests::settle::restart::a_rekey_msg1_of_the_peers_previous_run_read_late_by_the_restarted_node_leaves_one_session",
-        false,
-        Reach::None(
-            "the restarted node must read the late rekey msg1 with its new peering about 1 s old, so not eligible as a rekey; the world's rekey step ages the peer's end of the session past the 30 s floor, which makes that msg1 an eligible rekey, and a rekey reached by time alone starts at a jittered moment no schedule names",
-        ),
-    ),
-    (
-        "node::tests::roam_redial::a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering",
-        false,
-        Reach::None(ROAMED),
-    ),
-    (
-        "node::tests::roam_redial::a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering_with_multipath_on",
-        true,
-        Reach::None(ROAMED),
-    ),
 ];
-
-/// Why a redial from a new address is out of the explorer's reach.
-const ROAMED: &str = "the dialer's address changes while its node runs; the world's nodes each keep one address, and no step moves one";

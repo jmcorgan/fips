@@ -86,6 +86,8 @@ pub enum Refusal {
     Silent,
     /// The node's cap on answers in flight.
     Full,
+    /// The node's cap on peers held.
+    Cap,
 }
 
 /// What a party did with one history event.
@@ -260,6 +262,8 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
                     | Event::Msg2Sent { .. }
                     | Event::Msg2 { .. }
                     | Event::Timeout { .. }
+                    | Event::Switch { .. }
+                    | Event::Follow { .. }
                     | Event::RekeyStart { .. }
                     | Event::RekeyMsg2 { .. }
                     | Event::RekeyCutover
@@ -402,7 +406,7 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
                 let named = match rec.refused {
                     Some(Refusal::Replay) => Some(Named::Replay),
                     Some(Refusal::Silent) => Some(Named::Silent),
-                    Some(Refusal::Gate(_) | Refusal::Full) | None => None,
+                    Some(Refusal::Gate(_) | Refusal::Full | Refusal::Cap) | None => None,
                 };
                 if let Some(named) = named {
                     found.named.push((peer, named));
@@ -437,6 +441,26 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
         }
     }
     found
+}
+
+/// The bundle's own moves of where a peer is, its switches of the active
+/// path and its follows of a path, logged at `from` or after, taken out of
+/// `log`. A frame's own step runs before any move the frame's handling
+/// brings about, so a party that logs the frame once its handling is done
+/// puts these back after it.
+pub fn bundled(log: &mut Vec<Entry>, from: usize) -> Vec<Entry> {
+    let tail = log.split_off(from.min(log.len()));
+    let (moved, kept): (Vec<Entry>, Vec<Entry>) = tail.into_iter().partition(|e| {
+        matches!(
+            e,
+            Entry::Ev {
+                ev: Event::Switch { .. } | Event::Follow { .. },
+                ..
+            }
+        )
+    });
+    log.extend(kept);
+    moved
 }
 
 /// The close a node that keeps no fallback makes at a late second dial's
@@ -504,10 +528,7 @@ mod checks {
             Entry::Ev {
                 at: 1_000,
                 peer,
-                ev: Event::Frame {
-                    hs: Hs(1),
-                    from: at(1),
-                },
+                ev: Event::frame(Hs(1), at(1)),
                 rec: Rec::default(),
             },
             Entry::Ev {
@@ -626,10 +647,7 @@ mod checks {
             Entry::Ev {
                 at: 2_000,
                 peer,
-                ev: Event::Frame {
-                    hs: Hs(9),
-                    from: at(1),
-                },
+                ev: Event::frame(Hs(9), at(1)),
                 rec: Rec::default(),
             },
             Entry::Ev {
@@ -686,10 +704,7 @@ mod checks {
             Entry::Ev {
                 at: 1_000,
                 peer,
-                ev: Event::Frame {
-                    hs: Hs(1),
-                    from: at(1),
-                },
+                ev: Event::frame(Hs(1), at(1)),
                 rec: Rec::default(),
             },
             Entry::Ev {
@@ -788,10 +803,7 @@ mod checks {
             "precondition: the model closed nothing at the move"
         );
         let computed = resync_close(&j);
-        let kept = j.step(Event::Frame {
-            hs: Hs(2),
-            from: at(5),
-        });
+        let kept = j.step(Event::frame(Hs(2), at(5)));
         assert!(
             !kept.closes.is_empty(),
             "precondition: the model closes at the frame"

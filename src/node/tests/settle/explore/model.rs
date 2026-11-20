@@ -13,11 +13,11 @@
 //! [`mapped`], and each row of the peer's state, read before and after, is
 //! held to that transition's cell (`table::check_decided`). Where the model
 //! changes nothing, the node must not change which session or link it
-//! holds the peer on. The model holds one path per link, so its roam at a
-//! peer the node holds on more than one path is held as a change of
-//! nothing: the node, whose roaming rule moves a link's one path only,
-//! must keep the session and link, and the roam's cells are listed, not
-//! held.
+//! holds the peer on. The tap tells the model of one path per link
+//! (`Event::frame`), so its roam at a peer the node holds on more than one
+//! path is held as a change of nothing: the node, whose roaming rule moves
+//! a link's one path only, must keep the session and link, and the roam's
+//! cells are listed, not held.
 //!
 //! What a cell says of a row is held where it can be seen ([`decide`]): a
 //! row the cell keeps must read the same; a row the cell changes is held to
@@ -393,7 +393,7 @@ impl Tap {
                 ours.iter()
                     .flatten()
                     .any(|i| i.as_u32() == idx)
-                    .then_some((Event::Frame { hs: Hs(hs), from }, Cause::Frame))
+                    .then_some((Event::frame(Hs(hs), from), Cause::Frame))
             }
             _ => None,
         }

@@ -105,7 +105,7 @@ enum Want {
 
 /// Every rekey machine output this test can build, with what it should
 /// become.
-fn every_rekey_output() -> Vec<(Out, Want)> {
+fn rekey_outputs() -> Vec<(Out, Want)> {
     let t = tag();
     vec![
         (
@@ -209,7 +209,7 @@ fn every_rekey_output() -> Vec<(Out, Want)> {
 /// the shell's own, and a restart report dropped.
 #[test]
 fn each_rekey_output_routes_to_the_core_or_the_shell() {
-    for (o, want) in every_rekey_output() {
+    for (o, want) in rekey_outputs() {
         let before = format!("rekey {o:?}");
         let steps = rekeyed(vec![o]);
         assert_eq!(
@@ -253,7 +253,7 @@ fn read(p: &PathRef) -> Proven {
 }
 
 /// Every bundle output, each with the core input it stands for on `LINK`.
-fn every_bundle_output() -> Vec<(path::Output<()>, Option<In>)> {
+fn bundle_outputs() -> Vec<(path::Output<()>, Option<In>)> {
     let state = |port, next| path::Output::State {
         to: path(port),
         path_id: 1,
@@ -280,6 +280,7 @@ fn every_bundle_output() -> Vec<(path::Output<()>, Option<In>)> {
                 link: LINK,
                 from: pair(&path(1)),
                 to: pair(&path(3)),
+                roam: false,
             }),
         ),
         (
@@ -311,7 +312,7 @@ fn every_bundle_output() -> Vec<(path::Output<()>, Option<In>)> {
             }),
         ),
         (state(6, None), None),
-        (path::Output::Capable, None),
+        (path::Output::Capable, Some(In::Capable { link: LINK })),
         (path::Output::NotCapable, None),
         (
             path::Output::Refused {
@@ -329,17 +330,19 @@ fn every_bundle_output() -> Vec<(path::Output<()>, Option<In>)> {
             Some(In::Switched {
                 link: LINK,
                 to: pair(&path(5)),
+                proven: Proven::Live,
             }),
         ),
         (
             path::Output::Switched {
                 from: None,
-                to: path(5),
+                to: path(2),
                 why: Switch::Handover,
             },
             Some(In::Switched {
                 link: LINK,
-                to: pair(&path(5)),
+                to: pair(&path(2)),
+                proven: Proven::Acked,
             }),
         ),
         (path::Output::Orphaned, Some(In::Orphaned { peer: peer() })),
@@ -367,13 +370,15 @@ fn pathed(o: path::Output<()>, link: Option<LinkNo>, released: Option<LinkNo>) -
 /// Each bundle output comes back as itself, followed by the core input it
 /// stands for, if any: a state change with the path's proven state read
 /// from the bundle after the step, a move, a switch (with the old active
-/// path kept or discarded), a release and an orphaning.
-/// A discarded path's state change, the capability reports, a refusal, a
-/// send and a connect stand for none. Breaks: a move's `from` and `to`
+/// path kept or discarded, and the state of the path switched to read from
+/// the bundle the same way, a handover's acknowledged one too), the peer
+/// turning capable, a release and an orphaning. A discarded path's state
+/// change, the report that the peer is not capable yet, a refusal, a send,
+/// a connect and a proven size stand for none. Breaks: a move's `from` and `to`
 /// swapped; a discarded path's state change mirrored.
 #[test]
 fn each_bundle_output_mirrors_to_its_input() {
-    for (o, want) in every_bundle_output() {
+    for (o, want) in bundle_outputs() {
         let before = format!("path {o:?}");
         let steps = pathed(o, Some(LINK), None);
         let got: Vec<String> = steps.iter().map(shown).collect();
@@ -385,9 +390,12 @@ fn each_bundle_output_mirrors_to_its_input() {
 
 /// At a removal no link is given, and no bundle output reaches the core:
 /// the link's record goes with it. Break: a release routed with no link.
+///
+/// Records current behaviour (rule S-51: the dropped bundle output): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn a_bundle_output_at_a_removal_reaches_no_link() {
-    for (o, _) in every_bundle_output() {
+    for (o, _) in bundle_outputs() {
         let before = format!("path {o:?}");
         let got: Vec<String> = pathed(o, None, None).iter().map(shown).collect();
         assert_eq!(got, core::slice::from_ref(&before), "{before} at a removal");
@@ -443,9 +451,10 @@ fn a_released_path_goes_to_the_link_moved_off() {
     );
 }
 
-/// A one-path roam is the path moved to the frame's pair, and a bind of a
-/// bundle holding no path is a Live path there: one core input each, and
-/// nothing else. Break: the two swapped.
+/// A one-path roam is the path moved to the frame's pair, marked a roam
+/// (a path the bundle moved itself is not, `a_steps_outputs_come_back_in_order`),
+/// and a bind of a bundle holding no path is a Live path there: one core
+/// input each, and nothing else. Break: the two swapped.
 #[test]
 fn a_roam_is_moved_and_a_bind_is_a_live_path() {
     let (from, to) = (pair(&path(1)), pair(&path(2)));
@@ -453,6 +462,7 @@ fn a_roam_is_moved_and_a_bind_is_a_live_path() {
         link: LINK,
         from: Some(from.clone()),
         to: to.clone(),
+        standby: false,
     })
     .iter()
     .map(shown)
@@ -461,12 +471,14 @@ fn a_roam_is_moved_and_a_bind_is_a_live_path() {
         link: LINK,
         from,
         to: to.clone(),
+        roam: true,
     };
     assert_eq!(roam, [format!("core {moved:?}")], "a roam is a move");
     let bind: Vec<String> = joined(Event::Roam {
         link: LINK,
         from: None,
         to: to.clone(),
+        standby: false,
     })
     .iter()
     .map(shown)
@@ -477,6 +489,38 @@ fn a_roam_is_moved_and_a_bind_is_a_live_path() {
         proven: Proven::Live,
     };
     assert_eq!(bind, [format!("core {live:?}")], "a bind is a Live path");
+}
+
+/// The roam of a link's one path while it is not the active path moves
+/// the path, and is not marked a roam: the node resets nothing for it
+/// (`Roam::changed` is false for a standby roam), so the core must not
+/// reset the peer either.
+///
+/// Records current behaviour (rule S-48: no reset at a standby path's roam): open to change by
+/// decision. Its other assertions are not.
+#[test]
+fn a_standby_paths_roam_is_moved_and_not_marked_a_roam() {
+    let (from, to) = (pair(&path(1)), pair(&path(2)));
+    let got: Vec<String> = joined(Event::Roam {
+        link: LINK,
+        from: Some(from.clone()),
+        to: to.clone(),
+        standby: true,
+    })
+    .iter()
+    .map(shown)
+    .collect();
+    let moved = In::Moved {
+        link: LINK,
+        from,
+        to,
+        roam: false,
+    };
+    assert_eq!(
+        got,
+        [format!("core {moved:?}")],
+        "defect: a standby path's roam was not a move left unmarked"
+    );
 }
 
 /// A step's outputs come back in the order the machine gave them, each
@@ -516,9 +560,11 @@ fn a_steps_outputs_come_back_in_order() {
                 link: LINK,
                 from: pair(&path(1)),
                 to: pair(&path(3)),
+                roam: false,
             }
         ),
         format!("path {:?}", out[1]),
+        format!("core {:?}", In::Capable { link: LINK }),
         format!("path {:?}", out[2]),
         format!("core {:?}", In::Orphaned { peer: peer() }),
     ];
@@ -821,6 +867,9 @@ fn a_start_mirrors_the_original_path_as_live() {
 /// as it was, the bundle is not started again, and the setup's lease comes
 /// back as a release, the one step. Break, a scratch edit of the join
 /// function: the bundle renewed before the key is compared.
+///
+/// Records current behaviour (rule S-49: a refused move changes nothing): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn a_move_refused_for_another_key_leaves_both_machines_as_they_were() {
     let (mut me, mut b, mut c) = (Node::new(1), Node::new(2), Node::new(3));
@@ -884,6 +933,9 @@ fn a_move_refused_for_another_key_leaves_both_machines_as_they_were() {
 /// record store: the peer's startup epoch, the link's age and the replay
 /// record. Break, a scratch edit of the join function: what the machine
 /// carried dropped.
+///
+/// Records current behaviour (rule S-51: the stop's order): open to change by decision. Its
+/// other assertions are not.
 #[test]
 fn a_stop_files_what_the_rekey_machine_carried() {
     let (mut me, mut b) = (Node::new(1), Node::new(2));

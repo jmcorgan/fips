@@ -219,7 +219,7 @@ fn earliest<I: Instant>(a: Option<I>, b: Option<I>) -> Option<I> {
 /// Whether a frame of link message type `msg_type` shows which path the
 /// peer sends on: any link message but a session datagram or a path
 /// message (draft Section 5.12), a type this node does not know included.
-fn marks(msg_type: u8) -> bool {
+pub(crate) fn marks(msg_type: u8) -> bool {
     match LinkMessageType::from_byte(msg_type) {
         Some(
             LinkMessageType::SessionDatagram

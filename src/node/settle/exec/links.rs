@@ -57,7 +57,8 @@ pub(in crate::node) fn pathed(
 
 impl Node {
     /// Apply the core input `input` to the core's record of the link it
-    /// names: a path's state, move, switch or release. Every other input
+    /// names: a path's state, move, switch or release, or the link turning
+    /// capable. Every other input
     /// changes no record, and the node acts on it, if at all, where the join
     /// gave it.
     pub(in crate::node) fn feed(&mut self, input: &Input) {
@@ -68,8 +69,14 @@ impl Node {
             Input::State { .. }
             | Input::Moved { .. }
             | Input::Switched { .. }
-            | Input::Released { .. } => self.links.mirror(input),
+            | Input::Released { .. }
+            | Input::Capable { .. } => self.links.mirror(input),
             Input::Dial(_)
+            | Input::Connecting { .. }
+            | Input::Hello(_)
+            | Input::Abandon { .. }
+            | Input::PeerEpoch { .. }
+            | Input::Unsendable { .. }
             | Input::Punched(_)
             | Input::ConnectFailed { .. }
             | Input::Arrived { .. }
@@ -93,13 +100,15 @@ impl Node {
     /// The one path of `peer`'s link `link` moved inside its transport from
     /// `from` to `to`, or, with `from` `None`, a bundle holding no path was
     /// bound at `to`: neither is in any output of the bundle, so the join is
-    /// told of it, and the core's record of the link follows.
+    /// told of it, and the core's record of the link follows. `standby`
+    /// says the path was not the link's active path; the record ignores it.
     pub(in crate::node) fn roamed(
         &mut self,
         peer: NodeAddr,
         link: LinkId,
         from: Option<AddrKey>,
         to: &AddrKey,
+        standby: bool,
     ) {
         let Some(link) = self.links.no(&link) else {
             return;
@@ -112,6 +121,7 @@ impl Node {
             link,
             from: from.as_ref().map(pair),
             to: pair(to),
+            standby,
         };
         let Ok(steps) = join::<LinkProfile, PeerClock, OsEntropy, UdpSlot>(peer, event) else {
             debug_assert!(false, "the join refused a roam");

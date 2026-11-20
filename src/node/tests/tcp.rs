@@ -1075,3 +1075,131 @@ async fn a_tcp_candidate_is_connected_probed_and_its_connection_closed_with_its_
     );
     cleanup_nodes(&mut nodes).await;
 }
+
+/// Deny `peer` in `node`'s peer ACL, read from files in a directory of its
+/// own, which the caller keeps until the node is done with them.
+async fn deny(node: &mut Node, peer: &Node) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    node.isolate_peer_acl_for_test(
+        dir.path().join("peers.allow"),
+        dir.path().join("peers.deny"),
+    );
+    std::fs::write(dir.path().join("peers.deny"), format!("{}\n", peer.npub())).unwrap();
+    node.reload_peer_acl().await;
+    dir
+}
+
+/// What `node`'s TCP transport holds of the connection to or from `addr`,
+/// and how many inbound connections its pool holds.
+fn pooled(node: &TestNode, addr: &TransportAddr) -> (ConnectionState, u64) {
+    let handle = node.node.transports.get(&node.transport_id).unwrap();
+    let inbound = match handle {
+        TransportHandle::Tcp(t) => t.stats().pool_inbound_count(),
+        _ => unreachable!("a TCP test node"),
+    };
+    (handle.connection_state(addr), inbound)
+}
+
+/// Run the nodes' packets for `span`, so a close the node owes has time to
+/// land.
+async fn settle_for(nodes: &mut [TestNode], span: Duration) {
+    let until = tokio::time::Instant::now() + span;
+    while tokio::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(nodes).await;
+    }
+}
+
+/// A node at a peer cap of one dials two nodes over TCP and both answer:
+/// the first answer read installs its peer, and the second, refused at the
+/// cap at the dialer's msg2, should close the dial's connection, since no
+/// other link uses it. On next it stays open: the refusal drops the leg and
+/// leaves the connection as it was.
+#[tokio::test]
+#[ignore = "known defect: a dial refused at the peer cap keeps its TCP connection"]
+async fn a_dial_refused_at_the_peer_cap_closes_its_tcp_connection() {
+    let mut config = Config::new();
+    config.node.limits.max_peers = 1;
+    let mut nodes = vec![
+        make_test_node_tcp_with(config).await,
+        make_test_node_tcp().await,
+        make_test_node_tcp().await,
+    ];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    initiate_handshake(&mut nodes, 0, 2).await;
+    let dialled = [1, 2].map(|j| pooled(&nodes[0], &nodes[j].addr.clone()).0);
+    // Each responder answers, and the dialer reads both answers.
+    for _ in 0..200 {
+        if nodes[0].node.connection_count() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    let settled = nodes[0].node.connection_count() == 0;
+    settle_for(&mut nodes, Duration::from_millis(500)).await;
+    let held = nodes[0].node.peer_count();
+    let refused = [1, 2]
+        .into_iter()
+        .find(|&j| nodes[0].node.get_peer(nodes[j].node.node_addr()).is_none());
+    let after = refused.map(|j| pooled(&nodes[0], &nodes[j].addr.clone()).0);
+    cleanup_nodes(&mut nodes).await;
+
+    assert_eq!(
+        dialled,
+        [ConnectionState::Connected, ConnectionState::Connected],
+        "precondition: both dials hold a connection"
+    );
+    assert!(settled, "precondition: the dialer read both answers");
+    assert_eq!(held, 1, "precondition: the cap holds one peer");
+    assert!(refused.is_some(), "precondition: one dial was refused");
+    assert_eq!(
+        after,
+        Some(ConnectionState::None),
+        "defect: the dial refused at the peer cap left its connection open"
+    );
+}
+
+/// A responder whose ACL denies the initiator learns its identity at the
+/// msg3 and refuses it there. It should close the inbound TCP connection the
+/// handshake ran on, as nothing else uses it; on next the responder's pool
+/// still holds it a second later.
+#[tokio::test]
+#[ignore = "known defect: a msg3 refused by the ACL keeps its inbound TCP connection"]
+async fn an_acl_refusal_at_msg3_closes_its_inbound_tcp_connection() {
+    let mut nodes = vec![make_test_node_tcp().await, make_test_node_tcp().await];
+    let (a, b) = nodes.split_at_mut(1);
+    let _acl = deny(&mut b[0].node, &a[0].node).await;
+    let bad = nodes[1].node.stats().handshake.bad_state;
+    initiate_handshake(&mut nodes, 0, 1).await;
+    // The responder parks the dial's leg at its msg2, with the dial's
+    // connection pooled inbound, then reads the msg3 and refuses it.
+    let mut seen = 0;
+    for _ in 0..200 {
+        seen = seen.max(pooled(&nodes[1], &nodes[0].addr.clone()).1);
+        if seen > 0
+            && nodes[1].node.connection_count() == 0
+            && nodes[1].node.stats().handshake.bad_state > bad
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    let refused = nodes[1].node.stats().handshake.bad_state > bad;
+    let held = nodes[1].node.peer_count();
+    settle_for(&mut nodes, Duration::from_secs(1)).await;
+    let after = pooled(&nodes[1], &nodes[0].addr.clone()).1;
+    cleanup_nodes(&mut nodes).await;
+
+    assert_eq!(
+        seen, 1,
+        "precondition: the dial's connection is pooled inbound"
+    );
+    assert!(refused, "precondition: the responder refused the msg3");
+    assert_eq!(held, 0, "precondition: the responder holds no peer");
+    assert_eq!(
+        after, 0,
+        "defect: the responder's pool still holds the refused initiator's connection"
+    );
+}

@@ -1,0 +1,62 @@
+# The tests that record the current behaviour of a rule in rules.txt: one line
+# per test and rule, its crate, its path as `cargo test` lists it, and the
+# rule's ID. A test that asserts two incidental rules has a line for each. A
+# test that also asserts an outcome an FRC clause requires, or a decision
+# fixes, is listed under its incidental rule alone, and its doc line names
+# the part that is incidental and says its other assertions are not.
+#
+# Each listed test carries the doc line "Records current behaviour (rule
+# S-NN ...): open to change by decision", naming every rule it is listed
+# under here and no other; a test with that line is listed here.
+# `src/node/settle/tests/rules.rs` checks both directions.
+fips-core  proto::settle::table::tests::an_answer_sent_to_a_new_identity_once_the_peer_cap_filled_is_not_installed  S-02
+fips-core  proto::settle::model::tests::crossing::a_stored_msg2_sent_after_the_peer_is_held_elsewhere_installs_nothing  S-03
+fips-core  proto::settle::gates::tests::an_own_msg2_restart_does_not_stamp_the_dampener  S-05
+fips-core  proto::settle::gates::tests::an_own_msg2_restart_does_not_stamp_the_dampener  S-25
+fips-core  proto::settle::gates::tests::an_own_msg2_restart_does_not_stamp_the_dampener  S-32
+fips-core  proto::settle::gates::tests::silent_sessions_start_a_refusal_at_the_third_in_a_row  S-06
+fips-core  proto::settle::gates::tests::each_further_silent_session_doubles_the_refusal_up_to_its_cap  S-06
+fips-mesh  node::tests::silent_backoff::three_silent_sessions_ended_by_link_dead_refuse_the_next_same_epoch_msg1_with_its_own_counter  S-06
+fips-core  proto::settle::table::tests::a_msg1_from_the_pair_the_core_holds_the_peer_at_with_no_path_there_is_off_the_link  S-08
+fips-core  proto::settle::table::tests::a_msg1_from_a_setup_pair_the_index_names_another_link_at_is_off_the_link  S-08
+fips-core  proto::settle::table::tests::an_orphaned_bundles_peer_is_retried  S-09
+fips-core  proto::settle::table::tests::a_restarted_or_replaced_peer_is_retried_in_each_of_the_three_ways  S-09
+fips-core  proto::settle::table::tests::a_dial_after_its_connect_starts_its_leg_on_the_link_the_connect_opened  S-11
+fips-core  proto::settle::table::tests::a_connecting_dials_pair_is_in_use_before_its_msg1_and_a_failed_connect_retires_it_with_no_lease  S-12
+fips-core  proto::settle::table::tests::a_connecting_dials_pair_is_in_use_before_its_msg1_and_a_failed_connect_retires_it_with_no_lease  S-14
+fips-core  proto::settle::table::tests::a_msg1_past_the_admission_cap_is_rejected_and_holds_no_leg  S-15
+fips-core  proto::settle::table::tests::a_move_that_makes_the_peering_heard_forgets_its_replay_memory_and_keeps_its_silent_sessions  S-27
+fips-core  proto::settle::table::tests::a_path_the_bundle_followed_moves_the_cores_record_and_resets_nothing  S-34
+fips-core  proto::settle::table::tests::a_one_path_roam_moves_the_cores_record_and_resets_once  S-34
+fips-core  proto::settle::table::tests::a_frame_on_a_peering_heard_from_its_install_keeps_the_replay_memory_and_forgets_the_silent_sessions  S-36
+fips-core  proto::settle::table::tests::an_own_dials_session_that_ends_before_the_peers_first_frame_counts_as_a_silent_session  S-38
+fips-mesh  node::tests::silent_backoff::an_own_dials_session_reaped_before_the_peers_first_frame_counts_in_the_node_and_the_core  S-38
+fips-mesh  node::tests::settle::table::remove::a_dead_peer_is_removed_as_its_cells_say  S-39
+fips-mesh  node::tests::settle::table::remove::an_orphaned_peer_is_removed_as_its_cells_say  S-39
+fips-mesh  node::tests::settle::table::remove::a_peer_that_disconnects_is_removed_as_its_cells_say  S-39
+fips-mesh  node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say  S-39
+fips-mesh  node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say  S-39
+fips-mesh  node::tests::settle::table::remove::a_dead_peer_is_removed_as_its_cells_say_with_multipath_on  S-39
+fips-mesh  node::tests::settle::table::remove::an_orphaned_peer_is_removed_as_its_cells_say_with_multipath_on  S-39
+fips-mesh  node::tests::settle::table::remove::a_peer_that_disconnects_is_removed_as_its_cells_say_with_multipath_on  S-39
+fips-mesh  node::tests::settle::table::remove::a_peer_the_operator_disconnects_is_removed_as_its_cells_say_with_multipath_on  S-39
+fips-mesh  node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say_with_multipath_on  S-39
+fips-core  proto::settle::table::tests::an_orphaned_peer_closes_its_bundles_paths_and_not_a_setup_pair_released_to_keep  S-40
+fips-core  proto::settle::table::tests::an_operator_disconnect_closes_the_peers_pair_though_a_dial_uses_it  S-40
+fips-core  proto::settle::legs::tests::a_configured_multiplier_spaces_the_resends_as_the_node_truncates_them  S-47
+fips-core  proto::settle::legs::tests::resends_follow_the_backoff_and_repeat_the_msg1_byte_for_byte  S-47
+fips-core  proto::settle::legs::tests::resends_follow_the_backoff_and_repeat_the_msg1_byte_for_byte  S-54
+fips-mesh  node::settle::params::tests::a_configured_backoff_gives_the_nodes_resend_schedule  S-47
+fips-core  proto::settle::join::tests::a_standby_paths_roam_is_moved_and_not_marked_a_roam  S-48
+fips-core  proto::settle::join::tests::a_move_refused_for_another_key_leaves_both_machines_as_they_were  S-49
+fips-core  proto::settle::join::tests::a_bundle_output_at_a_removal_reaches_no_link  S-51
+fips-core  proto::settle::join::tests::a_stop_files_what_the_rekey_machine_carried  S-51
+fips-core  proto::settle::legs::tests::a_dial_leg_is_reaped_at_its_deadline_and_returns_its_lease  S-52
+fips-core  proto::settle::legs::tests::a_responder_leg_answers_a_resend_with_its_stored_msg2_and_is_reclaimed  S-52
+fips-core  proto::settle::table::tests::a_failed_dial_resend_is_due_at_the_next_poll_whatever_its_instant  S-55
+fips-core  proto::settle::table::tests::a_send_failure_after_a_dials_last_resend_asks_for_no_more  S-55
+fips-core  proto::settle::links::tests::a_probing_path_keeps_no_connection_open  S-57
+fips-core  proto::settle::table::tests::a_path_state_change_to_probing_stops_it_counting_as_in_use  S-57
+fips-core  proto::settle::links::tests::a_released_setup_address_leaves_the_index_and_a_roamed_one_stays  S-58
+fips-mesh  node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it  S-58
+fips-mesh  node::settle::tests::a_pair_two_links_are_set_up_at_names_the_newest_and_then_the_one_left  S-58

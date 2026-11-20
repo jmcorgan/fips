@@ -17,6 +17,7 @@ fn local_faults_are_never_attributed_to_the_peer_and_unauthenticated_causes_are_
         Reason::FrameUnauthenticated,
         Reason::Replay,
         Reason::ReplyUnauthenticated,
+        Reason::ReplyUnread,
         Reason::FinalUnauthenticated,
         Reason::SetupMalformed,
         Reason::CandidatesFull,

@@ -13,11 +13,12 @@
 //! `src/node/tests/settle/explore/README.md` says what each step does, what
 //! the world does not model, and which starts run.
 
-// Without the `explorers` feature only the world's own tests and the map of
-// pinned defects compile, and most of the explorer's machinery (the walk,
-// the reference model, the worker pools) has no caller. It is kept compiled
-// so those tests and the walks share one copy; the --all-features clippy pass
-// still finds code nothing at all uses.
+// Without the `explorers` feature only the world's own tests, the map of
+// pinned defects and the test of a walk thread's name compile, and most of
+// the explorer's machinery (the walk, the reference model, the worker
+// pools) has no caller. It is kept compiled so those tests and the walks
+// share one copy; the --all-features clippy pass still finds code nothing
+// at all uses.
 #![cfg_attr(not(feature = "explorers"), allow(dead_code))]
 
 // The explorer's file is named for what the directory is for.

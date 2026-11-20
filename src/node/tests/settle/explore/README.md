@@ -72,7 +72,10 @@ helper that seeds a handshake machine by hand.
     every worker to handle what it was sent before (bounded at 60 s), then
     runs what the workers sent back, as the receive loop does (below), so a
     round never counts quiet with a frame on a worker.
-  - The world's tests: a dial is the one `initiate_connection` makes on each
+  - The world's tests: the settlement core reaps a dial whose msg1
+    was lost where the node does, in its peers' timers and not in
+    `check_timeouts`, by its own reap and not by being handed the node's
+    give-up; a dial is the one `initiate_connection` makes on each
     transport (a connection-oriented link starts connecting, with a pending
     connect and no msg1; the loopback's is connected with its msg1 armed); a
     node is handed a msg1 or a msg2 only at the step that names it, on each
@@ -115,9 +118,14 @@ helper that seeds a handshake machine by hand.
   `heal` heals the leaf (below); `spawn_walk` starts one walk on a thread
   of its own, with an 8 MiB stack, since a walk in a debug build comes
   within a few per cent of the default 2 MiB, and a runtime of its own, once
-  fewer than `WALKS_AT_ONCE` walks run in the process (below); `parallel`
-  runs a job per start and order that way and gathers what they found. Its
-  tests: the map covers every pinned defect and every core start number;
+  fewer than `WALKS_AT_ONCE` walks run in the process (below), the thread
+  `titled` for the test that started it, followed by `::walk`, so the
+  audit's reach rows from a walk's nodes name
+  that test, while a panic on the walk's thread is not taken for the test
+  thread's own by `testing/lib/test-verdict.sh` (`parity.rs` names its
+  threads the same way); `parallel` runs a job per start and order that way
+  and gathers what they found. Its tests: a walk's thread is named for its
+  test; the map covers every pinned defect and every core start number;
   every start reaches its target: its scripted path runs to its end on its
   transport, and the explorer walks the number of paths the start states,
   in both orders and at both settings; and no more than `WALKS_AT_ONCE`
@@ -125,7 +133,7 @@ helper that seeds a handshake machine by hand.
 - `oracle.rs`: what is checked at each leaf (`judge`), and the explorer's
   tests over the starts: every path of every start keeps its properties, per
   transport and setting; each pinned defect the map gives a start is found
-  there; and each peer change of every start's
+  there (none has one at present); and each peer change of every start's
   scripted path, healed, does what the reference model's transition says,
   per setting, every transport in one test (below). And the crossing with a
   decrypt-worker pool (`pooled`): every path heals to one session per pair
@@ -267,10 +275,14 @@ Then, at the leaf:
   own, so the property test reports such a panic, with the path it was
   walking, at its own `defect:` assertion.
 
-A start names the clauses a pinned defect breaks on its scripted path
-(`pinned`): start 6's split, which the leaf's heal does not mend. They are
-not asserted on any of that start's paths; the map names the pin, and the
-finder asserts it on the scripted path.
+A start names the clauses a pinned defect, or a split accepted as
+behaviour, breaks on its scripted path (`pinned`): start 6's split, which
+the leaf's heal does not mend. They are not asserted on any of that start's
+paths. A defect's pin is named in the map, and the finder asserts it on the
+scripted path; start 6's split is accepted behaviour with no pin, and the
+node tests in `../crossing.rs` named
+`..._with_its_msg2_first_..._after_link_dead_and_a_redial_...` assert it
+and its end at link-dead and a redial.
 
 Each msg1's class against the model's is not checked here.
 

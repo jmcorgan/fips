@@ -1,47 +1,54 @@
 //! Scripted schedules of the settlement core in the world, on joint nodes
-//! with multipath off: the two late-dial cases left for later, pinned as known defects, each beside a control;
-//! and one schedule per earlier settlement defect the core can see, each
-//! reaching the state the defect broke and asserting it holds (the
-//! defect's shape is a switch that turns the schedule red).
+//! with multipath off: the two late-dial cases, one an accepted behaviour
+//! tested as such and one a known defect left pinned, each beside a
+//! control; and one schedule per earlier settlement defect the core can
+//! see, each reaching the state the defect broke and asserting it holds
+//! (the defect's shape is a switch that turns the schedule red).
 //!
 //! - A late second dial answered in the other order: the dialer reads its
 //!   second dial's msg2 first and then moves onto the first, which the
-//!   responder has replaced, so the two ends split. The operator's rule for
-//!   it (the dialer keeps the session it moved off until the peer's first
-//!   frame) is built later; until then the pin fails at its defect. Its
-//!   control is the same dials answered in order, which settle.
+//!   responder has replaced, so the two ends split. The split is accepted:
+//!   neither end hears the other, one end's link-dead timer removes the
+//!   peer, and the redial settles both ends on a session of its own. Its
+//!   tests bound that recovery by one heal and show the timer and the
+//!   redial did it (`TimerNever` turns them red). Its control is the same
+//!   dials answered in order, which settle at once.
 //! - A dial on the peer's aged link: the larger node dials again while the
 //!   smaller node holds it on a link old enough to rekey, so the smaller
 //!   node takes the dial for a rekey and arms a pending, which the larger
 //!   node never adopts, keeping its inbound session by the tie-break; the
 //!   smaller node then leaves the larger node's own rekey unanswered while
-//!   the pending is held. Its control dials on a link too young to rekey,
-//!   and the larger node's later rekey is answered.
+//!   the pending is held. The two ends keep one session and no timer ends
+//!   anything: the smaller node refuses the larger node's rekeys until its
+//!   own rekey clears the pending. A known defect, left for a later fix, so
+//!   its pin fails at its defect. Its control dials on a link too young to
+//!   rekey, and the larger node's later rekey is answered.
 
 use alloc::vec::Vec;
 
 use super::explore::Act;
 use super::joint::off;
-use super::oracle::{Oracle, heal, healed};
-use super::starts::{Do, Maker, Want, age, dial, run, second, starts};
+use super::oracle::{Oracle, every_step, heal, healed};
+use super::starts::{Do, Maker, Start, Want, age, dial, run, second, starts};
 use super::world::{Pkt, World};
+
+/// Start `number`'s variant named with `name`.
+fn start(number: u8, name: &str) -> Start {
+    starts()
+        .into_iter()
+        .find(|s| s.number == number && s.name.contains(name))
+        .expect("the start exists")
+}
 
 /// Start `number`'s variant named with `name`, with nodes made by `mk`.
 fn built(mk: Maker, number: u8, name: &str) -> World {
-    let st = starts()
-        .into_iter()
-        .find(|s| s.number == number && s.name.contains(name))
-        .expect("the start exists");
-    (st.build)(mk)
+    (start(number, name).build)(mk)
 }
 
 /// Start `number`'s variant named with `name` with nodes made by `mk`, after
 /// its own script and a heal.
 fn scripted(mk: Maker, number: u8, name: &str) -> World {
-    let st = starts()
-        .into_iter()
-        .find(|s| s.number == number && s.name.contains(name))
-        .expect("the start exists");
+    let st = start(number, name);
     let mut w = (st.build)(mk);
     let _ = (st.script)(&mut w);
     heal(&mut w);
@@ -96,17 +103,67 @@ fn after_a_late_second_dial_answered_in_order_both_ends_hold_one_session_smaller
     one_session_after_a_late_second_dial(5, "in order, smaller dialer");
 }
 
-#[test]
-#[ignore = "known defect: a late second dial whose msg2s are read in the other order leaves the two ends on different sessions, until the dialer keeps the session it moved off"]
-fn after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_larger_dialer() {
-    one_session_after_a_late_second_dial(6, "second msg2 first, larger dialer");
+/// The text of the one-session clause a split the link-dead timer ended
+/// leaves (`oracle::healed`), which records that the timer did it.
+const ENDED: &str = "removed here by the link-dead timer";
+
+/// Start 6's variant named with `name`, at joint nodes at multipath off:
+/// the late second dial answered in the other order splits the two ends,
+/// and within one heal one end's link-dead timer removes the peer that
+/// holds it on another session and the redial settles both ends on its
+/// own handshake, with nothing else left.
+fn one_session_within_a_heal_of_a_late_second_dial(name: &str) {
+    let t = std::time::Instant::now();
+    let st = start(6, name);
+    let mut w = (st.build)(off);
+    let _ = (st.script)(&mut w);
+    assert!(
+        !splits(&w).is_empty() && w.ended.is_empty(),
+        "precondition: {name}: the schedule leaves the two ends on different sessions"
+    );
+    heal(&mut w);
+    std::eprintln!("{name}: {} ms", t.elapsed().as_millis());
+    let left: Vec<_> = every_step(&w)
+        .into_iter()
+        .chain(healed(&w))
+        .filter(|b| !(b.oracle == Oracle::OneSession && b.what.ends_with(ENDED)))
+        .map(|b| (b.oracle, b.node, b.what))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "{name}: the pair holds one session within a heal of the split: {left:?}"
+    );
+    let ends: Vec<_> = (0..2)
+        .map(|x| {
+            w.parties[x]
+                .view()
+                .peers
+                .iter()
+                .find(|p| p.peer == w.ids[1 - x])
+                .map(|p| (p.origin, p.cur))
+        })
+        .collect();
+    let ended: Vec<_> = w.ended.iter().flat_map(|(_, _, pair)| *pair).collect();
+    assert!(
+        !ended.is_empty()
+            && ends[0].is_some()
+            && ends[0] == ends[1]
+            && ends[0].is_some_and(|(origin, _)| !ended.contains(&origin)),
+        "{name}: the link-dead timer ended the split and the redial settled both ends on a handshake of its own: {ends:?}, ended {:?}",
+        w.ended
+    );
 }
 
 #[test]
-#[ignore = "known defect: a late second dial whose msg2s are read in the other order leaves the two ends on different sessions, until the dialer keeps the session it moved off"]
-fn after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_smaller_dialer()
-{
-    one_session_after_a_late_second_dial(6, "second msg2 first, smaller dialer");
+fn after_a_late_second_dial_answered_in_the_other_order_the_link_dead_timer_and_the_redial_settle_one_session_within_a_heal_larger_dialer()
+ {
+    one_session_within_a_heal_of_a_late_second_dial("second msg2 first, larger dialer");
+}
+
+#[test]
+fn after_a_late_second_dial_answered_in_the_other_order_the_link_dead_timer_and_the_redial_settle_one_session_within_a_heal_smaller_dialer()
+ {
+    one_session_within_a_heal_of_a_late_second_dial("second msg2 first, smaller dialer");
 }
 
 /// Node 1 (the larger) has dialed node 0 (the smaller) again, at node 0's

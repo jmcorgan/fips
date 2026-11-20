@@ -245,11 +245,18 @@ at `next_wake` produces.
 - **Reply.** An index-bearing reply naming no held index, or one held by
   an epoch rather than the attempt, is refused. A reply that does not
   read on the attempt's fork, or reads as another static, changes
-  nothing. A two-message reply completes into a held proof; a
-  three-message reply sends msg3 and completes into a pending that waits
-  for evidence (with a probe and a keepalive at once) or for a delay, or,
-  when it reveals a restart, cuts over at once and retains msg3; in a
-  first handshake it installs the session's first epoch.
+  nothing but, for a profile that caps them (the link's IK msg2s), the
+  attempt's count of refused reads: once that count reaches
+  `Config::reads`, a reply that arrived off the peer's established link
+  is dropped unread, and one that arrived on it is still read. Anyone who
+  saw the msg1 can send replies under its cleartext index from anywhere,
+  so the cap bounds what they cost, and the peer's reply from its link
+  can still complete the attempt. A two-message reply completes into a
+  held proof; a three-message reply sends msg3 and completes into a
+  pending that waits for evidence (with a probe and a keepalive at once)
+  or for a delay, or, when it reveals a restart, cuts over at once and
+  retains msg3; in a first handshake it installs the session's first
+  epoch.
 - **Setup** (three-message only). A malformed setup is refused. A resend
   draws the stored ack. The smaller node refuses a new setup while its
   own attempt has completed, while it is resending its own msg3, or
@@ -300,7 +307,8 @@ at `next_wake` produces.
   `judge` takes `&self`. A commit from a network input carries a proof,
   and a proof's constructor is private to this module tree.
 - **Input that has not authenticated changes nothing but the candidate
-  list**, and a refused IK msg1 changes nothing but the record.
+  list and an own attempt's count of refused replies**, and a refused IK
+  msg1 changes nothing but the record.
 - **Time and randomness come in.** No clock reads, no random source of
   the machine's own: instants are arguments, jitter comes from
   `Env::jitter`, epoch tags from `Env::tags`, ephemerals from the

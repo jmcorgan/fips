@@ -147,6 +147,8 @@ pub enum Event {
         from: Addr,
         /// The pair it holds now.
         to: Addr,
+        /// The path was not the active one: a standby path's roam.
+        standby: bool,
     },
     /// A bundle holding no path bound the frame's pair `at` as its
     /// original path.
@@ -575,7 +577,7 @@ impl Machines {
 
     /// A msg2 routed to this machine by its receiver index.
     pub fn reply(&mut self, kit: &mut Kit, now: Ms, bytes: &[u8]) -> Vec<Event> {
-        self.step(kit, now, Input::Reply { bytes, route: () })
+        self.step(kit, now, Input::Reply { bytes, route: true })
     }
 
     /// A frame routed to this machine by its receiver index, on the slow
@@ -661,12 +663,15 @@ impl Machines {
             Roam::Roamed { from } => Some(Event::Roamed {
                 from: super::facts::addr(from.0, &from.1),
                 to: src,
+                standby: false,
             }),
-            Roam::Standby { index } => before
-                .get(index)
-                .map(|&from| Event::Roamed { from, to: src }),
+            Roam::Standby { index } => before.get(index).map(|&from| Event::Roamed {
+                from,
+                to: src,
+                standby: true,
+            }),
         };
-        if let Some(Event::Roamed { from, to }) = &event {
+        if let Some(Event::Roamed { from, to, .. }) = &event {
             self.locals.retain(|(a, _)| a != from);
             self.locals.push((*to, local));
         } else if let Some(Event::Bound { at }) = &event {
@@ -912,6 +917,14 @@ impl Machines {
     /// The bundle.
     pub fn bundle(&self) -> &Paths {
         &self.bundle
+    }
+
+    /// What the model is told of a frame of link message type `kind` on
+    /// this link (`Event::Frame`): how many paths the bundle holds, and
+    /// whether the frame is a path message on a bundle that runs multipath.
+    pub fn told(&self, kind: u8) -> (u8, bool) {
+        let paths = u8::try_from(self.bundle.paths().paths().len()).unwrap_or(u8::MAX);
+        (paths, messaged(kind) && self.mode == Mode::On)
     }
 
     /// Write the explorer's key of both machines at `now` to `out`: every

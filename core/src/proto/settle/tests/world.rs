@@ -417,17 +417,18 @@ pub enum Shape {
     /// Both of a node's own dials of one peer were answered and the
     /// later-sent msg2 was read first; reading the earlier-sent one then
     /// moved the node onto a session the peer had replaced. The late
-    /// second dial answered in the other order, a defect left for later.
+    /// second dial answered in the other order, an accepted split that one
+    /// end's link-dead timer and the redial end.
     LaterDialFirst,
     /// A peer's own dial, arriving while the receiver held it on a link
     /// old enough to rekey, armed a responder pending there, which the
     /// dialer settles as a crossing and may never adopt. The dial on the
-    /// peer's aged link, a defect left for later.
+    /// peer's aged link, a defect left for a later fix.
     DialAsRekey,
 }
 
 impl Shape {
-    /// Whether this shape is one of the two defects left for later, which
+    /// Whether this shape is one of the two late-dial shapes, which
     /// only the runs against the models of deployed nodes exempt; the
     /// model's convergence with itself and the core explorer exclude the
     /// starts that carry them instead.

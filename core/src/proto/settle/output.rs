@@ -1,6 +1,8 @@
 //! What the settlement core asks of the shell, run front to back.
 //!
-//! An [`Output::Install`] names the link the peer holds, where the peer is
+//! An [`Output::Ask`] asks the shell for an admitted msg1's answer, which
+//! [`Output::Answer`] then sends. An [`Output::Install`] names the link the
+//! peer holds, where the peer is
 //! now, how the peer's rekey machine is built and the lease the new
 //! session's index is held by; [`Output::Reset`] names the transition the
 //! per-peer data takes. A teardown is an [`Output::Remove`] with its
@@ -81,6 +83,9 @@ pub enum Denial {
     /// Another redial of the identity is pending and younger than the
     /// unheard floor.
     Held,
+    /// The max-peers cap is reached, and the msg1 or the completed dial
+    /// is from an identity not held.
+    Cap,
 }
 
 /// A peer installed.
@@ -107,6 +112,17 @@ pub enum Output {
     Opened {
         /// The link.
         link: LinkNo,
+    },
+    /// The msg1 that opened `link` is admitted: authorize it, build its
+    /// msg2 and draw its session index, and answer with
+    /// [`Input::Hello`](super::input::Input::Hello), or refuse it with
+    /// [`Input::Abandon`](super::input::Input::Abandon). Any teardown the
+    /// msg1 causes comes before it.
+    Ask {
+        /// The link the msg1 opened.
+        link: LinkNo,
+        /// The identity the msg1 proves.
+        peer: NodeAddr,
     },
     /// Send this msg2 on `link`. `stored` says it is the one already
     /// built for that msg1, sent again.
@@ -171,6 +187,20 @@ pub enum Output {
     Free {
         /// The lease.
         lease: IndexLease,
+    },
+    /// The held peer moved onto this node's own completed dial (beside
+    /// its [`Transition::Move`] reset): `own` says the link it left was one
+    /// this node dialed, and `unpin` whether the move ends an operator's
+    /// pin of the peer's path, which it does when the link it left was this
+    /// node's own dial or the dial was made while the peer was held on the
+    /// link it left.
+    Swapped {
+        /// The peer.
+        peer: NodeAddr,
+        /// The link it left was one this node dialed.
+        own: bool,
+        /// The move ends an operator's pin of the peer's path.
+        unpin: bool,
     },
     /// Schedule a reconnect to the peer.
     Retry {

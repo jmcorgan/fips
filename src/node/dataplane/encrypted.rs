@@ -508,7 +508,8 @@ impl Node {
                     Roam::Standby { .. } => standby,
                     Roam::Bound | Roam::Unmoved => None,
                 };
-                roamed = Some((peer.link_id(), from));
+                let standby = matches!(roam, Roam::Standby { .. });
+                roamed = Some((peer.link_id(), from, standby));
             }
             // Only a link the peer actually left loses its verification. A
             // frame the roaming rule refuses to follow (another transport, or
@@ -541,9 +542,9 @@ impl Node {
             }
         }
         self.paths.fold(wake);
-        if let Some((link, from)) = roamed {
+        if let Some((link, from, standby)) = roamed {
             let to = (frame.transport_id, frame.remote_addr.clone());
-            self.roamed(*node_addr, link, from, &to);
+            self.roamed(*node_addr, link, from, &to, standby);
         }
         // A session's first authenticated frame clears its identity's
         // silent-session record: one identity has one peer entry, and a

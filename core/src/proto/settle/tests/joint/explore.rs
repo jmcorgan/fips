@@ -7,9 +7,11 @@
 //! multipath settings. A run names its pairing, the mode at each end, in
 //! every line it prints.
 //!
-//! A sweep runs every start but the two late-dial cases left for later
-//! (their defects are pinned in `../regress.rs` and shown on real machines
-//! in `party.rs`), checks every explored state and every healed leaf, and
+//! A sweep runs every start but the two late-dial cases (start 6's split,
+//! accepted because one end's link-dead timer and the redial end it, which
+//! `../regress.rs` tests within a heal; start 7's aged-link defect, left
+//! for a later fix and pinned there; both shown on real machines in
+//! `party.rs`), checks every explored state and every healed leaf, and
 //! exempts only a split on a path that showed a known shape and the breach
 //! `pins.rs` holds of a proven path left with no connection ([`lapsed`]).
 //! Each exempted breach is counted by its cause in the line a sweep
@@ -45,7 +47,9 @@ use super::super::explore::reached;
 use super::super::explore::{Act, apply, explore, explore_within, none, replay};
 use super::super::oracle::{Breach, Oracle, by_shape};
 use super::super::party::Configured;
-use super::super::starts::{A, B, Start, TCP, UDP, dial_home, home, model, settle, world_of};
+#[cfg(feature = "slow-explorers")]
+use super::super::starts::Start;
+use super::super::starts::{A, B, TCP, UDP, dial_home, home, model, settle, world_of};
 use super::super::world::{Party, Pkt, World};
 use super::Mode;
 use super::facts::pair;
@@ -331,7 +335,7 @@ fn a_state_differing_only_inside_a_machine_has_its_own_key() {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Spared {
     /// A split on a path that showed a known shape other than the two
-    /// defects left for later (`by_shape`).
+    /// late-dial shapes (`by_shape`).
     Shape,
     /// [`lapsed`].
     Lapsed,
@@ -362,8 +366,9 @@ fn spared(w: &World, b: &Breach) -> Option<Spared> {
 /// What a node of the model, which runs no link-dead timer, leaves once
 /// healed beside a joint node, which runs the node's: the model still
 /// holds the joint node on a link whose frames were lost in flight, the
-/// joint node's timer removed it, and the model refuses each redial a
-/// gate still holds (its dampener or unheard floor), so
+/// joint node's timer removed it, and the model refuses each redial (one
+/// off the link of a peering it has not heard from while that link can be
+/// reached, or one its dampener holds), so
 /// the joint node holds a configured peer it cannot reach and the model
 /// keeps open the connection a refused redial came on. A node would have
 /// removed the silent peer too and taken the redial. Only a pairing of a
@@ -438,31 +443,49 @@ fn each_breach_the_pins_hold_is_exempted_by_its_own_cause_and_a_settled_pair_by_
             );
         }
     }
-    // Start 2 with the model at node 0 and a joint node at node 1: the
-    // model's dial completes, the frames are lost for the link-dead
+    // The model at node 0 and a joint node at node 1, whose configuration
+    // names the model's TCP home, and which dials the model once at its UDP
+    // home: the dial completes, the frames are lost for the link-dead
     // timeout, and the joint node's timer removes the model. The model,
-    // which runs no timer, still holds the joint node; it refused every
-    // redial off the link before redials were answered (the operator's
-    // decision, 2026-11-17), and now answers the joint node's redial, whose
-    // first frame replaces the stale peering, so the pair heals with no
-    // breach for the missing timer to exempt.
-    let st = chosen(super::starts::uncapped(model_off), |s| s.number == 2).remove(0);
-    let path = [
-        Act::Dup(0),
-        Connect(0, false),
-        Deliver(0),
-        Deliver(2),
-        Act::Advance,
-        Act::Advance,
-        Act::Advance,
-    ];
-    let mut w = replay(&st, &path);
+    // which runs no timer, still holds the joint node and has never heard
+    // from it, so it refuses each redial, which comes over TCP, off the
+    // link of a peering it has not heard from while that link can be
+    // reached. No redial is answered, and the stale peering leaves two
+    // breaches, the missing timer's. (A redial of a peering the model has
+    // heard from it answers, and the first frame replaces the stale
+    // peering: the pair heals with nothing to exempt.)
+    let mut w = super::super::starts::pair(model_off, A, &[&[], &[(0, TCP)]]);
+    dial_home(&mut w, 1, 0, UDP);
+    for (to, first) in [(0, true), (1, false)] {
+        let id = w
+            .net
+            .flight
+            .iter()
+            .find(|f| {
+                f.to == to
+                    && matches!(
+                        (&f.pkt, first),
+                        (Pkt::Msg1 { .. }, true) | (Pkt::Msg2 { .. }, false)
+                    )
+            })
+            .map(|f| f.id)
+            .expect("precondition: the handshake message is in flight");
+        w.deliver(id);
+    }
+    w.run_until(w.net.now + super::feeds::LIVE);
     heal(&mut w);
     let found = healed(&w);
     assert!(
-        found.is_empty(),
-        "the model's stale peering is replaced by the joint node's redial: {found:?}"
+        found.len() == 2,
+        "precondition: the model's stale peering leaves two breaches: {found:?}"
     );
+    for b in &found {
+        assert_eq!(
+            spared(&w, b),
+            Some(Spared::Untimed),
+            "{b:?} is exempted as the model's missing timer"
+        );
+    }
     // Start 2's script settles both ends, capable, and then holds for a
     // heal: the cause names nothing there.
     let st = start(2);
@@ -529,9 +552,12 @@ pub(super) fn swept(runs: &[Start], label: &str) -> Vec<String> {
     wrong
 }
 
-/// The starts of `starts` that `keep` takes, the two late-dial cases left
-/// for later aside (their defects are pinned in `../regress.rs` and shown
-/// on real machines in `party.rs`).
+/// The starts of `starts` that `keep` takes, the two late-dial cases
+/// aside: start 6's accepted split, which `../regress.rs` tests is ended
+/// by the link-dead timer and the redial within a heal, and start 7's
+/// aged-link defect, pinned there; both shown on real machines in
+/// `party.rs`.
+#[cfg(feature = "slow-explorers")]
 pub(super) fn chosen(starts: Vec<Start>, keep: impl Fn(&Start) -> bool) -> Vec<Start> {
     starts
         .into_iter()
@@ -563,6 +589,7 @@ pub const DOUBLED: &[&str] = &[
     "the only path's transport removed",
     "a NAT rebound of the second path",
     "a path removed at the peer",
+    "a NAT rebound of the active path",
 ];
 
 /// The start named `name` at On with On, alone.

@@ -20,7 +20,8 @@ pub enum Attribution {
 }
 
 /// Why an input changed nothing (or, where its row says so, only the
-/// candidate list or the replay record).
+/// candidate list, the replay record or an own attempt's count of refused
+/// replies).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
     /// An IK msg1 carried a startup epoch other than the peer's.
@@ -41,6 +42,9 @@ pub enum Reason {
     /// A reply failed its read on the attempt's fork, or read as another
     /// static.
     ReplyUnauthenticated,
+    /// A reply that arrived off the established link once the own attempt
+    /// had refused its budget of reads, dropped unread.
+    ReplyUnread,
     /// A reply for an attempt that has already completed.
     LateReply,
     /// A reply with no attempt to answer.
@@ -117,6 +121,7 @@ impl Reason {
             | Self::KeyMismatch
             | Self::AnsweredBefore
             | Self::ReplyUnauthenticated
+            | Self::ReplyUnread
             | Self::LateReply
             | Self::UnknownAttempt
             | Self::UnknownIndex

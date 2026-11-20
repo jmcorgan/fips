@@ -29,7 +29,9 @@ use crate::proto::rekey::{
     SetupFacts, Slot, TagSource, Wait,
 };
 use crate::proto::stp::TreeCoordinate;
-use crate::testutil::{SeededEntropy, TestClock, TestInstant, seed_entropy, seeded_keypair};
+use crate::testutil::{
+    SeededEntropy, TestClock, TestInstant, make_node_addr, seed_entropy, seeded_keypair,
+};
 use crate::time::Duration;
 
 use super::{FspXx, SessionKeys, SessionLocal};
@@ -711,4 +713,28 @@ fn xx_reply_from_another_key_keeps_the_attempt() {
     a.ack(t + 30, ba, &ack);
     assert_eq!(a.take(MsgKind::Msg3).len(), 1);
     assert_eq!(a.m().view().cycle, CycleView::PendI(Wait::Evidence));
+}
+
+#[test]
+fn the_session_profile_puts_no_ack_under_the_link_cap_on_refused_reads() {
+    // `None` is what keeps the rekey machine from counting a session's
+    // refused acks or dropping any unread (proto::rekey's
+    // `a_session_rekey_reads_every_msg2_whatever_the_link_cap` holds that
+    // rule on its stub). Whatever coordinates an ack carried, the session
+    // profile answers `None`, never where it arrived.
+    let near = TreeCoordinate::root(make_node_addr(1));
+    let far = TreeCoordinate::from_addrs(alloc::vec![
+        make_node_addr(4),
+        make_node_addr(3),
+        make_node_addr(2),
+    ])
+    .expect("a three-hop path");
+    for coords in [&near, &far] {
+        assert_eq!(
+            Xx::arrived(coords),
+            None,
+            "a session ack at depth {} is not capped",
+            coords.depth()
+        );
+    }
 }

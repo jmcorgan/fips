@@ -12,13 +12,11 @@ thread, node and outcome: `audited <thread> <node>`, or `planted <thread>
 <node>` where the node was skipped. A (thread, node) pair is audited when it
 has at least one `audited` row.
 
-Beside an audited row the `links-mirror` clause writes two more. `unmirrored
+Beside an audited row the `links-mirror` clause writes one more, `unmirrored
 <thread> <node>`: it skipped a peer a test changed past the feed of the
-settlement core's link records, with a test mutator of the peer's paths. And
-`letoff <thread> <node>`: it let off a peer whose record differs from its
-bundle only in the active path, recorded Live at a switch to it while the
-bundle holds it acknowledged. Each is a check not made, so each is held to a
-ceiling: the count of pairs that wrote it.
+settlement core's link records, with a test mutator of the peer's paths. It
+is a check not made, so it is held to a ceiling: the count of pairs that wrote
+it.
 
 The suite must run as threads in one process (`cargo test`), where a test's
 thread is named for it; under nextest every row would carry the same thread
@@ -26,10 +24,9 @@ name.
 
 Usage: check-audit-reach.py <rows file>
 
-Exit 0 = both floors and both ceilings hold. Exit 1 = the share of pairs
+Exit 0 = both floors and the ceiling hold. Exit 1 = the share of pairs
 audited, or the count of pairs audited, is under its floor, or the count of
-pairs skipped or let off by `links-mirror` is over its ceiling; the numbers
-are printed. Exit 2 = the file is unreadable, empty or holds a malformed row,
+pairs skipped by `links-mirror` is over its ceiling; the numbers are printed. Exit 2 = the file is unreadable, empty or holds a malformed row,
 so nothing was measured; never treated as a pass.
 
 The floors and ceilings are the constants below. Lowering a floor or raising
@@ -51,11 +48,8 @@ COUNT_FLOOR = 2200
 # crossing settled at the msg3 and of the restart at the msg3, and a beacon
 # test, each of which changes a bundle with a test mutator.
 UNMIRRORED_CEILING = 44
-# Most pairs `links-mirror` may let off for a switch to an acknowledged path:
-# the count at both multipath settings when the clause was added.
-LETOFF_CEILING = 4
 
-OUTCOMES = ("audited", "planted", "unmirrored", "letoff")
+OUTCOMES = ("audited", "planted", "unmirrored")
 
 
 def main() -> int:
@@ -84,7 +78,6 @@ def main() -> int:
         return 2
     audited = {p for p, seen in pairs.items() if "audited" in seen}
     unmirrored = sum(1 for seen in pairs.values() if "unmirrored" in seen)
-    letoff = sum(1 for seen in pairs.values() if "letoff" in seen)
     threads = {t for t, _ in pairs}
     covered = {t for t, _ in audited}
     share = 100.0 * len(audited) / len(pairs)
@@ -93,7 +86,7 @@ def main() -> int:
         f"{len(audited)} audited ({share:.2f}%), "
         f"{len(pairs) - len(audited)} only planted; "
         f"{len(threads)} tests, {len(threads - covered)} with no audited node; "
-        f"links-mirror skipped {unmirrored} and let off {letoff}"
+        f"links-mirror skipped {unmirrored}"
     )
     failed = False
     if share < SHARE_FLOOR:
@@ -106,11 +99,6 @@ def main() -> int:
         print(
             f"audit-reach: links-mirror skipped {unmirrored} pairs, "
             f"over the ceiling of {UNMIRRORED_CEILING}"
-        )
-        failed = True
-    if letoff > LETOFF_CEILING:
-        print(
-            f"audit-reach: links-mirror let off {letoff} pairs, over the ceiling of {LETOFF_CEILING}"
         )
         failed = True
     return 1 if failed else 0

@@ -1,8 +1,8 @@
 # core/src/proto/settle/model/tests
 
 Table tests for the reference model. Each cites the FRC-1201 line it reads
-(`frc-1201:<line>`, at fips-frcs `7c41380`), or names the local rule whose
-value it asserts.
+(`frc-1201:<line>`, at fips-frcs `7c41380`), or names the local rule or the
+operator's decision whose value it asserts.
 
 ## Files
 
@@ -23,6 +23,12 @@ value it asserts.
   drops one; the dampener stamped at the swap of a heard peering; copies
   and resends of an armed redial; and a redial whose peering is lost
   first.
+- `roam.rs`: where the peer is, which follows the path bundle of its link
+  (the README's "Where the peer is"): a switch of the active path, the
+  bundle's follow of the path the peer is at, and a frame's roam of the
+  link's one path, which several paths, another transport or a path
+  message leave unmoved and which a node with no bundle makes from any
+  source.
 
 ## Rules for changing it
 
@@ -30,3 +36,5 @@ value it asserts.
   If the FRC line moves, re-read it and update the citation.
 - Each rule's outcome lives on one line of `judge.rs`; flipping that line
   must red the test that cites the rule.
+- A test whose doc line says it records current behaviour is listed in
+  `../../current.txt`; rename, move or delete it only with its line there.

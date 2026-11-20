@@ -1,0 +1,53 @@
+# The settlement core's incidental rules: each rule, or part of a rule, whose
+# outcome no FRC clause and no decision with a reason fixes. Class I has no
+# record at all; class I-kept is kept as the node had it by a record that
+# gives no reason on the merits. A rule an FRC clause requires, or a decision
+# fixes, is not listed, and its tests are not marked.
+#
+# A test that asserts one of these outcomes records current behaviour, not a
+# requirement: current.txt lists it, and its doc comment says so. Changing
+# such an outcome is a decision, made with this file, current.txt and the
+# tests in one change, not a regression. A rule that a decision fixes leaves
+# this file, and its tests leave current.txt and lose their doc line, in the
+# change that records the decision.
+#
+# One line per rule: its ID, its class, `tested` when current.txt lists a test
+# for it or `untested` when none asserts it, and the incidental part with its
+# record. `src/node/settle/tests/rules.rs` checks this file against
+# current.txt and the tests.
+S-01  I       untested  the max-peers cap's default of 128 (Params.peers, the node's max_peers); a local choice the FRC allows; no record
+S-02  I       tested    an answer sent to an identity not held after the max-peers cap filled is refused: no install, a Cap reject, the lease back, the link retired; no record
+S-03  I-kept  tested    a responder leg whose msg2 is sent after the peer is held through another link installs nothing and answers its own msg1's resends until reaped; kept as the node had it
+S-05  I-kept  tested    neither msg2 source, an own dial's or a rekey's at a new epoch, stamps the dampener; kept as the node had it
+S-06  I-kept  tested    the silent-session values: a refusal from the third silent session in a row, 30 s, doubling to 600 s; kept as the node had it
+S-08  I-kept  tested    a msg1 is off the link from the pair the core holds the peer at with no path or index entry there, from a setup pair the index names a newer link at, and from a released setup pair; kept as the node had it
+S-09  I-kept  tested    a removal asks for a reconnect after Dead, Disconnect, Orphaned, Restart, Replacement, OwnRestart and a redial's swap, and not after Ended, Admin or Closed; kept as the node had it
+S-11  I       tested    a dial's bookkeeping: its leg starts on the link its connect opened, or on one opened for it, with the connect's resend cap; a dial naming a link no record holds gives its lease back; no record
+S-12  I       tested    a dial still connecting records its outbound link, indexed and in use, before its msg1; no record
+S-14  I       tested    a dial given up while connecting retires its link alone, closing nothing and freeing no lease; no record
+S-15  I       tested    the admission cap: once answers in flight and asks reach Params.pending (1000), bytes with no stored answer are refused at arrival and an admitted msg1 before the gate; no record
+S-18  I       untested  the admission cap refuses a replacement before the gate, as it does a msg1; no record
+S-22  I       untested  an answer's install is told as a Replace when its msg1 tore a held peer down, and as a Promote otherwise; no record
+S-23  I       untested  a failed msg2 send makes the later install a Promote; a code comment only
+S-24  I       untested  the max-peers cap's default of 128 for an own dial's install, as S-01; no record
+S-25  I-kept  tested    an own dial's msg2 at a new epoch passes no gate and stamps no dampener; kept as the node had it
+S-27  I-kept  tested    a move that makes the peering heard keeps the silent sessions; kept as the node had it
+S-32  I-kept  tested    a rekey msg2 at a new epoch passes no gate and stamps no dampener; kept as the node had it
+S-33  I       untested  a path a bundle's move names that the record does not hold arrives Live; no record
+S-34  I       tested    only a one-path roam resets the peer as a roam; a path the bundle follows at a path message resets nothing; no record
+S-36  I       tested    the first frame of a peering heard from its install, this node's own dial, keeps the replay memory; the node's behaviour transcribed
+S-38  I-kept  tested    a session that carried no frame counts as silent whatever its role; a record lapses after 600 s and remembers 8 setup ephemerals; kept as the node had it
+S-39  I-kept  tested    what a removal closes by its cause: every cause the paths its bundle does not keep that no other link uses, an operator disconnect the held pair too, the core's close every pair no other link uses; kept as the node had it
+S-40  I-kept  tested    an orphan and an operator disconnect close only the unkept paths no other link uses, never a setup pair the bundle released; an operator disconnect closes the held pair whatever uses it; kept as the node had it
+S-43  I       untested  the core's close removes every held peer as Closed, closing its pairs and asking for no reconnect; no record
+S-46  I       untested  a deadline saturates at 100 years; a code comment only
+S-47  I       tested    the resend waits: the k-th resend's wait is the resend interval times the multiplier to the k, truncated to the millisecond (1 s times 2.0 to the k by default); no record
+S-48  I       tested    a standby path's roam is told as a move with no reset, the active path's one-path roam as a roam, and a bind with no path as a Live path; the node's behaviour transcribed
+S-49  I       tested    a move refused for another key, a missing machine or no carry leaves the machine and bundle as they were and releases the lease; no record
+S-50  I       untested  a start whose setup authenticated another key builds neither machine; no record
+S-51  I       tested    a bundle output at a removal reaches no link, and a stop files what the rekey machine carried; no record
+S-52  I       tested    a leg is reaped 30 s after its start; no record
+S-54  I       tested    the first resend 1 s after the msg1 and at most 5 resends; no record
+S-55  I       tested    a failed resend is due again at the next poll, and nothing is retried after the last resend; no record
+S-57  I       tested    a Probing path is not in use and not indexed; a code comment only
+S-58  I-kept  tested    readers take the newest link the index names at a pair, and a released setup pair leaves the index; kept as the node had it

@@ -691,7 +691,7 @@ impl Profile for Ik {
     type Indices = Pool;
     type Transport = u8;
     type Carrier = ();
-    type Route = ();
+    type Route = bool;
     type Ext = u8;
     type LocalKeys = Local;
     type Fsp = Infallible;
@@ -746,12 +746,17 @@ impl Profile for Ik {
     fn is_probe(_: &[u8]) -> bool {
         false
     }
+
+    /// The route is whether the reply arrived on the link.
+    fn arrived(on_link: &bool) -> Option<bool> {
+        Some(*on_link)
+    }
 }
 
 impl Stub for Ik {
     const TRANSPORT: u8 = 1;
     const CARRIER: () = ();
-    const ROUTE: () = ();
+    const ROUTE: bool = true;
 
     fn fsp() -> Option<Infallible> {
         None
@@ -870,6 +875,10 @@ macro_rules! xk_profile {
             fn is_probe(p: &[u8]) -> bool {
                 p.first() == Some(&0x14)
             }
+
+            fn arrived(_: &u16) -> Option<bool> {
+                None
+            }
         }
 
         impl Stub for $name {
@@ -983,6 +992,10 @@ impl Profile for Xx {
 
     fn is_probe(_: &[u8]) -> bool {
         false
+    }
+
+    fn arrived(_: &()) -> Option<bool> {
+        None
     }
 }
 

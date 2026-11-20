@@ -43,7 +43,10 @@ leg's index lease.
   initiator's static key, startup epoch and index, the declared session
   and the negotiated profile, and the completion, which becomes either
   the authenticated `XxDone` a machine takes or the session and lease of
-  a link setup.
+  a link setup. Its reply route is `()`, so `arrived` answers `None`
+  and the rekey machine's cap on refused msg2 reads is off on next: an
+  attempt counts no refused msg2 and drops none unread, whatever link it
+  came on.
 - `tests/`: the profile's tests; its README describes them.
 
 ## Rules

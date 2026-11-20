@@ -73,12 +73,14 @@ field, at once.
   (`testing/check-audit-reach.py`). The `index-cache` clause, after the
   other index clauses, holds the link table's cached lookup to the one its
   records give now. The last clause, `links-mirror`, holds
-  each held peer's core link record to its bundle, letting off only the
-  active path a switch recorded Live while the bundle holds it
-  acknowledged; it skips a peer a test mutator of the peer's paths changed
-  past the feed (`ActivePeer::past_feed`, test builds only), and records
-  each skip and let-off in the reach file, where the check holds them to a
-  ceiling.
+  each held peer's core link record to its bundle, holding its paths,
+  each in the state the bundle holds it, a switched-to path too. It does
+  not compare the record's capable flag with the bundle's, as master's
+  does: next's crossing at the msg3 renews the bundle without telling the
+  record, and nothing on next reads the flag. It skips a peer a test
+  mutator of the peer's paths changed past the feed
+  (`ActivePeer::past_feed`, test builds only), and records each skip in
+  the reach file, where the check holds them to a ceiling.
 - `table.rs`: `Transition`, each thing the code does to a held peer; `Row`,
   each piece of what the node holds per peer, with `DataRow` for the peer's
   record; `Cell` and `DataCell`, what a transition does to a row; `Owner` and

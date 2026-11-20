@@ -428,6 +428,13 @@ impl<E: EntropySource + 'static> Profile for FmpXx<E> {
     fn is_probe(_: &[u8]) -> bool {
         false
     }
+
+    /// No rekey msg2 is capped by where it arrived: next's link reply
+    /// carries no route, so the cap on refused reads is off here until it
+    /// is wired into the XX handshake.
+    fn arrived(_: &()) -> Option<bool> {
+        None
+    }
 }
 
 #[cfg(test)]

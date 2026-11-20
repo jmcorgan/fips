@@ -261,6 +261,7 @@ fn a_moved_path_moves_the_links_entry_with_its_record_and_its_setup_pair_stays()
         link: no,
         from: at(from),
         to: at(to),
+        roam: false,
     };
 
     table.mirror(&moved("10.0.0.1:2121", "10.0.0.4:2121"));

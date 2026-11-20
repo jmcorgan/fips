@@ -244,11 +244,6 @@ pub(in crate::node) struct Mirror {
     /// The peers whose link's record breaks the clause, each with what the
     /// record and the bundle hold.
     pub(in crate::node) bad: Vec<String>,
-    /// The peers let off: the record differs from the bundle only in the
-    /// active path, which the bundle holds acknowledged and the record Live,
-    /// as a switch to it records it (test builds only).
-    #[cfg(test)]
-    pub(in crate::node) letoff: Vec<NodeAddr>,
     /// The peers not read, since a test changed their bundle past the feed
     /// (test builds only).
     #[cfg(test)]
@@ -270,10 +265,10 @@ fn sorted(mut paths: Vec<(Pair, Proven)>) -> Vec<(Pair, Proven)> {
 /// holds exactly the paths of the peer's bundle, order aside, each in the
 /// state the core is told of it (Live for a Live path, acknowledged for
 /// another acknowledged one, probing otherwise), and a peer with no bundle
-/// none. One difference is let off, as the joint world's `Mirrored` oracle
-/// lets it off: the bundle's active path acknowledged and not Live, which a
-/// switch to it records Live. A peer a test changed past the feed is not
-/// read.
+/// none. A peer a test changed past the feed is not read. Unlike the joint
+/// world's `Mirrored` oracle, it does not hold the record's capable flag to
+/// the bundle's: next's crossing at the msg3 renews the bundle without
+/// telling the record, and nothing on next reads the flag.
 pub(in crate::node) fn links_mirror(node: &Node) -> Mirror {
     let mut found = Mirror::default();
     for (addr, peer) in node.peers.iter() {
@@ -307,33 +302,10 @@ pub(in crate::node) fn links_mirror(node: &Node) -> Mirror {
                     .collect()
             })
             .unwrap_or_default();
-        let core = sorted(rec.paths.clone());
-        if core == sorted(held.clone()) {
-            continue;
-        }
-        let active = peer
-            .active_path()
-            .map(|p| (p.transport_id(), p.addr().clone()));
-        let switched: Vec<(Pair, Proven)> = held
-            .iter()
-            .map(|(at, q)| {
-                let mine = active
-                    .as_ref()
-                    .is_some_and(|(t, a)| at.transport == *t && at.addr == *a);
-                if *q == Proven::Acked && (mine || node_fault!(MirrorLetsAckedOff)) {
-                    (at.clone(), Proven::Live)
-                } else {
-                    (at.clone(), *q)
-                }
-            })
-            .collect();
-        if sorted(switched) == core {
-            #[cfg(test)]
-            found.letoff.push(*addr);
-        } else {
+        let (core, held) = (sorted(rec.paths.clone()), sorted(held));
+        if core != held {
             found.bad.push(format!(
-                "{addr}: link {link}'s record holds {core:?}, its bundle {:?}",
-                sorted(held)
+                "{addr}: link {link}'s record holds {core:?}, its bundle {held:?}"
             ));
         }
     }
@@ -372,9 +344,6 @@ pub(in crate::node) fn live(node: &Node, site: &str) {
         if !mirror.unmirrored.is_empty() {
             reach::row(node, "unmirrored");
         }
-        if !mirror.letoff.is_empty() {
-            reach::row(node, "letoff");
-        }
     }
 }
 
@@ -382,7 +351,7 @@ pub(in crate::node) fn live(node: &Node, site: &str) {
 /// outcome, appended to the file `FIPS_AUDIT_REACH` names: `audited <thread>
 /// <node>` or `planted <thread> <node>`, and beside an audited row
 /// `unmirrored` where `links-mirror` skipped a peer a test changed past the
-/// feed, and `letoff` where it let a switched path off.
+/// feed.
 /// `testing/check-audit-reach.py` counts the pairs. A test runs on a thread named for it when the suite
 /// runs as threads in one process.
 #[cfg(all(test, debug_assertions))]

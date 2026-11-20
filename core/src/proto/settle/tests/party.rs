@@ -553,7 +553,7 @@ impl Party for ModelParty {
                 Pkt::Msg2 { id, hs, epoch, .. } => self.msg2(net, src, id, hs, epoch),
                 Pkt::Frame { id, hs, .. } => {
                     if self.sides.contains_key(&id.0) {
-                        self.step(net, id, Event::Frame { hs, from: src });
+                        self.step(net, id, Event::frame(hs, src));
                         net.mark(self.ix, src, true);
                     }
                 }
