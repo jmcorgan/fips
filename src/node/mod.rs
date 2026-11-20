@@ -3242,30 +3242,43 @@ impl Node {
     /// own paths counted when it is another link, such as the link a move
     /// left, which goes next.
     pub(in crate::node) async fn close_setup(&mut self, link_id: LinkId, except: LinkId) {
-        #[cfg(test)]
-        self.resync();
         let Some(link) = self.links.get(&link_id) else {
+            #[cfg(test)]
+            self.resync();
             return;
         };
-        let transport_id = link.transport_id();
-        let addr = link.remote_addr();
+        let (transport_id, addr) = (link.transport_id(), link.remote_addr().clone());
+        // A dial whose own paths keep its connection is the usual case
+        // after a move, and not worth a line.
+        if !self.close_pair(transport_id, &addr, except).await && except == link_id {
+            tracing::debug!(
+                link_id = %link_id,
+                addr = %addr,
+                "Handshake link shares its connection with another live link; leaving it open"
+            );
+        }
+    }
+
+    /// Close the transport connection at `(transport_id, addr)` unless a
+    /// live link other than `except` uses it ([`Self::in_use`]). Whether it
+    /// was closed.
+    pub(in crate::node) async fn close_pair(
+        &mut self,
+        transport_id: TransportId,
+        addr: &TransportAddr,
+        except: LinkId,
+    ) -> bool {
+        #[cfg(test)]
+        self.resync();
         if self.in_use(transport_id, addr, except) {
-            // A dial whose own paths keep its connection is the usual case
-            // after a move, and not worth a line.
-            if except == link_id {
-                tracing::debug!(
-                    link_id = %link_id,
-                    addr = %addr,
-                    "Handshake link shares its connection with another live link; leaving it open"
-                );
-            }
-            return;
+            return false;
         }
         #[cfg(test)]
         self.closed(transport_id, addr);
         if let Some(transport) = self.transports.get(&transport_id) {
             transport.close_connection(addr).await;
         }
+        true
     }
 
     /// The close rule: whether a live link other than `link_id` uses

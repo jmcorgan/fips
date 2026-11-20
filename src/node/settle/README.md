@@ -34,8 +34,12 @@ field, at once.
   paths of its record and a handshake leg by its setup pair. `Node::in_use`
   asks it for every close site, the connect's and the drain's, and
   `Node::close_unused` closes a link's setup pair only when it answers no;
-  `Node::close_setup` asks the same with another link excepted, as a move
-  closes its dial's own connection with the link it left excepted.
+  `Node::close_pair` asks the same with another link excepted, for a
+  move's close of its dial's own connection with the link it left excepted
+  (`Node::close_setup`), for a msg1, a redial's among them, that the late
+  ACL or index exhaustion refuses after the answer is asked for, and for a
+  dial whose answer the restart gates refuse, with the dial's own link
+  excepted.
   The lookup is
   derived from the settlement core's record of each link (`Links`), kept
   under the core's number for it (`no`): opened and retired with the link,
@@ -158,7 +162,7 @@ field, at once.
   refusal of a promotion at the max-peers cap, and a crossing's swap; the
   shadow records what it decided beside it, and the live audit compares
   the two. `Node::closed` records likewise each connection the node closes
-  where a decision closes one (`close_setup`, a removal's close, a queued
+  where a decision closes one (`close_pair`, a removal's close, a queued
   release, a refused own dial), and the shadow each pair its outputs close
   (`Shadow::closes`). `line` appends to the file `FIPS_CORE_SHADOW`
   names, if any: a test's first difference, and at each node's drop a

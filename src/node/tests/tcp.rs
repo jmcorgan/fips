@@ -2,8 +2,11 @@
 //!
 //! Tests that the TCP transport works end-to-end at the node level:
 //! handshake, spanning tree convergence, mixed-transport routing,
-//! MMP link-dead detection, reconnection after link death, and a TCP
-//! path joining a multipath link made on loopback.
+//! MMP link-dead detection, reconnection after link death, a TCP
+//! path joining a multipath link made on loopback, the close of a
+//! connection whose msg1 is refused after the answer was asked for, and a
+//! pending redial's connection kept for the later redial that replaces it
+//! there.
 //! All tests use 127.0.0.1:0 (ephemeral ports) and need no privileges.
 
 use super::heartbeat::set_link_dead_timeout;
@@ -955,4 +958,453 @@ async fn a_tcp_candidate_is_connected_probed_and_its_connection_closed_with_its_
         "q's connection closed with it"
     );
     cleanup_nodes(&mut nodes).await;
+}
+
+/// Deny `peer` in `node`'s peer ACL, read from files in a directory of its
+/// own, which the caller keeps until the node is done with them.
+async fn deny(node: &mut Node, peer: &Node) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    node.isolate_peer_acl_for_test(
+        dir.path().join("peers.allow"),
+        dir.path().join("peers.deny"),
+    );
+    std::fs::write(dir.path().join("peers.deny"), format!("{}\n", peer.npub())).unwrap();
+    node.reload_peer_acl().await;
+    dir
+}
+
+/// A raw TCP connection to `responder`'s listener on which one genuine msg1
+/// from `initiator`'s identity at `epoch` has been sent, and the packet the
+/// responder received for it.
+async fn raw_msg1(
+    responder: &mut TestNode,
+    initiator: &Node,
+    epoch: [u8; 8],
+) -> (tokio::net::TcpStream, ReceivedPacket) {
+    use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG1, build_msg1};
+    use crate::utils::index::SessionIndex;
+    use tokio::io::AsyncWriteExt;
+
+    let identity = PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full());
+    let mut leg = outbound_leg(LinkId::new(1), identity, 1000);
+    let noise = leg
+        .start_handshake(initiator.identity().keypair(), epoch, LegStamp::at(1000))
+        .unwrap();
+    let wire = build_msg1(SessionIndex::new(7), &noise);
+    let listen: std::net::SocketAddr = responder.addr.as_str().unwrap().parse().unwrap();
+    let mut stream = tokio::net::TcpStream::connect(listen).await.unwrap();
+    stream.write_all(&wire).await.unwrap();
+    let from = TransportAddr::from_string(&stream.local_addr().unwrap().to_string());
+    let packet = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let p = responder
+                .packet_rx
+                .recv()
+                .await
+                .expect("packet channel open");
+            let msg1 = CommonPrefix::parse(&p.data).is_some_and(|c| c.phase == PHASE_MSG1);
+            if msg1 && p.remote_addr == from {
+                break p;
+            }
+        }
+    })
+    .await
+    .expect("precondition: the msg1 reaches the responder");
+    (stream, packet)
+}
+
+/// What `node`'s TCP transport holds of the connection from `from`, and how
+/// many inbound connections its pool holds.
+fn pooled(node: &TestNode, from: &TransportAddr) -> (ConnectionState, u64) {
+    let handle = node.node.transports.get(&node.transport_id).unwrap();
+    let inbound = match handle {
+        TransportHandle::Tcp(t) => t.stats().pool_inbound_count(),
+        _ => unreachable!("a TCP test node"),
+    };
+    (handle.connection_state(from), inbound)
+}
+
+/// How long after `since` the responder ended `stream`, read with nothing
+/// more sent: `Ok` at its end of stream or a reset, `Err` with what was
+/// read if it is still open at `bound`.
+async fn ended(
+    stream: &mut tokio::net::TcpStream,
+    since: std::time::Instant,
+    bound: Duration,
+) -> Result<Duration, String> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 256];
+    match tokio::time::timeout(bound, stream.read(&mut buf)).await {
+        Ok(Ok(0)) | Ok(Err(_)) => Ok(since.elapsed()),
+        Ok(Ok(n)) => Err(format!("{n} bytes read")),
+        Err(_) => Err(format!(
+            "still open {:?} after the refusal",
+            since.elapsed()
+        )),
+    }
+}
+
+/// Make `node`'s peering with `peer` a minute past its promotion and its
+/// last authenticated frame, so the liveness gate does not hold a restart
+/// back.
+fn quiet(node: &mut Node, peer: &NodeAddr) {
+    let p = node
+        .get_peer_mut(peer)
+        .expect("precondition: the responder holds the initiator");
+    p.test_backdate_promoted(Duration::from_secs(60));
+    p.test_backdate_heard(Duration::from_secs(60));
+}
+
+/// Stop every transport of `node`.
+async fn stop_tcp(node: &mut TestNode) {
+    for (_, t) in node.node.transports.iter_mut() {
+        t.stop().await.ok();
+    }
+}
+
+/// A msg1 on a fresh inbound TCP connection from an identity the ACL denies
+/// is refused at the late ACL, after the answer is asked for, and its
+/// connection closes at once: the initiator reads the end of its stream
+/// well inside a second, not at the transport's inbound idle deadline (64 s
+/// at stock settings), and the responder's inbound pool is free of it as the
+/// refusal returns.
+#[tokio::test]
+async fn a_late_acl_refusal_of_a_fresh_inbound_tcp_msg1_closes_its_connection_at_once() {
+    let config = Config::new();
+    let idle = super::super::handlers::rekey::inbound_idle_timeout(&config.node);
+    let mut b = make_test_node_tcp_idle(config, Some(idle)).await;
+    let a = make_node();
+    let _acl = deny(&mut b.node, &a).await;
+    let (mut stream, packet) = raw_msg1(&mut b, &a, a.startup_epoch()).await;
+    let from = packet.remote_addr.clone();
+    let open = pooled(&b, &from);
+
+    let refused_at = std::time::Instant::now();
+    b.node.handle_msg1(packet).await;
+    let held = (b.node.peer_count(), b.node.link_count());
+    let asked = b.node.shadow.seen("Abandon");
+    let after = pooled(&b, &from);
+    let end = ended(&mut stream, refused_at, Duration::from_secs(1)).await;
+    stop_tcp(&mut b).await;
+
+    assert_eq!(
+        open,
+        (ConnectionState::Connected, 1),
+        "precondition: the msg1's connection is pooled inbound"
+    );
+    assert_eq!(held, (0, 0), "precondition: the msg1 is refused");
+    assert_eq!(
+        asked, 1,
+        "precondition: the refusal is the late ACL's, after the answer was asked for"
+    );
+    assert_eq!(
+        after,
+        (ConnectionState::None, 0),
+        "defect: the responder's pool still holds the refused msg1's connection"
+    );
+    assert!(
+        end.is_ok(),
+        "defect: the refused msg1's connection did not close within a second: {end:?}"
+    );
+}
+
+/// A peer this node holds over TCP, quiet for a minute, restarts (a msg1 at
+/// a new epoch, on a new connection) while the ACL denies it. The restart's teardown removes the
+/// held peer before the late ACL, which refuses the msg1, and the msg1's
+/// connection closes at once, as a fresh connection's does.
+#[tokio::test]
+async fn a_late_acl_refusal_of_a_restart_msg1_over_tcp_closes_its_connection_at_once() {
+    let mut nodes = vec![make_test_node_tcp().await, make_test_node_tcp().await];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    drain_all_packets(&mut nodes, false).await;
+    let a = *nodes[0].node.node_addr();
+    let was_held = nodes[1].node.get_peer(&a).is_some();
+    let mut epoch = nodes[0].node.startup_epoch();
+    epoch[0] ^= 0xff;
+    let (initiator, mut b) = (nodes.remove(0), nodes.remove(0));
+    quiet(&mut b.node, &a);
+    let _acl = deny(&mut b.node, &initiator.node).await;
+    let (mut stream, packet) = raw_msg1(&mut b, &initiator.node, epoch).await;
+    let from = packet.remote_addr.clone();
+
+    let refused_at = std::time::Instant::now();
+    b.node.handle_msg1(packet).await;
+    let held = b.node.get_peer(&a).is_some();
+    let after = pooled(&b, &from).0;
+    let end = ended(&mut stream, refused_at, Duration::from_secs(1)).await;
+    let mut nodes = vec![initiator, b];
+    cleanup_nodes(&mut nodes).await;
+
+    assert!(was_held, "precondition: the responder holds the initiator");
+    assert!(
+        !held,
+        "precondition: the restart's teardown removed the held peer before the ACL refused it"
+    );
+    assert_eq!(
+        after,
+        ConnectionState::None,
+        "defect: the responder's pool still holds the refused restart's connection"
+    );
+    assert!(
+        end.is_ok(),
+        "defect: the refused restart's connection did not close within a second: {end:?}"
+    );
+}
+
+/// A msg1 on a fresh inbound TCP connection that the ACL admits, refused
+/// because no session index can be drawn for its answer, closes its
+/// connection at once, as the late ACL's refusal does.
+#[tokio::test]
+async fn a_fresh_inbound_tcp_msg1_refused_for_want_of_a_session_index_closes_its_connection_at_once()
+ {
+    let mut b = make_test_node_tcp().await;
+    let a = make_node();
+    b.node.index_allocator = crate::utils::index::IndexAllocator::with_max_attempts(0);
+    let (mut stream, packet) = raw_msg1(&mut b, &a, a.startup_epoch()).await;
+    let from = packet.remote_addr.clone();
+
+    let refused_at = std::time::Instant::now();
+    b.node.handle_msg1(packet).await;
+    let held = b.node.peer_count();
+    let asked = b.node.shadow.seen("Abandon");
+    let after = pooled(&b, &from).0;
+    let end = ended(&mut stream, refused_at, Duration::from_secs(1)).await;
+    stop_tcp(&mut b).await;
+
+    assert_eq!(held, 0, "precondition: the msg1 is refused");
+    assert_eq!(
+        asked, 1,
+        "precondition: the refusal follows the ask, at the index draw"
+    );
+    assert_eq!(
+        after,
+        ConnectionState::None,
+        "defect: the responder's pool still holds the refused msg1's connection"
+    );
+    assert!(
+        end.is_ok(),
+        "defect: the refused msg1's connection did not close within a second: {end:?}"
+    );
+}
+
+/// A held peer's restart over TCP, quiet for a minute, that the ACL admits,
+/// refused because no session index can be drawn for its answer once the
+/// teardown has run, closes the msg1's connection at once.
+#[tokio::test]
+async fn a_restart_msg1_over_tcp_refused_for_want_of_a_session_index_closes_its_connection_at_once()
+{
+    let mut nodes = vec![make_test_node_tcp().await, make_test_node_tcp().await];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    drain_all_packets(&mut nodes, false).await;
+    let a = *nodes[0].node.node_addr();
+    let was_held = nodes[1].node.get_peer(&a).is_some();
+    let mut epoch = nodes[0].node.startup_epoch();
+    epoch[0] ^= 0xff;
+    let (initiator, mut b) = (nodes.remove(0), nodes.remove(0));
+    quiet(&mut b.node, &a);
+    // An allocator that draws nothing, holding the indices already drawn.
+    let mut none = crate::utils::index::IndexAllocator::with_max_attempts(0);
+    for peer in b.node.peers.values() {
+        for ((_, index), _) in peer.link_bindings() {
+            none.reserve(crate::utils::index::SessionIndex::new(index))
+                .expect("precondition: each bound index once");
+        }
+    }
+    b.node.index_allocator = none;
+    let (mut stream, packet) = raw_msg1(&mut b, &initiator.node, epoch).await;
+    let from = packet.remote_addr.clone();
+
+    let refused_at = std::time::Instant::now();
+    b.node.handle_msg1(packet).await;
+    let held = b.node.get_peer(&a).is_some();
+    let after = pooled(&b, &from).0;
+    let end = ended(&mut stream, refused_at, Duration::from_secs(1)).await;
+    let mut nodes = vec![initiator, b];
+    cleanup_nodes(&mut nodes).await;
+
+    assert!(was_held, "precondition: the responder holds the initiator");
+    assert!(
+        !held,
+        "precondition: the restart's teardown removed the held peer before the index draw failed"
+    );
+    assert_eq!(
+        after,
+        ConnectionState::None,
+        "defect: the responder's pool still holds the refused restart's connection"
+    );
+    assert!(
+        end.is_ok(),
+        "defect: the refused restart's connection did not close within a second: {end:?}"
+    );
+}
+
+/// A peer this node holds over TCP, heard from, redials it from a new
+/// connection (a fresh msg1 at the same epoch, off the established link)
+/// while the ACL denies it. The redial is refused at the ACL, before an
+/// index is drawn for it, and the redial's connection closes at once, as a
+/// fresh connection's does; the held peering stays.
+#[tokio::test]
+async fn a_redial_over_tcp_refused_by_the_acl_closes_its_connection_at_once() {
+    let mut nodes = vec![make_test_node_tcp().await, make_test_node_tcp().await];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    drain_all_packets(&mut nodes, false).await;
+    let a = *nodes[0].node.node_addr();
+    let heard = nodes[1].node.get_peer(&a).is_some_and(|p| p.is_heard());
+    let held_link = nodes[1].node.get_peer(&a).map(|p| p.link_id());
+    let epoch = nodes[0].node.startup_epoch();
+    let (initiator, mut b) = (nodes.remove(0), nodes.remove(0));
+    let _acl = deny(&mut b.node, &initiator.node).await;
+    let was = b.node.stats().handshake.snapshot();
+    let (mut stream, packet) = raw_msg1(&mut b, &initiator.node, epoch).await;
+    let from = packet.remote_addr.clone();
+    let open = pooled(&b, &from).0;
+
+    let refused_at = std::time::Instant::now();
+    b.node.handle_msg1(packet).await;
+    let r = b.node.stats().handshake.snapshot();
+    let armed = b.node.redials.of(&a).is_some();
+    let still = b.node.get_peer(&a).map(|p| p.link_id());
+    let after = pooled(&b, &from).0;
+    let end = ended(&mut stream, refused_at, Duration::from_secs(1)).await;
+    let mut nodes = vec![initiator, b];
+    cleanup_nodes(&mut nodes).await;
+
+    assert!(heard, "precondition: the responder has heard the initiator");
+    assert_eq!(
+        open,
+        ConnectionState::Connected,
+        "precondition: the redial's connection is pooled inbound"
+    );
+    assert!(
+        r.redials == was.redials && r.bad_state > was.bad_state && !armed,
+        "precondition: the redial is refused at the ACL: {was:?} -> {r:?}"
+    );
+    assert_eq!(still, held_link, "precondition: the held peering stays");
+    assert_eq!(
+        after,
+        ConnectionState::None,
+        "defect: the responder's pool still holds the refused redial's connection"
+    );
+    assert!(
+        end.is_ok(),
+        "defect: the refused redial's connection did not close within a second: {end:?}"
+    );
+}
+
+/// A genuine msg1 from `initiator`'s identity at `epoch` to `responder`,
+/// sender index `sidx`, written on `stream`, an open connection to the
+/// responder's listener, and the packet the responder received for it.
+async fn msg1_on(
+    stream: &mut tokio::net::TcpStream,
+    responder: &mut TestNode,
+    initiator: &Node,
+    epoch: [u8; 8],
+    sidx: u32,
+) -> ReceivedPacket {
+    use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG1, build_msg1};
+    use crate::utils::index::SessionIndex;
+    use tokio::io::AsyncWriteExt;
+
+    let identity = PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full());
+    let mut leg = outbound_leg(LinkId::new(1), identity, 1000);
+    let noise = leg
+        .start_handshake(initiator.identity().keypair(), epoch, LegStamp::at(1000))
+        .unwrap();
+    let wire = build_msg1(SessionIndex::new(sidx), &noise);
+    stream.write_all(&wire).await.unwrap();
+    let from = TransportAddr::from_string(&stream.local_addr().unwrap().to_string());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let p = responder
+                .packet_rx
+                .recv()
+                .await
+                .expect("packet channel open");
+            let msg1 = CommonPrefix::parse(&p.data).is_some_and(|c| c.phase == PHASE_MSG1);
+            if msg1 && p.remote_addr == from {
+                break p;
+            }
+        }
+    })
+    .await
+    .expect("precondition: the msg1 reaches the responder")
+}
+
+/// The receiver index of the next msg2 read off `stream` within a second,
+/// or why none was read.
+async fn msg2_on(stream: &mut tokio::net::TcpStream) -> Result<u32, String> {
+    use crate::proto::fmp::wire::{MSG2_WIRE_SIZE, Msg2Header};
+    use tokio::io::AsyncReadExt;
+    let mut buf = vec![0u8; MSG2_WIRE_SIZE];
+    match tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut buf)).await {
+        Ok(Ok(_)) => Msg2Header::parse(&buf)
+            .map(|h| h.receiver_idx.as_u32())
+            .ok_or_else(|| "not a msg2".to_string()),
+        Ok(Err(e)) => Err(format!("the stream ended: {e}")),
+        Err(_) => Err("nothing read within a second".to_string()),
+    }
+}
+
+/// A peer this node holds over TCP, heard from, redials it from a new
+/// connection, and the redial is answered into a pending redial that no
+/// frame proves. More than a second later a second fresh msg1 of the peer
+/// arrives on the same connection: it replaces the pending redial, whose
+/// leg is cleaned up, and is answered. The connection is the second
+/// redial's own as much as the first's, so it stays open, and the second
+/// redial's msg2 goes out on it.
+#[tokio::test]
+async fn a_second_redial_over_tcp_on_a_pending_redials_connection_keeps_the_connection_and_is_answered()
+ {
+    crate::time::freeze();
+    let mut nodes = vec![make_test_node_tcp().await, make_test_node_tcp().await];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    drain_all_packets(&mut nodes, false).await;
+    let a = *nodes[0].node.node_addr();
+    let heard = nodes[1].node.get_peer(&a).is_some_and(|p| p.is_heard());
+    let held_link = nodes[1].node.get_peer(&a).map(|p| p.link_id());
+    let epoch = nodes[0].node.startup_epoch();
+    let (initiator, mut b) = (nodes.remove(0), nodes.remove(0));
+    let was = b.node.stats().handshake.snapshot();
+    let (mut stream, packet) = raw_msg1(&mut b, &initiator.node, epoch).await;
+    let from = packet.remote_addr.clone();
+    b.node.handle_msg1(packet).await;
+    let first = b.node.redials.of(&a);
+    let first_msg2 = msg2_on(&mut stream).await;
+
+    crate::time::advance(Duration::from_millis(1500));
+    let packet = msg1_on(&mut stream, &mut b, &initiator.node, epoch, 0x5EC0).await;
+    b.node.handle_msg1(packet).await;
+    let second = b.node.redials.of(&a);
+    let r = b.node.stats().handshake.snapshot();
+    let after = pooled(&b, &from).0;
+    let second_msg2 = msg2_on(&mut stream).await;
+    let still = b.node.get_peer(&a).map(|p| p.link_id());
+    let mut nodes = vec![initiator, b];
+    cleanup_nodes(&mut nodes).await;
+
+    assert!(heard, "precondition: the responder has heard the initiator");
+    assert_eq!(
+        first_msg2,
+        Ok(7),
+        "precondition: the first redial is answered on the connection"
+    );
+    assert!(
+        first.is_some() && r.redials == was.redials + 2,
+        "precondition: both msg1s are answered as redials: {was:?} -> {r:?}"
+    );
+    assert_eq!(still, held_link, "precondition: the held peering stays");
+    assert_eq!(
+        after,
+        ConnectionState::Connected,
+        "defect: the cleanup of the first redial closed the second redial's connection"
+    );
+    assert!(
+        second.is_some_and(|s| Some(s.link) != first.map(|f| f.link)),
+        "defect: the second redial is not pending in place of the first: {first:?} -> {second:?}"
+    );
+    assert_eq!(
+        second_msg2,
+        Ok(0x5EC0),
+        "defect: the second redial's msg2 did not reach its connection"
+    );
 }

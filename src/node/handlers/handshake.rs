@@ -1288,6 +1288,11 @@ impl Node {
                     let _ = machine.step(PeerEvent::Rejected, interval_ms);
                     #[cfg(test)]
                     self.shadow_unasked(link_id);
+                    // The refused msg1's connection closes now, unless a
+                    // live link uses it, rather than at the transport's
+                    // idle deadline.
+                    self.close_pair(packet.transport_id, &packet.remote_addr, link_id)
+                        .await;
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
@@ -1307,6 +1312,8 @@ impl Node {
                         warn!("Failed to allocate session index for inbound");
                         #[cfg(test)]
                         self.shadow_unasked(link_id);
+                        self.close_pair(packet.transport_id, &packet.remote_addr, link_id)
+                            .await;
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
@@ -1441,6 +1448,11 @@ impl Node {
                     let _ = machine.step(PeerEvent::Rejected, interval_ms);
                     #[cfg(test)]
                     self.shadow_unasked(link_id);
+                    // The refused msg1's connection closes now, unless a
+                    // live link uses it, rather than at the transport's
+                    // idle deadline.
+                    self.close_pair(packet.transport_id, &packet.remote_addr, link_id)
+                        .await;
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
@@ -1458,6 +1470,8 @@ impl Node {
                         warn!("Failed to allocate session index for inbound");
                         #[cfg(test)]
                         self.shadow_unasked(link_id);
+                        self.close_pair(packet.transport_id, &packet.remote_addr, link_id)
+                            .await;
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
@@ -2362,12 +2376,15 @@ impl Node {
                 reason = ?refusal,
                 "Restart on our dial refused by the restart gates, dropping the dial"
             );
-            if let Some(link) = self.links.get(&link_id) {
-                let tid = link.transport_id();
-                let addr = link.remote_addr().clone();
-                if let Some(transport) = self.transports.get(&tid) {
-                    transport.close_connection(&addr).await;
-                }
+            // The dial's connection closes by the close rule, as the
+            // settlement core decides it: not while the held link, or any
+            // other live link, uses it.
+            if let Some((tid, addr)) = self
+                .links
+                .get(&link_id)
+                .map(|link| (link.transport_id(), link.remote_addr().clone()))
+            {
+                self.close_pair(tid, &addr, link_id).await;
             }
             self.remove_peer_machine(link_id);
             self.remove_link(&link_id);

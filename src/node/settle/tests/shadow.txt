@@ -9,10 +9,8 @@
 # known difference, tab-separated: `<test>\t<site>\t<clause>`, the test's
 # thread name, the node entry the audit ran at, and the clause that found it.
 # No line names a planted node, and a planted state is no reason for one.
-# Every line is `closes-agree`'s: the rest of the comparison gives no first
-# difference over the whole fips-mesh lib suite, with multipath off or on.
-# Each group below is one difference, and its comment says what the node and
-# the core close.
+# There is none: the whole fips-mesh lib suite gives no first difference with
+# multipath off or on, `closes-agree` included.
 #
 # Reach gaps: switches of the core whose node half reds no root test, through
 # the shadow or otherwise (each by a run of the whole fips-mesh lib suite with
@@ -73,12 +71,3 @@
 # the bundle's capability from the core's records, is one. CrossedRunsKeep
 # is not: with it on, the tests the comparison finds it in fail, and two of
 # them are its manifest lines through the shadow.
-
-# The late ACL refuses a msg1 the core asked the answer to: the core
-# retires its link and closes the msg1's pair when no live link uses it; the
-# node closes nothing, and leaves the connection to the transport's idle
-# deadline.
-node::tests::acl::test_acl_rejected_msg1_leaves_no_registry_trace	handle_msg1	closes-agree
-node::tests::acl::test_inbound_msg1_denied_by_acl	handle_msg1	closes-agree
-node::tests::settle::table::replace::a_replacement_refused_by_the_acl_after_its_removal_keeps_the_removal	handle_msg1	closes-agree
-node::tests::settle::table::replace::a_replacement_refused_by_the_acl_after_its_removal_keeps_the_removal_with_multipath_on	handle_msg1	closes-agree

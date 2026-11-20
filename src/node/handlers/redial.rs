@@ -32,7 +32,10 @@
 //! redial of the peer in the last 15 s or a full memory, then the
 //! dampener) and the ACL. Only then is the msg1's ephemeral recorded, in
 //! the held link's replay record and the gates' redial memory, so a genuine
-//! dial refused by a gate is judged again at its next resend.
+//! dial refused by a gate is judged again at its next resend. A redial the
+//! ACL refuses, or one no session index is left for, has its connection
+//! closed at once unless a live link uses it, as any msg1 refused after its
+//! answer is asked for does.
 
 use crate::NodeAddr;
 use crate::node::Node;
@@ -118,22 +121,16 @@ impl Node {
                 .is_err()
         {
             let _ = machine.step(PeerEvent::Rejected, interval_ms);
+            // The refused redial's connection closes now, unless a live link
+            // uses it, rather than at the transport's idle deadline.
+            self.close_pair(packet.transport_id, &packet.remote_addr, link)
+                .await;
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
-        // Every gate passed: a pending redial older than the slot's floor
-        // gives way to this one, and the msg1's ephemeral is recorded, so
-        // its copies are copies from here on.
-        if let Some(old) = pending {
-            debug!(
-                peer = %self.peer_display_name(&peer),
-                link_id = %old.link,
-                "A later redial replaces a pending redial its frame never proved"
-            );
-            self.cleanup_stale_connection(old.link, packet.timestamp_ms)
-                .await;
-        }
+        // Every gate passed: the msg1's ephemeral is recorded, so its copies
+        // are copies from here on.
         if let Some(digest) = digest
             && let Some(held) = self.peers.get_mut(&peer)
         {
@@ -152,6 +149,8 @@ impl Node {
         let Some(our_lease) = allocate(&mut self.index_allocator) else {
             warn!("Failed to allocate session index for a redial");
             let _ = machine.step(PeerEvent::Rejected, interval_ms);
+            self.close_pair(packet.transport_id, &packet.remote_addr, link)
+                .await;
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -166,6 +165,19 @@ impl Node {
             LinkDirection::Inbound,
             Duration::from_millis(self.config().node.base_rtt_ms),
         ));
+        // A pending redial older than the slot's floor gives way to this
+        // one. Its leg goes once this one's link is open, so the close rule
+        // keeps the connection both arrived on when it is the same one, as
+        // a later fresh msg1 on a pending redial's TCP connection is.
+        if let Some(old) = pending {
+            debug!(
+                peer = %self.peer_display_name(&peer),
+                link_id = %old.link,
+                "A later redial replaces a pending redial its frame never proved"
+            );
+            self.cleanup_stale_connection(old.link, packet.timestamp_ms)
+                .await;
+        }
         let wire_msg2 = build_msg2(our_index, their_index, &wire.msg2_payload);
         // The answer's leg, the settlement core's, reaped at the handshake
         // deadline counted from the msg1's arrival.
