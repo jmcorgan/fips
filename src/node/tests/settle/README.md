@@ -31,7 +31,13 @@ files run off, which is what they test.
   dampener in `table/`),
   delivery until idle for loopback and TCP nodes alike (`pump`), a fresh
   heartbeat check (`heartbeat_reaches`), the check that two nodes hold one
-  session that carries a heartbeat each way (`settled`), and the wrappers
+  session that carries a heartbeat each way (`settled`, over `indices` and
+  `one_session`), the run that ends a split pair (`outlast`: `ride_out`
+  runs every node past the link-dead timeout on a frozen test clock, a
+  second at a time, each node's receive-loop tick and a full delivery
+  between steps, and records when each end dropped the other; then
+  `redial` dials again through `initiate_connection`), the split's shape
+  (`assert_split`), and the wrappers
   over shared helpers whose signature or key multipath changed
   (`bind_index`, `alias`, `tap`): the session-index map keyed by the bare
   index, and loopback addresses registered under their transport. A
@@ -89,8 +95,11 @@ files run off, which is what they test.
   pair the winning msg2 came from, then the audit); a second msg1 more than 1
   s after the first (in order, on another transport, where it is a redial the
   dialer's first frame proves, the dialer left on its second dial's link, and
-  with the second msg2 first, a known defect checked by heartbeat and by the
-  audit); a move's link: the address dialed with the
+  with the second msg2 first, a split accepted as behaviour: checked by
+  heartbeat and by the audit, it splits the pair until link-dead drops both
+  ends and the dialer redials, with the control that a working pair run past
+  the link-dead timeout the same way keeps its session); a move's link: the
+  address dialed with the
   msg2's pair a path of it, and the
   pin a second dial ends after a crossing; a TCP crossing whose one msg1
   arrives inside the other's connect window, which reaches the larger node
@@ -98,9 +107,12 @@ files run off, which is what they test.
   at its first frame; a larger node's dial on a quiet peer's aged link (two known
   defects); a crossed msg1 the smaller node reads after installing from its
   own dial and hearing nothing for longer than the heard floor, from another
-  transport and on the same one (known defects, with a control inside the
-  floor); a larger node's dial on the aged link after the smaller node's own
-  rekey, past the heard floor (a known defect, with the same control); and two
+  transport (one session) and on the same one (a split accepted as
+  behaviour, ended by link-dead and the smaller node's redial), with a
+  control inside the floor; a larger node's dial on the aged link after the
+  smaller node's own rekey, past the heard floor (a split accepted as
+  behaviour, ended by link-dead and the larger node's redial, with the same
+  control); and two
   dials to one address with no peer held, the first reaped, leaving open the
   connection the second runs on, on loopback and on the BLE mock; and the
   close rule where another link's second path holds the pair, at the link a
@@ -138,8 +150,9 @@ files run off, which is what they test.
   `restart_dial` also serve the replay tests of `decrypt_replay.rs`.
 - `restart.rs`: a restarted node that reads a late rekey msg1 of its
   peer's previous run, past the unheard floor, after the peer has moved
-  onto its new run: one session in every placement of the peer (a known
-  defect), with a control inside the floor. It drives the floor with
+  onto its new run: a split accepted as behaviour in every placement of the
+  peer, which link-dead ends at both ends and the peer's redial turns into
+  one session, with a control inside the floor. It drives the floor with
   `crate::time::advance`.
 - `lane.rs`: six planted tests for the lanes' self-checks. The first five
   serve the known-defect lane (`testing/known-defect-lane.sh`), and each must
@@ -219,5 +232,8 @@ a finding to report, not a reason to bring an exemption back.
 - A test that opens a socket needs nothing more: the whole module is in
   `node-synthetic`, and `testing/check-node-test-groups.py` reads the files
   `mod.rs` declares.
+- A test whose doc line says it records current behaviour is listed in the
+  settlement core's `current.txt` (`core/src/proto/settle/`); rename, move or
+  delete it only with its line there.
 - Tracker IDs and planning labels stay out of names, comments and messages;
   a test's name states the behaviour it asserts.

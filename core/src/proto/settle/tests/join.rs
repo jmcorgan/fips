@@ -390,6 +390,9 @@ fn each_bundle_output_mirrors_to_its_input() {
 
 /// At a removal no link is given, and no bundle output reaches the core:
 /// the link's record goes with it. Break: a release routed with no link.
+///
+/// Records current behaviour (rule S-51: the dropped bundle output): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn a_bundle_output_at_a_removal_reaches_no_link() {
     for (o, _) in bundle_outputs() {
@@ -492,6 +495,9 @@ fn a_roam_is_moved_and_a_bind_is_a_live_path() {
 /// the path, and is not marked a roam: the node resets nothing for it
 /// (`Roam::changed` is false for a standby roam), so the core must not
 /// reset the peer either.
+///
+/// Records current behaviour (rule S-48: no reset at a standby path's roam): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn a_standby_paths_roam_is_moved_and_not_marked_a_roam() {
     let (from, to) = (pair(&path(1)), pair(&path(2)));
@@ -861,6 +867,9 @@ fn a_start_mirrors_the_original_path_as_live() {
 /// as it was, the bundle is not started again, and the setup's lease comes
 /// back as a release, the one step. Break, a scratch edit of the join
 /// function: the bundle renewed before the key is compared.
+///
+/// Records current behaviour (rule S-49: a refused move changes nothing): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn a_move_refused_for_another_key_leaves_both_machines_as_they_were() {
     let (mut me, mut b, mut c) = (Node::new(1), Node::new(2), Node::new(3));
@@ -924,6 +933,9 @@ fn a_move_refused_for_another_key_leaves_both_machines_as_they_were() {
 /// record store: the peer's startup epoch, the link's age and the replay
 /// record. Break, a scratch edit of the join function: what the machine
 /// carried dropped.
+///
+/// Records current behaviour (rule S-51: the stop's order): open to change by decision. Its
+/// other assertions are not.
 #[test]
 fn a_stop_files_what_the_rekey_machine_carried() {
     let (mut me, mut b) = (Node::new(1), Node::new(2));

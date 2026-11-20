@@ -64,6 +64,14 @@ tests.
   routine of `../exec/remove.rs`, by a scan of the node's code outside its
   tests for a peer taken out of the peer map, with its one exemption and a
   planted line.
+- `rules.rs`: that the settlement core's `rules.txt` and `current.txt`
+  (`core/src/proto/settle/`) and the doc lines of the tests they list agree:
+  every listed test, of either crate, exists at its path, and its doc line
+  names the rules it is listed under; every rule marked tested lists a test
+  and none marked untested does; only I and I-kept rules are listed; and
+  every test with the doc line is listed. It resolves each path through the
+  crates' `mod` declarations, `#[path]` honoured, and finds a planted line of
+  each kind.
 - `scans.rs`: that no code of the root crate outside its tests builds,
   renews or closes a link's rekey or path machine but through the
   settlement core's join, with each exemption's reason and a check that

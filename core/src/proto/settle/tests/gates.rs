@@ -154,6 +154,8 @@ fn an_own_msg2_restart_goes_through_the_gate_and_is_accepted_inside_its_floors()
     assert_eq!(gate(&mut g, msg2(Source::OwnMsg2, now), 17_000), None);
 }
 
+/// Records current behaviour (rules S-05, S-25 and S-32: neither msg2 source stamps the
+/// dampener): open to change by decision. Its other assertions are not.
 #[test]
 fn an_own_msg2_restart_does_not_stamp_the_dampener() {
     let mut g = Gates::new();
@@ -245,6 +247,8 @@ fn a_frame_forgets_the_replay_memory_and_the_silent_sessions() {
     assert_eq!(replay, None, "the replayed ephemeral is forgotten");
 }
 
+/// Records current behaviour (rule S-06: the third session and the 30 s refusal): open to
+/// change by decision. Its other assertions are not.
 #[test]
 fn silent_sessions_start_a_refusal_at_the_third_in_a_row() {
     let mut g = Gates::new();
@@ -289,6 +293,8 @@ fn silent_sessions_start_a_refusal_at_the_third_in_a_row() {
     );
 }
 
+/// Records current behaviour (rule S-06: the 30 s refusal doubling to 600 s): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn each_further_silent_session_doubles_the_refusal_up_to_its_cap() {
     let mut g = Gates::new();

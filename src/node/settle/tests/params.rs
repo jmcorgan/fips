@@ -92,6 +92,8 @@ fn node_resends(node: &NodeConfig) -> Vec<u64> {
     times
 }
 
+/// Records current behaviour (rule S-47: the resend waits): open to change by decision. Its
+/// other assertions are not.
 #[test]
 fn a_configured_backoff_gives_the_nodes_resend_schedule() {
     for multiplier in [1.3333, 1.5, 2.0, 2.5005] {

@@ -338,6 +338,8 @@ fn a_path_released_drops_its_pair_and_closes_unless_in_use_or_kept() {
     assert!(!indexed(&table, 8, link));
 }
 
+/// Records current behaviour (rule S-57: a Probing path not in use): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn a_path_state_change_to_probing_stops_it_counting_as_in_use() {
     let (mut table, link) = dialer(1);
@@ -452,6 +454,9 @@ fn a_capable_peers_bare_setup_pair_is_off_the_link_in_the_table() {
 /// link holds no path and the index names no link, is off the link: the
 /// node counts the bundle's proven paths and the index, never where the
 /// peer was last seen. The setup pair of a peer not capable stays on it.
+///
+/// Records current behaviour (rule S-08: the core's record of the peer counts for nothing):
+/// open to change by decision. Its other assertions are not.
 #[test]
 fn a_msg1_from_the_pair_the_core_holds_the_peer_at_with_no_path_there_is_off_the_link() {
     let (mut table, _) = answered_from(9, 4);
@@ -504,6 +509,9 @@ fn a_msg1_from_a_pair_whose_path_is_probing_is_off_the_link() {
 /// the bundle released the path at the pair, and when a newer link, here
 /// a second dial to the same pair, is the one the index names, as the
 /// node's index names the newest.
+///
+/// Records current behaviour (rule S-08: the newer link and the released setup pair): open to
+/// change by decision. Its other assertions are not.
 #[test]
 fn a_msg1_from_a_setup_pair_the_index_names_another_link_at_is_off_the_link() {
     let (mut table, link) = dialer(1);
@@ -610,6 +618,8 @@ fn an_unsent_dial_resend_is_tried_again_at_the_next_tick_and_not_before() {
     assert_eq!(tried, want, "each failed resend is tried again one tick on");
 }
 
+/// Records current behaviour (rule S-55: due again at the next poll): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn a_failed_dial_resend_is_due_at_the_next_poll_whatever_its_instant() {
     // The node re-arms a failed resend at the instant it failed
@@ -664,6 +674,8 @@ fn a_failed_dial_resend_is_due_at_the_next_poll_whatever_its_instant() {
     );
 }
 
+/// Records current behaviour (rule S-55: no retry after the last resend): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn a_send_failure_after_a_dials_last_resend_asks_for_no_more() {
     // A dial with its last resend sent has none to try again, whatever cap
@@ -772,6 +784,9 @@ fn an_orphaned_bundle_removes_the_peer_and_retires_its_link() {
 
 /// The node routes an orphaned bundle through its link-dead path, which
 /// notes the loss for a reconnect, as it does for a dead link.
+///
+/// Records current behaviour (rule S-09: the reconnect after an orphan): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn an_orphaned_bundles_peer_is_retried() {
     let (mut table, _) = dialer(1);
@@ -787,6 +802,9 @@ fn an_orphaned_bundles_peer_is_retried() {
 /// rekey machine's replacement request, and this node's own dial answered
 /// at a new epoch. The node notes each loss for a reconnect before the new
 /// session is promoted, as at a dead link.
+///
+/// Records current behaviour (rule S-09: the reconnect after each new session): open to change
+/// by decision. Its other assertions are not.
 #[test]
 fn a_restarted_or_replaced_peer_is_retried_in_each_of_the_three_ways() {
     const LATER: Epoch = [2; 8];
@@ -848,6 +866,9 @@ fn retired(out: &[Output]) -> Vec<Pair> {
 /// released before the bundle was orphaned and marked to keep, was not
 /// closed at its release, and the removal does not close it either. The
 /// link is capable, as one whose bundle holds a second path is.
+///
+/// Records current behaviour (rule S-40: what an orphan closes): open to change by decision.
+/// Its other assertions are not.
 #[test]
 fn an_orphaned_peer_closes_its_bundles_paths_and_not_a_setup_pair_released_to_keep() {
     let (mut table, link) = dialer(1);
@@ -976,6 +997,9 @@ fn a_link_not_known_capable_keeps_its_other_paths_at_a_move() {
 /// The node's operator disconnect closes the connection at the pair the
 /// peer was held at, without asking whether another link uses it, as a
 /// stale connection's cleanup does.
+///
+/// Records current behaviour (rule S-40: the held pair closed whatever uses it): open to change
+/// by decision. Its other assertions are not.
 #[test]
 fn an_operator_disconnect_closes_the_peers_pair_though_a_dial_uses_it() {
     let (mut table, _) = responder(small(), 10, 9);
@@ -994,6 +1018,8 @@ fn an_operator_disconnect_closes_the_peers_pair_though_a_dial_uses_it() {
     assert!(table.links().get(dialed).is_some(), "the dial's link stays");
 }
 
+/// Records current behaviour (rule S-15: the admission cap's shape): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn a_msg1_past_the_admission_cap_is_rejected_and_holds_no_leg() {
     let params = Params {
@@ -1201,6 +1227,9 @@ fn a_move_onto_a_dial_answered_from_the_peers_other_pair_closes_the_dials_own_co
 /// heard: the replay memory of the msg1 that promoted it goes, as the node
 /// forgets it at the move, and a silent session counted before stays, since
 /// only a frame forgets that.
+///
+/// Records current behaviour (rule S-27: the silent sessions kept): open to change by decision.
+/// Its other assertions are not.
 #[test]
 fn a_move_that_makes_the_peering_heard_forgets_its_replay_memory_and_keeps_its_silent_sessions() {
     let mut table = Table::new(small(), Params::default());
@@ -1248,6 +1277,9 @@ fn a_move_that_makes_the_peering_heard_forgets_its_replay_memory_and_keeps_its_s
 /// install, and its first frame comes. As the node, the frame forgets the
 /// silent sessions and keeps the replay memory, which only a frame or a
 /// move that makes a peering heard forgets.
+///
+/// Records current behaviour (rule S-36: the replay memory kept): open to change by decision.
+/// Its other assertions are not.
 #[test]
 fn a_frame_on_a_peering_heard_from_its_install_keeps_the_replay_memory_and_forgets_the_silent_sessions()
  {
@@ -1294,6 +1326,9 @@ fn a_frame_on_a_peering_heard_from_its_install_keeps_the_replay_memory_and_forge
 /// back-off, which reads whether the session carried a frame, not whether
 /// the peering was heard; a second dial whose session carries a frame
 /// before it ends counts nothing more.
+///
+/// Records current behaviour (rule S-38: an own dial's session counts): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn an_own_dials_session_that_ends_before_the_peers_first_frame_counts_as_a_silent_session() {
     let mut table = Table::new(small(), Params::default());
@@ -1457,6 +1492,8 @@ fn the_table_and_the_record_read_the_mirror_the_same_way() {
     }
 }
 
+/// Records current behaviour (rules S-12 and S-14: the link before the msg1, and a failed
+/// connect's retire alone): open to change by decision. Its other assertions are not.
 #[test]
 fn a_connecting_dials_pair_is_in_use_before_its_msg1_and_a_failed_connect_retires_it_with_no_lease()
 {
@@ -1512,6 +1549,8 @@ fn a_dial_given_up_while_connecting_closes_nothing() {
     assert!(table.links().get(link).is_none(), "the link is retired");
 }
 
+/// Records current behaviour (rule S-11: a dial's bookkeeping): open to change by decision. Its
+/// other assertions are not.
 #[test]
 fn a_dial_after_its_connect_starts_its_leg_on_the_link_the_connect_opened() {
     let mut table = Table::new(small(), Params::default());
@@ -1904,6 +1943,8 @@ fn a_dial_completing_to_a_new_identity_at_the_peer_cap_is_not_installed() {
     assert!(table.links().get(link).is_none());
 }
 
+/// Records current behaviour (rule S-02: the refusal of an install the max-peers cap fills
+/// before): open to change by decision. Its other assertions are not.
 #[test]
 fn an_answer_sent_to_a_new_identity_once_the_peer_cap_filled_is_not_installed() {
     // Two msg1s are admitted below the cap; the second's answer goes out
@@ -2014,6 +2055,8 @@ fn a_frame_from_another_transport_moves_nothing_in_the_core() {
     );
 }
 
+/// Records current behaviour (rule S-34: the one reset at a roam): open to change by decision.
+/// Its other assertions are not.
 #[test]
 fn a_one_path_roam_moves_the_cores_record_and_resets_once() {
     // The frame from the new address, then the bundle's roam to it, as a
@@ -2044,6 +2087,8 @@ fn a_one_path_roam_moves_the_cores_record_and_resets_once() {
     );
 }
 
+/// Records current behaviour (rule S-34: no reset at a follow): open to change by decision. Its
+/// other assertions are not.
 #[test]
 fn a_path_the_bundle_followed_moves_the_cores_record_and_resets_nothing() {
     // The link holds two paths. A NAT rebinds the peer's address of the

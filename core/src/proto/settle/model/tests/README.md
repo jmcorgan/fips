@@ -36,3 +36,5 @@ operator's decision whose value it asserts.
   If the FRC line moves, re-read it and update the citation.
 - Each rule's outcome lives on one line of `judge.rs`; flipping that line
   must red the test that cites the rule.
+- A test whose doc line says it records current behaviour is listed in
+  `../../current.txt`; rename, move or delete it only with its line there.

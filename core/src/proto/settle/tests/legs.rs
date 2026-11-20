@@ -67,6 +67,8 @@ fn release(out: Vec<LegOut>) -> Vec<LegOut> {
         .collect()
 }
 
+/// Records current behaviour (rule S-52: the 30 s deadline): open to change by decision. Its
+/// other assertions are not.
 #[test]
 fn a_dial_leg_is_reaped_at_its_deadline_and_returns_its_lease() {
     let p = Params::default();
@@ -124,6 +126,8 @@ fn resends(legs: &mut Legs<TestInstant>, links: &mut Links, link: LinkNo, p: &Pa
     times
 }
 
+/// Records current behaviour (rules S-47 and S-54: the resend times and count): open to change
+/// by decision. Its other assertions are not.
 #[test]
 fn resends_follow_the_backoff_and_repeat_the_msg1_byte_for_byte() {
     // Run to the end at each wake: within the 30 s deadline the resends
@@ -145,6 +149,8 @@ fn resends_follow_the_backoff_and_repeat_the_msg1_byte_for_byte() {
     }
 }
 
+/// Records current behaviour (rule S-47: the resend waits): open to change by decision. Its
+/// other assertions are not.
 #[test]
 fn a_configured_multiplier_spaces_the_resends_as_the_node_truncates_them() {
     // The node's schedule: the first resend one interval after the dial,
@@ -231,6 +237,8 @@ fn an_mdns_directed_dial_stops_at_its_resend_cap() {
     }
 }
 
+/// Records current behaviour (rule S-52: the 30 s deadline): open to change by decision. Its
+/// other assertions are not.
 #[test]
 fn a_responder_leg_answers_a_resend_with_its_stored_msg2_and_is_reclaimed() {
     let p = Params::default();

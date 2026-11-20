@@ -189,6 +189,8 @@ fn after_a_late_second_dial_the_peers_first_frame_under_the_new_session_drops_th
     assert_eq!(j.peering.as_ref().and_then(|p| p.fallback), None);
 }
 
+/// Records current behaviour (rule S-03: the late stored answer installs nothing): open to
+/// change by decision. Its other assertions are not.
 #[test]
 fn a_stored_msg2_sent_after_the_peer_is_held_elsewhere_installs_nothing() {
     // The model's late-stored-msg2 rule.

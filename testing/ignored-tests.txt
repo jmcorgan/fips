@@ -20,8 +20,6 @@
 benchmark     fips-core  proto::link::tests::bench_session_datagram_decode_owned_vs_ref  core/src/proto/tests/link.rs
 benchmark     fips-core  proto::settle::tests::joint::explore::the_cold_start_is_explored_as_deep_as_the_reach_budget_allows_at_off_and_at_on  core/src/proto/settle/tests/joint/explore.rs
 known-defect  fips-core  proto::settle::tests::regress::after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey  core/src/proto/settle/tests/regress.rs
-known-defect  fips-core  proto::settle::tests::regress::after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_larger_dialer  core/src/proto/settle/tests/regress.rs
-known-defect  fips-core  proto::settle::tests::regress::after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_smaller_dialer  core/src/proto/settle/tests/regress.rs
 known-defect  fips-core  proto::settle::tests::joint::pins::a_proven_path_whose_connection_failed_is_not_counted_in_use_without_a_connection  core/src/proto/settle/tests/joint/pins.rs
 
 # fips-mesh
@@ -98,20 +96,7 @@ helper        fips-mesh  node::tests::settle::lane::a_planted_test_that_passes  
 helper        fips-mesh  node::tests::settle::lane::a_planted_switch_reds_at_its_defect_assertion  src/node/tests/settle/lane.rs
 helper        fips-mesh  nostr::tests::fixtures::capture_the_v044_fixtures  src/nostr/tests/fixtures.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_smaller_dialer  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_smaller_dialer_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_smaller_dialer  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_smaller_dialer_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::restart::a_rekey_msg1_of_the_peers_previous_run_read_late_by_the_restarted_node_leaves_one_session  src/node/tests/settle/restart.rs

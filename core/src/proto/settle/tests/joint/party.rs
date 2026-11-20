@@ -301,8 +301,12 @@ fn keeps(m: &Machines, want: Kid) -> bool {
 /// peer is in flight, which suspends the timer (`rekey_in_progress`), and
 /// for a session with no base, whose age the node reads as zero. The node
 /// checks on its one-second tick; the world removes the peer at the
-/// deadline itself, at most a tick before the node would.
+/// deadline itself, at most a tick before the node would. `None` always
+/// with `TimerNever`.
 pub fn deadline(m: &Machines) -> Option<Ms> {
+    if fault!(TimerNever) {
+        return None;
+    }
     let v = m.rekey().view();
     if v.cycle == CycleView::Init {
         return None;
@@ -3329,6 +3333,33 @@ fn a_peer_silent_for_the_link_dead_timeout_is_removed_then_and_redialled() {
     );
 }
 
+/// Settle `w` as a heal does, but lose every packet in flight to node `x`
+/// other than a close of its connection.
+fn settle_deaf(w: &mut World, x: usize) {
+    for _ in 0..256 {
+        w.net.flight.retain(|f| f.to != x || f.pkt == Pkt::Eof);
+        let connecting: Vec<u32> = w
+            .net
+            .conns
+            .iter()
+            .filter(|c| c.state == Link::Connecting)
+            .map(|c| c.id)
+            .collect();
+        for c in &connecting {
+            w.connected(*c, true);
+        }
+        w.net.flight.retain(|f| f.to != x || f.pkt == Pkt::Eof);
+        match w.net.flight.iter().find(|f| w.net.deliverable(f)) {
+            Some(f) => {
+                let id = f.id;
+                w.deliver(id);
+            }
+            None if connecting.is_empty() => return,
+            None => {}
+        }
+    }
+}
+
 #[test]
 fn a_peer_silent_past_the_link_dead_timeout_on_a_link_of_several_paths_is_removed_and_the_pair_heals()
  {
@@ -3336,9 +3367,14 @@ fn a_peer_silent_past_the_link_dead_timeout_on_a_link_of_several_paths_is_remove
     // holds node 0 on the inbound TCP link and has turned capable, so its
     // link has a second path, Probing, at node 0's TCP home. Then the
     // link's one connection fails: node 0, at one path, removes node 1;
-    // node 1, at two, is told only of a failed send, and its liveness
-    // timer removes node 0 once nothing is heard for the link-dead
-    // timeout. The second path reaches the same shape from a restart.
+    // node 1, at two, is told only of a failed send. The second path
+    // reaches the same shape from a restart, with the ends swapped. What
+    // is in flight then arrives; from the next wake on, everything the end
+    // that removed its peer sends the end that kept one is lost until that
+    // end's liveness timer removes its peer once nothing is heard for the
+    // link-dead timeout. The redials are lost with the rest, so no redial
+    // is answered (one answered would replace the peering at its first
+    // frame, before the timeout).
     use super::super::explore::Act::{Connect, Deliver, Dup, Fail, Restart};
     let st = super::starts::on()
         .into_iter()
@@ -3370,6 +3406,20 @@ fn a_peer_silent_past_the_link_dead_timeout_on_a_link_of_several_paths_is_remove
         assert!(
             holds(&w, 0) != holds(&w, 1),
             "precondition: {path:?} leaves one end holding the other"
+        );
+        let (kept, gone) = if holds(&w, 0) { (0, 1) } else { (1, 0) };
+        settle(&mut w);
+        let end = w.net.now + 2 * super::feeds::LIVE;
+        while holds(&w, kept) && w.net.now < end {
+            w.advance();
+            settle_deaf(&mut w, kept);
+        }
+        let (heard, lost) = hearing(&w, kept, gone);
+        let heard = heard.expect("precondition: the end that kept its peer heard it once");
+        assert_eq!(
+            lost,
+            Some(heard + super::feeds::LIVE),
+            "after {path:?}, node {kept} removes node {gone} at the link-dead timeout after the last frame it authenticated"
         );
         heal(&mut w);
         let found: Vec<Breach> = super::super::oracle::every_step(&w)
@@ -3472,7 +3522,9 @@ fn starts_6_and_7_show_their_two_defects_on_real_machines() {
         let found = scripted(&st);
         // Start 6's two ends hold each other on different sessions, so
         // each hears nothing the other sends, and one end's liveness timer
-        // ends the split by removing its peer within the heal.
+        // ends the split by removing its peer within the heal: the
+        // accepted behaviour, whose recovery `../regress.rs` tests. Start
+        // 7's pending is the aged-link defect, left for a later fix.
         let clause = if st.number == 6 { "split:" } else { "pending:" };
         assert!(
             found
@@ -3482,7 +3534,7 @@ fn starts_6_and_7_show_their_two_defects_on_real_machines() {
             st.name
         );
         // The machines of the split pair have not converged either, which
-        // is the same defect seen from the machines.
+        // is the same shape seen from the machines.
         assert!(
             found.iter().all(|b| b.oracle == Oracle::OneSession
                 || (b.oracle == Oracle::Machine && b.what.starts_with(super::oracle::CONVERGED))),

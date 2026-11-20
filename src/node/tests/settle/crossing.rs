@@ -10,9 +10,11 @@
 //!   came from, and the result is coherent by the audit.
 //! - A dialer's second msg1 reaching the responder more than 1 s after its
 //!   first: in order, on another transport, with the dialer left on its
-//!   second dial's link, and with the second msg2 reaching the dialer first
-//!   (known defect, for both address orders, by the heartbeat check and by
-//!   the audit).
+//!   second dial's link, and with the second msg2 reaching the dialer first,
+//!   which splits the pair until link-dead drops both ends and the dialer
+//!   redials (accepted behaviour, for both address orders, by the heartbeat
+//!   check and by the audit), with the control that a working pair run past
+//!   the link-dead timeout the same way keeps its session.
 //! - A move holds the link it dialed: at the address dialed, with the msg2's
 //!   pair a path of it; and a second dial answered after a crossing ends
 //!   the pin.
@@ -21,7 +23,13 @@
 //!   first.
 //! - A larger node's dial on a quiet peer's aged link, which the peer set
 //!   up: its next rekey is answered, and no pending is left that it cannot
-//!   adopt (known defects).
+//!   adopt (known defects; the pair keeps one session, so no split forms for
+//!   link-dead to end).
+//! - A crossed msg1 read past the heard floor on the same transport, and a
+//!   larger node's dial on the aged link after the smaller node's rekey:
+//!   each splits the pair until link-dead drops both ends, and a redial
+//!   then leaves one session (accepted behaviour), with a control inside
+//!   the heard floor.
 //! - Two dials to one address with no peer held, the first reaped: the
 //!   connection the second runs on stays open, on loopback by its record of
 //!   closes and on the BLE mock by its pool.
@@ -41,7 +49,10 @@
 //! runs multipath off, and its `_with_multipath_on` sibling runs it on, as two
 //! tests and not one loop, since a pin that fails in a loop's first pass would
 //! never reach the second. Setup checks are marked `precondition:`; the
-//! assertion of the behaviour is marked `defect:`.
+//! assertion of the behaviour is marked `defect:`. A test of a split's end
+//! runs the pair past the link-dead timeout on the test clock, a second at a
+//! time with everything sent delivered between steps, and redials from the
+//! end it names (`super::outlast`).
 
 use super::super::control::quieten;
 use super::super::crossed_dial::{Dial, cross_dials_from, hand, phase};
@@ -55,8 +66,8 @@ use super::super::spanning_tree::{
 use super::super::*;
 use super::audit::{Breach, assert_coherent, audit};
 use super::{
-    AGED, alias, crossed_tcp, heartbeat_reaches, loopback_node, pool, pump, received,
-    resolve_connect, settled, with_path,
+    AGED, alias, assert_split, crossed_tcp, heartbeat_reaches, loopback_node, one_session, outlast,
+    pool, pump, received, resolve_connect, ride_out, settled, with_path,
 };
 use super::{tcp_dial, tcp_pair};
 use crate::proto::fmp::wire::{CommonPrefix, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2};
@@ -872,85 +883,140 @@ async fn a_second_own_dial_on_another_transport_leaves_the_dialer_on_the_link_it
     own_dial_holds(true, false, Second::OtherTransport).await;
 }
 
-/// The reordered case, checked by heartbeat: both ends on one session.
+/// The reordered case, a split accepted as behaviour, which link-dead and a
+/// redial end. The responder holds the peering of the second msg1, which
+/// replaced the first; the dialer, reading the second dial's msg2 before the
+/// first's, is left on a session the responder does not hold. No frame
+/// either sends authenticates at the other, and link-dead drops both ends
+/// within the timeout and one step. Then the dialer dials the responder
+/// again, as a node does once it has dropped a peer, and the two ends hold
+/// one session that carries a heartbeat each way.
 async fn reordered_works(on: bool, dialer_larger: bool) {
     let mut late = second_msg1_late(on, dialer_larger, Second::Reordered).await;
-    let works = working_peering(&mut late).await;
+    let (d, r) = (late.d, late.r);
+    assert_split(&late.nodes, d, r, "the second msg2 read first");
+    outlast(&mut late.nodes, d, r, "the second msg2 read first").await;
+    let works = settled(&mut late.nodes, d, r).await;
     cleanup_nodes(&mut late.nodes).await;
-    assert!(works.is_ok(), "defect: {works:?}");
+    assert!(
+        works.is_ok(),
+        "defect: after link-dead and the dialer's redial: {works:?}"
+    );
 }
 
 #[tokio::test]
-#[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the two ends are left on different sessions"]
-async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer()
+async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_after_link_dead_and_a_redial_larger_dialer()
  {
     reordered_works(false, true).await;
 }
 
-/// [`a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer`] with multipath on.
+/// [`a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_after_link_dead_and_a_redial_larger_dialer`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the two ends are left on different sessions"]
-async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer_with_multipath_on()
+async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_after_link_dead_and_a_redial_larger_dialer_with_multipath_on()
  {
     reordered_works(true, true).await;
 }
 
 #[tokio::test]
-#[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the two ends are left on different sessions"]
-async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_smaller_dialer()
+async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_after_link_dead_and_a_redial_smaller_dialer()
  {
     reordered_works(false, false).await;
 }
 
-/// [`a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_smaller_dialer`] with multipath on.
+/// [`a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_after_link_dead_and_a_redial_smaller_dialer`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the two ends are left on different sessions"]
-async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_smaller_dialer_with_multipath_on()
+async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_after_link_dead_and_a_redial_smaller_dialer_with_multipath_on()
  {
     reordered_works(true, false).await;
 }
 
-/// The reordered case, checked by the audit: no breach of `OneSession`'s
-/// first clause. Other breaches are not this pin's reason and are ignored.
+/// The breaches of `OneSession`'s first clause the audit finds: the two
+/// ends on different sessions, or one end holding a peer that does not
+/// hold it. Other breaches are not the split and are left out.
+async fn splits_found(nodes: &mut [TestNode]) -> Vec<Breach> {
+    audit(nodes)
+        .await
+        .into_iter()
+        .filter(|b| matches!(b, Breach::Split { .. } | Breach::OneSided { .. }))
+        .collect()
+}
+
+/// The reordered case checked by the audit: it finds the split before
+/// link-dead, and none once link-dead has dropped both ends and the dialer
+/// has dialed the responder again.
 async fn reordered_one_session(on: bool, dialer_larger: bool) {
     let mut late = second_msg1_late(on, dialer_larger, Second::Reordered).await;
-    let breaches = audit(&mut late.nodes).await;
+    let (d, r) = (late.d, late.r);
+    let before = splits_found(&mut late.nodes).await;
+    assert!(
+        !before.is_empty(),
+        "defect: the pair is not split by the audit (the second msg2 read first)"
+    );
+    outlast(&mut late.nodes, d, r, "the second msg2 read first").await;
+    let after = splits_found(&mut late.nodes).await;
     cleanup_nodes(&mut late.nodes).await;
-    let split: Vec<&Breach> = breaches
-        .iter()
-        .filter(|b| matches!(b, Breach::Split { .. } | Breach::OneSided { .. }))
-        .collect();
-    assert!(split.is_empty(), "defect: {split:#?}");
+    assert!(
+        after.is_empty(),
+        "defect: after link-dead and the dialer's redial: {after:#?}"
+    );
 }
 
 #[tokio::test]
-#[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the audit finds the two ends on different sessions"]
-async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer()
+async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_after_link_dead_and_a_redial_larger_dialer()
  {
     reordered_one_session(false, true).await;
 }
 
-/// [`a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer`] with multipath on.
+/// [`a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_after_link_dead_and_a_redial_larger_dialer`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the audit finds the two ends on different sessions"]
-async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer_with_multipath_on()
+async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_after_link_dead_and_a_redial_larger_dialer_with_multipath_on()
  {
     reordered_one_session(true, true).await;
 }
 
 #[tokio::test]
-#[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the audit finds the two ends on different sessions"]
-async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_smaller_dialer()
+async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_after_link_dead_and_a_redial_smaller_dialer()
  {
     reordered_one_session(false, false).await;
 }
 
-/// [`a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_smaller_dialer`] with multipath on.
+/// [`a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_after_link_dead_and_a_redial_smaller_dialer`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the audit finds the two ends on different sessions"]
-async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_smaller_dialer_with_multipath_on()
+async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_after_link_dead_and_a_redial_smaller_dialer_with_multipath_on()
  {
     reordered_one_session(true, false).await;
+}
+
+/// The in-order late dial, a working pair, run past the link-dead timeout
+/// the way the converted tests run a split pair: neither end is dropped,
+/// and the two still hold one session that carries a heartbeat each way.
+/// The control that the ride drops only an end that hears nothing.
+async fn working_rides_out(on: bool) {
+    let mut late = second_msg1_late(on, true, Second::InOrder).await;
+    let (d, r) = (late.d, late.r);
+    assert!(
+        one_session(&late.nodes, d, r),
+        "precondition: the in-order late dial leaves one session"
+    );
+    let dropped = ride_out(&mut late.nodes, d, r).await;
+    let works = settled(&mut late.nodes, d, r).await;
+    cleanup_nodes(&mut late.nodes).await;
+    assert!(
+        dropped.a.is_none() && dropped.b.is_none() && works.is_ok(),
+        "defect: a working pair run past the link-dead timeout lost its session: dropped {dropped:?}, then {works:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_working_pair_run_past_the_link_dead_timeout_on_the_test_clock_keeps_its_session() {
+    working_rides_out(false).await;
+}
+
+/// [`a_working_pair_run_past_the_link_dead_timeout_on_the_test_clock_keeps_its_session`] with multipath on.
+#[tokio::test]
+async fn a_working_pair_run_past_the_link_dead_timeout_on_the_test_clock_keeps_its_session_with_multipath_on()
+ {
+    working_rides_out(true).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,6 +1204,15 @@ fn loopback(tn: &mut TestNode, id: TransportId, addr: TransportAddr) {
 /// second address of the smaller node's. Whether the two ends are left on
 /// one working session.
 async fn late_cross(on: bool, other: bool, quiet: Duration) -> Result<(), String> {
+    let (mut nodes, s, l) = late_cross_pair(on, other, quiet).await;
+    let out = settled(&mut nodes, s, l).await;
+    cleanup_nodes(&mut nodes).await;
+    out
+}
+
+/// The pair [`late_cross`] checks, once everything sent is delivered, with
+/// the indices of the smaller and the larger node.
+async fn late_cross_pair(on: bool, other: bool, quiet: Duration) -> (Vec<TestNode>, usize, usize) {
     let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
     let (s, l) = if nodes[0].node.node_addr() < nodes[1].node.node_addr() {
         (0, 1)
@@ -1202,9 +1277,7 @@ async fn late_cross(on: bool, other: bool, quiet: Duration) -> Result<(), String
         hand(&mut nodes[s].node, packet).await;
     }
     pump(&mut nodes).await;
-    let out = settled(&mut nodes, s, l).await;
-    cleanup_nodes(&mut nodes).await;
-    out
+    (nodes, s, l)
 }
 
 /// A crossed msg1 the larger node sent from another transport, read by the
@@ -1225,26 +1298,43 @@ async fn a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_
 }
 
 /// As above, with the larger node's dial on the transport the smaller
-/// node's dial used.
-#[tokio::test]
-#[ignore = "known defect: a crossed msg1 read past the heard floor makes the smaller node replace its session while the larger node keeps its own"]
-async fn a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session() {
-    let out = late_cross(false, false, SILENCE).await;
-    assert!(out.is_ok(), "defect: {out:?}");
+/// node's dial used: a split accepted as behaviour, which link-dead and a
+/// redial end. The smaller node replaces the session of its own
+/// dial with the one the larger node's late msg1 offers, while the larger
+/// node keeps the session of the smaller node's dial; no frame either sends
+/// authenticates at the other, and link-dead drops both ends at the same
+/// step. Then the smaller node dials the larger again, and the two ends
+/// hold one session that carries a heartbeat each way.
+async fn late_cross_outlasted(on: bool) {
+    let what = "a crossed msg1 on the same transport read past the heard floor";
+    let (mut nodes, s, l) = late_cross_pair(on, false, SILENCE).await;
+    assert_split(&nodes, s, l, what);
+    outlast(&mut nodes, s, l, what).await;
+    let out = settled(&mut nodes, s, l).await;
+    cleanup_nodes(&mut nodes).await;
+    assert!(
+        out.is_ok(),
+        "defect: after link-dead and the smaller node's redial: {out:?}"
+    );
 }
 
-/// [`a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: a crossed msg1 read past the heard floor makes the smaller node replace its session while the larger node keeps its own"]
-async fn a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session_with_multipath_on()
+async fn a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session_after_link_dead_and_a_redial()
  {
-    let out = late_cross(true, false, SILENCE).await;
-    assert!(out.is_ok(), "defect: {out:?}");
+    late_cross_outlasted(false).await;
+}
+
+/// [`a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session_after_link_dead_and_a_redial`] with multipath on.
+#[tokio::test]
+async fn a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session_after_link_dead_and_a_redial_with_multipath_on()
+ {
+    late_cross_outlasted(true).await;
 }
 
 /// The same late crossed msg1, read with the larger node heard just now,
-/// inside the heard floor, leaves one working session: the assertion the
-/// two pins make can pass.
+/// inside the heard floor, leaves one working session with no link-dead
+/// and no redial: the split the two tests above outlast comes from the
+/// heard floor.
 #[tokio::test]
 async fn a_crossed_msg1_from_another_transport_read_inside_the_heard_floor_leaves_one_session() {
     let out = late_cross(false, true, Duration::ZERO).await;
@@ -1270,6 +1360,15 @@ async fn a_crossed_msg1_from_another_transport_read_inside_the_heard_floor_leave
 /// the larger node dials the smaller node's second address. Whether the
 /// two ends are left on one working session.
 async fn aged_rekey(on: bool, quiet: Duration) -> Result<(), String> {
+    let (mut nodes, d, p) = aged_rekey_pair(on, quiet).await;
+    let out = settled(&mut nodes, d, p).await;
+    cleanup_nodes(&mut nodes).await;
+    out
+}
+
+/// The pair [`aged_rekey`] checks, once everything sent is delivered, with
+/// the indices of the larger node, which dials, and the smaller.
+async fn aged_rekey_pair(on: bool, quiet: Duration) -> (Vec<TestNode>, usize, usize) {
     let mut nodes = vec![
         make_test_node_with_config(with_path(rekey_config(60), on), 1280).await,
         make_test_node_with_config(with_path(rekey_config(60), on), 1280).await,
@@ -1336,32 +1435,47 @@ async fn aged_rekey(on: bool, quiet: Duration) -> Result<(), String> {
     }
     deliver(&mut nodes[d]).await;
     drain_all_packets(&mut nodes, false).await;
-    let out = settled(&mut nodes, d, p).await;
-    cleanup_nodes(&mut nodes).await;
-    out
+    (nodes, d, p)
 }
 
 /// A larger node's dial on the aged link the smaller node set up, made
 /// after the smaller node's own rekey and longer than the heard floor
-/// after the smaller node last heard it, leaves one working session.
-#[tokio::test]
-#[ignore = "known defect: after the smaller node's own rekey, the larger node's dial on its aged link is taken as a replacement while the larger node keeps its own session"]
-async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session() {
-    let out = aged_rekey(false, SILENCE).await;
-    assert!(out.is_ok(), "defect: {out:?}");
+/// after the smaller node last heard it: a split accepted as behaviour,
+/// which link-dead and a redial end. The smaller node takes the dial
+/// as a replacement of its young session while the larger node keeps the
+/// rekeyed one; no frame either sends authenticates at the other, and
+/// link-dead drops both ends within the timeout and one step. Then the
+/// larger node dials the smaller node's own address again, and the two ends
+/// hold one session that carries a heartbeat each way.
+async fn aged_rekey_outlasted(on: bool) {
+    let what = "a larger node's dial on the aged link after the smaller node's rekey";
+    let (mut nodes, d, p) = aged_rekey_pair(on, SILENCE).await;
+    assert_split(&nodes, d, p, what);
+    outlast(&mut nodes, d, p, what).await;
+    let out = settled(&mut nodes, d, p).await;
+    cleanup_nodes(&mut nodes).await;
+    assert!(
+        out.is_ok(),
+        "defect: after link-dead and the larger node's redial: {out:?}"
+    );
 }
 
-/// [`a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: after the smaller node's own rekey, the larger node's dial on its aged link is taken as a replacement while the larger node keeps its own session"]
-async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session_with_multipath_on()
+async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session_after_link_dead_and_a_redial()
  {
-    let out = aged_rekey(true, SILENCE).await;
-    assert!(out.is_ok(), "defect: {out:?}");
+    aged_rekey_outlasted(false).await;
+}
+
+/// [`a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session_after_link_dead_and_a_redial`] with multipath on.
+#[tokio::test]
+async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session_after_link_dead_and_a_redial_with_multipath_on()
+ {
+    aged_rekey_outlasted(true).await;
 }
 
 /// The same dial with the larger node heard just now leaves one working
-/// session: the assertion the pin makes can pass.
+/// session with no link-dead and no redial: the split the two tests above
+/// outlast comes from the heard floor.
 #[tokio::test]
 async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_inside_the_heard_floor_leaves_one_session()
  {

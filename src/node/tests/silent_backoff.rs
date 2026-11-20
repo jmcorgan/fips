@@ -172,6 +172,8 @@ async fn three_replaced(rig: &mut Rig) {
     rig.drain().await;
 }
 
+/// Records current behaviour (rule S-06: the refusal from the third silent session): open to
+/// change by decision. Its other assertions are not.
 #[tokio::test]
 async fn three_silent_sessions_ended_by_link_dead_refuse_the_next_same_epoch_msg1_with_its_own_counter()
  {
@@ -448,6 +450,9 @@ async fn next_of(tn: &mut TestNode, want: u8) -> ReceivedPacket {
 /// frame, so node 1 counts it toward node 0's back-off though node 1 set
 /// the peering up itself, and the settlement core beside the node counts
 /// it the same way.
+///
+/// Records current behaviour (rule S-38: an own dial's session counts): open to change by
+/// decision. Its other assertions are not.
 #[tokio::test]
 async fn an_own_dials_session_reaped_before_the_peers_first_frame_counts_in_the_node_and_the_core()
 {

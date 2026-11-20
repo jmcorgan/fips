@@ -425,6 +425,9 @@ async fn plain(cause: Cause) {
 }
 
 /// A dead peer, multipath off, is removed as the table says.
+///
+/// Records current behaviour (rule S-39: what the removal closes): open to change by decision.
+/// Its other assertions are not.
 #[tokio::test]
 async fn a_dead_peer_is_removed_as_its_cells_say() {
     plain(Cause::Dead).await;
@@ -432,6 +435,9 @@ async fn a_dead_peer_is_removed_as_its_cells_say() {
 
 /// A peer whose one path loses its interface, multipath off, is removed as
 /// the table says.
+///
+/// Records current behaviour (rule S-39: what the removal closes): open to change by decision.
+/// Its other assertions are not.
 #[tokio::test]
 async fn an_orphaned_peer_is_removed_as_its_cells_say() {
     plain(Cause::Orphaned).await;
@@ -439,6 +445,9 @@ async fn an_orphaned_peer_is_removed_as_its_cells_say() {
 
 /// A peer that sends a Disconnect, multipath off, is removed as the table
 /// says.
+///
+/// Records current behaviour (rule S-39: what the removal closes): open to change by decision.
+/// Its other assertions are not.
 #[tokio::test]
 async fn a_peer_that_disconnects_is_removed_as_its_cells_say() {
     plain(Cause::Disconnect).await;
@@ -446,6 +455,9 @@ async fn a_peer_that_disconnects_is_removed_as_its_cells_say() {
 
 /// A peer the operator disconnects, multipath off, is removed as the table
 /// says, its current pair closed.
+///
+/// Records current behaviour (rule S-39: what the removal closes): open to change by decision.
+/// Its other assertions are not.
 #[tokio::test]
 async fn a_peer_the_operator_disconnects_is_removed_as_its_cells_say() {
     plain(Cause::Admin).await;
@@ -453,6 +465,9 @@ async fn a_peer_the_operator_disconnects_is_removed_as_its_cells_say() {
 
 /// A peer whose link rekey machine ends the link, multipath off, is removed
 /// as the table says.
+///
+/// Records current behaviour (rule S-39: what the removal closes): open to change by decision.
+/// Its other assertions are not.
 #[tokio::test]
 async fn a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say() {
     plain(Cause::Ended).await;
@@ -589,6 +604,9 @@ fn unkept_of(node: &Node, peer: &NodeAddr) -> Vec<PathRef> {
 
 /// [`a_dead_peer_is_removed_as_its_cells_say`] with multipath on, on a
 /// capable link of two paths.
+///
+/// Records current behaviour (rule S-39: what the removal closes): open to change by decision.
+/// Its other assertions are not.
 #[tokio::test]
 async fn a_dead_peer_is_removed_as_its_cells_say_with_multipath_on() {
     capable(Cause::Dead).await;
@@ -596,6 +614,9 @@ async fn a_dead_peer_is_removed_as_its_cells_say_with_multipath_on() {
 
 /// [`an_orphaned_peer_is_removed_as_its_cells_say`] with multipath on, on a
 /// capable link whose other path's interface went first.
+///
+/// Records current behaviour (rule S-39: what the removal closes): open to change by decision.
+/// Its other assertions are not.
 #[tokio::test]
 async fn an_orphaned_peer_is_removed_as_its_cells_say_with_multipath_on() {
     capable(Cause::Orphaned).await;
@@ -603,6 +624,9 @@ async fn an_orphaned_peer_is_removed_as_its_cells_say_with_multipath_on() {
 
 /// [`a_peer_that_disconnects_is_removed_as_its_cells_say`] with multipath
 /// on, on a capable link of two paths.
+///
+/// Records current behaviour (rule S-39: what the removal closes): open to change by decision.
+/// Its other assertions are not.
 #[tokio::test]
 async fn a_peer_that_disconnects_is_removed_as_its_cells_say_with_multipath_on() {
     capable(Cause::Disconnect).await;
@@ -610,6 +634,9 @@ async fn a_peer_that_disconnects_is_removed_as_its_cells_say_with_multipath_on()
 
 /// [`a_peer_the_operator_disconnects_is_removed_as_its_cells_say`] with
 /// multipath on, on a capable link of two paths.
+///
+/// Records current behaviour (rule S-39: what the removal closes): open to change by decision.
+/// Its other assertions are not.
 #[tokio::test]
 async fn a_peer_the_operator_disconnects_is_removed_as_its_cells_say_with_multipath_on() {
     capable(Cause::Admin).await;
@@ -617,6 +644,9 @@ async fn a_peer_the_operator_disconnects_is_removed_as_its_cells_say_with_multip
 
 /// [`a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say`]
 /// with multipath on, on a capable link of two paths.
+///
+/// Records current behaviour (rule S-39: what the removal closes): open to change by decision.
+/// Its other assertions are not.
 #[tokio::test]
 async fn a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say_with_multipath_on() {
     capable(Cause::Ended).await;

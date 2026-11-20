@@ -103,6 +103,10 @@ in the `node-synthetic` group with the rest of `settle`.
 - **A red cells test changes the table, not the code**: the old code is the
   spec. Fix `cell` and its golden line in `src/node/settle/tests/table.rs`
   in the same commit.
+- **A test listed in the settlement core's `current.txt`**
+  (`core/src/proto/settle/`) records current behaviour, as its doc line says:
+  the removal tests here record what a removal closes by its cause. Rename,
+  move or delete one only with its line there.
 
 ## Coverage gap: the BLE mark where it is not read
 

@@ -1113,6 +1113,9 @@ async fn a_frame_on_a_standby_path_keeps_the_link_alive() {
 
 /// After a switch both pairs map to the link; a released pair no longer maps to
 /// it, and a moved path's entry moves with it.
+///
+/// Records current behaviour (rule S-58: the released setup pair out of the index): open to
+/// change by decision. Its other assertions are not.
 #[tokio::test]
 async fn a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it() {
     let (mut nodes, b, b2) = same_transport().await;

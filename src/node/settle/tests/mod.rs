@@ -15,6 +15,7 @@ mod defaults;
 mod links;
 mod plan;
 mod remove;
+mod rules;
 mod scans;
 
 /// The peer's handshake entry for `link`, with no handshake started.
@@ -106,6 +107,8 @@ fn link(id: u64, addr: &str) -> Link {
     )
 }
 
+/// Records current behaviour (rule S-58: the newest link named): open to change by decision.
+/// Its other assertions are not.
 #[test]
 fn a_pair_two_links_are_set_up_at_names_the_newest_and_then_the_one_left() {
     let (one, two) = (LinkId::new(1), LinkId::new(2));

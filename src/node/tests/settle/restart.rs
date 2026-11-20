@@ -4,10 +4,13 @@
 //! restarts, D dials it (and R dials D too, in half the cases), and R
 //! answers D's dial. Once R's new peering is past the unheard floor (1 s),
 //! D starts its own rekey of the old peering, then reads what R sent and
-//! moves onto R's new run; only then does R read D's rekey msg1. Both ends
-//! must be left on one session, in every placement of D: the smaller or the
-//! larger node, the one that dialed the old link or not (a known defect,
-//! with a control inside the floor).
+//! moves onto R's new run; only then does R read D's rekey msg1. Past the
+//! floor, R replaces its new peering with the one D's msg1 offers while D
+//! keeps R's new run, in every placement of D: the smaller or the larger
+//! node, the one that dialed the old link or not. That split is accepted
+//! behaviour, bounded by link-dead and a redial: link-dead drops both ends,
+//! D dials R again, and both ends are left on one session. Inside the floor
+//! the same msg1 leaves one session at once (the control).
 //!
 //! Setup checks are marked `precondition:`; the assertion of the behaviour
 //! is marked `defect:`.
@@ -15,7 +18,7 @@
 use super::super::rekey_parity::{deliver, linked_pair, rekey_config, trigger_age};
 use super::super::spanning_tree::{TestNode, cleanup_nodes, initiate_handshake, restarted_node};
 use super::super::*;
-use super::{pump, settled, with_path};
+use super::{assert_split, outlast, pump, settled, with_path};
 
 /// Past the 1 s floor below which an unheard peering is not replaced.
 const PAST_FLOOR: Duration = Duration::from_millis(1_100);
@@ -32,6 +35,20 @@ async fn late_rekey(
     both: bool,
     wait: Duration,
 ) -> Result<(), String> {
+    let (mut nodes, d, r) = late_rekey_pair(d_smaller, d_dialed, both, wait).await;
+    let out = settled(&mut nodes, d, r).await;
+    cleanup_nodes(&mut nodes).await;
+    out
+}
+
+/// The pair [`late_rekey`] checks, once everything sent is delivered, with
+/// the indices of D and R.
+async fn late_rekey_pair(
+    d_smaller: bool,
+    d_dialed: bool,
+    both: bool,
+    wait: Duration,
+) -> (Vec<TestNode>, usize, usize) {
     let (d, r) = if d_dialed { (0, 1) } else { (1, 0) };
     let mut nodes: Vec<TestNode> = loop {
         let mut nodes = linked_pair(
@@ -75,9 +92,7 @@ async fn late_rekey(
     deliver(&mut nodes[d]).await;
     deliver(&mut nodes[r]).await;
     pump(&mut nodes).await;
-    let out = settled(&mut nodes, d, r).await;
-    cleanup_nodes(&mut nodes).await;
-    out
+    (nodes, d, r)
 }
 
 /// The placements in which the pair is not left on one working session,
@@ -96,18 +111,36 @@ async fn splits(wait: Duration) -> Vec<String> {
     out
 }
 
-/// Past the unheard floor, the late rekey msg1 of R's previous run, read
-/// by the restarted R, leaves one working session in every placement.
+/// Past the unheard floor, the late rekey msg1 of R's previous run, read by
+/// the restarted R, splits the pair in every placement: no frame either end
+/// sends authenticates at the other, and link-dead drops both ends within
+/// the timeout and one step. Then D dials R again, as a node does once it
+/// has dropped a peer, and the two ends hold one session that carries a
+/// heartbeat each way. `outlast` leaves the thread's test clock frozen, so
+/// only the first placement is set up on a running clock and the rest on
+/// the frozen one.
 #[tokio::test]
-#[ignore = "known defect: a rekey msg1 of the peer's previous run, read past the unheard floor, replaces the restarted node's peering while the peer has moved onto it"]
-async fn a_rekey_msg1_of_the_peers_previous_run_read_late_by_the_restarted_node_leaves_one_session()
-{
-    let split = splits(PAST_FLOOR).await;
-    assert!(split.is_empty(), "defect: {split:#?}");
+async fn a_rekey_msg1_of_the_peers_previous_run_read_late_by_the_restarted_node_leaves_one_session_after_link_dead_and_a_redial()
+ {
+    for both in [true, false] {
+        for (d_smaller, d_dialed) in PLACEMENTS {
+            let what = format!("D smaller {d_smaller}, D dialed {d_dialed}, R dials too {both}");
+            let (mut nodes, d, r) = late_rekey_pair(d_smaller, d_dialed, both, PAST_FLOOR).await;
+            assert_split(&nodes, d, r, &what);
+            outlast(&mut nodes, d, r, &what).await;
+            let out = settled(&mut nodes, d, r).await;
+            cleanup_nodes(&mut nodes).await;
+            assert!(
+                out.is_ok(),
+                "defect: after link-dead and D's redial ({what}): {out:?}"
+            );
+        }
+    }
 }
 
 /// Inside the unheard floor the same msg1 leaves one working session in
-/// every placement: the assertion the pin makes can pass.
+/// every placement, with no link-dead and no redial: the split the test
+/// above outlasts comes from the floor.
 #[tokio::test]
 async fn a_rekey_msg1_of_the_peers_previous_run_read_inside_the_unheard_floor_leaves_one_session() {
     // The floor is 1 s. With the clock running, the real time from R's

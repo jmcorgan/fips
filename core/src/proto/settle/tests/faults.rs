@@ -1563,6 +1563,38 @@ pub const ROWS: &[Row] = &[
             "a_move_onto_a_later_dial_to_a_peer_held_on_the_link_it_dialled_ends_the_pin",
         )],
     ),
+    // The late second dial answered in the other order: the accepted
+    // recovery, one end's link-dead timer ending the split and the redial
+    // settling one session within a heal. The timer's own tests: a silent
+    // peer removed at the timeout, on a link of one path and of several.
+    // And the exemption of the model's missing timer, which reds at its
+    // precondition: with no timer the joint node never removes the model,
+    // so the stale peering that the exemption is for is never left.
+    (
+        Fault::TimerNever,
+        &[
+            (
+                REGRESS,
+                "after_a_late_second_dial_answered_in_the_other_order_the_link_dead_timer_and_the_redial_settle_one_session_within_a_heal_larger_dialer",
+            ),
+            (
+                REGRESS,
+                "after_a_late_second_dial_answered_in_the_other_order_the_link_dead_timer_and_the_redial_settle_one_session_within_a_heal_smaller_dialer",
+            ),
+            (
+                JOINT_PARTY,
+                "a_peer_silent_for_the_link_dead_timeout_is_removed_then_and_redialled",
+            ),
+            (
+                JOINT_PARTY,
+                "a_peer_silent_past_the_link_dead_timeout_on_a_link_of_several_paths_is_removed_and_the_pair_heals",
+            ),
+            (
+                JOINT_EXPLORE,
+                "each_breach_the_pins_hold_is_exempted_by_its_own_cause_and_a_settled_pair_by_none",
+            ),
+        ],
+    ),
 ];
 
 /// The rekey machine's switches that a joint node's tests red, each by its
@@ -1874,32 +1906,12 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
         HAND,
     ),
     (
-        "after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_larger_dialer",
-        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
-    ),
-    (
-        "after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_smaller_dialer",
-        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
-    ),
-    (
         "after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey",
         "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
     ),
     (
         "a_proven_path_whose_connection_failed_is_not_counted_in_use_without_a_connection",
         "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
-    ),
-    (
-        "a_peer_silent_for_the_link_dead_timeout_is_removed_then_and_redialled",
-        HAND,
-    ),
-    (
-        "a_peer_silent_past_the_link_dead_timeout_on_a_link_of_several_paths_is_removed_and_the_pair_heals",
-        HAND,
-    ),
-    (
-        "each_breach_the_pins_hold_is_exempted_by_its_own_cause_and_a_settled_pair_by_none",
-        HAND,
     ),
     (
         "the_dialer_settle_candidate_explored_shows_exactly_the_breaches_recorded_for_it",

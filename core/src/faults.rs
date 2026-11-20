@@ -436,6 +436,11 @@ faults! {
     /// Heartbeat pacing reads `std::time::Instant` instead of the node's
     /// monotonic clock, which the link-dead check reads.
     HeartbeatsOnStdClock,
+    /// The heartbeat check never finds a peer's link dead, however long the
+    /// peer has been silent, so a silent peer stays held: nothing ends a
+    /// pair split across two sessions, and the redial that follows
+    /// link-dead never comes.
+    LinkDeadNever,
     /// The explorer's world reads its nodes' decrypt-worker results without
     /// waiting for the jobs dispatched before, so a round counts quiet with
     /// a frame still on a worker thread.

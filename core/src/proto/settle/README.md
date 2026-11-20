@@ -189,6 +189,16 @@ so it reaches no normal or release build.
   the node holds, and `core` lines where the settlement core differs, each
   naming its cause; it holds none since a crossing's mover holds the link
   it dialed, as the core does. Its head states where its lines came from.
+- `rules.txt`: the core's incidental rules, those whose outcome no FRC
+  clause and no decision with a reason fixes, one line each: its ID, class
+  I (no record) or I-kept (kept as the node had it), whether a test asserts
+  it, and what part is incidental.
+- `current.txt`: the tests, of either crate, that assert a rule of
+  `rules.txt`, one line per test and rule. Each carries a doc line saying it
+  records current behaviour, open to change by decision. The root crate's
+  `src/node/settle/tests/rules.rs` checks the two files and the doc lines
+  against each other, since only the root crate's tests can read both
+  crates' sources.
 - `faults.rs`: the test-only switches that turn each guard of the core
   and of its tests off (`FIPS_SETTLE_FAULTS`), read through the `fault!` macro in
   `mod.rs`, and the choice of a candidate rule for the two settlement
@@ -197,7 +207,8 @@ so it reaches no normal or release build.
 - `tests/`: the deterministic world, the model and the core as nodes of
   it, the named starts, the bounded explorers, the settlement properties,
   the rekey machine's decisions, a model of the current node, the
-  pinned late-dial cases, the scripted regressions, the seeded long
+  late-dial cases (the accepted split's recovery tested, the aged-link
+  defect pinned), the scripted regressions, the seeded long
   runs, the candidate rules explored, the meta-test of the switches and
   the scans of this directory. See its README.
 
@@ -212,6 +223,11 @@ to the model, and nothing in `model/` refers to a core item; the scans in
   (`testing/build-core-baremetal.sh` builds the crate without it, so a
   leak into a normal build shows there).
 - Names follow the crate's style: at most one underscore outside tests.
+- A change to the outcome of a rule in `rules.txt` is a decision, not a
+  fix: it changes the rule's line and its tests in the same change. A rule
+  a decision fixes leaves `rules.txt`, and its tests leave `current.txt`
+  and lose their doc line. A new test that asserts an incidental outcome
+  takes a line in `current.txt` and the doc line.
 - The index in `links.rs` is recomputed by `Links`' own methods after
   every change and never written directly.
 - A lease leaves `legs.rs` only with its leg: taken with it, returned

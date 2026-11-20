@@ -8,8 +8,10 @@
 //! every setup check one starting `precondition:` (see `README.md`).
 //!
 //! This file holds the drivers the files share: real TCP nodes on
-//! 127.0.0.1, a crossed TCP dial, delivery until the nodes are idle, and
-//! the check that two nodes are left on one working session.
+//! 127.0.0.1, a crossed TCP dial, delivery until the nodes are idle, the
+//! check that two nodes are left on one working session, and the run that
+//! ends a split pair: past the link-dead timeout on the test clock, then a
+//! redial.
 
 pub(super) mod audit;
 mod bounds;
@@ -208,20 +210,8 @@ pub(super) async fn heartbeat_reaches(
 /// end's index the other's peer index, on which a heartbeat sent now
 /// authenticates each way. The error says what was seen.
 pub(super) async fn settled(nodes: &mut [TestNode], a: usize, b: usize) -> Result<(), String> {
-    let a_addr = *nodes[a].node.node_addr();
-    let b_addr = *nodes[b].node.node_addr();
-    let at_a = nodes[a]
-        .node
-        .get_peer(&b_addr)
-        .map(|p| (p.our_index(), p.their_index()));
-    let at_b = nodes[b]
-        .node
-        .get_peer(&a_addr)
-        .map(|p| (p.our_index(), p.their_index()));
-    let same = matches!(
-        (at_a, at_b),
-        (Some((ao, at)), Some((bo, bt))) if ao.is_some() && ao == bt && at == bo
-    );
+    let (at_a, at_b) = indices(nodes, a, b);
+    let same = one_session(nodes, a, b);
     let fresh = [
         heartbeat_reaches(nodes, a, b).await,
         heartbeat_reaches(nodes, b, a).await,
@@ -314,4 +304,148 @@ pub(super) fn tap(
     tokio::sync::mpsc::UnboundedReceiver<ReceivedPacket>,
 ) {
     loopback_tap(tid)
+}
+
+// ---------------------------------------------------------------------------
+// A split pair, ridden past link-dead and redialed
+// ---------------------------------------------------------------------------
+
+/// How far [`ride_out`] moves the clocks between two passes of the nodes'
+/// timers: a second, a tenth of the 10 s heartbeat interval, so each end's
+/// heartbeat falls due and is delivered well inside the 30 s link-dead
+/// timeout, and link-dead drops only an end that hears nothing.
+pub(super) const RIDE_STEP: Duration = Duration::from_secs(1);
+
+/// How many steps of [`RIDE_STEP`] [`ride_out`] runs at most: two link-dead
+/// timeouts and a heartbeat interval.
+pub(super) const RIDE_STEPS: u64 = 70;
+
+/// When each end of a pair stopped holding the other in [`ride_out`], in
+/// seconds of the ride: `a` for the first node it was given, `b` for the
+/// second.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Dropped {
+    pub(super) a: Option<u64>,
+    pub(super) b: Option<u64>,
+}
+
+impl Dropped {
+    /// Whether both ends dropped the other, each by second `bound`.
+    pub(super) fn within(&self, bound: u64) -> bool {
+        self.a.is_some_and(|s| s <= bound) && self.b.is_some_and(|s| s <= bound)
+    }
+}
+
+/// Run every node past the link-dead timeout on the test clock. The
+/// thread's monotonic clock is frozen, and each step moves it and the wall
+/// clock on by [`RIDE_STEP`], runs every node's receive-loop tick
+/// (`roam_redial::tick`: every timer in its production order, then the path
+/// machines'), and hands over everything sent until a pass moves nothing.
+/// Stops once `nodes[a]` and `nodes[b]` have both dropped the other, or
+/// after [`RIDE_STEPS`] steps. No timeout is shortened.
+pub(super) async fn ride_out(nodes: &mut [TestNode], a: usize, b: usize) -> Dropped {
+    crate::time::freeze();
+    let a_addr = *nodes[a].node.node_addr();
+    let b_addr = *nodes[b].node.node_addr();
+    let mut out = Dropped { a: None, b: None };
+    for second in 1..=RIDE_STEPS {
+        crate::time::advance(RIDE_STEP);
+        crate::time::step_wall(RIDE_STEP.as_millis() as i64);
+        for tn in nodes.iter_mut() {
+            super::roam_redial::tick(&mut tn.node).await;
+        }
+        quiet(nodes).await;
+        if out.a.is_none() && nodes[a].node.get_peer(&b_addr).is_none() {
+            out.a = Some(second);
+        }
+        if out.b.is_none() && nodes[b].node.get_peer(&a_addr).is_none() {
+            out.b = Some(second);
+        }
+        if out.a.is_some() && out.b.is_some() {
+            break;
+        }
+    }
+    out
+}
+
+/// Hand every node what it was sent, a hop a pass, until a pass moves
+/// nothing, with no wait between passes, so a frozen clock stands still.
+async fn quiet(nodes: &mut [TestNode]) {
+    for _ in 0..1000 {
+        if process_available_packets(nodes).await == 0 {
+            return;
+        }
+    }
+    panic!("precondition: the nodes went quiet within 1000 passes");
+}
+
+/// `nodes[from]` dials `nodes[to]` again at `to`'s own address, through
+/// `initiate_connection`, as a node does once it has dropped a peer, and
+/// everything sent is handed over until the nodes are quiet.
+pub(super) async fn redial(nodes: &mut [TestNode], from: usize, to: usize) {
+    let tid = nodes[from].transport_id;
+    let at = nodes[to].addr.clone();
+    let id = PeerIdentity::from_pubkey_full(nodes[to].node.identity().pubkey_full());
+    nodes[from]
+        .node
+        .initiate_connection(tid, at, id)
+        .await
+        .expect("precondition: the redial starts");
+    quiet(nodes).await;
+}
+
+/// End a split pair the way the node does: ride it past the link-dead
+/// timeout on the test clock ([`ride_out`]), then `nodes[from]` redials
+/// `nodes[to]` ([`redial`]). Asserts, marked `defect:`, that link-dead
+/// dropped both ends within the timeout and one step: each end's session
+/// is one the other does not hold, so neither hears a frame that
+/// authenticates. `what` names the case in the message.
+pub(super) async fn outlast(nodes: &mut [TestNode], from: usize, to: usize, what: &str) {
+    let dropped = ride_out(nodes, from, to).await;
+    let bound = nodes[from].node.config().node.link_dead_timeout_secs + RIDE_STEP.as_secs();
+    assert!(
+        dropped.within(bound),
+        "defect: link-dead did not drop both ends of the split within {bound} s ({what}): node {from} at {:?} s, node {to} at {:?} s",
+        dropped.a,
+        dropped.b
+    );
+    redial(nodes, from, to).await;
+}
+
+/// Asserts, marked `defect:`, that `nodes[a]` and `nodes[b]` each hold the
+/// other and are not on one session: the shape of the split, before
+/// link-dead ends it. `what` names the case in the message.
+pub(super) fn assert_split(nodes: &[TestNode], a: usize, b: usize, what: &str) {
+    let (at_a, at_b) = indices(nodes, a, b);
+    assert!(
+        at_a.is_some() && at_b.is_some() && !one_session(nodes, a, b),
+        "defect: the pair is not split ({what}): (ours, theirs) at node {a} {at_a:?}, at node {b} {at_b:?}"
+    );
+}
+
+/// Whether `nodes[a]` and `nodes[b]` hold each other on one session, each
+/// end's index the other's peer index.
+pub(super) fn one_session(nodes: &[TestNode], a: usize, b: usize) -> bool {
+    matches!(
+        indices(nodes, a, b),
+        (Some((ao, at)), Some((bo, bt))) if ao.is_some() && ao == bt && at == bo
+    )
+}
+
+/// One end's (ours, theirs) session indices for the other end, `None` when
+/// it does not hold the other.
+pub(super) type Indices = Option<(Option<SessionIndex>, Option<SessionIndex>)>;
+
+/// The (ours, theirs) indices `nodes[a]` holds for `nodes[b]` and
+/// `nodes[b]` for `nodes[a]`.
+pub(super) fn indices(nodes: &[TestNode], a: usize, b: usize) -> (Indices, Indices) {
+    let a_addr = *nodes[a].node.node_addr();
+    let b_addr = *nodes[b].node.node_addr();
+    let at = |n: usize, peer: &NodeAddr| {
+        nodes[n]
+            .node
+            .get_peer(peer)
+            .map(|p| (p.our_index(), p.their_index()))
+    };
+    (at(a, &b_addr), at(b, &a_addr))
 }

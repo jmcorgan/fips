@@ -113,7 +113,7 @@ helper that seeds a handshake machine by hand.
 - `oracle.rs`: what is checked at each leaf (`judge`), and the explorer's
   tests over the starts: every path of every start keeps its properties, per
   transport and setting; each pinned defect the map gives a start is found
-  there; and each peer change of every start's
+  there (none has one at present); and each peer change of every start's
   scripted path, healed, does what the reference model's transition says,
   per setting, every transport in one test (below). And the crossing with a
   decrypt-worker pool (`pooled`): every path heals to one session per pair
@@ -255,10 +255,14 @@ Then, at the leaf:
   own, so the property test reports such a panic, with the path it was
   walking, at its own `defect:` assertion.
 
-A start names the clauses a pinned defect breaks on its scripted path
-(`pinned`): start 6's split, which the leaf's heal does not mend. They are
-not asserted on any of that start's paths; the map names the pin, and the
-finder asserts it on the scripted path.
+A start names the clauses a pinned defect, or a split accepted as
+behaviour, breaks on its scripted path (`pinned`): start 6's split, which
+the leaf's heal does not mend. They are not asserted on any of that start's
+paths. A defect's pin is named in the map, and the finder asserts it on the
+scripted path; start 6's split is accepted behaviour with no pin, and the
+node tests in `../crossing.rs` named
+`..._with_its_msg2_first_..._after_link_dead_and_a_redial_...` assert it
+and its end at link-dead and a redial.
 
 Each msg1's class against the model's is not checked here.
 

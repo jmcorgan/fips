@@ -407,6 +407,10 @@ pub(crate) enum Fault {
     /// peer's path only when the link it left was this node's dial, not
     /// when the dial was made while the peer was held on that link.
     UnpinOwnOnly,
+    /// A joint node's liveness timer never fires: its party reports no
+    /// link-dead deadline, so a peer silent past the link-dead timeout is
+    /// kept, and a split neither end hears across is never ended.
+    TimerNever,
 }
 
 impl Fault {
@@ -558,6 +562,7 @@ impl Fault {
         Self::UnsendableCloses,
         Self::TeardownIgnoresKeep,
         Self::UnpinOwnOnly,
+        Self::TimerNever,
     ];
 
     /// The switch whose variant name is `name`.

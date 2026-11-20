@@ -160,12 +160,19 @@ can rebuild any state by replaying the path that reached it.
   differences applied; a second test asserts each named difference is
   still met where it should be. An own rekey in a history starts past the
   machine's start floors, one check beyond the ages a msg1 is judged by.
-- `regress.rs`: the two late-dial cases left for later, pinned as known
-  defects with joint nodes at both ends, multipath off (a late second dial whose msg2s are
-  read in the other order, both dialers; the larger node's dial on the
-  smaller node's aged link, then its own rekey), each with a control that
-  passes (the same dials answered in order; the dial on a link too young
-  to rekey). They are run by `testing/known-defect-lane.sh`. Beside them,
+- `regress.rs`: the two late-dial cases, with joint nodes at both ends,
+  multipath off, each with a control that passes. A late second dial
+  whose msg2s are read in the other order, both dialers, splits the pair,
+  an accepted behaviour: its tests show that within one heal one end's
+  link-dead timer removes the peer and the redial settles both ends on a
+  handshake of its own (`TimerNever`, the timer that never fires, reds
+  them); its control is the same dials answered in order. The larger
+  node's dial on the smaller node's aged link, then its own rekey, is a
+  known defect left for a later fix, pinned and run by
+  `testing/known-defect-lane.sh`: the pair keeps one session and no timer
+  fires, while the smaller node refuses the larger node's rekeys until its
+  own rekey clears the pending; its control dials on a link too young to
+  rekey. Beside them,
   one schedule per earlier settlement defect the core can see, each
   reaching the state that defect broke and asserting it holds: a removed
   link's index entries, a crossing over two transports, a crossing's move
@@ -287,6 +294,10 @@ can rebuild any state by replaying the path that reached it.
   depth, states, frontier per depth and time; `FIPS_SETTLE_EXPLORE_TRACE=1`
   prints the frontier as it grows) and record the run when a change moves
   the counts.
+- A test whose doc line says it records current behaviour asserts an
+  incidental rule of `../rules.txt` and is listed in `../current.txt`;
+  rename, move or delete it only with its line there, and change what it
+  asserts of that rule only with the rule's line.
 - The explorer's key is the world's digest. A connection's direction keeps
   its order there, and everything else in flight is a set, so deliveries
   that commute reach one state. It prints a packet's bytes, not its wire
@@ -336,8 +347,10 @@ can rebuild any state by replaying the path that reached it.
   and a frame that would not open or a pair's machines not converged only
   beside such a split of the same sessions; nothing else on the path is
   exempt: a split of other sessions, a pending, a configured peer not
-  held. The two defects left for later, `LaterDialFirst` and `DialAsRekey`
-  (`Shape::pinned`), only the runs against the models of deployed nodes
+  held. The two late-dial shapes, `LaterDialFirst` (the accepted split
+  that the link-dead timer and the redial end) and `DialAsRekey` (the
+  aged-link defect left for a later fix) (`Shape::pinned`), only the runs
+  against the models of deployed nodes
   exempt (`oracle::by_any_shape`), where a dial on an aged link also
   spares a pending, or a split, that names the pending it left: the
   model's convergence with itself and the core explorer exclude the

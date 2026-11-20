@@ -65,8 +65,8 @@ IgnoreOwnDial	red	fips-mesh	node::tests::handshake::heard::a_second_msg1_after_t
 IgnoreOwnDial	red	fips-core	proto::settle::table::tests::a_second_dial_to_a_peer_held_on_this_nodes_own_dial_moves_the_peer_onto_it
 IgnoreOwnDial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_leaves_a_working_peering_larger_dialer	defect: Err(
 IgnoreOwnDial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer	defect: Err(
-IgnoreOwnDial	pass	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer
-IgnoreOwnDial	pass	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer
+IgnoreOwnDial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_after_link_dead_and_a_redial_larger_dialer	the pair is not split
+IgnoreOwnDial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_after_link_dead_and_a_redial_larger_dialer	the pair is not split
 IgnoreOwnDial	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_loopback
 IgnoreOwnDial	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_loopback_with_multipath_on
 CrossedRunsKeep	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says
@@ -399,6 +399,19 @@ HeartbeatsOnStdClock	red	fips-mesh	node::tests::settle::explore::oracle::every_n
 HeartbeatsOnStdClock	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_loopback_with_multipath_on
 HeartbeatsOnStdClock	red	fips-mesh	node::tests::settle::explore::oracle::a_crossing_with_the_worker_pool_started_offers_the_moved_session
 HeartbeatsOnStdClock	red	fips-mesh	node::tests::settle::explore::oracle::a_crossing_with_the_worker_pool_started_offers_the_moved_session_with_multipath_on
+LinkDeadNever	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_after_link_dead_and_a_redial_larger_dialer	link-dead did not drop
+LinkDeadNever	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_after_link_dead_and_a_redial_larger_dialer_with_multipath_on	link-dead did not drop
+LinkDeadNever	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_after_link_dead_and_a_redial_smaller_dialer	link-dead did not drop
+LinkDeadNever	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_after_link_dead_and_a_redial_smaller_dialer_with_multipath_on	link-dead did not drop
+LinkDeadNever	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_after_link_dead_and_a_redial_larger_dialer	link-dead did not drop
+LinkDeadNever	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_after_link_dead_and_a_redial_larger_dialer_with_multipath_on	link-dead did not drop
+LinkDeadNever	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_after_link_dead_and_a_redial_smaller_dialer	link-dead did not drop
+LinkDeadNever	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_after_link_dead_and_a_redial_smaller_dialer_with_multipath_on	link-dead did not drop
+LinkDeadNever	red	fips-mesh	node::tests::settle::crossing::a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session_after_link_dead_and_a_redial	link-dead did not drop
+LinkDeadNever	red	fips-mesh	node::tests::settle::crossing::a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session_after_link_dead_and_a_redial_with_multipath_on	link-dead did not drop
+LinkDeadNever	red	fips-mesh	node::tests::settle::crossing::a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session_after_link_dead_and_a_redial	link-dead did not drop
+LinkDeadNever	red	fips-mesh	node::tests::settle::crossing::a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session_after_link_dead_and_a_redial_with_multipath_on	link-dead did not drop
+LinkDeadNever	red	fips-mesh	node::tests::settle::restart::a_rekey_msg1_of_the_peers_previous_run_read_late_by_the_restarted_node_leaves_one_session_after_link_dead_and_a_redial	link-dead did not drop
 WorldSkipsWorkerWait	red	fips-mesh	node::tests::settle::explore::oracle::a_crossing_whose_decrypt_workers_lag_heals_to_one_session_on_each_dropped_msg1_path
 WorldSkipsWorkerWait	red	fips-mesh	node::tests::settle::explore::oracle::a_crossing_whose_decrypt_workers_lag_heals_to_one_session_on_each_dropped_msg1_path_with_multipath_on
 DrainSkipsWorkerWait	red	fips-mesh	node::tests::spanning_tree::a_stepped_drain_returns_only_after_the_decrypt_workers_handled_what_they_were_sent
@@ -539,6 +552,6 @@ CapNotCounted	red	fips-mesh	node::tests::unit::handle_msg1_silent_drops_at_cap_f
 OutboundGated	red	fips-core	proto::settle::gates::tests::an_own_msg2_restart_goes_through_the_gate_and_is_accepted_inside_its_floors	core/src/proto/settle/tests/gates.rs:154
 OutboundGated	red	fips-mesh	node::tests::restart_dial::both_ends_dialling_after_a_peer_restart_settle_on_one_session_in_either_message_order	src/node/tests/restart_dial.rs:208
 OutboundGated	red	fips-mesh	node::tests::restart_dial::one_dial_after_a_peer_restart_leaves_both_ends_on_one_session_with_end_to_end_sessions_cleared
-IntervalTen	red	fips-core	proto::settle::gates::tests::the_default_intervals_are_the_frcs	core/src/proto/settle/tests/gates.rs:432
+IntervalTen	red	fips-core	proto::settle::gates::tests::the_default_intervals_are_the_frcs	core/src/proto/settle/tests/gates.rs:438
 IntervalTen	red	fips-mesh	node::tests::handshake::a_second_epoch_restart_inside_the_interval_on_the_node_clock_is_refused_by_the_dampener_and_a_third_past_it_is_accepted
 StandbyRoamUnfed	red	fips-mesh	node::tests::settle::live::a_standby_paths_roam_moves_its_links_record_with_multipath_on	links-mirror

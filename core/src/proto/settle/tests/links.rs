@@ -67,6 +67,8 @@ fn a_retired_links_address_that_is_another_links_live_path_stays_open() {
     );
 }
 
+/// Records current behaviour (rule S-57: a Probing path not in use): open to change by
+/// decision. Its other assertions are not.
 #[test]
 fn a_probing_path_keeps_no_connection_open() {
     let mut links = Links::new();
@@ -100,6 +102,8 @@ fn a_released_path_marked_keep_closes_nothing() {
     assert!(left.is_empty(), "the released path leaves the index");
 }
 
+/// Records current behaviour (rule S-58: the released setup pair out of the index): open to
+/// change by decision. Its other assertions are not.
 #[test]
 fn a_released_setup_address_leaves_the_index_and_a_roamed_one_stays() {
     let mut links = Links::new();

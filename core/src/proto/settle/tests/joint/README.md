@@ -152,9 +152,14 @@ builds, and changes no line of the core, the machine or the bundle.
   timer: a held peer whose rekey machine has authenticated no frame, under
   any session, for the link-dead timeout since that frame or the current
   session's start is removed as dead, and redialled if configured, unless
-  this node's own rekey of it is in flight; at one path a close of the
-  active path's connection removes the peer at once, which the timer
-  would do within the timeout.
+  this node's own rekey of it is in flight (`deadline`; `TimerNever`
+  makes it never fire, which reds the timer's own tests here, the tests
+  in `../regress.rs` that the split of a late second dial answered in the
+  other order is ended by the timer and the redial within a heal, and the
+  exemption of the model's missing timer in `explore.rs`, whose stale
+  peering the timer leaves); at one path a close of the active
+  path's connection removes the peer at once, which the timer would do
+  within the timeout.
   It gives the joint world's oracles its facts (`Party::joint`): each
   peer the core holds beside what the shell holds for it, the lease each
   live leg holds by the shell's record of it, and what the pool and the
@@ -204,10 +209,14 @@ builds, and changes no line of the core, the machine or the bundle.
   the link record (`PathsUnmirrored`), a peer silent for the link-dead
   timeout removed then and redialled, and the two crossings of start 3
   at On with On that leave one end holding a link of two paths whose
-  connection failed healing once its timer removes the peer (both by
-  hand), every start but 6 and 7 settling
+  connection failed healing once its timer removes the peer, the other
+  end's redials lost until then (both by hand), every start but 6 and 7
+  settling
   by its script (`MoveKeepsInboundLink`), and starts 6 and 7 showing their
-  two pinned defects (`OneSessionNoFresh`, `OneSessionNoPending`).
+  two shapes on real machines (`OneSessionNoFresh`, `OneSessionNoPending`):
+  start 6's split, the accepted behaviour the link-dead timer and the
+  redial end, and start 7's pending, the aged-link defect left for a
+  later fix.
 - `oracle.rs`: the joint world's own oracles over what a joint node
   gives (`Facts`, from `Party::joint`), checked at every step by the
   settlement oracles' `every_step`: one view of each peer the core holds
@@ -327,7 +336,10 @@ builds, and changes no line of the core, the machine or the bundle.
   default), printing each depth's frontier and the time it ended at, and
   how far into the next depth the limit came.
   Its sweeps check every start's explored states and healed leaves, every
-  start but the two late-dial cases left for later: at Off with Off, and
+  start but the two late-dial cases (start 6's accepted split, which
+  `../regress.rs` tests is ended by the link-dead timer and the redial
+  within a heal, and start 7's aged-link defect, pinned there): at Off
+  with Off, and
   at On with On every start but the three named starts whose links
   turn capable there and the two-path starts whose sweeps take minutes
   (`OutboundGated` for both, shown on one start's sweep in `runs.rs`). A
@@ -351,12 +363,15 @@ builds, and changes no line of the core, the machine or the bundle.
   against the model, under the same exemption and one more, for what the
   model's missing link-dead timer leaves beside a joint node (`untimed`):
   the model still holds a joint node whose timer removed it after the
-  link's frames were lost, and refuses every redial, so the joint node
-  holds a configured peer it cannot reach and the model keeps the refused
-  redial's connection open. A node runs the timer too; two joint nodes
-  never reach it. The exemption test shows it spares that path's two
-  breaches and nothing else on it (by hand: sparing nothing reds the
-  explorer on start 2).
+  link's frames were lost, and refuses every redial (one off the link of
+  a peering it has not heard from, while that link can be reached), so
+  the joint node holds a configured peer it cannot reach and the model
+  keeps the refused redial's connection open. A node runs the timer too;
+  two joint nodes never reach it. The model answers a redial of a peering
+  it has heard from, so no explored path of the named starts reaches it
+  now; the exemption test builds it by hand, the model answering one dial
+  on UDP from a joint node configured with its TCP home, and shows it
+  spares that world's two breaches and nothing else in it.
 - `pins.rs`: pins of what the joint world found. A known-defect pin is
   ignored, listed in `testing/ignored-tests.txt` and run by the
   known-defect lane, which reds when one passes; the fix that turns one
