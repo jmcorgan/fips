@@ -51,6 +51,7 @@ pub mod wire;
 pub use candidate::{Candidates, Entry, Sources};
 pub use capable::Capability;
 pub use live::{Answer, Liveness, Sent};
+pub(crate) use machine::marks;
 pub use machine::{Account, Bundle, Charge, PathView, PinView, View};
 pub use params::{
     Config, PATH_DEAD_PROBE_INTERVAL_MAX, PATH_DEAD_PROBE_INTERVAL_MIN, PATH_DEAD_RECHECK_SPAN,

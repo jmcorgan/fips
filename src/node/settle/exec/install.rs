@@ -74,12 +74,9 @@ impl Run {
         ambient: &PeerActionCtx,
     ) -> Self {
         let initiator = ambient.is_outbound;
-        // A dial's msg2 found it in the dial map under the transport its msg1
-        // went out on and the index the dial holds, which the msg2 named.
-        let dial = ambient
-            .our_index
-            .filter(|_| initiator)
-            .map(|index| (ambient.transport_id, index.as_u32()));
+        // A dial's msg2 found its leg by the transport its msg1 went out on
+        // and the index the leg holds, which the msg2 named, on its link.
+        let dial = ambient.our_index.filter(|_| initiator).map(|_| link);
         Self {
             peer: *ambient.verified_identity.node_addr(),
             t: transition(link, ambient),
@@ -188,6 +185,10 @@ impl Node {
     /// installed: a promotion's whole plan, or what follows a replacement's
     /// removal.
     pub(in crate::node) async fn run_promotion(&mut self, r: &mut Run) {
+        #[cfg(test)]
+        if let Some(did) = super::from_node(r.peer, &r.t) {
+            self.did(did);
+        }
         let at = divide(&r.t);
         self.run_part(r, at..plan(&r.t).len()).await;
     }
@@ -365,11 +366,7 @@ pub(super) async fn machine_resolved(node: &mut Node, r: &mut Run) {
     };
     // Disjoint field borrow: the machine's map and the index allocator.
     f.follow = match link.and_then(|link| node.peer_machines.get_mut(&link)) {
-        Some(machine) => machine.step(
-            PeerEvent::PromotionResolved { result },
-            f.interval_ms,
-            &mut node.index_allocator,
-        ),
+        Some(machine) => machine.step(PeerEvent::PromotionResolved { result }, f.interval_ms),
         None => Vec::new(),
     };
 }

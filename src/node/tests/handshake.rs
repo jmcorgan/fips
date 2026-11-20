@@ -86,10 +86,7 @@ async fn test_two_node_handshake_udp() {
         Duration::from_millis(100),
     );
     node_a.links.raw().insert(link_id_a, link_a);
-    node_a
-        .pending_outbound
-        .raw()
-        .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
+    node_a.plant_dial_at((transport_id_a, our_index_a.as_u32()), link_id_a, None);
 
     // Send msg1 from A to B over UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -314,10 +311,7 @@ async fn test_run_rx_loop_handshake() {
         Duration::from_millis(100),
     );
     node_a.links.raw().insert(link_id_a, link_a);
-    node_a
-        .pending_outbound
-        .raw()
-        .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
+    node_a.plant_dial_at((transport_id_a, our_index_a.as_u32()), link_id_a, None);
 
     // Send msg1 from A to B over real UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -511,10 +505,7 @@ async fn test_cross_connection_both_initiate() {
         .links
         .raw_index()
         .insert((transport_id_a, remote_addr_b.clone()), link_id_a_out);
-    node_a
-        .pending_outbound
-        .raw()
-        .insert((transport_id_a, our_index_a.as_u32()), link_id_a_out);
+    node_a.plant_dial_at((transport_id_a, our_index_a.as_u32()), link_id_a_out, None);
 
     // Node B initiates to Node A
     let link_id_b_out = node_b.allocate_link_id();
@@ -551,10 +542,7 @@ async fn test_cross_connection_both_initiate() {
         .links
         .raw_index()
         .insert((transport_id_b, remote_addr_a.clone()), link_id_b_out);
-    node_b
-        .pending_outbound
-        .raw()
-        .insert((transport_id_b, our_index_b.as_u32()), link_id_b_out);
+    node_b.plant_dial_at((transport_id_b, our_index_b.as_u32()), link_id_b_out, None);
 
     // Both send msg1 over UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -713,24 +701,23 @@ async fn test_stale_connection_cleanup() {
     node.links
         .raw_index()
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.pending_outbound
-        .raw()
-        .insert((transport_id, our_index.as_u32()), link_id);
+    node.plant_dial_at((transport_id, our_index.as_u32()), link_id, None);
 
     // Verify state before timeout check
     assert_eq!(node.connection_count(), 1);
     assert_eq!(node.link_count(), 1);
     assert!(
-        node.pending_outbound
+        node.pending_outbound()
             .contains_key(&(transport_id, our_index.as_u32()))
     );
     assert_eq!(node.index_allocator.count(), 1);
 
     // The leg's last activity was its msg1, just now. Once the handshake
     // timeout has passed on the monotonic clock, the connection is cleaned
-    // up.
+    // up: the dial's leg is reaped at the peers' timers, as a dial's is.
     let timeout_ms = node.config().node.rate_limit.handshake_timeout_secs * 1000;
     crate::time::advance(Duration::from_millis(timeout_ms + 1_000));
+    node.drive_peer_timers(Node::interval_ms()).await;
     node.check_timeouts().await;
 
     // Verify everything was cleaned up
@@ -742,7 +729,7 @@ async fn test_stale_connection_cleanup() {
     assert_eq!(node.link_count(), 0, "Stale link should be removed");
     assert!(
         !node
-            .pending_outbound
+            .pending_outbound()
             .contains_key(&(transport_id, our_index.as_u32())),
         "pending_outbound should be cleaned up"
     );
@@ -805,9 +792,7 @@ async fn test_failed_connection_cleanup() {
     node.links
         .raw_index()
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.pending_outbound
-        .raw()
-        .insert((transport_id, our_index.as_u32()), link_id);
+    node.plant_dial_at((transport_id, our_index.as_u32()), link_id, None);
 
     // Simulate a stored-handshake send failure through the control machine —
     // the failure carrier the stale-connection sweep now reads (the leg no
@@ -817,11 +802,9 @@ async fn test_failed_connection_cleanup() {
             .peer_machines
             .get_mut(&link_id)
             .expect("machine seeded by the handshake seeder");
-        let alloc = &mut node.index_allocator;
         let actions = machine.step(
             crate::peer::machine::PeerEvent::HandshakeSendFailed,
             Node::interval_ms(),
-            alloc,
         );
         assert!(actions.is_empty());
         assert!(machine.is_failed());
@@ -875,8 +858,7 @@ async fn test_msg1_stored_for_resend() {
 
     // Build wire msg1 and store it (as initiate_peer_connection does)
     let wire_msg1 = build_msg1(our_index, &noise_msg1);
-    let resend_interval = node.config().node.rate_limit.handshake_resend_interval_ms;
-    conn.set_conn_handshake_msg1(wire_msg1.clone(), now_ms + resend_interval);
+    conn.set_conn_handshake_msg1(wire_msg1.clone());
 
     // Verify stored msg1 matches what was built
     assert_eq!(conn.conn_handshake_msg1().unwrap(), &wire_msg1);
@@ -917,14 +899,11 @@ async fn test_resend_scheduling() {
     node.links
         .raw_index()
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.pending_outbound
-        .raw()
-        .insert((transport_id, our_index.as_u32()), link_id);
 
-    // The msg1-resend counter and its due timer live on the per-peer machine,
-    // which also carries the pending connection. Dial it to `SentMsg1`
-    // (connectionless: no connect step) and arm its retransmit timer at
-    // now + 1000ms, mirroring what a real dial arms.
+    // The msg1-resend counter and its due time live on the dial's leg; the
+    // per-peer machine carries the pending connection. Dial it to `SentMsg1`
+    // (connectionless: no connect step) and give its leg a resend at
+    // now + 1000ms, mirroring what a real dial schedules.
     let mut machine = crate::peer::machine::PeerMachine::new_outbound(
         link_id,
         peer_identity,
@@ -938,23 +917,19 @@ async fn test_resend_scheduling() {
             connection_oriented: false,
         },
         now_ms,
-        &mut node.index_allocator,
     );
     // The msg1 wire lives on the machine's carrier (the retransmit driver's
     // resend source), mirroring `prepare_outbound_msg1`.
-    machine.set_conn_handshake_msg1(wire_msg1, now_ms + 1000);
+    machine.set_conn_handshake_msg1(wire_msg1);
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
     node.peer_machines.raw().insert(link_id, machine);
-    node.peer_machines
-        .raw_timers()
-        .entry(link_id)
-        .or_default()
-        .insert(
-            crate::peer::machine::TimerKind::HandshakeRetransmit,
-            now_ms + 1000,
-        );
+    node.plant_dial_at(
+        (transport_id, our_index.as_u32()),
+        link_id,
+        Some(now_ms + 1000),
+    );
 
     // Before the scheduled time the timer isn't due, so nothing fires.
     node.drive_peer_timers(now_ms + 500).await;
@@ -975,10 +950,10 @@ async fn test_resend_scheduling() {
     );
 }
 
-/// Test that the timer driver reaps an outbound leg whose machine
-/// `HandshakeTimeout` timer has come due (the timeout fold). The reap re-checks
-/// the shell `is_timed_out` predicate, then tears the connection down exactly as
-/// the old `check_timeouts` Teardown path did.
+/// Test that the timer driver reaps an outbound dial whose handshake leg is
+/// past its deadline: the settlement core's poll of the legs reaps it, and the
+/// node tears the connection down as the old `check_timeouts` Teardown path
+/// did.
 #[tokio::test]
 async fn test_handshake_timeout_drive() {
     let mut node = make_node();
@@ -1008,12 +983,9 @@ async fn test_handshake_timeout_drive() {
     node.links
         .raw_index()
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.pending_outbound
-        .raw()
-        .insert((transport_id, our_index.as_u32()), link_id);
 
-    // Machine in SentMsg1, carrying the pending connection, with a
-    // HandshakeTimeout timer armed at dial + 30s.
+    // Machine in SentMsg1, carrying the pending connection, with its
+    // dial's leg due to time out at dial + 30s.
     let mut machine = crate::peer::machine::PeerMachine::new_outbound(
         link_id,
         peer_identity,
@@ -1027,20 +999,12 @@ async fn test_handshake_timeout_drive() {
             connection_oriented: false,
         },
         dial_ms,
-        &mut node.index_allocator,
     );
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
     node.peer_machines.raw().insert(link_id, machine);
-    node.peer_machines
-        .raw_timers()
-        .entry(link_id)
-        .or_default()
-        .insert(
-            crate::peer::machine::TimerKind::HandshakeTimeout,
-            dial_ms + 30_000,
-        );
+    node.plant_dial_at((transport_id, our_index.as_u32()), link_id, None);
 
     assert_eq!(node.connection_count(), 1);
 
@@ -1058,7 +1022,7 @@ async fn test_handshake_timeout_drive() {
         "Control machine dropped with the reaped connection"
     );
     assert!(
-        !node.peer_machines.timers().contains_key(&link_id),
+        node.leg(link_id).is_none(),
         "Timer store dropped with the reaped connection"
     );
 }
@@ -1182,6 +1146,7 @@ async fn test_should_admit_msg1_admits_rekey_when_accept_off() {
     node.links
         .raw_index()
         .insert((transport_id, addr.clone()), link_id);
+    node.resync();
 
     assert!(node.should_admit_msg1(transport_id, &addr));
 }
@@ -1222,6 +1187,7 @@ async fn test_should_admit_msg1_admits_rekey_when_udp_accept_off() {
     node.links
         .raw_index()
         .insert((transport_id, addr.clone()), link_id);
+    node.resync();
 
     assert!(node.should_admit_msg1(transport_id, &addr));
 }
@@ -1282,6 +1248,7 @@ async fn test_should_admit_msg1_admits_rekey_when_addr_form_differs() {
     let numeric_addr = TransportAddr::from_string("100.64.0.5:2121");
     peer.set_current_addr(transport_id, numeric_addr.clone());
     node.peers.raw().insert(peer_node_addr, peer);
+    node.resync();
 
     // Sanity: legacy carve-out still works for the hostname-form lookup.
     assert!(node.should_admit_msg1(transport_id, &hostname_addr));
@@ -1627,6 +1594,7 @@ async fn a_msg1_admitted_by_a_link_no_identity_owns_is_dropped_after_the_dh() {
     node.links
         .raw_index()
         .insert((transport_id, source_addr.clone()), link_id);
+    node.resync();
 
     assert!(
         node.should_admit_msg1(transport_id, &source_addr),
@@ -1876,6 +1844,7 @@ async fn msg1_waiver_classifies_all_three_outcomes() {
     node.links
         .raw_index()
         .insert((refusing_id, bare.clone()), bare_link);
+    node.resync();
     assert_eq!(
         classify(&node, refusing_id, &bare),
         Msg1Waiver::Unattributed,
@@ -1896,6 +1865,7 @@ async fn msg1_waiver_classifies_all_three_outcomes() {
     node.links
         .raw_index()
         .insert((refusing_id, promoted_addr.clone()), promoted_link);
+    node.resync();
     assert_eq!(
         classify(&node, refusing_id, &promoted_addr),
         Msg1Waiver::Expect(promoted_node_addr),
@@ -1913,6 +1883,7 @@ async fn msg1_waiver_classifies_all_three_outcomes() {
     node.links
         .raw_index()
         .insert((refusing_id, carrier_addr.clone()), carrier_link);
+    node.resync();
     assert_eq!(
         classify(&node, refusing_id, &carrier_addr),
         Msg1Waiver::Expect(dialled_node_addr),
@@ -1966,6 +1937,7 @@ async fn a_stale_reverse_address_entry_does_not_hide_a_peer_reachable_by_address
     node.links
         .raw_index()
         .insert((transport_id, numeric.clone()), dead_link);
+    node.resync();
 
     assert_eq!(
         node.msg1_waiver(
@@ -2263,7 +2235,7 @@ async fn a_first_epoch_change_against_a_silent_peering_still_restarts_it() {
 /// would still see the first restart as moments old and refuse the second.
 #[tokio::test]
 async fn a_second_epoch_restart_past_the_interval_on_the_node_clock_is_accepted() {
-    // The restart interval, `EPOCH_RESTART_MIN_INTERVAL_SECS`, plus a second.
+    // The restart interval, the restart gates' `Params::interval`, plus a second.
     const PAST_THE_INTERVAL: Duration = Duration::from_secs(15 + 1);
 
     let transport_id = TransportId::new(1);
@@ -2307,6 +2279,100 @@ async fn a_second_epoch_restart_past_the_interval_on_the_node_clock_is_accepted(
             "restart {round} must stamp the dampener"
         );
     }
+}
+
+/// The restart dampener's window on the node's monotonic clock, from inside:
+/// a restart accepted at `t` stamps the dampener, so a second epoch change at
+/// `t + 12 s` is refused, by the dampener and not by a floor, since the
+/// peering it would tear down is idle past both, and a third at `t + 16 s`,
+/// past the interval, is accepted.
+#[tokio::test]
+async fn a_second_epoch_restart_inside_the_interval_on_the_node_clock_is_refused_by_the_dampener_and_a_third_past_it_is_accepted()
+ {
+    // The refusal line of a restart msg1.
+    const REFUSED: &str = "Epoch mismatch inside the peering's restart interval, dropping msg1";
+
+    let transport_id = TransportId::new(1);
+    let mut node = make_node();
+    let initiator = make_node();
+    let initiator_addr = node_addr_of(&initiator);
+    let source_addr = TransportAddr::from_string("127.0.0.1:41012");
+
+    // Each restart meets a peering installed at an epoch the genuine msg1
+    // does not carry, idle past the liveness gate, so only the dampener can
+    // refuse it.
+    let installed = install_peering_at_a_different_epoch(
+        &mut node,
+        &initiator,
+        transport_id,
+        &source_addr,
+        IDLE_SECS,
+    );
+    node.handle_msg1(ReceivedPacket::with_timestamp(
+        transport_id,
+        source_addr.clone(),
+        genuine_msg1(&initiator, &node),
+        Node::now_ms(),
+    ))
+    .await;
+    assert!(
+        node.get_peer(&initiator_addr)
+            .is_some_and(|p| p.link_id() != installed)
+            && node.restart_dampener_stamp(&initiator_addr).is_some(),
+        "precondition: the first restart is accepted and stamps the dampener"
+    );
+
+    crate::time::advance(Duration::from_secs(12));
+    let installed = install_peering_at_a_different_epoch(
+        &mut node,
+        &initiator,
+        transport_id,
+        &source_addr,
+        IDLE_SECS,
+    );
+    let (logs, guard) = crate::testutil::capture_logs_scoped();
+    node.handle_msg1(ReceivedPacket::with_timestamp(
+        transport_id,
+        source_addr.clone(),
+        genuine_msg1(&initiator, &node),
+        Node::now_ms(),
+    ))
+    .await;
+    drop(guard);
+    assert_eq!(
+        node.get_peer(&initiator_addr).map(|p| p.link_id()),
+        Some(installed),
+        "defect: a restart 12 s after an accepted one, inside the dampener's \
+         interval on the node's clock, tore down the peering"
+    );
+    let line = logs.line(REFUSED);
+    assert_eq!(
+        line.as_deref()
+            .and_then(|l| crate::testutil::log_field(l, "reason")),
+        Some("\"dampened\""),
+        "precondition: the dampener refused the second restart, not a floor: {line:?}"
+    );
+
+    crate::time::advance(Duration::from_secs(4));
+    let installed = install_peering_at_a_different_epoch(
+        &mut node,
+        &initiator,
+        transport_id,
+        &source_addr,
+        IDLE_SECS,
+    );
+    node.handle_msg1(ReceivedPacket::with_timestamp(
+        transport_id,
+        source_addr.clone(),
+        genuine_msg1(&initiator, &node),
+        Node::now_ms(),
+    ))
+    .await;
+    assert!(
+        node.get_peer(&initiator_addr)
+            .is_some_and(|p| p.link_id() != installed),
+        "the third restart, 16 s after the first and past the interval, must replace the peering"
+    );
 }
 
 /// A transient send failure during msg2 leaves the half-built link alone.
@@ -2574,10 +2640,7 @@ mod dead_encrypt_worker {
                 Duration::from_millis(100),
             ),
         );
-        node_a
-            .pending_outbound
-            .raw()
-            .insert((tid, our_index.as_u32()), link_id);
+        node_a.plant_dial_at((tid, our_index.as_u32()), link_id, None);
         node_a
             .transports
             .get(&tid)
@@ -4061,5 +4124,54 @@ fn msg1_refusals_each_land_on_their_own_counter_and_conserve_the_old_bad_state_t
     assert_eq!(
         (snap.bad_state, snap.silent_backoff, snap.unknown_connection),
         (0, 1, 0)
+    );
+}
+
+/// An accepted epoch change stamps the restart dampener in the node and in
+/// the settlement core beside it, and the test clock then moves past the
+/// dampener's interval. `gates-agree` ages the node's stamp on the peer
+/// clock from the instant it was taken, as it ages the core's, and finds
+/// both lapsed.
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn gates_agree_reads_the_nodes_dampener_stamp_on_the_clock_the_core_stamps_on() {
+    let transport_id = TransportId::new(1);
+    let mut node = make_node();
+    let initiator = make_node();
+    let initiator_addr = node_addr_of(&initiator);
+    let source_addr = TransportAddr::from_string("127.0.0.1:41011");
+    install_peering_at_a_different_epoch(
+        &mut node,
+        &initiator,
+        transport_id,
+        &source_addr,
+        IDLE_SECS,
+    );
+    node.handle_msg1(ReceivedPacket::with_timestamp(
+        transport_id,
+        source_addr.clone(),
+        genuine_msg1(&initiator, &node),
+        Node::now_ms(),
+    ))
+    .await;
+    let stamped = (
+        node.restart_dampener_stamp(&initiator_addr).is_some(),
+        node.shadow
+            .table()
+            .and_then(|t| t.gates().stamp(&initiator_addr))
+            .is_some(),
+    );
+    let before = crate::node::settle::audit::gates_agree(&node);
+    let interval = crate::proto::settle::params::Params::default().interval;
+    crate::time::advance(interval + Duration::from_secs(1));
+    let after = crate::node::settle::audit::gates_agree(&node);
+    assert_eq!(
+        (stamped, before),
+        ((true, true), Vec::<String>::new()),
+        "precondition: the accepted change stamped the node and the core alike"
+    );
+    assert!(
+        after.is_empty(),
+        "defect: gates-agree did not find the node's and the core's dampener stamps both lapsed: {after:?}"
     );
 }

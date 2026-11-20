@@ -131,10 +131,7 @@ async fn outbound_denied_at_msg2(
         .links
         .raw_index()
         .insert((transport_id, remote_addr.clone()), link_id_a);
-    node_a
-        .pending_outbound
-        .raw()
-        .insert((transport_id, our_index_a.as_u32()), link_id_a);
+    node_a.plant_dial_at((transport_id, our_index_a.as_u32()), link_id_a, None);
 
     let mut conn_b = inbound_leg(LinkId::new(2), 1000);
     let responder_epoch = [0x11; 8];
@@ -166,7 +163,7 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     assert_eq!(node_a.peer_count(), 0);
     assert_eq!(node_a.connection_count(), 0);
     assert_eq!(node_a.link_count(), 0);
-    assert!(node_a.pending_outbound.is_empty());
+    assert!(node_a.pending_outbound().is_empty());
 }
 
 /// The outbound ACL reject arm disposes of the whole leg — machine, link and
@@ -209,7 +206,7 @@ async fn test_outbound_msg2_acl_reject_reschedules_a_configured_peer() {
     // The reschedule must not resurrect any of the disposed leg.
     assert_eq!(node_a.peer_count(), 0);
     assert_eq!(node_a.link_count(), 0);
-    assert!(node_a.pending_outbound.is_empty());
+    assert!(node_a.pending_outbound().is_empty());
 }
 
 #[tokio::test]

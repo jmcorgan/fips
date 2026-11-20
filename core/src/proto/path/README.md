@@ -689,8 +689,8 @@ its node code steps it and acts on what it decides.
   no active path when it takes the active one) or makes one active
   (`activate`, which refuses a path never acked); the root crate's tests
   mark a path Dead through
-  `mark_dead`, which exists only in test builds and under the
-  `test-hooks` feature. `classify` is the
+  `mark_dead`, and leave a set with no active path through `deactivate`,
+  which exist only in test builds and under the `test-hooks` feature. `classify` is the
   source query: it answers with a `Match`, saying whether a pair is a
   proven path (Live, or acked once in this link, in any state), with
   whether it is the active one; a held path not yet proven; or no path.

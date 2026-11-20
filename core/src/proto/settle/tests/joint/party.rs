@@ -2032,6 +2032,7 @@ impl JointParty {
                 In::Heard {
                     peer: key(id),
                     from: pair(src),
+                    kind: crate::proto::link::LinkMessageType::Heartbeat.to_byte(),
                 },
                 at,
             );

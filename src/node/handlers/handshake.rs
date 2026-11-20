@@ -9,100 +9,37 @@ use crate::node::diag::{self, HsLine, Msg1Path, OrNone, Shown, Withheld};
 use crate::node::handlers::path::NodeFacts;
 use crate::node::rate_limit::Msg1Class;
 use crate::node::reject::{HandshakeReject, RejectReason};
+use crate::node::settle::params::settle_params;
 use crate::node::{Node, NodeError};
+use crate::peer::PeerInstant;
 use crate::peer::machine::{
     CrossConnOutcome, FailReason, HandshakeCrypto, HandshakePhase, PeerAction, PeerEvent,
-    PeerMachine, PeerState, TimerKind,
+    PeerMachine, PeerState,
 };
 use crate::peer::{LinkCaps, Match, PathCaps};
+use crate::proto::fmp::ActiveBackoff;
 use crate::proto::fmp::rekey::ik::{Arrived, read_msg1};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::proto::fmp::{
     EphemeralDigest, EstablishSnapshot, EstablishView, InboundDecision, InboundReject, LegStamp,
     Msg1Digest, OutboundSnapshot, PromotionResult, WireOutcome, cross_connection_winner,
 };
+use crate::proto::settle::gates::{Ask, Liveness, Refusal, Source};
 use crate::proto::settle::output::Why;
+use crate::proto::settle::params::Params;
 use crate::time::HostClock;
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket, TransportError, TransportId};
 use crate::utils::index::{IndexError, SessionIndex};
-use fips_core::proto::rekey::{Arrival, Input, Reason, Route};
-use fips_core::time::Clock as _;
+use fips_core::proto::rekey::{Arrival, Input, Reason, Route, allocate};
+use fips_core::time::{Clock as _, Instant as _};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-/// Minimum interval between accepted epoch changes for one peer identity,
-/// and the recency threshold at which the peering an epoch change would
-/// destroy still counts as live.
-///
-/// An epoch-mismatch msg1 is authentic but replayable: a captured one stays
-/// valid indefinitely, and accepting it tears down a working peering. Both
-/// conditions are receiver-local. The liveness half is the one that closes
-/// the replay, since a peering under attack is by construction still
-/// heartbeating; the interval half bounds the churn a peer can drive on its
-/// own.
-///
-/// Sized against the peer's own recovery rather than against a round number:
-/// a genuinely restarting peer's msg1 resends fire at roughly t+1, t+3, t+7
-/// and t+15 seconds and its attempt is reaped at `handshake_timeout_secs`
-/// (30), so 15 is the largest value at which a real restart still re-peers
-/// inside its first handshake window with no reconnect backoff. It also sits
-/// below `link_dead_timeout_secs` (30), so the liveness gate can never
-/// outlive the reaper that would have removed the peering anyway.
-///
-/// Raising it lengthens the outage an attacker's accepted replay causes,
-/// because the genuine peer's recovery msg1 hits the same arm. Lowering it
-/// weakens both halves and, below the resend ladder, buys nothing.
-///
-/// The same two conditions gate replacing a peering on a same-epoch msg1
-/// that is not a resend of its link-setup msg1, which is just as replayable.
-/// The dampener is per peer and shared by both, so a restart and a
-/// replacement of one peer inside the interval count as two teardowns.
-pub(in crate::node) const EPOCH_RESTART_MIN_INTERVAL_SECS: u64 = 15;
-
-/// How long a peering promoted on a received msg1 is kept against another
-/// msg1 from the same peer while nothing has been heard on it.
-///
-/// An unheard responder peering may have come from a captured msg1, so the
-/// genuine peer's own msg1 has to be able to replace it, but not at once. A
-/// dialer that opens two paths to this node in one tick sends two fresh
-/// msg1s, and the second reaches this node before the dialer's first frame
-/// on the session the first one opened. Replacing on it would tear down the
-/// session the dialer may keep when it resolves its two completions by
-/// address order, and neither end could then read the other. The second
-/// msg1 of such a dial arrives within about one round trip of the first.
-///
-/// A genuine msg1 that meets a phantom promoted inside this age is refused,
-/// and the phantom's link records its ephemeral, as a link records every
-/// msg1 it refuses, so the msg1's resends are refused too: the peer's next
-/// dial, with a fresh msg1, replaces the phantom. A parallel dial over a
-/// path whose first frame takes longer than this can still be split. An
-/// attacker holding k distinct captures of a peer, each timed to land just
-/// ahead of the peer's own msg1, holds that peer's reconnect off for about
-/// k of its dials per 15 s. Each replaced unheard peering also ends a session that never
-/// authenticated a frame, which the silent-session record counts, so about
-/// four distinct captures a second apart (`SILENT_SESSION_LIMIT` plus one)
-/// start that back-off of the peer's same-epoch msg1s: `SILENT_BACKOFF_BASE_MS`,
-/// doubling to its cap. No measured basis.
+/// The age an unheard peering must reach before a msg1 may replace it, in
+/// milliseconds: the restart gates' `Params::unheard`, for the tests that
+/// wait it out.
+#[cfg(test)]
 pub(in crate::node) const UNHEARD_PEERING_MIN_AGE_MS: u64 = 1_000;
-
-/// Most msg1s per peer whose promotion of an unheard peering is remembered.
-///
-/// A msg1 carries nothing fresh, so a captured one promotes a peering that
-/// nothing proves is live, and the genuine peer's own msg1 must be able to
-/// replace it. Each distinct capture can then replace the one before, and
-/// every replacement costs this node a DH, a teardown, and a msg2 and initial
-/// TreeAnnounce sent to the msg1's source address, which the replayer chose.
-/// Remembering the ephemerals already used stops a capture from being spent
-/// twice inside `EPOCH_RESTART_MIN_INTERVAL_SECS`; at this bound a further
-/// replacement of an unheard peering is refused, as the dampener refuses.
-///
-/// This is the most replay-driven msg2s per peer per interval (one without
-/// the memory). It does not bound what blocking the genuine peer's reconnect
-/// costs: the silent-session back-off starts after fewer captures (see
-/// `UNHEARD_PEERING_MIN_AGE_MS`). A genuine peer uses one or two (its first
-/// msg1 and, if that peering was replaced before its first frame, its next).
-/// No measured basis.
-const MAX_REPLAYED_MSG1S: usize = 8;
 
 /// Where a same-epoch msg1 from a held peer goes after that peer's link
 /// rekey machine has judged it.
@@ -161,96 +98,45 @@ pub(in crate::node) fn msg1_refusal(reason: Reason) -> HandshakeReject {
     }
 }
 
-/// What the replay memory says about a msg1 that would replace an unheard
-/// peering.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::node) enum ReplayVerdict {
-    /// Not seen inside the interval, and the peer has room: may replace.
-    Fresh,
-    /// Its ephemeral already promoted a peering inside the interval.
-    Seen,
-    /// The peer has used `MAX_REPLAYED_MSG1S` ephemerals inside the interval.
-    Full,
+/// The instant `ms` milliseconds before now on the peer clock, or an hour
+/// before it when the clock does not reach back that far: a wall-clock
+/// interval carried onto the peer clock, for the mutation lane's wall-clock
+/// breaks of the restart gates.
+fn ago(ms: u64) -> PeerInstant {
+    let now = crate::peer::peer_now();
+    now.checked_sub(Duration::from_millis(ms))
+        .or_else(|| now.checked_sub(Duration::from_secs(3_600)))
+        .unwrap_or(now)
 }
 
-/// Per peer, the ephemerals of the msg1s that promoted an unheard responder
-/// peering in the last `EPOCH_RESTART_MIN_INTERVAL_SECS`, each with the
-/// interval-clock reading (`Node::interval_ms`) it was noted at, so a step
-/// of the system clock neither ages an entry out nor keeps it.
-///
-/// Held on the node rather than on `ActivePeer`, because a replacement tears
-/// the peer entry down and the memory has to outlive it. A peer's entries are
-/// forgotten when one of its peerings is heard from, since the attack they
-/// bound is over.
-#[derive(Debug, Default)]
-pub(in crate::node) struct ReplayedMsg1s {
-    by_peer: std::collections::HashMap<NodeAddr, Vec<(EphemeralDigest, u64)>>,
+/// The instant on the peer clock whose reading, in milliseconds, is `ms`:
+/// a stamp taken on another clock read as if it were the peer clock's.
+fn mono_instant(ms: u64) -> PeerInstant {
+    let now = crate::peer::peer_now();
+    let at = crate::time::mono_ms();
+    if ms >= at {
+        now.checked_add(Duration::from_millis(ms - at))
+    } else {
+        now.checked_sub(Duration::from_millis(at - ms))
+    }
+    .unwrap_or(now)
 }
 
-impl ReplayedMsg1s {
-    /// Drop every entry older than the interval at `now_ms`.
-    fn prune(&mut self, now_ms: u64) {
-        let window = if node_fault!(MemoryNeverExpires) {
-            u64::MAX
-        } else {
-            EPOCH_RESTART_MIN_INTERVAL_SECS * 1000
-        };
-        self.by_peer.retain(|_, seen| {
-            seen.retain(|&(_, at)| now_ms.saturating_sub(at) < window);
-            !seen.is_empty()
-        });
+/// Now on the wall clock, as an instant on the peer clock: the peer clock's
+/// reading when the wall clock was first read here, moved by the wall
+/// clock's time since, so a step of the wall clock moves it and a step of
+/// the peer clock does not. Only the mutation lane's wall-clock breaks of
+/// the replay memory read it.
+fn wall_now() -> PeerInstant {
+    static FIRST: std::sync::OnceLock<(PeerInstant, u64)> = std::sync::OnceLock::new();
+    let (at, wall) = *FIRST.get_or_init(|| (crate::peer::peer_now(), Node::now_ms()));
+    let now = Node::now_ms();
+    if now >= wall {
+        at.checked_add(Duration::from_millis(now - wall))
+    } else {
+        at.checked_sub(Duration::from_millis(wall - now))
     }
-
-    /// Judge a msg1 with ephemeral `ephemeral` that would replace `peer`'s
-    /// unheard peering at `now_ms`.
-    pub(in crate::node) fn verdict(
-        &mut self,
-        peer: &NodeAddr,
-        ephemeral: &EphemeralDigest,
-        now_ms: u64,
-    ) -> ReplayVerdict {
-        self.prune(now_ms);
-        let Some(seen) = self.by_peer.get(peer) else {
-            return ReplayVerdict::Fresh;
-        };
-        if seen.iter().any(|(e, _)| e == ephemeral) {
-            ReplayVerdict::Seen
-        } else if seen.len() >= MAX_REPLAYED_MSG1S {
-            ReplayVerdict::Full
-        } else {
-            ReplayVerdict::Fresh
-        }
-    }
-
-    /// Remember that `ephemeral` promoted an unheard peering for `peer` at
-    /// `now_ms`. Past the bound the oldest entry goes, which is reached only
-    /// by net-new promotions, the path that does not consult the memory.
-    pub(in crate::node) fn note(
-        &mut self,
-        peer: NodeAddr,
-        ephemeral: EphemeralDigest,
-        now_ms: u64,
-    ) {
-        self.prune(now_ms);
-        let seen = self.by_peer.entry(peer).or_default();
-        if !seen.iter().any(|(e, _)| *e == ephemeral) {
-            seen.push((ephemeral, now_ms));
-        }
-        if seen.len() > MAX_REPLAYED_MSG1S {
-            seen.remove(0);
-        }
-    }
-
-    /// Forget `peer`'s entries: one of its peerings has been heard from.
-    pub(in crate::node) fn forget(&mut self, peer: &NodeAddr) {
-        self.by_peer.remove(peer);
-    }
-
-    /// How many ephemerals are remembered for `peer`. Test-only.
-    #[cfg(test)]
-    pub(in crate::node) fn count(&self, peer: &NodeAddr) -> usize {
-        self.by_peer.get(peer).map_or(0, Vec::len)
-    }
+    .unwrap_or(at)
 }
 
 /// Why an inbound msg1 got past the `accept_connections` gate, and against
@@ -286,8 +172,13 @@ impl EstablishView for Node {
             redial: false,
             at_max_peers: max_peers > 0 && self.peers.len() >= max_peers,
             silent_backoff: self
-                .silent_sessions
-                .refusing(peer_addr, crate::time::mono_ms()),
+                .gates
+                .refusing(peer_addr, crate::peer::peer_now())
+                .map(|b| ActiveBackoff {
+                    epoch: b.epoch,
+                    silent: b.silent,
+                    remaining_ms: b.remaining.as_millis() as u64,
+                }),
         }
     }
 
@@ -370,7 +261,9 @@ impl Node {
     /// identity's silent-session record, and log how many of its refusal
     /// lines were not logged.
     pub(in crate::node) fn note_peer_heard(&mut self, peer: &NodeAddr) {
-        let refused = diag::withheld(self.silent_sessions.heard(peer));
+        let refused = self.gates.take_refused(peer);
+        self.gates.framed(peer);
+        let refused = diag::withheld(refused);
         if refused > 0 {
             debug!(
                 peer = %self.peer_display_name(peer),
@@ -400,7 +293,6 @@ impl Node {
             let acts = machine.step(
                 PeerEvent::CrossConnResolved { outcome },
                 Self::interval_ms(),
-                &mut self.index_allocator,
             );
             debug_assert!(
                 acts.is_empty(),
@@ -420,57 +312,32 @@ impl Node {
     ///
     /// This is deliberately separate from the `accept_connections` gate:
     /// it is the only half of `should_admit_msg1` that is a safe basis
-    /// for exempting traffic from stranger-class treatment. Two
-    /// predicates cover "established peer at this transport+addr":
+    /// for exempting traffic from stranger-class treatment. The settlement
+    /// core's records of the node's links answer it
+    /// ([`Placement::established`](crate::proto::settle::links::Placement::established)):
+    /// the link index names a link at `(transport_id, remote_addr)`, or a
+    /// held peer holds a path there that is Live or acked in the link,
+    /// whatever its state now (multipath v1 draft, Section 5.10). A path
+    /// still being probed is not. The index names each link at the address
+    /// it was set up at, which for a dial is the configured form, perhaps a
+    /// hostname, and the peer's paths are at the numeric addresses inbound
+    /// packets carry, so a rekey msg1 from either form of an established
+    /// peer's address is matched. Without the paths, the carve-out misses
+    /// any deployment that combines a hostname-based peer config with
+    /// `udp.accept_connections: false` or `udp.outbound_only: true` (the
+    /// production trigger for the 2026-04-30 bug).
     ///
-    /// 1. The link index has an entry for `(transport_id, remote_addr)`.
-    ///    This is the fast path and matches when the peer registered with
-    ///    the same `TransportAddr` form we observe on inbound packets
-    ///    (e.g., both numeric when peer config uses a numeric IP).
-    ///
-    /// 2. `(transport_id, remote_addr)` is a path of an active peer proven
-    ///    at this end, the active one among them (`path_match` answers
-    ///    `Proven { .. }`): Live, or acked in the link, whatever its state
-    ///    now (multipath v1 draft, Section 5.10). A path still being probed
-    ///    is not. The active path's address is `current_addr()`, which is
-    ///    updated from inbound encrypted-frame source addrs (always numeric
-    ///    `SocketAddr`-form), so this catches established peers whose
-    ///    link index key is hostname-form (because `initiate_connection`
-    ///    populated it from a hostname-bearing peer config) while inbound
-    ///    rekey msg1 arrives in numeric form. Without this second
-    ///    predicate, the carve-out misses any deployment that combines a
-    ///    hostname-based peer config
-    ///    with `udp.accept_connections: false` or `udp.outbound_only: true`
-    ///    (the production trigger for the 2026-04-30 bug).
-    ///
-    /// Cost: predicate 1 is O(1), predicate 2 is O(peers). Because
-    /// `handle_msg1` classifies before rate limiting, predicate 2 runs on
-    /// every inbound msg1 including those about to be refused, so a msg1
-    /// flood costs O(peers) per dropped packet rather than O(1). Predicate 2
-    /// exists only because the link index is keyed on the *unresolved* dial
-    /// address; if that keying is corrected, this becomes a single O(1)
-    /// lookup and the flood cost returns to O(1).
+    /// Cost: one walk over the link records. Because `handle_msg1`
+    /// classifies before rate limiting, it runs on every inbound msg1
+    /// including those about to be refused, so a msg1 flood costs O(links)
+    /// per dropped packet.
     pub(in crate::node) fn is_established_link_msg1(
         &self,
         transport_id: crate::transport::TransportId,
         remote_addr: &crate::transport::TransportAddr,
     ) -> bool {
-        if self
-            .links
-            .index()
-            .contains_key(&(transport_id, remote_addr.clone()))
-        {
-            return true;
-        }
-        if self.peers.values().any(|p| {
-            matches!(
-                p.path_match(transport_id, remote_addr),
-                Match::Proven { .. }
-            )
-        }) {
-            return true;
-        }
-        false
+        self.placement(&(transport_id, remote_addr.clone()))
+            .established()
     }
 
     /// Classify the msg1 waiver for a source that `should_admit_msg1`
@@ -478,15 +345,17 @@ impl Node {
     /// identity to check against and what to do when it has none.
     ///
     /// `established` is the caller's already-computed
-    /// `is_established_link_msg1(...)`, so the O(peers) scan is not repeated
-    /// on the refusal path.
+    /// `is_established_link_msg1(...)`, so the walk is not repeated on the
+    /// refusal path.
     ///
-    /// The two attribution limbs are composed the same way
-    /// `is_established_link_msg1` composes its own: as an OR, not as an
-    /// if/else. A link index entry that yields no identity must not
-    /// short-circuit the address scan, because the two keys can be different
-    /// forms of the same peer's address (the hostname-vs-numeric case that
-    /// predicate 2 exists for) and the entry can outlive the link it named.
+    /// The identity is the settlement core's records' answer
+    /// ([`Placement::expected`](crate::proto::settle::links::Placement::expected)):
+    /// the peer holding the link the index names at the pair, or the
+    /// identity the handshake on that link expects; failing both, a held
+    /// peer whose path there is Live or acked. A named link that yields no
+    /// identity does not stop the search, because the index and the paths
+    /// can hold different forms of the same peer's address (the
+    /// hostname-vs-numeric case `is_established_link_msg1` describes).
     pub(in crate::node) fn msg1_waiver(
         &self,
         established: bool,
@@ -509,46 +378,9 @@ impl Node {
             // reintroduce the hole this classifier exists to close.
             return Msg1Waiver::Unattributed;
         }
-
-        // Predicate 1: the reverse-address lookup.
-        if let Some(&link_id) = self.links.index().get(&(transport_id, remote_addr.clone())) {
-            if let Some(peer) = self.peers.values().find(|p| p.link_id() == link_id) {
-                return Msg1Waiver::Expect(*peer.node_addr());
-            }
-            // A link with no promoted peer: a dial in progress or an inbound
-            // handshake in flight. Both register a connection carrying the
-            // expected (outbound) or learned (inbound) identity.
-            if let Some(id) = self
-                .connections()
-                .find(|(id, _)| **id == link_id)
-                .and_then(|(_, machine)| machine.conn_expected_identity())
-            {
-                return Msg1Waiver::Expect(*id.node_addr());
-            }
-            // Deliberately fall through instead of returning. The entry can
-            // name a link that no longer exists — `remove_link` clears the
-            // reverse lookup only under the key it rebuilds from the link's
-            // own remote address, so an entry inserted under a second
-            // address form for that link survives its removal. Rejecting
-            // here would refuse a peer predicate 2 can still attribute, and
-            // would refuse it permanently: this classifier's caller returns
-            // above the insert that overwrites the stale entry, so nothing
-            // downstream would ever repair the map.
-        }
-
-        // Predicate 2: the address scan over promoted peers, for a path of
-        // an active peer proven at this end, the active one among them,
-        // which always yields an identity when it matches.
-        self.peers
-            .values()
-            .find(|p| {
-                matches!(
-                    p.path_match(transport_id, remote_addr),
-                    Match::Proven { .. }
-                )
-            })
-            .map(|p| Msg1Waiver::Expect(*p.node_addr()))
-            .unwrap_or(Msg1Waiver::Unattributed)
+        self.placement(&(transport_id, remote_addr.clone()))
+            .expected()
+            .map_or(Msg1Waiver::Unattributed, Msg1Waiver::Expect)
     }
 
     /// Returns true if an inbound msg1 should be admitted past the
@@ -571,6 +403,21 @@ impl Node {
         self.transports
             .get(&transport_id)
             .is_none_or(|t| t.accept_connections())
+    }
+
+    /// Where a msg1 from `key` stands among the settlement core's records
+    /// of the node's links, the identity a handshake leg expects read from
+    /// its machine.
+    pub(in crate::node) fn placement(
+        &self,
+        key: &crate::node::AddrKey,
+    ) -> crate::proto::settle::links::Placement {
+        self.links.placement(key, |id| {
+            self.connections()
+                .find(|(link, _)| **link == id)
+                .and_then(|(_, machine)| machine.conn_expected_identity())
+                .map(|identity| *identity.node_addr())
+        })
     }
 
     /// The transport and address of `peer`'s established link, where a reply
@@ -697,10 +544,10 @@ impl Node {
     /// This creates a new inbound connection. Rate limiting is applied
     /// before any expensive crypto operations.
     ///
-    /// Classifying the source costs no crypto (two map/scan lookups), so it
-    /// happens first and selects which bucket the msg1 draws on: rekey and
-    /// restart traffic from an established link stops competing with
-    /// stranger admission, while still being metered.
+    /// Classifying the source costs no crypto (one walk over the link
+    /// records), so it happens first and selects which bucket the msg1 draws
+    /// on: rekey and restart traffic from an established link stops
+    /// competing with stranger admission, while still being metered.
     pub(in crate::node) async fn handle_msg1(&mut self, packet: ReceivedPacket) {
         #[cfg(test)]
         self.resync();
@@ -712,10 +559,10 @@ impl Node {
     /// after it.
     async fn msg1_body(&mut self, packet: ReceivedPacket) {
         // === CLASSIFY, THEN RATE LIMIT (both before any crypto) ===
-        // Classification is two map lookups; the second is O(peers) and now
-        // runs on every inbound msg1, including refused ones. See the
-        // `is_established_link_msg1` doc comment for why the scan is still
-        // needed and what would retire it.
+        // Classification is one walk over the settlement core's link
+        // records, O(links), and runs on every inbound msg1, including
+        // refused ones. See the `is_established_link_msg1` doc comment for
+        // why it reads the paths as well as the index.
         //
         // `_slot` is an RAII guard: it releases the limiter's pending slot on
         // drop, which is every return path below and the end of the function.
@@ -760,6 +607,19 @@ impl Node {
             "the msg1 pending slot was released before the handler ran"
         );
 
+        // The shadow core takes every msg1 the rate limiter admits, before
+        // any Diffie-Hellman. The limiter is the node's resource admission,
+        // not a settlement decision: a msg1 it refuses never reaches the
+        // core, and its refusal is not one the core is compared on.
+        #[cfg(test)]
+        self.decide(crate::proto::settle::input::Input::Arrived {
+            from: crate::proto::settle::links::Pair {
+                transport: packet.transport_id,
+                addr: packet.remote_addr.clone(),
+            },
+            bytes: packet.data.clone(),
+        });
+
         // accept_connections gate. Rekey/restart msg1 on an existing link
         // is always admitted; the gate only filters truly-fresh connections
         // from strangers. Without this carve-out, the dual-init tie-breaker
@@ -767,9 +627,9 @@ impl Node {
         //
         // `!established &&` is not a behaviour change: `should_admit_msg1`
         // is `is_established_link_msg1() || accept_connections()`, so the
-        // short-circuit only skips a second evaluation of the `peers` scan
-        // on the hot path. The call is left in place so the two predicates
-        // cannot drift apart.
+        // short-circuit only skips a second walk over the settlement core's
+        // link records on the hot path. The call is left in place so the two
+        // predicates cannot drift apart.
         if !established && !self.should_admit_msg1(packet.transport_id, &packet.remote_addr) {
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -805,6 +665,20 @@ impl Node {
         // classification now gates on `has_existing_peer` (identity), which
         // subsumes it.
         let addr_key = (packet.transport_id, packet.remote_addr.clone());
+        #[cfg(all(test, debug_assertions))]
+        crate::node::settle::audit::placed(
+            self,
+            "duplicate",
+            &addr_key,
+            crate::node::settle::audit::Asked::Unanswered(
+                self.links.index().get(&addr_key).copied().filter(|id| {
+                    self.links
+                        .get(id)
+                        .is_some_and(|l| l.direction() == LinkDirection::Inbound)
+                        && !self.peers.values().any(|p| p.link_id() == *id)
+                }),
+            ),
+        );
         if let Some(&existing_link_id) = self.links.index().get(&addr_key)
             && let Some(link) = self.links.get(&existing_link_id)
         {
@@ -828,10 +702,19 @@ impl Node {
             } else if link.direction() == LinkDirection::Inbound {
                 let is_active_peer = self.peers.values().any(|p| p.link_id() == existing_link_id);
                 if !is_active_peer {
-                    // Genuinely pending handshake — resend msg2.
-                    let msg2_bytes = self.find_stored_msg2(existing_link_id);
+                    // Genuinely pending handshake — resend the msg2 its
+                    // answer's leg stored.
+                    let msg2_bytes = self
+                        .links
+                        .no(&existing_link_id)
+                        .and_then(|no| self.legs.msg2(no))
+                        .map(<[u8]>::to_vec);
                     if let Some(msg2) = msg2_bytes {
                         if let Some(transport) = self.transports.get(&packet.transport_id) {
+                            // The answer is decided here; whether its send
+                            // went out is told after, as for a first answer.
+                            #[cfg(test)]
+                            self.did(crate::node::settle::exec::Did::Answer { stored: true });
                             match transport.send_existing(&packet.remote_addr, &msg2).await {
                                 Ok(_) => {
                                     if let Some(m) = self.peer_machines.get_mut(&existing_link_id) {
@@ -843,15 +726,21 @@ impl Node {
                                         link_id = %existing_link_id,
                                         "Resent msg2 for duplicate msg1"
                                     );
+                                    #[cfg(test)]
+                                    self.shadow_sent(existing_link_id, true);
                                     self.promote_resent(existing_link_id, &packet).await;
                                 }
-                                Err(e) => debug!(
-                                    remote_addr = %packet.remote_addr,
-                                    error = %e,
-                                    transport_id = %packet.transport_id,
-                                    link_id = %existing_link_id,
-                                    "Failed to resend msg2"
-                                ),
+                                Err(e) => {
+                                    debug!(
+                                        remote_addr = %packet.remote_addr,
+                                        error = %e,
+                                        transport_id = %packet.transport_id,
+                                        link_id = %existing_link_id,
+                                        "Failed to resend msg2"
+                                    );
+                                    #[cfg(test)]
+                                    self.shadow_sent(existing_link_id, false);
+                                }
                             }
                         }
                     } else {
@@ -984,6 +873,27 @@ impl Node {
             msg2_payload: msg2_response,
             msg1_digest: Msg1Digest::of(&packet.data),
         };
+        // The shadow core reads the msg1 as the node has: what an admitted
+        // msg1 opens is numbered as this msg1's link.
+        // The Noise read took the ephemeral, so the msg1 carries one.
+        #[cfg(test)]
+        let shadow_read = ephemeral.map(|ephemeral| crate::proto::settle::input::Read {
+            peer: peer_node_addr,
+            from: crate::proto::settle::links::Pair {
+                transport: packet.transport_id,
+                addr: packet.remote_addr.clone(),
+            },
+            bytes: packet.data.clone(),
+            ephemeral,
+            epoch: wire.remote_epoch.unwrap_or_default(),
+        });
+        #[cfg(test)]
+        if let Some(read) = shadow_read.clone() {
+            let reachable = !self.peers.contains_key(&peer_node_addr)
+                || self.link_reachable(&peer_node_addr).await;
+            let input = crate::proto::settle::input::Input::Msg1 { read, reachable };
+            self.decide_at(Some(link_id), input);
+        }
         // The promotion line reads the msg1's digest from the carrier.
         machine.set_conn_msg1_digest(wire.msg1_digest);
         // The work that follows a promotion records the msg1 on the peer, and
@@ -1017,8 +927,23 @@ impl Node {
             let mut est = self.establish_snapshot(&peer_node_addr);
             match self.msg1_to_link(&peer, &packet, &wire).await {
                 LinkVerdict::Done => return,
-                LinkVerdict::Replace => est.replace = true,
+                LinkVerdict::Replace => {
+                    // The rekey machine asked for the restart gates: the
+                    // shadow core is told of the replacement it asked for.
+                    #[cfg(test)]
+                    if let Some(read) = shadow_read.clone() {
+                        self.decide_at(
+                            Some(link_id),
+                            crate::proto::settle::input::Input::Replace(read),
+                        );
+                    }
+                    est.replace = true;
+                }
                 LinkVerdict::Redial(e) => {
+                    // The shadow core is not told of a redial yet: the
+                    // comparison stops at one.
+                    #[cfg(test)]
+                    self.shadow.diverge();
                     est.redial = true;
                     redial_ephemeral = Some(e);
                 }
@@ -1048,6 +973,10 @@ impl Node {
                         reason: FailReason::Rejected
                     }
                 ));
+                #[cfg(test)]
+                self.did(crate::node::settle::exec::Did::Reject {
+                    peer: Some(peer_node_addr),
+                });
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(msg1_reject(
                         &InboundReject::AtMaxPeers,
@@ -1065,8 +994,8 @@ impl Node {
                 // Counted on the identity's record, since a refused msg1
                 // may have no peer entry to count on.
                 let shown = self
-                    .silent_sessions
-                    .note_refused(&peer_node_addr)
+                    .gates
+                    .count_refused(&peer_node_addr)
                     .is_none_or(|n| self.show(&peer_node_addr, HsLine::Refused, n));
                 if shown {
                     debug!(
@@ -1079,6 +1008,10 @@ impl Node {
                         "Msg1 from a peer whose recent sessions carried no frame, refusing during its back-off"
                     );
                 }
+                #[cfg(test)]
+                self.did(crate::node::settle::exec::Did::Reject {
+                    peer: Some(peer_node_addr),
+                });
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(msg1_reject(
                         &InboundReject::SilentBackoff,
@@ -1100,7 +1033,9 @@ impl Node {
                     ephemeral,
                     leg_at,
                 };
-                self.arm_redial(armed, &packet, &wire).await;
+                // Boxed: the redial's arming adds its own state to the msg1
+                // handler's future, which a test's thread runs on its stack.
+                Box::pin(self.arm_redial(armed, &packet, &wire)).await;
             }
             InboundDecision::RestartThenPromote { peer }
             | InboundDecision::ReplaceThenPromote { peer } => {
@@ -1151,137 +1086,121 @@ impl Node {
                 // already promoted an unheard peering of this peer inside the
                 // interval is not answered again (a header-changed copy of a
                 // capture the link's record does not hold lands here), and
-                // once the peer has spent `MAX_REPLAYED_MSG1S` of them a
+                // once the peer has spent the memory's bound of them a
                 // further replacement waits for the oldest to age out.
+                // The settlement core's restart gates judge it, in that order:
+                // the replay memory, the two floors, then the dampener, which
+                // an acceptance tearing down a heard peering stamps.
                 let now_ms = Self::now_ms();
-                let old_heard = self.peers.get(&peer).is_some_and(|p| p.is_heard());
-                if !old_heard
-                    && self.peers.contains_key(&peer)
-                    && let Some(ephemeral) = ephemeral.as_ref()
-                {
-                    let at = match (
-                        node_fault!(MemoryOnWall),
-                        node_fault!(MemoryVerdictOnPacketStamp),
-                    ) {
-                        (true, _) => Self::now_ms(),
-                        (false, true) => packet.timestamp_ms,
-                        (false, false) => Self::interval_ms(),
-                    };
-                    let verdict = self.replayed_msg1s.verdict(&peer, ephemeral, at);
-                    if verdict != ReplayVerdict::Fresh {
+                // The logs report the idle time from the wall-clock stamps
+                // operators are shown, as they always have; the gates measure
+                // on the peer clock, which a step of the system clock does not
+                // move. For an unheard peering it is its age since promotion,
+                // not time since the peer was heard.
+                let shown_idle_ms = self.peers.get(&peer).map_or(u64::MAX, |p| {
+                    if p.is_heard() {
+                        p.idle_time(now_ms)
+                    } else {
+                        packet.timestamp_ms.saturating_sub(p.authenticated_at())
+                    }
+                });
+                let params = self.gate_params();
+                let now = crate::peer::peer_now();
+                let dampened = self
+                    .gates
+                    .stamp(&peer)
+                    .is_some_and(|t| now.saturating_duration_since(t) < params.interval);
+                let ask = Ask {
+                    source: if replacing {
+                        Source::Replacement
+                    } else {
+                        Source::Restart
+                    },
+                    held: self.liveness(&peer, packet.timestamp_ms),
+                    ephemeral,
+                    epoch: wire.remote_epoch,
+                    memory: Self::memory_instant(&packet),
+                };
+                match self.gates.gate(peer, ask, now, &params) {
+                    None => {}
+                    Some(refusal @ (Refusal::Replayed | Refusal::ReplayFull)) => {
                         debug!(
                             peer = %self.peer_display_name(&peer),
                             remote_addr = %packet.remote_addr,
-                            reason = match verdict {
-                                ReplayVerdict::Seen => "replayed-ephemeral",
+                            reason = match refusal {
+                                Refusal::Replayed => "replayed-ephemeral",
                                 _ => "replay-memory-full",
                             },
                             "Msg1 replacing an unheard peering was already used or over the per-peer bound, dropping"
                         );
+                        #[cfg(test)]
+                        self.did(crate::node::settle::exec::Did::Reject { peer: Some(peer) });
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
                     }
-                }
-                // The gate measures on the peer clock, which a step of the
-                // system clock does not move. The logs below report the idle
-                // time from the wall-clock stamps operators are shown, as
-                // they always have.
-                let (peering_idle_ms, shown_idle_ms, min_idle_ms) = self
-                    .peers
-                    .get(&peer)
-                    .map(|p| {
-                        if p.is_heard() {
-                            (
-                                if node_fault!(GateOnWall) {
-                                    p.idle_time(Self::now_ms())
-                                } else {
-                                    crate::peer::since(p.heard_at()).as_millis() as u64
-                                },
-                                p.idle_time(now_ms),
-                                EPOCH_RESTART_MIN_INTERVAL_SECS * 1000,
-                            )
-                        } else {
-                            (
-                                if node_fault!(UnheardAgeOnWall) {
-                                    packet.timestamp_ms.saturating_sub(p.authenticated_at())
-                                } else {
-                                    crate::peer::since(p.promoted_at()).as_millis() as u64
-                                },
-                                packet.timestamp_ms.saturating_sub(p.authenticated_at()),
-                                UNHEARD_PEERING_MIN_AGE_MS,
-                            )
-                        }
-                    })
-                    .unwrap_or((u64::MAX, u64::MAX, 0));
-                let dampened = self.restart_dampener.get(&peer).is_some_and(|t| {
-                    crate::time::mono_now()
-                        .saturating_duration_since(*t)
-                        .as_secs()
-                        < EPOCH_RESTART_MIN_INTERVAL_SECS
-                });
-                if peering_idle_ms < min_idle_ms || dampened {
-                    // For an unheard peering `idle_ms` is its age since
-                    // promotion, not time since the peer was heard.
-                    let reason = if peering_idle_ms >= min_idle_ms {
-                        "dampened"
-                    } else if old_heard {
-                        "heard-within-interval"
-                    } else {
-                        "unheard-peering-young"
-                    };
-                    if replacing {
-                        if self.shown(&peer, HsLine::Replace) {
+                    Some(refusal) => {
+                        let reason = match refusal {
+                            Refusal::Heard => "heard-within-interval",
+                            Refusal::Unheard => "unheard-peering-young",
+                            Refusal::Silent => "silent-backoff",
+                            // A redial's refusal is not one a restart or a
+                            // replacement is given.
+                            Refusal::Dampened
+                            | Refusal::Replayed
+                            | Refusal::ReplayFull
+                            | Refusal::Redialed => "dampened",
+                        };
+                        if replacing {
+                            if self.shown(&peer, HsLine::Replace) {
+                                debug!(
+                                    peer = %self.peer_display_name(&peer),
+                                    remote_addr = %packet.remote_addr,
+                                    idle_ms = shown_idle_ms,
+                                    dampened,
+                                    reason,
+                                    "Same-epoch msg1 inside the peering's replacement interval, dropping"
+                                );
+                            }
+                        } else if self.shown(&peer, HsLine::Restart) {
                             debug!(
                                 peer = %self.peer_display_name(&peer),
                                 remote_addr = %packet.remote_addr,
                                 idle_ms = shown_idle_ms,
                                 dampened,
                                 reason,
-                                "Same-epoch msg1 inside the peering's replacement interval, dropping"
+                                "Epoch mismatch inside the peering's restart interval, dropping msg1"
                             );
                         }
-                    } else if self.shown(&peer, HsLine::Restart) {
-                        debug!(
-                            peer = %self.peer_display_name(&peer),
-                            remote_addr = %packet.remote_addr,
-                            idle_ms = shown_idle_ms,
-                            dampened,
-                            reason,
-                            "Epoch mismatch inside the peering's restart interval, dropping msg1"
-                        );
+                        // Silent drop: the stored msg2 is bound to the original
+                        // msg1's ephemeral, and answering an address the sender
+                        // chose is free amplification.
+                        //
+                        // No registry cleanup is needed here. On the pre-refactor
+                        // layout this arm removed the pending connection and its
+                        // link, because both were inserted before msg1 was
+                        // classified. The classification now runs against a local
+                        // `machine` that enters `peer_machines` only at the promote
+                        // tails below, and `link_id` is a bare allocation until
+                        // then, so dropping out of the arm is the whole cleanup.
+                        // The fresh leg holds no session index either (it is parked
+                        // at `Handshaking{ReceivedMsg1}` with `our_index == None`),
+                        // so nothing is leaked by returning.
+                        #[cfg(test)]
+                        self.did(crate::node::settle::exec::Did::Reject { peer: Some(peer) });
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                        return;
                     }
-                    // Silent drop: the stored msg2 is bound to the original
-                    // msg1's ephemeral, and answering an address the sender
-                    // chose is free amplification.
-                    //
-                    // No registry cleanup is needed here. On the pre-refactor
-                    // layout this arm removed the pending connection and its
-                    // link, because both were inserted before msg1 was
-                    // classified. The classification now runs against a local
-                    // `machine` that enters `peer_machines` only at the promote
-                    // tails below, and `link_id` is a bare allocation until
-                    // then, so dropping out of the arm is the whole cleanup.
-                    // The fresh leg holds no session index either (it is parked
-                    // at `Handshaking{ReceivedMsg1}` with `our_index == None`),
-                    // so nothing is leaked by returning.
-                    self.stats_mut()
-                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                    return;
                 }
-                // Stamped on acceptance only. A refusal that slid the window
-                // would let a sustained replay starve a genuinely restarting
-                // peer for as long as it kept sending. Stamped only when the
-                // peering torn down had been heard from: the dampener bounds
-                // churn a peer drives on its own, and a peering that never
-                // carried a frame is not that. Stamping it would let two
-                // captured msg1s refuse the genuine peer for the interval.
-                let cutoff = Duration::from_secs(EPOCH_RESTART_MIN_INTERVAL_SECS);
-                self.restart_dampener
-                    .retain(|_, t| crate::time::mono_now().saturating_duration_since(*t) < cutoff);
-                if old_heard {
-                    self.restart_dampener.insert(peer, crate::time::mono_now());
-                }
+                // Stamped on acceptance only, by the gates. A refusal that
+                // slid the window would let a sustained replay starve a
+                // genuinely restarting peer for as long as it kept sending.
+                // Stamped only when the peering torn down had been heard from:
+                // the dampener bounds churn a peer drives on its own, and a
+                // peering that never carried a frame is not that. Stamping it
+                // would let two captured msg1s refuse the genuine peer for the
+                // interval.
 
                 if replacing {
                     debug!(
@@ -1351,6 +1270,11 @@ impl Node {
                 self.execute_peer_actions(link_id, &teardown_ctx, actions)
                     .await;
 
+                // Admitted: the answer is asked for, and authorized next.
+                #[cfg(test)]
+                self.did(crate::node::settle::exec::Did::Ask {
+                    peer: peer_node_addr,
+                });
                 // Shell interposition: late-ACL authorize BEFORE any allocation.
                 if self
                     .authorize_peer(
@@ -1361,21 +1285,19 @@ impl Node {
                     )
                     .is_err()
                 {
-                    let _ =
-                        machine.step(PeerEvent::Rejected, interval_ms, &mut self.index_allocator);
+                    let _ = machine.step(PeerEvent::Rejected, interval_ms);
+                    #[cfg(test)]
+                    self.shadow_unasked(link_id);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
                 }
 
-                // Phase 2: allocate our index + emit [SendHandshake, PromoteToActive].
-                let promote_actions = machine.step(
-                    PeerEvent::Authorized,
-                    interval_ms,
-                    &mut self.index_allocator,
-                );
-                let our_index = match machine.our_index() {
-                    Some(idx) => idx,
+                // Phase 2: allocate our index, which the answer's leg holds
+                // until the promotion takes it, then emit [SendHandshake,
+                // PromoteToActive].
+                let our_lease = match allocate(&mut self.index_allocator) {
+                    Some(lease) => lease,
                     None => {
                         // Allocation exhausted in Phase 2 (mirrors the pre-refactor
                         // allocate-failure path): no msg2, no promote. The old peer
@@ -1383,11 +1305,15 @@ impl Node {
                         // pre-refactor arm, which also removed the stale peer before
                         // hitting the shared allocate-failure return.
                         warn!("Failed to allocate session index for inbound");
+                        #[cfg(test)]
+                        self.shadow_unasked(link_id);
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
                     }
                 };
+                let our_index = SessionIndex::new(our_lease.index());
+                let promote_actions = machine.step(PeerEvent::Authorized, interval_ms);
 
                 // Shell registry surgery, in the pre-refactor order:
                 // set indices on the shell connection, insert link / reverse map /
@@ -1403,8 +1329,23 @@ impl Node {
                 );
                 self.links.open(link);
                 let wire_msg2 = build_msg2(our_index, their_index, &msg2_payload);
-                // Store the framed msg2 on the surviving carrier for duplicate-
-                // msg1 resend while the connection is still pending.
+                #[cfg(test)]
+                self.did(crate::node::settle::exec::Did::Answer { stored: false });
+                #[cfg(test)]
+                self.shadow_hello(link_id, our_index.as_u32(), &wire_msg2, interval_ms);
+                // The answer's leg, the settlement core's: the msg1 answered,
+                // the framed msg2 a resend of that msg1 draws while the
+                // connection is still pending, and the lease, reaped at the
+                // handshake deadline counted from the msg1's arrival. The
+                // surviving carrier keeps the msg2 for the promotion's tail.
+                self.answer_leg(
+                    link_id,
+                    *peer_identity.node_addr(),
+                    &packet.data,
+                    wire_msg2.clone(),
+                    our_lease,
+                    interval_ms,
+                );
                 machine.set_conn_handshake_msg2(wire_msg2);
 
                 // Register the machine, which already carries the connection
@@ -1482,6 +1423,11 @@ impl Node {
                     }
                 ));
 
+                // Admitted: the answer is asked for, and authorized next.
+                #[cfg(test)]
+                self.did(crate::node::settle::exec::Did::Ask {
+                    peer: peer_node_addr,
+                });
                 // Shell interposition: late-ACL authorize BEFORE any allocation.
                 if self
                     .authorize_peer(
@@ -1492,32 +1438,33 @@ impl Node {
                     )
                     .is_err()
                 {
-                    let _ =
-                        machine.step(PeerEvent::Rejected, interval_ms, &mut self.index_allocator);
+                    let _ = machine.step(PeerEvent::Rejected, interval_ms);
+                    #[cfg(test)]
+                    self.shadow_unasked(link_id);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
                 }
 
-                // Phase 2: allocate our index + emit [SendHandshake, PromoteToActive].
-                let promote_actions = machine.step(
-                    PeerEvent::Authorized,
-                    interval_ms,
-                    &mut self.index_allocator,
-                );
-                let our_index = match machine.our_index() {
-                    Some(idx) => idx,
+                // Phase 2: allocate our index, which the answer's leg holds
+                // until the promotion takes it, then emit [SendHandshake,
+                // PromoteToActive].
+                let our_lease = match allocate(&mut self.index_allocator) {
+                    Some(lease) => lease,
                     None => {
                         // Allocation exhausted in Phase 2 (mirrors the pre-refactor
-                        // allocate-failure path): no msg2, no promote. The concrete
-                        // allocator error is consumed inside `on_authorized`, so the
-                        // restored warn! carries the pre-refactor message text only.
+                        // allocate-failure path): no msg2, no promote. The restored
+                        // warn! carries the pre-refactor message text only.
                         warn!("Failed to allocate session index for inbound");
+                        #[cfg(test)]
+                        self.shadow_unasked(link_id);
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
                     }
                 };
+                let our_index = SessionIndex::new(our_lease.index());
+                let promote_actions = machine.step(PeerEvent::Authorized, interval_ms);
 
                 // Shell registry surgery, in the pre-refactor order:
                 // set indices on the shell connection, insert link / reverse map /
@@ -1531,8 +1478,23 @@ impl Node {
                 );
                 self.links.open(link);
                 let wire_msg2 = build_msg2(our_index, their_index, &msg2_payload);
-                // Store the framed msg2 on the surviving carrier for duplicate-
-                // msg1 resend while the connection is still pending.
+                #[cfg(test)]
+                self.did(crate::node::settle::exec::Did::Answer { stored: false });
+                #[cfg(test)]
+                self.shadow_hello(link_id, our_index.as_u32(), &wire_msg2, interval_ms);
+                // The answer's leg, the settlement core's: the msg1 answered,
+                // the framed msg2 a resend of that msg1 draws while the
+                // connection is still pending, and the lease, reaped at the
+                // handshake deadline counted from the msg1's arrival. The
+                // surviving carrier keeps the msg2 for the promotion's tail.
+                self.answer_leg(
+                    link_id,
+                    *peer_identity.node_addr(),
+                    &packet.data,
+                    wire_msg2.clone(),
+                    our_lease,
+                    interval_ms,
+                );
                 machine.set_conn_handshake_msg2(wire_msg2);
 
                 // Register the machine, which already carries the connection
@@ -1577,13 +1539,12 @@ impl Node {
     /// successful send would. A leg that has learned no identity or holds no
     /// indices is left alone.
     async fn promote_resent(&mut self, link: LinkId, packet: &ReceivedPacket) {
-        let Some((identity, ours, theirs)) = self.peer_machines.get(&link).and_then(|m| {
-            Some((
-                *m.conn_expected_identity()?,
-                m.our_index()?,
-                m.conn_their_index()?,
-            ))
-        }) else {
+        let ours = self.leg(link).map(|leg| SessionIndex::new(leg.index()));
+        let Some((identity, ours, theirs)) = self
+            .peer_machines
+            .get(&link)
+            .and_then(|m| Some((*m.conn_expected_identity()?, ours?, m.conn_their_index()?)))
+        else {
             return;
         };
         let peer = *identity.node_addr();
@@ -1637,13 +1598,95 @@ impl Node {
     ) {
         let unheard = self.peers.get(peer).is_some_and(|p| !p.is_heard());
         if unheard && let Some(ephemeral) = ephemeral {
-            let at = if node_fault!(MemoryOnWall) {
-                Self::now_ms()
-            } else {
-                Self::interval_ms()
-            };
-            self.replayed_msg1s.note(*peer, ephemeral, at);
+            let params = self.gate_params();
+            self.gates.promoted(
+                *peer,
+                ephemeral,
+                crate::peer::peer_now(),
+                Self::memory_now(),
+                &params,
+            );
         }
+    }
+
+    /// The restart gates' parameters: the core's own, which no
+    /// configuration moves.
+    pub(in crate::node) fn gate_params(&self) -> Params {
+        settle_params(&self.config().node)
+    }
+
+    /// What the restart gates know of the peering held for `peer`, as a
+    /// restart source stamped `stamp_ms` on the wall clock would tear it
+    /// down: whether it is heard, when it was promoted, and when its last
+    /// frame authenticated (its promotion before the first). `None` when no
+    /// peering is held.
+    pub(in crate::node) fn liveness(
+        &self,
+        peer: &NodeAddr,
+        stamp_ms: u64,
+    ) -> Option<Liveness<PeerInstant>> {
+        let p = self.peers.get(peer)?;
+        let mut live = Liveness {
+            heard: p.is_heard(),
+            installed: p.promoted_at(),
+            last: Some(p.heard_at()),
+        };
+        // The mutation lane's breaks: the heard floor read from the wall
+        // clock's idle time, and the unheard peering's age from the source's
+        // wall stamp.
+        if node_fault!(GateOnWall) {
+            live.last = Some(ago(p.idle_time(Self::now_ms())));
+        }
+        if node_fault!(UnheardAgeOnWall) {
+            live.installed = ago(stamp_ms.saturating_sub(p.authenticated_at()));
+        }
+        Some(live)
+    }
+
+    /// The instant the restart gates read the replay memory at for a msg1
+    /// in `packet`: the peer clock's now (`None`), or, under the mutation
+    /// lane's breaks, the wall clock, or the msg1's wall stamp taken as a
+    /// reading of the peer clock.
+    pub(in crate::node) fn memory_instant(packet: &ReceivedPacket) -> Option<PeerInstant> {
+        match (
+            node_fault!(MemoryOnWall),
+            node_fault!(MemoryVerdictOnPacketStamp),
+        ) {
+            (true, _) => Some(wall_now()),
+            (false, true) => Some(mono_instant(packet.timestamp_ms)),
+            (false, false) => None,
+        }
+    }
+
+    /// The instant the restart gates read and store the replay memory at
+    /// for a writer other than a msg1's gate: the peer clock's now
+    /// (`None`), or the wall clock under the mutation lane's break that
+    /// measures the replay memory there, so the memory stays on one clock.
+    pub(in crate::node) fn memory_now() -> Option<PeerInstant> {
+        node_fault!(MemoryOnWall).then(wall_now)
+    }
+
+    /// Ask the restart gates about a new epoch `epoch` that a msg2 stamped
+    /// `stamp_ms` on the wall clock found for the peer held as `peer`: the
+    /// msg2 of a link rekey when `rekey`, else the answer to this node's own
+    /// dial. The gates pass both msg2 sources, since a msg2 is the reply to
+    /// this node's own handshake; the refusal, if any, is returned.
+    pub(in crate::node) fn gate_msg2(
+        &mut self,
+        peer: NodeAddr,
+        rekey: bool,
+        epoch: Option<[u8; 8]>,
+        stamp_ms: u64,
+    ) -> Option<Refusal> {
+        let ask = Ask {
+            source: Source::msg2(rekey),
+            held: self.liveness(&peer, stamp_ms),
+            ephemeral: None,
+            epoch,
+            memory: Self::memory_now(),
+        };
+        let params = self.gate_params();
+        self.gates.gate(peer, ask, crate::peer::peer_now(), &params)
     }
 
     /// Hand `packet`'s msg1, read as `wire`, a same-epoch msg1 from the held
@@ -1909,32 +1952,32 @@ impl Node {
     }
 
     /// Whether `packet` arrived on `peer`'s link, and whether its pair is a
-    /// path of the peer's proven at this end. On the link: from a path the
-    /// peer holds that is proven at this end (Live or acked; the original
-    /// path is both), or, on a link whose peer is not capable, from a pair
-    /// the peer holds no path for that a link index entry maps to its
-    /// link. That is FRC-1201 Section 5.7's setup address, such as the
-    /// address the link was set up at after its one path followed the peer
-    /// elsewhere, or a hostname-keyed dial address beside a numeric current
-    /// address. On a link whose peer is capable such a pair is off the link
-    /// (multipath draft Section 5.10). A same-epoch msg1 and a rekey msg2
-    /// are placed by this one rule.
+    /// path of the peer's proven at this end. On the link, as the
+    /// settlement core's records of the node's links place it
+    /// ([`Placement::on_link`](crate::proto::settle::links::Placement::on_link)):
+    /// from a path the peer's link holds that is proven at this end (Live
+    /// or acked; the original path is both), or, on a link whose peer is
+    /// not capable, from a pair the link holds no path at that the link
+    /// index names the link at. That is FRC-1201 Section 5.7's setup
+    /// address, such as the address the link was set up at after its one
+    /// path followed the peer elsewhere, or a hostname-keyed dial address
+    /// beside a numeric current address. On a link whose peer is capable
+    /// such a pair is off the link (multipath draft Section 5.10). A
+    /// same-epoch msg1 and a rekey msg2 are placed by this one rule.
     fn link_arrival(&self, peer: &NodeAddr, packet: &ReceivedPacket) -> (bool, bool) {
-        self.peers.get(peer).map_or((false, false), |p| {
-            match p.path_match(packet.transport_id, &packet.remote_addr) {
-                Match::Proven { .. } => (true, true),
-                Match::Unproven => (false, false),
-                Match::None => (
-                    !p.bundle().is_some_and(|b| b.capable())
-                        && self
-                            .links
-                            .index()
-                            .get(&(packet.transport_id, packet.remote_addr.clone()))
-                            == Some(&p.link_id()),
-                    false,
-                ),
-            }
-        })
+        let Some(p) = self.peers.get(peer) else {
+            return (false, false);
+        };
+        let key = (packet.transport_id, packet.remote_addr.clone());
+        let on_link = self
+            .links
+            .no(&p.link_id())
+            .is_some_and(|no| self.placement(&key).on_link(no));
+        let proven = matches!(
+            p.path_match(packet.transport_id, &packet.remote_addr),
+            Match::Proven { .. }
+        );
+        (on_link, proven)
     }
 
     /// Hand `packet`'s msg2, which names `peer`'s index, to that peer's link
@@ -2017,31 +2060,6 @@ impl Node {
         }
     }
 
-    /// Find stored msg2 bytes for a given link (pre- or post-promotion).
-    ///
-    /// Checks the control machine's carrier (if still pending) and then the
-    /// ActivePeer (if already promoted).
-    fn find_stored_msg2(&self, link_id: LinkId) -> Option<Vec<u8>> {
-        // Check pending connection first (its stored msg2 lives on the control
-        // machine's carrier).
-        if let Some(msg2) = self
-            .peer_machines
-            .get(&link_id)
-            .and_then(|machine| machine.conn_handshake_msg2())
-        {
-            return Some(msg2.to_vec());
-        }
-        // Check promoted peer
-        for peer in self.peers.values() {
-            if peer.link_id() == link_id
-                && let Some(msg2) = peer.handshake_msg2()
-            {
-                return Some(msg2.to_vec());
-            }
-        }
-        None
-    }
-
     /// Handle handshake message 2 (phase 0x2).
     ///
     /// This completes an outbound handshake we initiated.
@@ -2067,13 +2085,13 @@ impl Node {
         };
 
         // Look up our pending handshake by our sender_idx (receiver_idx in
-        // msg2). A link-setup dial's index maps to its connection in
-        // `pending_outbound`, whose control machine still carries the
+        // msg2). A link-setup dial's index is the one its leg's lease holds
+        // (`Node::dial_at`), and its control machine still carries the
         // handshake; a link rekey's attempt index is bound to its peer in
         // `peers_by_index`, and its peer's link machine reads the msg2.
         //
         // A fresh handshake is bound to the transport its msg1 went out on:
-        // `pending_outbound` is keyed by (transport, index), so a msg2 from
+        // a dial is found by its link's transport and its index, so a msg2 from
         // any other transport misses and, unless it names a rekey, is
         // discarded before any state changes. A relayed copy of the genuine
         // msg2 therefore cannot complete the dial at a foreign address. A
@@ -2084,7 +2102,7 @@ impl Node {
         // by the index alone; past its budget of refused reads, the rekey
         // reads only one that arrived on the link.
         let key = (packet.transport_id, header.receiver_idx.as_u32());
-        let setup = self.pending_outbound.get(&key).copied();
+        let setup = self.dial_at(key.0, key.1);
         let link_id = match setup {
             Some(id)
                 if self
@@ -2107,11 +2125,11 @@ impl Node {
                     remote_addr = %packet.remote_addr,
                     "No pending outbound handshake for index"
                 );
-                // A `pending_outbound` entry whose connection no longer
-                // carries a handshake is stale: a state-machine
-                // inconsistency, not a fresh lookup miss.
-                let reject = if setup.is_some() {
-                    self.pending_outbound.forget(&key);
+                // A dial's leg whose connection no longer carries a
+                // handshake is stale: a state-machine inconsistency, not a
+                // fresh lookup miss.
+                let reject = if let Some(stale) = setup {
+                    self.drop_leg(stale);
                     HandshakeReject::BadState
                 } else {
                     HandshakeReject::UnknownConnection
@@ -2125,7 +2143,7 @@ impl Node {
         // The leg is stamped on the interval clock from here, beside the
         // wall stamp it keeps.
         let interval_ms = Self::interval_ms();
-        let (peer_identity, our_index) = {
+        let peer_identity = {
             let machine = self.peer_machines.get_mut(&link_id).unwrap();
 
             let noise_msg2 = &packet.data[header.noise_msg2_offset..];
@@ -2156,7 +2174,7 @@ impl Node {
                         "msg2 did not authenticate, keeping the handshake attempt"
                     );
                     if node_fault!(ForgetDialOnRefusedMsg2) {
-                        self.pending_outbound.forget(&key);
+                        self.drop_leg(link_id);
                     }
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -2186,7 +2204,7 @@ impl Node {
                 "pending connection present for msg2 completion"
             );
 
-            let peer_identity = match machine.conn_expected_identity() {
+            match machine.conn_expected_identity() {
                 Some(id) => *id,
                 None => {
                     warn!(link_id = %link_id, "No identity after handshake");
@@ -2194,10 +2212,26 @@ impl Node {
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
                 }
-            };
-
-            (peer_identity, machine.our_index())
+            }
         };
+
+        // The msg2 completed the dial: its leg leaves the legs, and the
+        // machine takes the lease the shell drew for it, and its msg1, for
+        // the promotion or the crossing that follows.
+        if let Some(leg) = self.take_leg(link_id) {
+            let machine = self
+                .peer_machines
+                .get_mut(&link_id)
+                .expect("the completed dial's machine");
+            machine.set_conn_handshake_msg1(leg.msg1().to_vec());
+            if let Some(old) = machine.set_conn_our_index(leg.lease()) {
+                let _ = self.index_allocator.free(SessionIndex::new(old.release()));
+            }
+        }
+        let our_index = self
+            .peer_machines
+            .get(&link_id)
+            .and_then(|machine| machine.our_index());
 
         if self
             .authorize_peer(
@@ -2208,10 +2242,13 @@ impl Node {
             )
             .is_err()
         {
-            self.pending_outbound.forget(&key);
+            #[cfg(test)]
+            self.shadow_abandon(link_id);
             if let Some(link) = self.links.get(&link_id) {
                 let tid = link.transport_id();
                 let addr = link.remote_addr().clone();
+                #[cfg(test)]
+                self.closed(tid, &addr);
                 if let Some(transport) = self.transports.get(&tid) {
                     transport.close_connection(&addr).await;
                 }
@@ -2250,6 +2287,25 @@ impl Node {
             "Outbound handshake completed"
         );
 
+        // The shadow core completes the dial on its link.
+        #[cfg(test)]
+        if let Some(link) = self.shadow_link(link_id) {
+            let epoch = self
+                .peer_machines
+                .get(&link_id)
+                .and_then(|m| m.conn_remote_epoch())
+                .unwrap_or_default();
+            let input = crate::proto::settle::input::Input::Msg2 {
+                link,
+                epoch,
+                from: crate::proto::settle::links::Pair {
+                    transport: packet.transport_id,
+                    addr: packet.remote_addr.clone(),
+                },
+            };
+            self.decide(input);
+        }
+
         // Cross-connection resolution: if the peer was already promoted via
         // our inbound handshake (we processed their msg1), both nodes initially
         // use mismatched sessions. The tie-breaker determines which handshake
@@ -2274,8 +2330,8 @@ impl Node {
         // exists, and the rest of a swap or a keep runs through the
         // settlement executor. The machine was persisted at DIAL, so the
         // executor's `PromoteToActive` arm can feed `PromotionResolved` back
-        // via the same lookup; the `pending_outbound` lifecycle stays
-        // shell-side — the machine never touches it.
+        // via the same lookup; the dial's leg left the legs when this msg2
+        // completed it, and the machine never touches the legs.
         let out_snap = self.outbound_snapshot(&peer_node_addr);
         let own_dial = out_snap.has_existing_peer && out_snap.own_dial;
         // A dial made while the peer was held, answered while it is still
@@ -2285,6 +2341,47 @@ impl Node {
         let held_now = self.peers.get(&peer_node_addr).map(|p| p.link_id());
         let later_dial = held_now.is_some()
             && self.peer_machines.get(&link_id).and_then(|m| m.held_link()) == held_now;
+        // A new epoch in the answer to this node's own dial is a restart,
+        // which the restart gates are asked about as every restart source
+        // is. They pass it: the msg2 is the reply to this node's own msg1.
+        let msg2_epoch = self
+            .peer_machines
+            .get(&link_id)
+            .and_then(|m| m.conn_remote_epoch());
+        if out_snap.has_existing_peer
+            && matches!(
+                (out_snap.existing_peer_epoch, msg2_epoch),
+                (Some(held), Some(new)) if held != new
+            )
+            && let Some(refusal) =
+                self.gate_msg2(peer_node_addr, false, msg2_epoch, packet.timestamp_ms)
+        {
+            debug!(
+                peer = %self.peer_display_name(&peer_node_addr),
+                link_id = %link_id,
+                reason = ?refusal,
+                "Restart on our dial refused by the restart gates, dropping the dial"
+            );
+            if let Some(link) = self.links.get(&link_id) {
+                let tid = link.transport_id();
+                let addr = link.remote_addr().clone();
+                if let Some(transport) = self.transports.get(&tid) {
+                    transport.close_connection(&addr).await;
+                }
+            }
+            self.remove_peer_machine(link_id);
+            self.remove_link(&link_id);
+            if let Some(idx) = our_index {
+                let _ = self.index_allocator.free(idx);
+            }
+            #[cfg(test)]
+            self.did(crate::node::settle::exec::Did::Reject {
+                peer: Some(peer_node_addr),
+            });
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+            return;
+        }
         let actions = match self.peer_machines.get_mut(&link_id) {
             Some(machine) => machine.step(
                 PeerEvent::Msg2 {
@@ -2292,11 +2389,10 @@ impl Node {
                     out: out_snap,
                 },
                 interval_ms,
-                &mut self.index_allocator,
             ),
             None => {
-                // No machine persisted at dial (e.g. a test that seeds
-                // `connections`/`pending_outbound` directly, or any path that
+                // No machine persisted at dial (e.g. a test that seeds a dial
+                // directly, or any path that
                 // reaches msg2 without `start_handshake`): reproduce the
                 // pre-persistence transient exactly.
                 let mut machine = PeerMachine::new_outbound(
@@ -2313,7 +2409,6 @@ impl Node {
                         out: out_snap,
                     },
                     interval_ms,
-                    &mut self.index_allocator,
                 );
                 self.peer_machines.add(link_id, machine);
                 actions
@@ -2348,7 +2443,6 @@ impl Node {
             let mut conn = match taken_conn {
                 Some(c) => c,
                 None => {
-                    self.pending_outbound.forget(&key);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
                     return;
@@ -2356,6 +2450,12 @@ impl Node {
             };
 
             if crate::node::settle::exec::Run::swaps(swap, !own_dial && !later_dial) {
+                #[cfg(test)]
+                self.did(crate::node::settle::exec::Did::Swapped {
+                    peer: peer_node_addr,
+                    own: own_dial,
+                    unpin: own_dial || later_dial,
+                });
                 // We're the smaller node, or the peer's answer to this dial
                 // supersedes our earlier dial's. Swap to outbound session +
                 // indices. The peer keeps the session it answered this dial
@@ -2370,7 +2470,6 @@ impl Node {
                     (Some(s), Some(lease)) => (s, lease),
                     _ => {
                         warn!(peer = %self.peer_display_name(&peer_node_addr), "Incomplete outbound connection");
-                        self.pending_outbound.forget(&key);
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
@@ -2454,7 +2553,7 @@ impl Node {
                         },
                     );
                     run.prior = prior;
-                    run.dial = Some(key);
+                    run.dial = Some(link_id);
                     let facts = run.crossing();
                     facts.out = out;
                     facts.paths = paths;
@@ -2491,7 +2590,7 @@ impl Node {
                     peer_node_addr,
                     crate::node::settle::table::Transition::Keep { dial: link_id },
                 );
-                run.dial = Some(key);
+                run.dial = Some(link_id);
                 let facts = run.crossing();
                 facts.to = Some((packet.transport_id, packet.remote_addr.clone()));
                 facts.lease = carrier_our_index;
@@ -2505,7 +2604,6 @@ impl Node {
             // the dial's leg still ends as at any crossing. The decision was
             // made on a snapshot that held the peer, with nothing awaited
             // since, so this is not reached.
-            self.pending_outbound.forget(&key);
             // Close the losing leg's connection: a separate socket on TCP, a
             // no-op when connectionless, and left open when it is the very
             // connection the promoted peer runs on (BLE).
@@ -2531,24 +2629,13 @@ impl Node {
         // `Promoted`; a held one would be refused, which the executor
         // asserts never happens.
         //
-        // The outbound Msg2 Promote step cancels the two dial-armed handshake
-        // timers (the machine survives promotion, so they would otherwise linger
-        // in the timer store until `drive_peer_timers` lazily discards them — the
-        // promoted leg's pending connection is consumed and the machine has left
-        // `SentMsg1`, so they can no longer fire) and then promotes.
+        // The outbound Msg2 Promote step promotes; the dial's leg, with its
+        // resends and deadline, left the legs when this msg2 completed it.
         // `PromoteToActive` is what performs the promotion.
-        let promote = [
-            PeerAction::CancelTimer {
-                kind: TimerKind::HandshakeRetransmit,
-            },
-            PeerAction::CancelTimer {
-                kind: TimerKind::HandshakeTimeout,
-            },
-            PeerAction::PromoteToActive { link: link_id },
-        ];
+        let promote = [PeerAction::PromoteToActive { link: link_id }];
         let restarted = actions.first() == Some(&PeerAction::InvalidateSendState);
         debug_assert!(actions.ends_with(&promote));
-        debug_assert_eq!(actions.len(), if restarted { 5 } else { 3 });
+        debug_assert_eq!(actions.len(), if restarted { 3 } else { 1 });
         if restarted {
             info!(
                 peer = %self.peer_display_name(&peer_node_addr),
@@ -2579,11 +2666,11 @@ impl Node {
         self.execute_peer_actions(link_id, &ambient, actions).await;
 
         // A promotion that succeeded left the machine Established, and the
-        // executor's promotion arm ran its tail: the dial forgotten, the
-        // promotion logged, the initial tree announce and the filter announce
-        // scheduled. A promote failure removed the machine and runs no tail
-        // (the pre-refactor Err arm likewise left `pending_outbound` in place
-        // and only recorded the reject, which the executor's Err arm does).
+        // executor's promotion arm ran its tail: the promotion logged, the
+        // initial tree announce and the filter announce scheduled. A promote
+        // failure removed the machine and runs no tail (the pre-refactor Err
+        // arm likewise only recorded the reject, which the executor's Err
+        // arm does).
         debug_assert!(matches!(
             self.peer_machines.get(&link_id).map(|m| m.state()),
             Some(PeerState::Established { .. }) | None
@@ -2612,6 +2699,17 @@ impl Node {
         // of it. Gathering the carrier reads up front is only a borrow shape:
         // they are infallible, so the order in which the missing-field errors
         // are reported below is unchanged.
+        // An answer's leg leaves the legs here: the machine takes the lease
+        // the shell drew for it, for the promotion.
+        if self.peer_machines.contains_key(&link_id)
+            && let Some(lease) = self.take_leg(link_id).map(|leg| leg.lease())
+            && let Some(old) = self
+                .peer_machines
+                .get_mut(&link_id)
+                .and_then(|machine| machine.set_conn_our_index(lease))
+        {
+            let _ = self.index_allocator.free(SessionIndex::new(old.release()));
+        }
         let machine = self
             .peer_machines
             .get_mut(&link_id)
@@ -2717,6 +2815,10 @@ impl Node {
 
         // Normal promotion
         if self.max_peers() > 0 && self.peers.len() >= self.max_peers() {
+            #[cfg(test)]
+            self.did(crate::node::settle::exec::Did::Reject {
+                peer: Some(peer_node_addr),
+            });
             let _ = self
                 .index_allocator
                 .free(SessionIndex::new(our_lease.release()));

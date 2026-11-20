@@ -322,8 +322,7 @@ pub(super) async fn dial_at(
     initiator.node.links.open(link);
     initiator
         .node
-        .pending_outbound
-        .note((transport_id, our_index.as_u32()), link_id);
+        .plant_dial_at((transport_id, our_index.as_u32()), link_id, None);
 
     let transport = initiator.node.transports.get(&transport_id).unwrap();
     transport

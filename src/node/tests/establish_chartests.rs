@@ -84,12 +84,14 @@ pub(super) async fn register_udp_with_peer_socket(
 
 /// Local re-impl of the `unit.rs` dummy-peer injector (that one is private to
 /// its module). Fills the peer table with distinct identities so cap tests can
-/// reach saturation.
+/// reach saturation, each on a link id the node allocates, so none shares a
+/// link with one a test opens.
 fn inject_dummy_peers(node: &mut Node, count: usize) {
-    for i in 0..count {
+    for _ in 0..count {
         let identity = make_peer_identity();
         let addr = *identity.node_addr();
-        let peer = ActivePeer::new(identity, LinkId::new((i + 1) as u64), 0);
+        let link = node.allocate_link_id();
+        let peer = ActivePeer::new(identity, link, 0);
         node.peers.raw().insert(addr, peer);
     }
 }
@@ -207,18 +209,18 @@ async fn chartest_msg1_duplicate_pending_resends_stored_msg2() {
     node.links
         .raw_index()
         .insert((transport_id, peer_addr.clone()), link_id);
+    // The index the node drew for the answer before it wrote the msg2.
+    let lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
     node.seed_handshake_machine(
         HandshakeSeed::inbound(link_id, 1000)
+            .with_our_index(lease)
             .with_transport_id(transport_id)
             .with_source_addr(peer_addr.clone()),
     )
     .unwrap();
-    // The stored msg2 lives on the control machine's carrier (the resend source
-    // for a duplicate msg1 while pending), mirroring the inbound establish path.
-    node.peer_machines
-        .get_mut(&link_id)
-        .unwrap()
-        .set_conn_handshake_msg2(stored_msg2.clone());
+    // The stored msg2 lives on the answer's leg (the resend source for a
+    // duplicate msg1 while pending), mirroring the inbound establish path.
+    node.plant_answer_at(link_id, stored_msg2.clone());
     assert_eq!(node.peer_count(), 0);
 
     let before_pending = node.msg1_rate_limiter.pending_count();
@@ -368,9 +370,7 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
     node.links
         .raw_index()
         .insert((transport_id, out_addr.clone()), out_link);
-    node.pending_outbound
-        .raw()
-        .insert((transport_id, out_index.as_u32()), out_link);
+    node.plant_dial_at((transport_id, out_index.as_u32()), out_link, None);
     assert_eq!(node.peer_count(), 0);
 
     // Inbound msg1 from the same identity, different source addr.
@@ -393,22 +393,21 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
         "pending outbound to the same identity must be preserved (deferred cleanup)"
     );
     assert!(
-        node.pending_outbound
+        node.pending_outbound()
             .contains_key(&(transport_id, out_index.as_u32())),
         "the outbound pending_outbound entry is preserved for msg2 index-learning"
     );
 }
 
 /// Seed a pending outbound dial from `node` to `peer`, started at `addr` on
-/// `transport_id`, as a dial begun before the node reached its peer cap. With
-/// `register` the dial's link and address mapping are installed too, as a real
-/// dial to that address would leave them. Returns the dial's link and index.
+/// `transport_id`, as a dial begun before the node reached its peer cap. The
+/// dial's link and address mapping are installed too, as a real dial to that
+/// address leaves them. Returns the dial's link and index.
 fn seed_dial(
     node: &mut Node,
     peer: PeerIdentity,
     transport_id: TransportId,
     addr: &TransportAddr,
-    register: bool,
 ) -> (LinkId, SessionIndex) {
     let out_link = node.allocate_link_id();
     let lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
@@ -428,23 +427,80 @@ fn seed_dial(
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, LegStamp::at(1000))
         .unwrap();
-    if register {
-        let link = Link::connectionless(
-            out_link,
-            transport_id,
-            addr.clone(),
-            LinkDirection::Outbound,
-            Duration::from_millis(100),
-        );
-        node.links.raw().insert(out_link, link);
-        node.links
-            .raw_index()
-            .insert((transport_id, addr.clone()), out_link);
-    }
-    node.pending_outbound
-        .raw()
-        .insert((transport_id, out_index.as_u32()), out_link);
+    let link = Link::connectionless(
+        out_link,
+        transport_id,
+        addr.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    );
+    node.links.raw().insert(out_link, link);
+    node.links
+        .raw_index()
+        .insert((transport_id, addr.clone()), out_link);
+    node.plant_dial_at((transport_id, out_index.as_u32()), out_link, None);
     (out_link, out_index)
+}
+
+/// A configured auto-connect peer that restarts: its accepted restart msg1
+/// replaces the peering, the node notes the old peering's loss for the
+/// peer's retry, as for a link that died, and the promotion that follows
+/// takes the retry off the schedule, since the peer is held again. The
+/// settlement core beside the node decides the same retry at the restart,
+/// so the live audit's comparison finds them alike; a core that retried no
+/// restarted peer differs here.
+#[tokio::test]
+async fn an_accepted_restart_of_an_auto_connect_peer_notes_its_retry_and_clears_it_at_the_promotion()
+ {
+    let sender = Identity::generate();
+    let mut config = Config::new();
+    config.peers = vec![crate::config::PeerConfig {
+        npub: sender.npub(),
+        alias: None,
+        addresses: vec![crate::config::PeerAddress::new("udp", "127.0.0.1:9")],
+        connect_policy: crate::config::ConnectPolicy::AutoConnect,
+        auto_reconnect: true,
+        via_nostr: false,
+    }];
+    let mut node = make_node_with(config);
+    let transport_id = TransportId::new(1);
+    let (_peer_sock, peer_addr) = register_udp_with_peer_socket(&mut node, transport_id).await;
+    let sender_pid = PeerIdentity::from_pubkey_full(sender.pubkey_full());
+    let sender_addr = *sender_pid.node_addr();
+
+    let link = node.allocate_link_id();
+    let mut old_peer = keyed_peer(&node, &sender, link, 1000);
+    old_peer.test_backdate_promoted(Duration::from_secs(60));
+    old_peer.test_backdate_heard(Duration::from_secs(60));
+    old_peer.set_remote_epoch(Some([1u8; 8]));
+    old_peer.set_current_addr(transport_id, peer_addr.clone());
+    node.peers.raw().insert(sender_addr, old_peer);
+    assert!(
+        node.peering.reconciler.retry_pending.is_empty(),
+        "precondition: nothing is scheduled before the restart"
+    );
+
+    let data = craft_msg1_wire(&node, &sender, [2u8; 8], SessionIndex::new(0x77), 2000);
+    node.handle_msg1(ReceivedPacket {
+        transport_id,
+        remote_addr: peer_addr.clone(),
+        data,
+        timestamp_ms: timeline_ms(2000),
+    })
+    .await;
+
+    let restarted = node
+        .get_peer(&sender_addr)
+        .is_some_and(|p| p.remote_epoch() == Some([2u8; 8]));
+    assert!(restarted, "precondition: the restart replaced the peering");
+    assert!(
+        !node
+            .peering
+            .reconciler
+            .retry_pending
+            .contains_key(&sender_addr),
+        "defect: the restart of an auto-connect peer left a retry scheduled for the peer it holds"
+    );
 }
 
 /// Max-peers cap with the node's own dial to the sender in flight: the cap is
@@ -469,7 +525,7 @@ async fn chartest_msg1_at_cap_with_pending_outbound_is_dropped_without_a_msg2() 
     let sender_pid = PeerIdentity::from_pubkey_full(sender.pubkey_full());
     let sender_addr = *sender_pid.node_addr();
     let out_addr = TransportAddr::from_string("10.0.0.9:2121");
-    let (out_link, out_index) = seed_dial(&mut node, sender_pid, transport_id, &out_addr, false);
+    let (out_link, out_index) = seed_dial(&mut node, sender_pid, transport_id, &out_addr);
 
     let rejects_before = node.stats().handshake.max_peers;
     let links_before = node.link_count();
@@ -507,7 +563,7 @@ async fn chartest_msg1_at_cap_with_pending_outbound_is_dropped_without_a_msg2() 
         "our own dial to the sender is left pending"
     );
     assert!(
-        node.pending_outbound
+        node.pending_outbound()
             .contains_key(&(transport_id, out_index.as_u32())),
         "our own dial keeps its index entry for its msg2"
     );
@@ -533,7 +589,7 @@ async fn chartest_msg1_at_cap_from_the_address_we_are_dialing_leaves_our_dial_in
 
     let sender = Identity::generate();
     let sender_pid = PeerIdentity::from_pubkey_full(sender.pubkey_full());
-    let (out_link, out_index) = seed_dial(&mut node, sender_pid, transport_id, &peer_addr, true);
+    let (out_link, out_index) = seed_dial(&mut node, sender_pid, transport_id, &peer_addr);
 
     let data = craft_msg1_wire(&node, &sender, [5u8; 8], SessionIndex::new(0x55), 2000);
     let packet = ReceivedPacket {
@@ -563,7 +619,7 @@ async fn chartest_msg1_at_cap_from_the_address_we_are_dialing_leaves_our_dial_in
     );
     assert!(node.has_pending_leg(&out_link));
     assert!(
-        node.pending_outbound
+        node.pending_outbound()
             .contains_key(&(transport_id, out_index.as_u32()))
     );
 }
@@ -654,10 +710,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
         .links
         .raw_index()
         .insert((transport_id_a, remote_addr_b.clone()), link_a_out);
-    node_a
-        .pending_outbound
-        .raw()
-        .insert((transport_id_a, out_index_a.as_u32()), link_a_out);
+    node_a.plant_dial_at((transport_id_a, out_index_a.as_u32()), link_a_out, None);
 
     // B initiates to A.
     let link_b_out = node_b.allocate_link_id();
@@ -694,10 +747,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
         .links
         .raw_index()
         .insert((transport_id_b, remote_addr_a.clone()), link_b_out);
-    node_b
-        .pending_outbound
-        .raw()
-        .insert((transport_id_b, out_index_b.as_u32()), link_b_out);
+    node_b.plant_dial_at((transport_id_b, out_index_b.as_u32()), link_b_out, None);
 
     // Both put msg1 on the wire.
     node_a

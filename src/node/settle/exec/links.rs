@@ -62,6 +62,8 @@ impl Node {
     /// changes no record, and the node acts on it, if at all, where the join
     /// gave it.
     pub(in crate::node) fn feed(&mut self, input: &Input) {
+        #[cfg(test)]
+        self.shadow_feed(input);
         match input {
             // The mutation lane's break: a path's state never reaches the
             // record.
@@ -94,20 +96,24 @@ impl Node {
             | Input::Dead { .. }
             | Input::Admin { .. }
             | Input::Sent { .. }
-            | Input::SendFailed { .. } => {}
+            | Input::SendFailed { .. }
+            | Input::Unsendable { .. } => {}
         }
     }
 
     /// The one path of `peer`'s link `link` moved inside its transport from
     /// `from` to `to`, or, with `from` `None`, a bundle holding no path was
     /// bound at `to`: neither is in any output of the bundle, so the join is
-    /// told of it, and the core's record of the link follows.
+    /// told of it, and the core's record of the link follows. `standby`
+    /// says the path was not the link's active path, a roam the node resets
+    /// nothing for.
     pub(in crate::node) fn roamed(
         &mut self,
         peer: NodeAddr,
         link: LinkId,
         from: Option<AddrKey>,
         to: &AddrKey,
+        standby: bool,
     ) {
         let Some(link) = self.links.no(&link) else {
             return;
@@ -120,6 +126,7 @@ impl Node {
             link,
             from: from.as_ref().map(pair),
             to: pair(to),
+            standby,
         };
         let Ok(steps) = join::<LinkProfile, PeerClock, OsEntropy, UdpSlot>(peer, event) else {
             debug_assert!(false, "the join refused a roam");

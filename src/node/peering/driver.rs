@@ -62,6 +62,8 @@ impl Node {
     /// derived from the live published state so a drain self-suppresses the
     /// reconnect.
     pub(in crate::node) fn note_link_dead(&mut self, node_addr: NodeAddr, now: PeeringInstant) {
+        #[cfg(test)]
+        self.did(crate::node::settle::exec::Did::Retry { peer: node_addr });
         let policy =
             self.build_peering_policy(self.config().auto_connect_peers().cloned().collect());
         let gate = Gate::from_state(self.supervisor.state);

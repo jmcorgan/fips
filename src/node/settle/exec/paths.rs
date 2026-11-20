@@ -302,6 +302,8 @@ pub(super) fn close_queued(node: &mut Node, r: &mut Run) {
         && let (Some(link), Some(to)) = (f.link, &f.to)
         && !node.in_use(to.transport, &to.addr, link)
     {
+        #[cfg(test)]
+        node.closed(to.transport, &to.addr);
         node.paths.close_later(to.clone(), r.peer, link, f.removed);
     }
 }

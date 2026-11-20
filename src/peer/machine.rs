@@ -12,14 +12,13 @@
 //!
 //! ## Shape
 //!
-//! `step(event, now, index_allocator) -> Vec<PeerAction>` is a **pure reducer**:
+//! `step(event, now) -> Vec<PeerAction>` is a **pure reducer**:
 //! every lifecycle *decision* is delegated to the existing sans-IO cores in
 //! [`crate::proto::fmp`] ([`Fmp::establish_inbound`]/[`establish_outbound`],
-//! [`Fmp::poll_timeouts`]/[`poll_resends`],
 //! and `cross_connection_winner`) — this module writes **no new decision
 //! core**. The machine only (a) builds the plain-data snapshots those cores
 //! consume from its control-tier state, (b) maps the returned
-//! [`ConnAction`]/[`InboundDecision`]/[`OutboundDecision`]/[`PromotionResult`]
+//! [`InboundDecision`]/[`OutboundDecision`]/[`PromotionResult`]
 //! into the [`PeerAction`] vocabulary the driver executes, and (c) advances its
 //! own control state. Shell-side effects (the Noise wire step, `promote_connection`
 //! registry surgery, late ACL `authorize_peer`, decrypt-worker register/unregister)
@@ -57,33 +56,26 @@
 use crate::identity::ErasingKeypair;
 use crate::noise::{self, NoiseError, NoiseSession};
 use crate::proto::fmp::{
-    ConnAction, ConnSnapshot, ConnectionState, EstablishSnapshot, Fmp, InboundDecision, LegStamp,
-    Msg1Digest, OutboundDecision, OutboundSnapshot, PromotionResult, WireOutcome,
+    ConnectionState, EstablishSnapshot, Fmp, InboundDecision, LegStamp, Msg1Digest,
+    OutboundDecision, OutboundSnapshot, PromotionResult, WireOutcome,
 };
 use crate::proto::link::LinkMessageType;
 use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
-use crate::utils::index::{IndexAllocator, SessionIndex};
+use crate::utils::index::SessionIndex;
 use crate::{NodeAddr, PeerIdentity};
-use fips_core::proto::rekey::{IndexLease, allocate};
+use fips_core::proto::rekey::IndexLease;
 use secp256k1::Keypair;
 
 // ============================================================================
 // Timing placeholders
 //
-// The `poll_*` cores already take the interval/backoff as arguments, so these
-// are only used to compute `SetTimer{at_ms}` deadlines and the
-// `Closed{backoff_deadline_ms}` park time. The handshake timers are armed
-// live at dial time from these constants: the retransmit driver fires on the
-// machine-armed deadline, while the timeout reaper keys on the timer's
-// presence with its threshold read from `NodeConfig`, which also governs the
-// reschedule cadence shell-side. The unit tests assert on timer *kinds*, not
-// exact deadlines.
+// These compute the liveness `SetTimer{at_ms}` deadline and the
+// `Closed{backoff_deadline_ms}` park time. A handshake's resends and its
+// deadline are the settlement core's handshake leg's (`Node::legs`), not
+// this machine's.
 // ============================================================================
 
-const HANDSHAKE_RETRANSMIT_INTERVAL_MS: u64 = 1_000;
-const HANDSHAKE_TIMEOUT_MS: u64 = 30_000;
 const HANDSHAKE_MAX_RESENDS: u32 = 5;
-const RESEND_BACKOFF: f64 = 2.0;
 // `LIVENESS_INTERVAL_MS` below is a placeholder pinned to today's
 // `NodeConfig` default. It is not a wiring to the config: nothing here reads
 // a config value, so an operator override is not tracked. The tie to the
@@ -200,15 +192,10 @@ pub(crate) enum FailReason {
 /// A timer the machine schedules on the driver's quantized tick.
 ///
 /// `Hash` lets it key the driver's per-peer timer store; `Ord` lets the driver
-/// collect due kinds deterministically. Note the driver must fire
-/// `HandshakeTimeout` before `HandshakeRetransmit` on a same-tick coincidence
-/// (a reaped leg must not be resent), which is the reverse of this declaration
-/// order — the driver orders explicitly rather than relying on the derived
-/// ascending `Ord`.
+/// collect due kinds deterministically. A handshake's resends and deadline are
+/// not the machine's: they are its handshake leg's in the settlement core.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum TimerKind {
-    HandshakeRetransmit,
-    HandshakeTimeout,
     Liveness,
 }
 
@@ -811,10 +798,10 @@ impl PeerMachine {
     }
 
     /// The session index we allocated for this peer, read from the surviving
-    /// carrier. Populated once the index is allocated on either establish path
-    /// (inbound at `on_authorized`, outbound at msg1 preparation). `None` before
-    /// allocation (and after a rejected/unauthorized msg1). The inbound cutover
-    /// reads this to perform the shell registry surgery.
+    /// carrier. The shell draws it and the handshake's leg in the settlement
+    /// core holds it; the carrier takes it when a dial's msg2 completes the
+    /// dial, or when an answer is promoted. `None` before then (and after a
+    /// rejected/unauthorized msg1).
     pub(crate) fn our_index(&self) -> Option<SessionIndex> {
         self.conn.our_index()
     }
@@ -825,23 +812,6 @@ impl PeerMachine {
     /// stale-connection reaper frees it.
     pub(crate) fn take_our_index(&mut self) -> Option<IndexLease> {
         self.conn.take_our_index()
-    }
-
-    /// The msg1 resend count for this outbound handshake leg. The per-peer
-    /// machine is the home for this counter — the timer driver advances it via
-    /// [`record_resend`](Self::record_resend) on each successful resend, and the
-    /// control-socket connection snapshot reads it here so the operator-visible
-    /// count follows the machine rather than the (now inert) shell connection.
-    pub(crate) fn resend_count(&self) -> u32 {
-        self.conn.resend_count()
-    }
-
-    /// Record a successful msg1 resend: advance the count and store the next
-    /// backoff deadline. The driver calls this only after the resend actually
-    /// went out (record-on-success — a failed send neither advances the count
-    /// nor reschedules), matching the pre-fold shell semantics.
-    pub(crate) fn record_resend(&mut self, next_resend_at_ms: u64) {
-        self.conn.record_resend(next_resend_at_ms);
     }
 
     /// Connection-start timestamp of the surviving carrier — the home for the
@@ -922,10 +892,11 @@ impl PeerMachine {
         self.conn.handshake_msg2()
     }
 
-    /// Store the wire-format msg1 for resend on the surviving carrier and record
-    /// the first resend deadline, mirroring the leg's start-of-handshake write.
-    pub(crate) fn set_conn_handshake_msg1(&mut self, msg1: Vec<u8>, first_resend_at_ms: u64) {
-        self.conn.set_handshake_msg1(msg1, first_resend_at_ms);
+    /// Store on the surviving carrier the wire-format msg1 this node's dial
+    /// sent, which its handshake leg held until the msg2 completed it, for
+    /// the promotion that follows. The carrier schedules no resend.
+    pub(crate) fn set_conn_handshake_msg1(&mut self, msg1: Vec<u8>) {
+        self.conn.set_handshake_msg1(msg1, 0);
     }
 
     /// Store the wire-format msg2 for duplicate-msg1 resend on the surviving
@@ -1097,18 +1068,13 @@ impl PeerMachine {
 
     /// Advance the machine one event. Pure reducer: delegates every decision to
     /// the sans-IO cores, maps their results into [`PeerAction`]s, and updates
-    /// control state. `index_allocator` is a synchronous capability (the
-    /// handshake/rekey need an index mid-transition), never moved in, never an
-    /// action.
+    /// control state. The machine draws no session index: the shell draws
+    /// each handshake's and holds it in the handshake's leg in the
+    /// settlement core until the promotion takes it.
     ///
     /// `now` is a reading of the interval clock (`Node::interval_ms`): the
     /// timers the machine arms are deadlines on it.
-    pub(crate) fn step(
-        &mut self,
-        event: PeerEvent,
-        now: u64,
-        index_allocator: &mut IndexAllocator,
-    ) -> Vec<PeerAction> {
+    pub(crate) fn step(&mut self, event: PeerEvent, now: u64) -> Vec<PeerAction> {
         match event {
             PeerEvent::Dial {
                 transport_id,
@@ -1123,12 +1089,10 @@ impl PeerMachine {
                 let (_decision, actions) = self.inbound_msg1(link, &wire, est, now);
                 actions
             }
-            PeerEvent::Msg2 { their_index, out } => {
-                self.on_msg2(their_index, out, now, index_allocator)
-            }
-            PeerEvent::Authorized => self.on_authorized(now, index_allocator),
+            PeerEvent::Msg2 { their_index, out } => self.on_msg2(their_index, out, now),
+            PeerEvent::Authorized => self.on_authorized(now),
             PeerEvent::AuthorizedHeld => {
-                let mut actions = self.on_authorized(now, index_allocator);
+                let mut actions = self.on_authorized(now);
                 actions.retain(|a| !matches!(a, PeerAction::PromoteToActive { .. }));
                 actions
             }
@@ -1228,27 +1192,18 @@ impl PeerMachine {
         Vec::new()
     }
 
-    /// Emit msg1 and arm the retransmit/timeout timers. The Noise msg1
-    /// construction and its index allocation are shell-side effects performed by
-    /// the driver when it executes this action; an empty payload is emitted (see
-    /// module note). This path is not exercised by the tests.
-    fn start_outbound_handshake(&mut self, now: u64) -> Vec<PeerAction> {
+    /// Emit msg1. The Noise msg1 construction and its index allocation are
+    /// shell-side effects performed by the driver when it executes this
+    /// action; an empty payload is emitted (see module note). The msg1's
+    /// resends and the handshake's deadline are its leg's in the settlement
+    /// core, which the shell started when it prepared the msg1.
+    fn start_outbound_handshake(&mut self, _now: u64) -> Vec<PeerAction> {
         let bytes = Vec::new();
         self.state = PeerState::Handshaking {
             link: self.link,
             phase: HandshakePhase::SentMsg1,
         };
-        vec![
-            PeerAction::SendHandshake { bytes },
-            PeerAction::SetTimer {
-                kind: TimerKind::HandshakeRetransmit,
-                at_ms: now + HANDSHAKE_RETRANSMIT_INTERVAL_MS,
-            },
-            PeerAction::SetTimer {
-                kind: TimerKind::HandshakeTimeout,
-                at_ms: now + HANDSHAKE_TIMEOUT_MS,
-            },
-        ]
+        vec![PeerAction::SendHandshake { bytes }]
     }
 
     /// Outbound completion: compute the establish decision from the snapshot
@@ -1263,7 +1218,6 @@ impl PeerMachine {
         their_index: SessionIndex,
         out: OutboundSnapshot,
         _now: u64,
-        _alloc: &mut IndexAllocator,
     ) -> Vec<PeerAction> {
         self.conn.set_their_index(their_index);
         match Fmp::new().establish_outbound(&out, self.conn.remote_epoch()) {
@@ -1299,22 +1253,11 @@ impl PeerMachine {
 
     /// The promotion of a completed outbound connection as a net-new peer.
     ///
-    /// Our outbound index (allocated at dial) already sits on the surviving
-    /// carrier; it is the one we register once promotion resolves. The
-    /// machine survives promotion (it becomes the active peer's control
-    /// machine), so the outbound handshake timers are cancelled here or they
-    /// would linger in the driver's store. A late fire would no-op against
-    /// the non-`Handshaking` state, but leaving them armed is a timer leak.
+    /// Our outbound index (drawn by the shell at dial, and held by the dial's
+    /// leg until its msg2 completed it) sits on the surviving carrier; it is
+    /// the one we register once promotion resolves.
     fn outbound_promote(&self) -> Vec<PeerAction> {
-        vec![
-            PeerAction::CancelTimer {
-                kind: TimerKind::HandshakeRetransmit,
-            },
-            PeerAction::CancelTimer {
-                kind: TimerKind::HandshakeTimeout,
-            },
-            PeerAction::PromoteToActive { link: self.link },
-        ]
+        vec![PeerAction::PromoteToActive { link: self.link }]
     }
 
     // ------------------------------------------------------------------
@@ -1386,9 +1329,9 @@ impl PeerMachine {
     /// Inbound **Phase 1**: classify the fresh leg *without*
     /// allocating an index. Records identity/their-index and stashes the
     /// opaque msg2 payload, parking at `Handshaking{ReceivedMsg1}` — the
-    /// "awaiting Authorized" marker. The index allocation and the msg2/promote
-    /// emission happen in Phase 2 ([`Self::on_authorized`]) only after the
-    /// shell's late-ACL gate passes, so a rejected/unauthorized msg1 allocates
+    /// "awaiting Authorized" marker. The shell draws the index only after its
+    /// late-ACL gate passes, and the msg2/promote emission happens in Phase 2
+    /// ([`Self::on_authorized`]), so a rejected/unauthorized msg1 allocates
     /// nothing (preserving the pre-refactor global index-allocation sequence).
     fn inbound_classify(&mut self, link: LinkId, wire: &WireOutcome) -> Vec<PeerAction> {
         self.identity = Some(wire.peer_identity);
@@ -1401,14 +1344,15 @@ impl PeerMachine {
         Vec::new()
     }
 
-    /// Inbound **Phase 2**: the late-ACL gate passed shell-side.
-    /// Allocate our index NOW — the single inbound allocation point — record it
-    /// on `conn`, and emit the msg2 send + promotion. `RegisterDecryptSession`
-    /// follows on the `PromotionResolved{Promoted}` feedback. Guarded to
-    /// the inbound `ReceivedMsg1` phase so the benign outbound `Authorized`
-    /// confirmation stays a no-op (state `Handshaking{SentMsg1}` and every other
-    /// state fall through to `Vec::new()`).
-    fn on_authorized(&mut self, _now: u64, alloc: &mut IndexAllocator) -> Vec<PeerAction> {
+    /// Inbound **Phase 2**: the late-ACL gate passed shell-side, and the
+    /// shell drew our index, which the answer's leg in the settlement core
+    /// holds until the promotion takes it. Emit the msg2 send and the
+    /// promotion. `RegisterDecryptSession` follows on the
+    /// `PromotionResolved{Promoted}` feedback. Guarded to the inbound
+    /// `ReceivedMsg1` phase so the benign outbound `Authorized` confirmation
+    /// stays a no-op (state `Handshaking{SentMsg1}` and every other state fall
+    /// through to `Vec::new()`).
+    fn on_authorized(&mut self, _now: u64) -> Vec<PeerAction> {
         if !matches!(
             self.state,
             PeerState::Handshaking {
@@ -1418,21 +1362,6 @@ impl PeerMachine {
         ) {
             return Vec::new();
         }
-        let our_index = match allocate(alloc) {
-            Some(lease) => lease,
-            None => {
-                // Allocation exhausted: no index, no msg2, no promote. The shell
-                // records the reject + completes the rate-limiter bracket
-                // (mirrors the pre-refactor `handle_msg1` allocate-failure path).
-                self.state = PeerState::Failed {
-                    reason: FailReason::Rejected,
-                };
-                return Vec::new();
-            }
-        };
-        // The inbound carrier holds no index before authorization, so
-        // nothing is replaced here.
-        let _ = self.conn.set_our_index(our_index).map(IndexLease::release);
         let bytes = self.pending_msg2_payload.take().unwrap_or_default();
         let link = self.link;
         vec![
@@ -1443,11 +1372,11 @@ impl PeerMachine {
 
     /// The stored msg2 of an authorized inbound leg was sent in answer to a
     /// later msg1: promote the leg as a first successful send would have. A
-    /// leg not yet authorized holds no index and has sent nothing, and a leg
-    /// whose identity is already held on another link would promote into a
-    /// cross-connection, which this path does not resolve; both stay as they
-    /// are. The state is left to the `PromotionResolved` feedback, as on the
-    /// first send.
+    /// leg not yet authorized still holds its msg2 payload and has sent
+    /// nothing, and a leg whose identity is already held on another link
+    /// would promote into a cross-connection, which this path does not
+    /// resolve; both stay as they are. The state is left to the
+    /// `PromotionResolved` feedback, as on the first send.
     fn on_resend(&self, peer_held: bool) -> Vec<PeerAction> {
         let pending = matches!(
             self.state,
@@ -1456,7 +1385,7 @@ impl PeerMachine {
                 ..
             }
         );
-        if peer_held || !pending || self.conn.our_index().is_none() {
+        if peer_held || !pending || self.pending_msg2_payload.is_some() {
             return Vec::new();
         }
         vec![PeerAction::PromoteToActive { link: self.link }]
@@ -1475,7 +1404,9 @@ impl PeerMachine {
                 ..
             }
         );
-        if !pending || self.conn.our_index().is_none() {
+        // An authorized leg has taken its msg2 payload; the shell holds its
+        // session index until the promotion.
+        if !pending || self.pending_msg2_payload.is_some() {
             return Vec::new();
         }
         let mut actions = Vec::new();
@@ -1615,85 +1546,10 @@ impl PeerMachine {
     // Timeout / teardown / close
     // ------------------------------------------------------------------
 
-    fn on_timeout(&mut self, kind: TimerKind, now: u64) -> Vec<PeerAction> {
+    fn on_timeout(&mut self, kind: TimerKind, _now: u64) -> Vec<PeerAction> {
         match kind {
-            TimerKind::HandshakeRetransmit => self.on_handshake_retransmit(now),
-            TimerKind::HandshakeTimeout => self.on_handshake_timeout(now),
             TimerKind::Liveness => Vec::new(),
         }
-    }
-
-    fn on_handshake_retransmit(&mut self, now: u64) -> Vec<PeerAction> {
-        if !matches!(
-            self.state,
-            PeerState::Handshaking {
-                phase: HandshakePhase::SentMsg1,
-                ..
-            }
-        ) {
-            return Vec::new();
-        }
-        let snap = self.conn_snapshot();
-        let mut actions = Vec::new();
-        for act in Fmp::new().poll_resends(
-            vec![snap],
-            now,
-            HANDSHAKE_RETRANSMIT_INTERVAL_MS,
-            RESEND_BACKOFF,
-        ) {
-            if let ConnAction::ResendMsg1 {
-                bytes,
-                next_resend_at_ms,
-                ..
-            } = act
-            {
-                self.conn.record_resend(next_resend_at_ms);
-                actions.push(PeerAction::SendHandshake { bytes });
-                actions.push(PeerAction::SetTimer {
-                    kind: TimerKind::HandshakeRetransmit,
-                    at_ms: next_resend_at_ms,
-                });
-            }
-        }
-        actions
-    }
-
-    fn on_handshake_timeout(&mut self, now: u64) -> Vec<PeerAction> {
-        if !matches!(self.state, PeerState::Handshaking { .. }) {
-            return Vec::new();
-        }
-        let snap = self.conn_snapshot();
-        // poll_timeouts emits [ScheduleRetry?, Teardown]; the machine REMAPS
-        // ScheduleRetry -> ReportLost (single loss token) and Teardown ->
-        // FreeIndex{our_index}, emitting FreeIndex before ReportLost.
-        let mut free = Vec::new();
-        let mut lost = Vec::new();
-        for act in Fmp::new().poll_timeouts(vec![snap]) {
-            match act {
-                ConnAction::ScheduleRetry { peer } => {
-                    // Handshake timeout on an un-promoted leg — the connected-
-                    // guarded reflex. Dormant today (no `Timeout` event is
-                    // dispatched until the timeout fold in C5).
-                    lost.push(PeerAction::ReportLost {
-                        peer,
-                        kind: LostKind::HandshakeTimeout,
-                    });
-                }
-                ConnAction::Teardown { .. } => {
-                    if let Some(lease) = self.conn.take_our_index() {
-                        free.push(PeerAction::FreeIndex {
-                            index: SessionIndex::new(lease.release()),
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-        self.state = PeerState::Closed {
-            backoff_deadline_ms: now + CLOSED_BACKOFF_MS,
-        };
-        free.extend(lost);
-        free
     }
 
     fn on_disconnect(&mut self, reason: CloseReason, now: u64) -> Vec<PeerAction> {
@@ -1767,20 +1623,6 @@ impl PeerMachine {
                 | PeerState::Active { .. }
                 | PeerState::Maintaining { .. }
         )
-    }
-
-    fn conn_snapshot(&self) -> ConnSnapshot {
-        ConnSnapshot {
-            link: self.conn.link_id(),
-            is_outbound: self.conn.is_outbound(),
-            retry_addr: self.conn.expected_identity().map(|id| *id.node_addr()),
-            resend_count: self.conn.resend_count(),
-            msg1: self
-                .conn
-                .handshake_msg1()
-                .map(|b| b.to_vec())
-                .unwrap_or_default(),
-        }
     }
 }
 
@@ -1897,7 +1739,7 @@ mod tests {
             PeerAction::ActivateConnectedUdp,
             PeerAction::TeardownConnectedUdp,
             PeerAction::SetTimer {
-                kind: TimerKind::HandshakeRetransmit,
+                kind: TimerKind::Liveness,
                 at_ms: 1234,
             },
             PeerAction::CancelTimer {
@@ -1981,7 +1823,6 @@ mod tests {
     // ---- Test 4: restart-override -----------------------------------------
     #[test]
     fn restart_override() {
-        let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
         let peer_addr = *peer.node_addr();
         let mut m = PeerMachine::new_inbound(LinkId::new(1), LegStamp::at(0));
@@ -1999,7 +1840,6 @@ mod tests {
                 est,
             },
             1_000,
-            &mut alloc,
         );
 
         // Phase 1: restart tail only (invalidate, unregister old, report lost),
@@ -2025,10 +1865,9 @@ mod tests {
             }
         ));
         assert_eq!(m.our_index(), None);
-        assert_eq!(alloc.count(), 0);
 
-        // Phase 2: late-ACL gate passed -> allocate + Promote tail.
-        let promote = m.step(PeerEvent::Authorized, 1_000, &mut alloc);
+        // Phase 2: late-ACL gate passed -> the shell draws the index; Promote tail.
+        let promote = m.step(PeerEvent::Authorized, 1_000);
         assert!(
             promote
                 .iter()
@@ -2040,13 +1879,14 @@ mod tests {
                 .any(|a| matches!(a, PeerAction::PromoteToActive { .. }))
         );
 
+        // The promotion hands the carrier the lease the answer's leg held.
+        let _ = m.conn.set_our_index(IndexLease::for_test(0x5151));
         // Promotion feedback -> Established.
         let follow = m.step(
             PeerEvent::PromotionResolved {
                 result: PromotionResult::Promoted(peer_addr),
             },
             1_000,
-            &mut alloc,
         );
         assert!(
             follow
@@ -2097,7 +1937,6 @@ mod tests {
     // ---- Test 5: N:1 crystallization --------------------------------------
     #[test]
     fn n_to_one_crystallization() {
-        let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
         let peer_addr = *peer.node_addr();
 
@@ -2112,21 +1951,21 @@ mod tests {
                 est: est_w,
             },
             100,
-            &mut alloc,
         );
         assert!(wp1.is_empty()); // Phase 1 classifies without emitting.
-        let wa = winner.step(PeerEvent::Authorized, 100, &mut alloc);
+        let wa = winner.step(PeerEvent::Authorized, 100);
         assert!(
             wa.iter().any(
                 |a| matches!(a, PeerAction::PromoteToActive { link } if *link == LinkId::new(1))
             )
         );
+        // The promotion hands the carrier the lease the answer's leg held.
+        let _ = winner.conn.set_our_index(IndexLease::for_test(0x5252));
         let wf = winner.step(
             PeerEvent::PromotionResolved {
                 result: PromotionResult::Promoted(peer_addr),
             },
             100,
-            &mut alloc,
         );
         assert!(
             wf.iter()
@@ -2146,14 +1985,15 @@ mod tests {
                 est: est_l,
             },
             100,
-            &mut alloc,
         );
         assert!(lp1.is_empty()); // Phase 1 classifies without emitting.
-        let la = loser.step(PeerEvent::Authorized, 100, &mut alloc);
+        let la = loser.step(PeerEvent::Authorized, 100);
         assert!(
             la.iter()
                 .any(|a| matches!(a, PeerAction::PromoteToActive { .. }))
         );
+        // The promotion hands the carrier the lease the answer's leg held.
+        let _ = loser.conn.set_our_index(IndexLease::for_test(0x5454));
         let loser_index = loser.our_index();
         let lf = loser.step(
             PeerEvent::PromotionResolved {
@@ -2162,7 +2002,6 @@ mod tests {
                 },
             },
             100,
-            &mut alloc,
         );
         assert_eq!(
             lf,
@@ -2184,7 +2023,6 @@ mod tests {
     // ---- Test 6: inbound establish ----------------------------------------
     #[test]
     fn inbound_establish() {
-        let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
         let peer_addr = *peer.node_addr();
         let mut m = PeerMachine::new_inbound(LinkId::new(1), LegStamp::at(0));
@@ -2207,7 +2045,6 @@ mod tests {
                 est,
             },
             200,
-            &mut alloc,
         );
         assert!(phase1.is_empty());
         assert_eq!(
@@ -2218,10 +2055,9 @@ mod tests {
             }
         );
         assert_eq!(m.our_index(), None);
-        assert_eq!(alloc.count(), 0); // allocator untouched pre-authorize
 
-        // Phase 2 (Authorized): allocate + [SendHandshake, PromoteToActive].
-        let phase2 = m.step(PeerEvent::Authorized, 200, &mut alloc);
+        // Phase 2 (Authorized): the shell draws the index; [SendHandshake, PromoteToActive].
+        let phase2 = m.step(PeerEvent::Authorized, 200);
         assert!(matches!(phase2[0], PeerAction::SendHandshake { .. }));
         assert_eq!(
             phase2[1],
@@ -2229,16 +2065,18 @@ mod tests {
                 link: LinkId::new(1)
             }
         );
-        assert!(m.our_index().is_some());
-        assert_eq!(alloc.count(), 1); // exactly one index allocated
+        // The shell draws the index; the answer's leg in the settlement
+        // core holds it until the promotion hands it to the carrier.
+        assert_eq!(m.our_index(), None);
 
+        // The promotion hands the carrier the lease the answer's leg held.
+        let _ = m.conn.set_our_index(IndexLease::for_test(0x5353));
         // Phase 3 (PromotionResolved{Promoted}): register + Established.
         let phase3 = m.step(
             PeerEvent::PromotionResolved {
                 result: PromotionResult::Promoted(peer_addr),
             },
             200,
-            &mut alloc,
         );
         assert!(matches!(
             phase3[0],
@@ -2250,7 +2088,6 @@ mod tests {
     // ---- Test 6b: inbound late-ACL rejected -> no allocation --------------
     #[test]
     fn inbound_authorize_rejected_no_alloc() {
-        let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
         let mut m = PeerMachine::new_inbound(LinkId::new(1), LegStamp::at(0));
         let est = est_new_peer();
@@ -2264,13 +2101,11 @@ mod tests {
                 est,
             },
             200,
-            &mut alloc,
         );
         assert!(phase1.is_empty());
-        assert_eq!(alloc.count(), 0);
 
         // Late-ACL rejects -> Failed{AclRejected}, still no allocation.
-        let rej = m.step(PeerEvent::Rejected, 200, &mut alloc);
+        let rej = m.step(PeerEvent::Rejected, 200);
         assert!(rej.is_empty());
         assert_eq!(
             m.state(),
@@ -2278,14 +2113,12 @@ mod tests {
                 reason: FailReason::AclRejected
             }
         );
-        assert_eq!(alloc.count(), 0);
         assert_eq!(m.our_index(), None);
     }
 
     // ---- Test 6c: inbound reject at max_peers -> no allocation ------------
     #[test]
     fn inbound_at_max_peers_reject_no_alloc() {
-        let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
         let mut m = PeerMachine::new_inbound(LinkId::new(1), LegStamp::at(0));
         let mut est = est_new_peer();
@@ -2299,7 +2132,6 @@ mod tests {
                 est,
             },
             200,
-            &mut alloc,
         );
         assert!(actions.is_empty());
         assert_eq!(
@@ -2308,14 +2140,12 @@ mod tests {
                 reason: FailReason::Rejected
             }
         );
-        assert_eq!(alloc.count(), 0);
         assert_eq!(m.our_index(), None);
     }
 
     // ---- Test 7: outbound establish (+ cross-connection) ------------------
     #[test]
     fn outbound_establish() {
-        let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
         let peer_addr = *peer.node_addr();
 
@@ -2338,28 +2168,18 @@ mod tests {
                 out,
             },
             300,
-            &mut alloc,
         );
         assert_eq!(
             actions,
-            vec![
-                PeerAction::CancelTimer {
-                    kind: TimerKind::HandshakeRetransmit
-                },
-                PeerAction::CancelTimer {
-                    kind: TimerKind::HandshakeTimeout
-                },
-                PeerAction::PromoteToActive {
-                    link: LinkId::new(1)
-                }
-            ]
+            vec![PeerAction::PromoteToActive {
+                link: LinkId::new(1)
+            }]
         );
         actions = m.step(
             PeerEvent::PromotionResolved {
                 result: PromotionResult::Promoted(peer_addr),
             },
             300,
-            &mut alloc,
         );
         assert_eq!(
             actions,
@@ -2390,7 +2210,6 @@ mod tests {
                 out: out_swap,
             },
             400,
-            &mut alloc,
         );
         assert_eq!(
             swap,
@@ -2431,7 +2250,6 @@ mod tests {
                 out: out_keep,
             },
             500,
-            &mut alloc,
         );
         assert_eq!(
             keep,
@@ -2462,7 +2280,6 @@ mod tests {
     // `inbound_msg1`, so the unregister never fires in production.
     #[test]
     fn dial_persisted_outbound_promote_keeps_carrier_index() {
-        let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
         let peer_addr = *peer.node_addr();
         let dial_index = SessionIndex::new(0x55AA);
@@ -2488,21 +2305,12 @@ mod tests {
                 out,
             },
             300,
-            &mut alloc,
         );
         assert_eq!(
             promote,
-            vec![
-                PeerAction::CancelTimer {
-                    kind: TimerKind::HandshakeRetransmit
-                },
-                PeerAction::CancelTimer {
-                    kind: TimerKind::HandshakeTimeout
-                },
-                PeerAction::PromoteToActive {
-                    link: LinkId::new(1)
-                }
-            ]
+            vec![PeerAction::PromoteToActive {
+                link: LinkId::new(1)
+            }]
         );
         assert_eq!(m.our_index(), Some(dial_index));
 
@@ -2512,7 +2320,6 @@ mod tests {
                 result: PromotionResult::Promoted(peer_addr),
             },
             300,
-            &mut alloc,
         );
         assert_eq!(m.state(), PeerState::Established { addr: peer_addr });
         assert_eq!(m.our_index(), Some(dial_index));
@@ -2532,7 +2339,6 @@ mod tests {
                 est,
             },
             1_000,
-            &mut alloc,
         );
         assert!(
             restart.iter().any(|a| matches!(
@@ -2561,7 +2367,6 @@ mod tests {
     // identical `[PromoteToActive]` and leave `our_index == None`.
     #[test]
     fn connectionless_dial_then_msg2_promotes_from_handshaking() {
-        let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
 
         let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, LegStamp::at(0));
@@ -2574,7 +2379,6 @@ mod tests {
                 connection_oriented: false,
             },
             100,
-            &mut alloc,
         );
         assert!(matches!(
             m.state(),
@@ -2607,21 +2411,12 @@ mod tests {
                 out,
             },
             200,
-            &mut alloc,
         );
         assert_eq!(
             promote,
-            vec![
-                PeerAction::CancelTimer {
-                    kind: TimerKind::HandshakeRetransmit
-                },
-                PeerAction::CancelTimer {
-                    kind: TimerKind::HandshakeTimeout
-                },
-                PeerAction::PromoteToActive {
-                    link: LinkId::new(1)
-                }
-            ]
+            vec![PeerAction::PromoteToActive {
+                link: LinkId::new(1)
+            }]
         );
         assert_eq!(m.our_index(), None);
     }
@@ -2636,7 +2431,6 @@ mod tests {
     // reach via `on_dial` is already covered by the test above).
     #[test]
     fn connection_oriented_dial_opens_transport_then_connected_handshakes() {
-        let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
 
         let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, LegStamp::at(0));
@@ -2649,7 +2443,6 @@ mod tests {
                 connection_oriented: true,
             },
             100,
-            &mut alloc,
         );
         assert_eq!(
             m.state(),
@@ -2667,7 +2460,7 @@ mod tests {
         );
 
         // Transport connected: now send msg1 and arm the handshake timers.
-        let connected = m.step(PeerEvent::TransportConnected, 200, &mut alloc);
+        let connected = m.step(PeerEvent::TransportConnected, 200);
         assert!(matches!(
             m.state(),
             PeerState::Handshaking {
@@ -2677,17 +2470,7 @@ mod tests {
         ));
         assert_eq!(
             connected,
-            vec![
-                PeerAction::SendHandshake { bytes: Vec::new() },
-                PeerAction::SetTimer {
-                    kind: TimerKind::HandshakeRetransmit,
-                    at_ms: 200 + HANDSHAKE_RETRANSMIT_INTERVAL_MS,
-                },
-                PeerAction::SetTimer {
-                    kind: TimerKind::HandshakeTimeout,
-                    at_ms: 200 + HANDSHAKE_TIMEOUT_MS,
-                },
-            ]
+            vec![PeerAction::SendHandshake { bytes: Vec::new() },]
         );
     }
 
@@ -2699,7 +2482,6 @@ mod tests {
     // no actions. On a machine with no leg it is a defensive no-op.
     #[test]
     fn handshake_send_failed_marks_leg_without_leaving_handshaking() {
-        let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
 
         // Dial-persisted outbound machine carrying a prepared leg, driven to
@@ -2713,14 +2495,13 @@ mod tests {
                 connection_oriented: false,
             },
             100,
-            &mut alloc,
         );
         m.set_leg(HandshakeCrypto::new());
         assert!(m.is_handshaking_sent_msg1());
         assert!(!m.is_failed());
         assert_eq!(m.displayed_handshake_state(), "sent_msg1");
 
-        let actions = m.step(PeerEvent::HandshakeSendFailed, 200, &mut alloc);
+        let actions = m.step(PeerEvent::HandshakeSendFailed, 200);
         assert_eq!(actions, Vec::new(), "HandshakeSendFailed emits no actions");
         assert!(
             m.is_handshaking_sent_msg1(),
@@ -2739,7 +2520,7 @@ mod tests {
         // With no leg (e.g. after take_leg) the event stays a defensive no-op
         // for the leg handle and keeps the state retransmit-eligible.
         let _ = m.take_leg();
-        let actions = m.step(PeerEvent::HandshakeSendFailed, 300, &mut alloc);
+        let actions = m.step(PeerEvent::HandshakeSendFailed, 300);
         assert_eq!(actions, Vec::new());
         assert!(m.is_handshaking_sent_msg1());
         assert!(m.leg().is_none());
@@ -2818,14 +2599,13 @@ mod tests {
     // ---- Test 8: liveness -> LinkDeadSuspected -> ReportLost --------------
     #[test]
     fn liveness_to_link_dead() {
-        let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
         let mut m = PeerMachine::new_outbound(LinkId::new(1), id, LegStamp::at(0));
         m.state = PeerState::Active { addr };
         let _ = m.conn.set_our_index(IndexLease::for_test(0x4242));
 
-        let hb = m.step(PeerEvent::HeartbeatDue, 1_000, &mut alloc);
+        let hb = m.step(PeerEvent::HeartbeatDue, 1_000);
         assert_eq!(
             hb,
             vec![
@@ -2839,7 +2619,7 @@ mod tests {
             ]
         );
 
-        let dead = m.step(PeerEvent::LinkDeadSuspected, 2_000, &mut alloc);
+        let dead = m.step(PeerEvent::LinkDeadSuspected, 2_000);
         assert_eq!(
             dead,
             vec![
@@ -2862,7 +2642,6 @@ mod tests {
     // emits nothing; a keep leaves the shadow untouched and emits nothing.
     #[test]
     fn cross_conn_resolved_swap_updates_shadow() {
-        let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
         let mut m = PeerMachine::new_outbound(LinkId::new(1), id, LegStamp::at(0));
@@ -2880,7 +2659,6 @@ mod tests {
                 },
             },
             7_000,
-            &mut alloc,
         );
         assert!(acts.is_empty());
         // Our new index is held by the promoted peer's link rekey machine,
@@ -2888,12 +2666,10 @@ mod tests {
         assert_eq!(m.conn.our_index(), Some(SessionIndex::new(0x1111)));
         assert_eq!(m.conn.their_index(), Some(their));
         assert_eq!(m.state(), PeerState::Active { addr });
-        assert_eq!(alloc.count(), 0);
     }
 
     #[test]
     fn cross_conn_resolved_keep_is_noop() {
-        let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
         let mut m = PeerMachine::new_outbound(LinkId::new(1), id, LegStamp::at(0));
@@ -2906,13 +2682,11 @@ mod tests {
                 outcome: CrossConnOutcome::Keep,
             },
             7_000,
-            &mut alloc,
         );
         assert!(acts.is_empty());
         assert_eq!(m.conn.our_index(), Some(SessionIndex::new(0x1111)));
         assert_eq!(m.conn.their_index(), Some(SessionIndex::new(0x2222)));
         assert_eq!(m.state(), PeerState::Active { addr });
-        assert_eq!(alloc.count(), 0);
     }
 
     // ---- Moved from `PeerConnection`'s own test module ---------------------

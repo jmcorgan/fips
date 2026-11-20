@@ -13,7 +13,7 @@ use super::establish_chartests::{
 use super::heartbeat::set_link_dead_timeout;
 use super::link_setup_diag::{
     EPOCH, Established, arm_pending, arm_pending_with_peer, drain, established, expect_line, field,
-    packet, sender_frame, stop_transport,
+    hear_now, packet, sender_frame, stop_transport,
 };
 use super::*;
 use crate::testutil::{LogCapture, capture_logs_scoped};
@@ -176,8 +176,7 @@ async fn a_peer_with_three_resends_logs_each_and_its_removal_reports_nothing_sup
 #[tokio::test]
 async fn repeated_msg1s_from_a_peer_heard_within_the_interval_log_three_lines_then_one_notice() {
     let mut e = established(5).await;
-    let peer = e.node.get_peer_mut(&e.peer).unwrap();
-    peer.touch(Node::now_ms());
+    let peer = hear_now(&mut e);
     let (link, index) = (peer.link_id(), peer.our_index());
 
     let msg1s = fresh_msg1s(&e, 0x0A00, 8);

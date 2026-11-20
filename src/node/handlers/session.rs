@@ -3107,6 +3107,17 @@ impl Node {
         }
     }
 
+    /// Now on the interval clock, as the instant the settlement core's
+    /// handshake legs take: [`Self::interval_ms`]'s reading, so the legs run
+    /// on the clock and in the whole milliseconds the node's handshake
+    /// timers have always run on, and a step of the wall clock moves them
+    /// only when the mutation lane's `IntervalOnWall` moves that clock. The
+    /// rekey timers, the path bundles and everything else that reads
+    /// `crate::peer::peer_now` do not take it.
+    pub(in crate::node) fn settle_now() -> crate::peer::PeerInstant {
+        crate::time::mono_at(Self::interval_ms())
+    }
+
     /// Now on both clocks a handshake leg keeps, read together: the wall
     /// clock for what operators are shown, the interval clock for timeouts.
     pub(in crate::node) fn leg_stamp() -> crate::proto::fmp::LegStamp {

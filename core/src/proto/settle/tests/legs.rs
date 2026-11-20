@@ -147,11 +147,10 @@ fn resends_follow_the_backoff_and_repeat_the_msg1_byte_for_byte() {
 
 #[test]
 fn a_configured_multiplier_spaces_the_resends_as_the_node_truncates_them() {
-    // The node's schedule, `next_resend_at_ms`: the first resend one
-    // interval after the dial, and after the n-th the interval times the
-    // multiplier to the n-th power, truncated to the millisecond. At 1.3333
-    // the waits are 1333, 1777, 2370 and 3160 ms; doubling would give 2,
-    // 4, 8 and 16 s.
+    // The node's schedule: the first resend one interval after the dial,
+    // and after the n-th the interval times the multiplier to the n-th
+    // power, truncated to the millisecond. At 1.3333 the waits are 1333,
+    // 1777, 2370 and 3160 ms; doubling would give 2, 4, 8 and 16 s.
     for (multiplier, want) in [
         (1.3333, alloc::vec![1_000, 2_333, 4_110, 6_480, 9_640]),
         (1.5, alloc::vec![1_000, 2_500, 4_750, 8_125, 13_187]),
@@ -170,6 +169,33 @@ fn a_configured_multiplier_spaces_the_resends_as_the_node_truncates_them() {
         assert_eq!(
             times, want,
             "defect: at a multiplier of {multiplier} the resends are not where the node sends them"
+        );
+    }
+}
+
+#[test]
+fn a_dials_first_resend_comes_a_second_after_its_msg1_whatever_the_configured_interval() {
+    // The node arms a dial's first resend a second after its msg1, whatever
+    // the configured interval, and spaces the later ones from the configured
+    // interval: after the n-th, the interval times the multiplier to the
+    // n-th power.
+    for (interval, want) in [
+        (500, alloc::vec![1_000, 2_000, 4_000, 8_000, 16_000]),
+        (1_000, alloc::vec![1_000, 3_000, 7_000, 15_000, 31_000]),
+        (3_000, alloc::vec![1_000, 7_000, 19_000, 43_000, 91_000]),
+    ] {
+        let p = Params {
+            handshake: Duration::from_secs(120),
+            resend: Duration::from_millis(interval),
+            ..Params::default()
+        };
+        let mut links = Links::new();
+        let mut legs = Legs::new();
+        let link = dialed(&mut legs, &mut links, 6, 0, &p);
+        let times = resends(&mut legs, &mut links, link, &p);
+        assert_eq!(
+            times, want,
+            "defect: at a resend interval of {interval} ms the resends are not where the node sends them"
         );
     }
 }

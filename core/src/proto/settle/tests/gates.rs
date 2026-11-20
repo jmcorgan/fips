@@ -56,6 +56,7 @@ fn msg1(source: Source, held: Option<Liveness<TestInstant>>, hs: u32) -> Ask<Tes
         held,
         ephemeral: Some(eph(hs)),
         epoch: epoch(1),
+        memory: None,
     }
 }
 
@@ -66,6 +67,7 @@ fn msg2(source: Source, held: Liveness<TestInstant>) -> Ask<TestInstant> {
         held: Some(held),
         ephemeral: None,
         epoch: epoch(2),
+        memory: None,
     }
 }
 
@@ -170,7 +172,7 @@ fn an_own_msg2_restart_does_not_stamp_the_dampener() {
 fn the_replay_memory_refuses_an_ephemeral_that_already_promoted_an_unheard_peering() {
     let mut g = Gates::new();
     let p = Params::default();
-    g.promoted(peer(), eph(1), t(0), &p);
+    g.promoted(peer(), eph(1), t(0), None, &p);
     assert_eq!(
         gate(
             &mut g,
@@ -179,7 +181,7 @@ fn the_replay_memory_refuses_an_ephemeral_that_already_promoted_an_unheard_peeri
         ),
         None
     );
-    g.promoted(peer(), eph(2), t(1_000), &p);
+    g.promoted(peer(), eph(2), t(1_000), None, &p);
     let replay = gate(
         &mut g,
         msg1(Source::Replacement, Some(unheard(1_000)), 1),
@@ -199,7 +201,7 @@ fn the_replay_memory_holds_at_most_eight() {
     let mut g = Gates::new();
     let p = Params::default();
     let mut installed = 0;
-    g.promoted(peer(), eph(0), t(0), &p);
+    g.promoted(peer(), eph(0), t(0), None, &p);
     for hs in 1..8u32 {
         let at = u64::from(hs) * 1_000;
         let ask = msg1(Source::Replacement, Some(unheard(installed)), hs);
@@ -208,7 +210,7 @@ fn the_replay_memory_holds_at_most_eight() {
             None,
             "precondition: replacement {hs} accepted"
         );
-        g.promoted(peer(), eph(hs), t(at), &p);
+        g.promoted(peer(), eph(hs), t(at), None, &p);
         installed = at;
     }
     let ninth = gate(
@@ -223,9 +225,9 @@ fn the_replay_memory_holds_at_most_eight() {
 fn a_frame_forgets_the_replay_memory_and_the_silent_sessions() {
     let mut g = Gates::new();
     let p = Params::default();
-    g.promoted(peer(), eph(1), t(0), &p);
+    g.promoted(peer(), eph(1), t(0), None, &p);
     for hs in 10..13 {
-        g.ended(peer(), epoch(1), Some(eph(hs)), t(0), &p);
+        g.ended(peer(), epoch(1), Some(eph(hs)), t(0), None, &p);
     }
     let silent = gate(&mut g, msg1(Source::NotHeld, None, 20), 1_000);
     assert_eq!(
@@ -247,19 +249,25 @@ fn a_frame_forgets_the_replay_memory_and_the_silent_sessions() {
 fn silent_sessions_start_a_refusal_at_the_third_in_a_row() {
     let mut g = Gates::new();
     let p = Params::default();
-    assert_eq!(g.ended(peer(), epoch(1), Some(eph(1)), t(0), &p), None);
     assert_eq!(
-        g.ended(peer(), epoch(1), Some(eph(1)), t(0), &p),
+        g.ended(peer(), epoch(1), Some(eph(1)), t(0), None, &p),
+        None
+    );
+    assert_eq!(
+        g.ended(peer(), epoch(1), Some(eph(1)), t(0), None, &p),
         None,
         "a session counted once"
     );
-    assert_eq!(g.ended(peer(), epoch(1), Some(eph(2)), t(0), &p), None);
+    assert_eq!(
+        g.ended(peer(), epoch(1), Some(eph(2)), t(0), None, &p),
+        None
+    );
     assert_eq!(
         gate(&mut g, msg1(Source::NotHeld, None, 9), 0),
         None,
         "two in a row refuse nothing"
     );
-    let third = g.ended(peer(), epoch(1), Some(eph(3)), t(0), &p);
+    let third = g.ended(peer(), epoch(1), Some(eph(3)), t(0), None, &p);
     assert_eq!(third, Some(Duration::from_secs(30)));
     assert_eq!(
         gate(&mut g, msg1(Source::NotHeld, None, 9), 29_999),
@@ -287,7 +295,7 @@ fn each_further_silent_session_doubles_the_refusal_up_to_its_cap() {
     let p = Params::default();
     let got: Vec<Option<u64>> = (1..=9u32)
         .map(|hs| {
-            g.ended(peer(), epoch(1), Some(eph(hs)), t(u64::from(hs)), &p)
+            g.ended(peer(), epoch(1), Some(eph(hs)), t(u64::from(hs)), None, &p)
                 .map(|d| d.as_secs())
         })
         .collect();
@@ -326,6 +334,7 @@ fn gate_memory_holds_no_entry_once_an_identitys_state_has_lapsed() {
             held: None,
             ephemeral: Some(eph(i)),
             epoch: epoch(1),
+            memory: None,
         };
         assert_eq!(
             g.gate(identity(i), ask, t(u64::from(i)), &p),
@@ -338,9 +347,9 @@ fn gate_memory_holds_no_entry_once_an_identitys_state_has_lapsed() {
     // restart of a heard peering, which stamps the dampener.
     for i in 20_000..20_100u32 {
         let at = t(20_000);
-        g.promoted(identity(i), eph(i), at, &p);
+        g.promoted(identity(i), eph(i), at, None, &p);
         for hs in 0..3 {
-            let _ = g.ended(identity(i), epoch(1), Some(eph(i * 4 + hs)), at, &p);
+            let _ = g.ended(identity(i), epoch(1), Some(eph(i * 4 + hs)), at, None, &p);
         }
         let restart = Ask {
             epoch: epoch(2),
@@ -367,6 +376,51 @@ fn gate_memory_holds_no_entry_once_an_identitys_state_has_lapsed() {
         "defect: gate memory holds {} entries an hour after the last state, \
          where the node's memory holds none",
         g.peers.len()
+    );
+}
+
+#[test]
+fn the_refused_count_goes_with_its_silent_session_record() {
+    // The msg1s a silent-session refusal refuses are counted on the
+    // record, for the shell's lines, so the count lapses with the record
+    // and the gates hold no count beside it to outlive it.
+    let p = Params::default();
+    let mut g: Gates<TestInstant> = Gates::new();
+    assert_eq!(g.count_refused(&peer()), None, "no record counts nothing");
+    for hs in 1..=3 {
+        let _ = g.ended(peer(), epoch(1), Some(eph(hs)), t(0), None, &p);
+    }
+    assert_eq!(g.count_refused(&peer()), Some(1));
+    assert_eq!(g.count_refused(&peer()), Some(2));
+    assert!(
+        g.ended(peer(), epoch(1), Some(eph(4)), t(1_000), None, &p)
+            .is_some(),
+        "precondition: a fourth silent session extends the refusal"
+    );
+    assert_eq!(
+        g.take_refused(&peer()),
+        2,
+        "the refusal reports what the one before it refused"
+    );
+    assert_eq!(
+        g.count_refused(&peer()),
+        Some(1),
+        "and counts again from none"
+    );
+    let _ = g.ended(peer(), epoch(2), Some(eph(5)), t(2_000), None, &p);
+    assert_eq!(
+        g.take_refused(&peer()),
+        0,
+        "a session at another epoch starts a record that has refused nothing"
+    );
+    assert_eq!(g.count_refused(&peer()), Some(1));
+    // Long past the record's horizon, another identity's session end drops
+    // the lapsed record.
+    let _ = g.ended(identity(1), epoch(1), Some(eph(6)), t(3_600_000), None, &p);
+    assert_eq!(
+        g.count_refused(&peer()),
+        None,
+        "defect: an identity whose record has lapsed still has its refusals counted"
     );
 }
 
@@ -417,11 +471,12 @@ impl Beside {
                             held: self.held,
                             ephemeral: Some(eph(hs.0)),
                             epoch: Some(epoch_of(epoch)),
+                            memory: None,
                         };
                         let r = self.gates.gate(peer(), ask, now, &p);
                         if r.is_none() {
                             self.held = Some(unheard(now.0));
-                            self.gates.promoted(peer(), eph(hs.0), now, &p);
+                            self.gates.promoted(peer(), eph(hs.0), now, None, &p);
                         }
                         r
                     })
@@ -764,5 +819,26 @@ fn the_redial_memory_outlives_a_frame_and_the_lapse_of_the_rest_of_the_identitys
         ),
         Some(Refusal::Redialed),
         "defect: the redial memory went with the frame or the lapse"
+    );
+}
+
+#[test]
+fn the_redial_memory_outlives_the_first_frame_of_a_heard_session_and_a_move() {
+    // The first frame of a session heard from its install and a move that
+    // makes a peering heard each forget part of the identity's memory, and
+    // neither forgets its redial memory, which only the swap does.
+    let params = Params::default();
+    let mut g = Gates::new();
+    g.redialed(peer(), eph(2), t(40_000), &params);
+    g.framed(&peer());
+    g.forget(&peer());
+    assert_eq!(
+        gate(
+            &mut g,
+            msg1(Source::Redial, Some(heard(0, Some(40_500))), 2),
+            41_000
+        ),
+        Some(Refusal::Redialed),
+        "defect: the redial memory went with the frame or the move"
     );
 }

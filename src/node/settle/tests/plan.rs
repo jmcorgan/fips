@@ -66,7 +66,7 @@ const PROMOTE_OUT: &[(Effect, &str)] = &[
         Effect::PathsRenewed,
         "Box::pin(self.paths_renewed(&node_addr)).await",
     ),
-    (Effect::DialForget, "self.pending_outbound.forget(&key)"),
+    (Effect::DialForget, "self.drop_leg(link_id)"),
     (
         Effect::PromotedNote,
         "info!(.., \"Peer promoted to active\")",
@@ -159,7 +159,7 @@ const MOVE: &[(Effect, &str)] = &[
         Effect::MachineCrossed,
         "self.observe_cross_conn_resolved(&peer_node_addr, outcome)",
     ),
-    (Effect::DialForget, "self.pending_outbound.forget(&key)"),
+    (Effect::DialForget, "self.drop_leg(link_id)"),
     (
         Effect::LoserClose,
         "self.close_handshake_link_connection(loser).await",
@@ -195,7 +195,7 @@ const KEEP: &[(Effect, &str)] = &[
         Effect::MachineCrossed,
         "self.observe_cross_conn_resolved(&peer_node_addr, outcome)",
     ),
-    (Effect::DialForget, "self.pending_outbound.forget(&key)"),
+    (Effect::DialForget, "self.drop_leg(link_id)"),
     (
         Effect::LoserClose,
         "self.close_handshake_link_connection(link_id).await",

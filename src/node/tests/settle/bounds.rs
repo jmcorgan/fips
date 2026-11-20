@@ -42,7 +42,7 @@ async fn dial_unanswered() -> (Vec<TestNode>, LinkId, ReceivedPacket, SessionInd
         .sender_idx;
     let link = *nodes[0]
         .node
-        .pending_outbound
+        .pending_outbound()
         .get(&(tid, observed.as_u32()))
         .expect("precondition: the dial is registered under its msg1 index");
     (nodes, link, msg1, observed)
@@ -95,17 +95,23 @@ fn sizes(node: &Node, others: &[NodeAddr]) -> Vec<(&'static str, usize)> {
     let mut sizes = vec![
         ("peers", node.peers.len()),
         ("peer_machines", node.peer_machines.len()),
-        ("pending_outbound", node.pending_outbound.len()),
+        ("pending_outbound", node.pending_outbound().len()),
         ("links", node.links.len()),
         ("addr_to_link", node.links.index().len()),
         ("peers_by_index", node.peers_by_index.len()),
         ("index_allocator", node.index_allocator.count()),
         ("link_records", node.link_records.len()),
-        ("restart_dampener", node.restart_dampener.len()),
+        (
+            "restart_dampener",
+            node.gates
+                .known()
+                .filter(|p| node.gates.stamp(p).is_some())
+                .count(),
+        ),
     ];
     for peer in others {
-        sizes.push(("replayed_msg1s", node.replayed_msg1s.count(peer)));
-        let silent = node.silent_sessions.count(peer).unwrap_or(0);
+        sizes.push(("replayed_msg1s", node.gates.replays(peer)));
+        let silent = node.gates.silent(peer).unwrap_or(0);
         sizes.push(("silent_sessions", silent as usize));
     }
     sizes
@@ -138,7 +144,7 @@ async fn spray_keeps_the_dial(replay: bool) {
     }
     if nodes[0]
         .node
-        .pending_outbound
+        .pending_outbound()
         .get(&(tid, observed.as_u32()))
         != Some(&link)
     {

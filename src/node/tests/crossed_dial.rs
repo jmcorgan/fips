@@ -200,7 +200,7 @@ pub(super) async fn cross_dials_from(dial: Dial, config: crate::config::Config) 
         .await
         .expect("precondition: l's dial starts");
     let outbound = {
-        let keys: Vec<_> = nodes[s].node.pending_outbound.keys().copied().collect();
+        let keys: Vec<_> = nodes[s].node.pending_outbound().keys().copied().collect();
         assert_eq!(keys.len(), 1, "precondition: s has one dial pending");
         assert_eq!(keys[0].0, s_tid, "precondition: s's dial is on {s_tid:?}");
         SessionIndex::new(keys[0].1)
@@ -598,7 +598,7 @@ async fn a_crossed_dial_won_on_the_tie_break_keeps_the_pin() {
         "precondition: s holds l and pinned its link"
     );
     assert_eq!(
-        nodes[s].node.pending_outbound.len(),
+        nodes[s].node.pending_outbound().len(),
         1,
         "precondition: s dialled l once"
     );
@@ -698,7 +698,7 @@ async fn a_crossed_dial_won_on_the_tie_break_keeps_the_pin_when_the_peers_leg_is
         "precondition: the leg's link was allocated before s's dial"
     );
     let outbound = {
-        let keys: Vec<_> = nodes[s].node.pending_outbound.keys().copied().collect();
+        let keys: Vec<_> = nodes[s].node.pending_outbound().keys().copied().collect();
         assert_eq!(keys.len(), 1, "precondition: s has one dial pending");
         SessionIndex::new(keys[0].1)
     };
@@ -785,7 +785,7 @@ async fn a_crossed_dial_won_on_the_tie_break_keeps_the_pin_when_the_peers_leg_is
         "precondition: s moved to its own dial's session"
     );
     assert_eq!(
-        nodes[s].node.pending_outbound.len(),
+        nodes[s].node.pending_outbound().len(),
         0,
         "precondition: s's dial was answered"
     );

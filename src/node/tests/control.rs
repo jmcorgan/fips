@@ -1300,7 +1300,7 @@ fn plant_lost_dial(
     origin: crate::peer::machine::DialOrigin,
     dial_ms: u64,
 ) -> LinkId {
-    use crate::peer::machine::{PeerEvent, PeerMachine, TimerKind};
+    use crate::peer::machine::{PeerEvent, PeerMachine};
     use crate::proto::fmp::LegStamp;
 
     let link_id = node.allocate_link_id();
@@ -1323,18 +1323,21 @@ fn plant_lost_dial(
             connection_oriented: false,
         },
         dial_ms,
-        &mut node.index_allocator,
     );
+    let index = our_lease.index();
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport);
     machine.set_conn_source_addr(addr.clone());
     machine.set_leg(conn.take_leg().unwrap());
     node.peer_machines.raw().insert(link_id, machine);
-    node.peer_machines
-        .raw_timers()
-        .entry(link_id)
-        .or_default()
-        .insert(TimerKind::HandshakeTimeout, dial_ms + 30_000);
+    node.links.open(crate::transport::Link::connectionless(
+        link_id,
+        transport,
+        addr.clone(),
+        crate::transport::LinkDirection::Outbound,
+        std::time::Duration::from_millis(100),
+    ));
+    node.plant_dial_at((transport, index), link_id, None);
     link_id
 }
 

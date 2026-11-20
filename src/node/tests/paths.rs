@@ -276,7 +276,7 @@ async fn a_crossed_dial_starts_the_bundle_on_the_pair_its_msg2_came_from() {
         .await
         .expect("precondition: l's dial starts");
     let outbound = {
-        let keys: Vec<_> = nodes[s].node.pending_outbound.keys().copied().collect();
+        let keys: Vec<_> = nodes[s].node.pending_outbound().keys().copied().collect();
         assert_eq!(keys.len(), 1, "precondition: s has one dial pending");
         assert_eq!(keys[0].0, t2(), "precondition: s's dial is on t2");
         SessionIndex::new(keys[0].1)
@@ -2530,7 +2530,8 @@ async fn a_msg1_from_a_probing_pair_gets_no_waiver_and_one_from_an_acked_pair_do
     let r = TransportAddr::from_string("loopback:inc4-r");
     let a = &mut nodes[0].node;
     a.get_peer_mut(&b).unwrap().admit_path(t2(), r.clone());
-    let waiver = |a: &Node| {
+    let waiver = |a: &mut Node| {
+        a.resync();
         let established = a.is_established_link_msg1(t2(), &r);
         (established, a.msg1_waiver(established, t2(), &r))
     };

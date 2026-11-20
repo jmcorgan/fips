@@ -60,11 +60,15 @@ async fn pair(on: bool) -> (Vec<TestNode>, Vec<PathRef>) {
 pub(super) fn dial_of_its_own(node: &mut Node, peer: &NodeAddr) {
     let spare = super::spare(node, peer);
     let key = (spare.transport, 0x0dd_d1a1);
+    let held = node
+        .get_peer(peer)
+        .map(crate::peer::ActivePeer::link_id)
+        .expect("precondition: the peer is held");
     assert!(
-        node.pending_outbound.contains_key(&key),
+        node.leg(held).is_some(),
         "precondition: dirty noted its dial"
     );
-    node.pending_outbound.forget(&key);
+    node.forget_leg(held);
     let id = node.allocate_link_id();
     node.links.open(crate::transport::Link::new(
         id,
@@ -73,7 +77,7 @@ pub(super) fn dial_of_its_own(node: &mut Node, peer: &NodeAddr) {
         crate::transport::LinkDirection::Outbound,
         Duration::from_millis(50),
     ));
-    node.pending_outbound.note(key, id);
+    node.plant_dial_at(key, id, None);
 }
 
 /// Leave the rows [`dirty`] toggles from the peering's current state unlike
@@ -196,7 +200,7 @@ async fn restart(on: bool) {
     unlike_new(&mut nodes[0].node, &b, &mut pairs);
     // No stamp, so that a stamp shows, and a stale one pruned does not pass
     // for it.
-    nodes[0].node.restart_dampener.remove(&b);
+    nodes[0].node.gates.unstamp(&b);
     quiet(&mut nodes[0].node, &b);
     let old = nodes[0].node.get_peer(&b).map(|p| p.link_id());
     restart_one(&mut nodes, on).await;
@@ -325,7 +329,7 @@ async fn replacement(on: bool) {
     unlike_new(&mut nodes[0].node, &b, &mut pairs);
     // No stamp, so that a stamp would show: an accepted msg1 also prunes
     // every stamp past the interval, as [`dirty`]'s is.
-    nodes[0].node.restart_dampener.remove(&b);
+    nodes[0].node.gates.unstamp(&b);
     crate::time::advance(Duration::from_millis(UNHEARD_PEERING_MIN_AGE_MS + 500));
     let mut second = second;
     second.timestamp_ms = Node::now_ms();
@@ -486,7 +490,7 @@ async fn a_restart_seen_in_our_msg2_replaces_the_peer_as_the_table_says_with_mul
 async fn refused(on: bool) {
     let mut nodes = super::peered(on).await;
     let b = *nodes[1].node.node_addr();
-    nodes[0].node.restart_dampener.remove(&b);
+    nodes[0].node.gates.unstamp(&b);
     quiet(&mut nodes[0].node, &b);
     let old = nodes[0]
         .node
@@ -588,7 +592,7 @@ async fn ble_restart(on: bool) {
         addr: link.clone(),
     }];
     unlike_new(&mut nodes[1].node, &a, &mut pairs);
-    nodes[1].node.restart_dampener.remove(&a);
+    nodes[1].node.gates.unstamp(&a);
     let marked = mark_at(&nodes[1], &link).await;
     let before = Seen::of(&nodes[1].node, &a, &pairs).await;
     let msg1 = genuine_msg1(&nodes[0].node, &nodes[1].node);

@@ -759,10 +759,7 @@ fn dial_seen(world: &World, from: usize, to: usize) -> Option<(LinkState, bool, 
         .pending_connects
         .iter()
         .any(|p| p.link_id == id);
-    let resends = node
-        .peer_machines
-        .get(&id)
-        .is_some_and(|m| m.conn_handshake_msg1().is_some());
+    let resends = node.leg(id).is_some();
     Some((link.state(), connecting, resends))
 }
 
@@ -830,6 +827,66 @@ async fn a_dial_in_a_world_goes_through_initiate_connection_on_ble() {
 #[tokio::test]
 async fn a_dial_in_a_world_goes_through_initiate_connection_on_ble_with_multipath_on() {
     dial_made(Medium::Ble, true).await;
+}
+
+/// A dial whose msg1 is lost, past its handshake deadline: the node reaps
+/// it in its peers' timers (`drive_peer_timers`), not in `check_timeouts`,
+/// and the shadow settlement core runs its legs' timers in the same place,
+/// so after `check_timeouts` alone both still hold the dial and the
+/// shadow's comparison finds no difference, and after the timers both have
+/// reaped it, the core by its own reap and not by being handed the node's
+/// give-up.
+async fn reaped_where_the_node_does(on: bool) {
+    let mut world = World::new(Medium::Loopback, 2, on).await;
+    world.dial(0, 1, 0).await;
+    world.clear();
+    let link = world.nodes[0].node.peer_machines.keys().next().copied();
+    crate::time::advance(Duration::from_secs(40));
+    world.nodes[0].node.check_timeouts().await;
+    let node = &world.nodes[0].node;
+    let after_check = (
+        link.is_some_and(|l| node.links.contains_key(&l)),
+        link.and_then(|l| node.shadow.no(l)).is_some(),
+        node.shadow.diverged(),
+    );
+    world.nodes[0]
+        .node
+        .drive_peer_timers(Node::interval_ms())
+        .await;
+    let node = &world.nodes[0].node;
+    let after_timers = (
+        link.is_some_and(|l| node.links.contains_key(&l)),
+        link.and_then(|l| node.shadow.no(l)).is_some(),
+        node.shadow.diverged(),
+    );
+    let fed = node.shadow.seen("ConnectFailed");
+    cleanup_nodes(&mut world.nodes).await;
+    assert!(link.is_some(), "precondition: the dial has a machine");
+    assert_eq!(
+        after_check,
+        (true, true, false),
+        "defect: after check_timeouts alone the node and the shadow do not both hold the dial \
+         (node, shadow, diverged)"
+    );
+    assert_eq!(
+        after_timers,
+        (false, false, false),
+        "after the peers' timers both have reaped the dial (node, shadow, diverged)"
+    );
+    assert_eq!(
+        fed, 0,
+        "defect: the shadow core was handed the node's give-up of the dial instead of reaping it"
+    );
+}
+
+#[tokio::test]
+async fn the_shadow_core_reaps_a_dial_where_the_node_does() {
+    reaped_where_the_node_does(false).await;
+}
+
+#[tokio::test]
+async fn the_shadow_core_reaps_a_dial_where_the_node_does_with_multipath_on() {
+    reaped_where_the_node_does(true).await;
 }
 
 /// The session `world`'s node `at` holds its peer `peer` on: (ours, theirs).

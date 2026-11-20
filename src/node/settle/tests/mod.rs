@@ -28,8 +28,8 @@ fn dropping_a_machine_drops_its_timers_and_leaves_other_links() {
     let mut map = MachineMap::default();
     map.add(one, machine(one));
     map.add(two, machine(two));
-    map.arm(one, TimerKind::HandshakeTimeout, 5000);
-    map.arm(two, TimerKind::HandshakeTimeout, 6000);
+    map.arm(one, TimerKind::Liveness, 5000);
+    map.arm(two, TimerKind::Liveness, 6000);
 
     map.drop(one);
 
@@ -40,7 +40,7 @@ fn dropping_a_machine_drops_its_timers_and_leaves_other_links() {
     );
     assert!(map.contains_key(&two), "another link keeps its machine");
     assert_eq!(
-        map.timers()[&two].get(&TimerKind::HandshakeTimeout),
+        map.timers()[&two].get(&TimerKind::Liveness),
         Some(&6000),
         "another link keeps its timers"
     );
@@ -50,27 +50,20 @@ fn dropping_a_machine_drops_its_timers_and_leaves_other_links() {
 fn arming_a_timer_again_replaces_its_deadline_and_cancelling_keeps_the_links_store() {
     let link = LinkId::new(1);
     let mut map = MachineMap::default();
-    map.arm(link, TimerKind::HandshakeRetransmit, 1000);
-    map.arm(link, TimerKind::HandshakeRetransmit, 2000);
-    map.arm(link, TimerKind::HandshakeTimeout, 9000);
+    map.arm(link, TimerKind::Liveness, 1000);
+    map.arm(link, TimerKind::Liveness, 2000);
     assert_eq!(
-        map.timers()[&link].get(&TimerKind::HandshakeRetransmit),
+        map.timers()[&link].get(&TimerKind::Liveness),
         Some(&2000),
         "the second arm replaces the deadline"
     );
 
-    map.cancel(link, TimerKind::HandshakeRetransmit);
-    assert_eq!(
-        map.timers()[&link].get(&TimerKind::HandshakeTimeout),
-        Some(&9000),
-        "cancelling one kind leaves the other armed"
-    );
-    map.cancel(link, TimerKind::HandshakeTimeout);
+    map.cancel(link, TimerKind::Liveness);
     assert!(
         map.timers()[&link].is_empty(),
         "the link keeps an empty store, as the timer sites left it"
     );
-    map.cancel(LinkId::new(2), TimerKind::HandshakeTimeout);
+    map.cancel(LinkId::new(2), TimerKind::Liveness);
     assert!(
         !map.timers().contains_key(&LinkId::new(2)),
         "cancelling on a link with no store makes none"
@@ -85,24 +78,6 @@ fn ensuring_a_machine_keeps_the_one_the_link_has_and_makes_one_otherwise() {
     assert!(map.contains_key(&link), "a link with none gets a machine");
     map.ensure(link, || panic!("the link already has a machine"));
     assert_eq!(map.len(), 1);
-}
-
-#[test]
-fn noting_a_dial_again_replaces_its_link_and_forgetting_leaves_other_dials() {
-    let tid = TransportId::new(1);
-    let mut map = DialMap::default();
-    map.note((tid, 7), LinkId::new(1));
-    map.note((tid, 7), LinkId::new(2));
-    map.note((tid, 8), LinkId::new(3));
-    assert_eq!(map.get(&(tid, 7)), Some(&LinkId::new(2)));
-
-    map.forget(&(tid, 7));
-    assert!(!map.contains_key(&(tid, 7)), "the dial is forgotten");
-    assert_eq!(
-        map.get(&(tid, 8)),
-        Some(&LinkId::new(3)),
-        "another dial stays"
-    );
 }
 
 /// A peer with a fresh identity on `link`, and its address.
@@ -344,13 +319,10 @@ fn only_the_ways_past_the_writers_mark_a_map_planted() {
     let link = LinkId::new(1);
     let mut machines = MachineMap::default();
     machines.add(link, machine(link));
-    machines.arm(link, TimerKind::HandshakeTimeout, 1);
-    machines.cancel(link, TimerKind::HandshakeTimeout);
+    machines.arm(link, TimerKind::Liveness, 1);
+    machines.cancel(link, TimerKind::Liveness);
     machines.ensure(link, || machine(link));
     machines.drop(link);
-    let mut dials = DialMap::default();
-    dials.note((TransportId::new(1), 1), link);
-    dials.forget(&(TransportId::new(1), 1));
     let mut peers = PeerMap::default();
     let (addr, held) = peer(link);
     peers.install(addr, held);
@@ -375,16 +347,11 @@ fn only_the_ways_past_the_writers_mark_a_map_planted() {
     links.open(self::link(1, "10.0.0.1:2121"));
     links.forget(&link, &key("10.0.0.1:2121"));
     assert!(
-        !machines.planted()
-            && !dials.planted()
-            && !peers.planted()
-            && !indices.planted()
-            && !links.planted(),
+        !machines.planted() && !peers.planted() && !indices.planted() && !links.planted(),
         "no writer marks its map"
     );
 
     machines.raw();
-    dials.raw();
     peers.raw();
     indices.raw();
     let mut timers = MachineMap::default();
@@ -393,7 +360,6 @@ fn only_the_ways_past_the_writers_mark_a_map_planted() {
     let mut index = LinkTable::default();
     index.raw_index();
     assert!(machines.planted(), "raw marks the machines");
-    assert!(dials.planted(), "raw marks the dials");
     assert!(peers.planted(), "raw marks the peers");
     assert!(indices.planted(), "raw marks the indices");
     assert!(timers.planted(), "raw_timers marks the machines");
@@ -434,8 +400,9 @@ fn the_live_audit_fails_a_link_no_peer_machine_or_dial_names() {
 #[should_panic(expected = "audit_live: test: dial-link")]
 fn the_live_audit_fails_a_pending_dial_whose_link_is_not_in_the_link_map() {
     let mut node = bare();
-    node.pending_outbound
-        .note((TransportId::new(1), 5), LinkId::new(1));
+    node.links.open(link(1, "10.0.0.1:2121"));
+    node.plant_dial_at((TransportId::new(1), 5), LinkId::new(1), None);
+    node.links.close(&LinkId::new(1));
     audit::live(&node, "test");
 }
 
@@ -445,8 +412,7 @@ fn the_live_audit_fails_a_pending_dial_whose_link_is_not_in_the_link_map() {
 fn the_live_audit_fails_an_index_entry_naming_no_live_link() {
     let mut node = bare();
     node.links.open(link(1, "10.0.0.1:2121"));
-    node.pending_outbound
-        .note((TransportId::new(1), 5), LinkId::new(1));
+    node.plant_dial_at((TransportId::new(1), 5), LinkId::new(1), None);
     node.links.plant_entry(key("10.0.0.2:2121"), LinkId::new(2));
     audit::live(&node, "test");
 }
@@ -458,7 +424,7 @@ fn the_live_audit_fails_an_index_entry_off_its_links_pair_and_every_path() {
     let mut node = bare();
     let one = LinkId::new(1);
     node.links.open(link(1, "10.0.0.1:2121"));
-    node.pending_outbound.note((TransportId::new(1), 5), one);
+    node.plant_dial_at((TransportId::new(1), 5), one, None);
     node.links.claim(one, key("10.0.0.9:2121"));
     audit::live(&node, "test");
 }

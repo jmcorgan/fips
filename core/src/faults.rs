@@ -295,6 +295,16 @@ faults! {
     /// machine reports each loss for one before the new session is
     /// promoted.
     RestartNoRetry,
+    /// The settlement core removes a peer a redial's swap replaces with no
+    /// reconnect, though the peer's control machine reports the loss for
+    /// one before the redial's leg is promoted.
+    RedialNoRetry,
+    /// The settlement core installs the peer a redial's swap promotes
+    /// heard at the swap, forgetting its replay memory and silent sessions
+    /// there, where the node promotes the redial's leg unheard, noting its
+    /// ephemeral, and hears it at the proving frame's own entry, a later
+    /// one under decrypt workers.
+    RedialSwapHeard,
     /// The settlement core's removal of an orphaned or disconnected peer
     /// closes every pair of its link no other link uses, a setup pair the
     /// bundle released to keep included, and leaves the pair a
@@ -504,7 +514,9 @@ faults! {
     /// A redial is answered whatever the ACL says of its identity.
     RedialSkipsAcl,
     /// An operator disconnect of a held peer leaves its pending redial, so
-    /// the redial's first frame promotes the peer again.
+    /// the redial's first frame promotes the peer again. Read by the node
+    /// and by the settlement core, whose disconnect abandons the pending
+    /// redial as the node drops it.
     RedialKeptAtDisconnect,
     /// A link rekey reads every msg2 under its attempt's index, however
     /// many it has refused, as before the cap: a party that saw the rekey's
@@ -536,6 +548,11 @@ faults! {
     /// configured with another multiplier would resend on another schedule
     /// than the one it runs today.
     BackoffDoubles,
+    /// The settlement core sends a dial's first msg1 resend one configured
+    /// resend interval after the msg1, where the node sends it a second
+    /// after, whatever the interval, so a node configured with another
+    /// interval would send its first resend at another instant.
+    FirstResendAtInterval,
     /// The settlement core ignores a dial's own resend cap, so a dial an
     /// mDNS advert directs at a node not configured to dial resends the
     /// configured count, where the node stops it at its discovery cap.
@@ -545,11 +562,43 @@ faults! {
     /// in no index and in use by nothing, where the node's link and index
     /// entry exist from the dial.
     ConnectingUnlinked,
+    /// The settlement core closes the pair a dial still connecting dialed
+    /// when the dial is given up, where the node closes nothing for a dial
+    /// it gives up before its msg1.
+    ConnectingCloses,
+    /// The settlement core closes the msg1's pair when it gives up an
+    /// answer whose msg2 could not be sent at all, where the node forgets
+    /// the link and closes nothing.
+    UnsendableCloses,
+    /// The settlement core gives up a redial's answer whose msg2 could not
+    /// be sent and keeps the identity's pending redial on its retired link,
+    /// where the node forgets the redial with the leg's machine.
+    UnsendableKeepsRedial,
+    /// The settlement core closes a torn-down link's paths by its records
+    /// alone, not by its bundle's keep, where the node closes, on a capable
+    /// link, each path other than the one the peer sends on, and on any
+    /// other none.
+    TeardownIgnoresKeep,
     /// The settlement core says a move onto this node's own dial ends an
     /// operator's pin of the peer's path only when the link it left was
     /// this node's dial, where the node also ends it when the dial was made
     /// while the peer was held on that link (`own_dial || later_dial`).
     UnpinOwnOnly,
+    /// The settlement core's frame on a peering heard already, by this
+    /// node's own dial or a move, forgets the replay memory an earlier
+    /// unheard peering left, where the node forgets it only at the frame or
+    /// move that makes the peering heard.
+    FrameForgetsReplays,
+    /// The settlement core counts a removed session toward the identity's
+    /// silent-session back-off only when the peering was unheard, so a
+    /// session of this node's own dial that ends before the peer's first
+    /// frame is not counted, where the node counts every session that
+    /// carried no frame.
+    SilentReadsHeard,
+    /// The settlement core resets a peer, as at a roam, when its link's one
+    /// path roams while it is not the active path, where the node moves the
+    /// path and resets nothing.
+    StandbyRoamResets,
     /// The settlement core asks for a msg1's answer before it classifies
     /// the msg1, so a refused or rekey msg1 would cost a msg2 write and an
     /// index draw, as the answer built before the decision did.
@@ -558,6 +607,27 @@ faults! {
     /// msg1 from a new identity is answered and a dial to one installed,
     /// where the node drops the msg1 and refuses the promotion.
     CapNotCounted,
+    /// The settlement core's restart gates judge a new epoch in the msg2 of
+    /// this node's own dial as they judge a msg1 restart, by the floors and
+    /// the dampener, where the node accepts it as the reply to its own
+    /// msg1. The node half of the gates' switch of the same name.
+    OutboundGated,
+    /// The settlement core's restart interval is 10 s, so the dampener
+    /// accepts a second restart 12 s after the first, which the node
+    /// refuses. The node half of the core parameters' switch of the same
+    /// name.
+    IntervalTen,
+    /// The node's test-only shadow of the settlement core is dropped with
+    /// its node still holding the leases of its legs and installed peers.
+    ShadowKeepsLeases,
+    /// The node's test-only resync writes nothing into its shadow of the
+    /// settlement core, so a peer, link, index entry or handshake a test
+    /// planted, or a fact a test setter changed, is missing from it.
+    PlantSkipped,
+    /// A frame that roams a link's one path while it is not the active
+    /// path tells the settlement core's record nothing of the pair it left,
+    /// so the record gains the new pair and keeps the old.
+    StandbyRoamUnfed,
 }
 
 impl Fault {

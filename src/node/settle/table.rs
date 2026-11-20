@@ -509,11 +509,12 @@ listed! {
         Bloom,
         /// The tree state.
         Tree,
-        /// `restart_dampener`.
+        /// The restart gates' dampener stamps (`gates`).
         Dampener,
-        /// `silent_sessions`.
+        /// The restart gates' silent-session records (`gates`), and the
+        /// refusals counted against them (`refusals`).
         Silent,
-        /// `replayed_msg1s`.
+        /// The restart gates' replay memory (`gates`).
         Replayed,
         /// `link_records`.
         Records,

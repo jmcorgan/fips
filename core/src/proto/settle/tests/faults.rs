@@ -49,6 +49,7 @@ const LINKS: &str = "proto::settle::links::tests::";
 const GATES: &str = "proto::settle::gates::tests::";
 const LEGS: &str = "proto::settle::legs::tests::";
 const TABLE: &str = "proto::settle::table::tests::";
+const JOIN: &str = "proto::settle::join::tests::";
 const CANDIDATES: &str = "proto::settle::tests::candidates::";
 const CMP: &str = "proto::settle::tests::cmp::";
 const EXPLORE: &str = "proto::settle::tests::explore::";
@@ -400,16 +401,49 @@ pub const ROWS: &[Row] = &[
             "a_frame_forgets_the_replay_memory_and_the_silent_sessions",
         )],
     ),
+    // Not in the joint world: no joint test, scripted start or sweep of the
+    // default build reds with it on. The memory it drops is read again only
+    // once that heard peering is gone and a later one is unheard.
+    (
+        Fault::FrameForgetsReplays,
+        &[(
+            TABLE,
+            "a_frame_on_a_peering_heard_from_its_install_keeps_the_replay_memory_and_forgets_the_silent_sessions",
+        )],
+    ),
+    // Not in the joint world: no joint test, scripted start or sweep of the
+    // default build reds with it on. The count it leaves out is read only by
+    // a later msg1 of the same identity at the same epoch, and only once
+    // three such sessions have ended.
+    (
+        Fault::SilentReadsHeard,
+        &[(
+            TABLE,
+            "an_own_dials_session_that_ends_before_the_peers_first_frame_counts_as_a_silent_session",
+        )],
+    ),
+    // Not in the joint world: no joint test, scripted start or sweep of the
+    // default build reaches a standby path's roam.
+    (
+        Fault::StandbyRoamResets,
+        &[(JOIN, "a_standby_paths_roam_is_moved_and_not_marked_a_roam")],
+    ),
     // Not in the joint world: what the switch keeps is an identity whose
     // stamp, replays and silence have all lapsed, and each gate reads those
     // against its own interval or horizon, so no verdict changes. Only the
-    // memory's size shows the defect, which the gates test reads.
+    // memory's size shows the defect, which the gates tests read.
     (
         Fault::MemoryNeverDropped,
-        &[(
-            GATES,
-            "gate_memory_holds_no_entry_once_an_identitys_state_has_lapsed",
-        )],
+        &[
+            (
+                GATES,
+                "gate_memory_holds_no_entry_once_an_identitys_state_has_lapsed",
+            ),
+            (
+                GATES,
+                "the_refused_count_goes_with_its_silent_session_record",
+            ),
+        ],
     ),
     (
         Fault::SilentEarly,
@@ -449,6 +483,10 @@ pub const ROWS: &[Row] = &[
             (
                 LEGS,
                 "a_responder_leg_answers_a_resend_with_its_stored_msg2_and_is_reclaimed",
+            ),
+            (
+                TABLE,
+                "a_reap_of_one_leg_reaps_only_that_leg_and_only_from_its_deadline",
             ),
             SCRIPTED_OFF,
             SCRIPTED_ON,
@@ -632,6 +670,17 @@ pub const ROWS: &[Row] = &[
         Fault::MoveLeavesUnheard,
         &[SIM_REACHED, PARITY_MODEL, PARITY_JOINT],
     ),
+    // Not in the joint world: no joint test, scripted start or sweep of the
+    // default build reds with it on. A move makes a peering heard only where
+    // a crossing promoted it unheard first, and the memory it keeps is read
+    // again only once that heard peering is gone.
+    (
+        Fault::MoveKeepsReplayMemory,
+        &[(
+            TABLE,
+            "a_move_that_makes_the_peering_heard_forgets_its_replay_memory_and_keeps_its_silent_sessions",
+        )],
+    ),
     (
         Fault::IgnoreOwnDial,
         &[
@@ -698,10 +747,16 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::RedialMemoryLapses,
-        &[(
-            GATES,
-            "the_redial_memory_outlives_a_frame_and_the_lapse_of_the_rest_of_the_identitys_memory",
-        )],
+        &[
+            (
+                GATES,
+                "the_redial_memory_outlives_a_frame_and_the_lapse_of_the_rest_of_the_identitys_memory",
+            ),
+            (
+                GATES,
+                "the_redial_memory_outlives_the_first_frame_of_a_heard_session_and_a_move",
+            ),
+        ],
     ),
     (
         Fault::RedialCompared,
@@ -916,6 +971,31 @@ pub const ROWS: &[Row] = &[
         &[(
             TABLE,
             "a_restarted_or_replaced_peer_is_retried_in_each_of_the_three_ways",
+        )],
+    ),
+    (
+        Fault::RedialNoRetry,
+        &[(TABLE, "a_peer_a_redials_swap_replaces_is_retried")],
+    ),
+    (
+        Fault::UnsendableKeepsRedial,
+        &[(
+            TABLE,
+            "a_redials_answer_given_up_as_unsendable_is_no_longer_a_pending_redial",
+        )],
+    ),
+    (
+        Fault::RedialKeptAtDisconnect,
+        &[(
+            TABLE,
+            "an_operator_disconnect_abandons_the_peers_pending_redial",
+        )],
+    ),
+    (
+        Fault::RedialSwapHeard,
+        &[(
+            TABLE,
+            "a_redials_swap_installs_the_peer_unheard_and_its_frames_heard_hears_it",
         )],
     ),
     // Not in the joint world: no joint node is told of an operator
@@ -1316,6 +1396,17 @@ pub const ROWS: &[Row] = &[
             "a_configured_multiplier_spaces_the_resends_as_the_node_truncates_them",
         )],
     ),
+    // Not in the joint world: every joint node's table takes
+    // `Params::default`, whose resend interval is the node's fixed first
+    // wait, a second. Only another interval shows the defect, which the legs
+    // test sets.
+    (
+        Fault::FirstResendAtInterval,
+        &[(
+            LEGS,
+            "a_dials_first_resend_comes_a_second_after_its_msg1_whatever_the_configured_interval",
+        )],
+    ),
     // Not in the joint world: no joint dial carries a resend cap of its own
     // (the joint party's `Dialed` has `resends: None`), as an mDNS-directed
     // dial does.
@@ -1336,6 +1427,40 @@ pub const ROWS: &[Row] = &[
             (
                 TABLE,
                 "a_dial_after_its_connect_starts_its_leg_on_the_link_the_connect_opened",
+            ),
+        ],
+    ),
+    // Not in the joint world: the joint party hands the core its dial in one
+    // step and tells it of no `Connecting`, so no dial is given up while it
+    // connects.
+    (
+        Fault::ConnectingCloses,
+        &[(TABLE, "a_dial_given_up_while_connecting_closes_nothing")],
+    ),
+    // Not in the joint world: the joint party's sends do not fail.
+    (
+        Fault::UnsendableCloses,
+        &[(
+            TABLE,
+            "an_answer_whose_msg2_cannot_be_sent_is_given_up_and_closes_nothing",
+        )],
+    ),
+    // Not in the joint world by this row: the joint party's closes are
+    // checked by its own oracles.
+    (
+        Fault::TeardownIgnoresKeep,
+        &[
+            (
+                TABLE,
+                "a_teardown_of_a_capable_link_closes_each_path_but_the_one_the_peer_sends_on",
+            ),
+            (
+                TABLE,
+                "a_link_not_known_capable_keeps_its_other_paths_at_an_operator_disconnect",
+            ),
+            (
+                TABLE,
+                "a_link_not_known_capable_keeps_its_other_paths_at_a_move",
             ),
         ],
     ),

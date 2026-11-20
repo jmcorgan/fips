@@ -409,11 +409,11 @@ fn maps_agree(nodes: &[TestNode], i: usize, breaches: &mut Vec<Breach>) {
             what: "a link no peer or handshake leg names",
         });
     }
-    for link in settle::dial_link(node) {
+    for no in settle::dial_link(node) {
         breaches.push(Breach::MapsAgree {
             node: i,
-            link,
-            what: "a pending dial whose link is not in the link map",
+            link: LinkId::new(no.0),
+            what: "a handshake leg whose link is not in the link map, by the core's number",
         });
     }
     for ((tid, remote), link) in node.links.index().iter() {

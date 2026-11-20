@@ -198,3 +198,15 @@ fn freezing_the_monotonic_clock_is_seen_on_its_own_thread_only() {
     let other = std::thread::spawn(is_frozen).join().expect("thread ran");
     assert!(!other, "a freeze reached another thread");
 }
+
+#[test]
+fn an_instant_at_an_interval_reading_reads_back_as_that_reading_and_orders_as_the_readings() {
+    for ms in [0, 1, 999, 1_000, 30_001, 1_700_000_000_000] {
+        assert_eq!(mono_ms_at(mono_at(ms)), ms, "the instant at {ms} ms");
+    }
+    assert!(mono_at(1_000) < mono_at(1_001));
+    assert_eq!(
+        mono_at(1_000).saturating_duration_since(mono_at(0)),
+        Duration::from_secs(1)
+    );
+}

@@ -24,6 +24,7 @@ use crate::nostr::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::peer::machine::{DialOrigin, HandshakeCrypto, PeerEvent, PeerMachine};
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
+use crate::proto::settle::legs::Start;
 use crate::proto::settle::output::Why;
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
 use crate::utils::onlink::OnLinkPrefixes;
@@ -648,6 +649,23 @@ impl Node {
         );
         self.peer_machines.add(link_id, machine);
 
+        // The shadow core opens a dial on a connection still to be made
+        // with no leg, as the node's link and index entry exist from here.
+        #[cfg(test)]
+        if is_connection_oriented {
+            use crate::proto::settle::{input::Input, links::Pair};
+            let input = Input::Connecting {
+                peer: *peer_identity.node_addr(),
+                to: Pair {
+                    transport: transport_id,
+                    addr: remote_addr.clone(),
+                },
+                resends: matches!(origin, DialOrigin::MdnsAdvert)
+                    .then_some(crate::peer::machine::DISCOVERY_RESENDS),
+            };
+            self.decide_at(Some(link_id), input);
+        }
+
         if is_connection_oriented {
             // Connection-oriented: drive the machine to open the transport. The
             // machine parks in `Connecting` and emits one `OpenTransport`; the
@@ -719,11 +737,12 @@ impl Node {
     }
 
     /// Prepare an outbound Noise msg1 at dial: allocate the session index, run
-    /// the Noise leaf, frame the wire, arm the shell-side resend, track
-    /// `pending_outbound`, and embed the prepared connection on the dial-time
-    /// control machine. Returns `Err` on index-allocation or Noise failure
+    /// the Noise leaf, frame the wire, start the dial's leg in the settlement
+    /// core's legs with the msg1 and the lease, which times its resends and
+    /// its deadline and by whose index the msg2 finds the dial, and embed the
+    /// prepared connection on the dial-time control machine. Returns `Err` on index-allocation or Noise failure
     /// (cleaning the partial leg, including the dial-time control machine),
-    /// leaving the armed wire on the connection for `send_stored_msg1` to
+    /// leaving the msg1 on the dial's leg for `send_stored_msg1` to
     /// transmit. Does NOT send — so the fallible setup can propagate its error
     /// synchronously before any machine drive. The control machine itself is
     /// persisted at dial in `initiate_connection`; this function hands it the
@@ -759,6 +778,8 @@ impl Node {
             Some(lease) => lease,
             None => {
                 // Clean up the link and dial-time machine we just created
+                #[cfg(test)]
+                self.shadow_abandon(link_id);
                 self.links
                     .forget(&link_id, &(transport_id, remote_addr.clone()));
                 self.remove_peer_machine(link_id);
@@ -787,6 +808,8 @@ impl Node {
                 let _ = self
                     .index_allocator
                     .free(crate::utils::index::SessionIndex::new(our_lease.release()));
+                #[cfg(test)]
+                self.shadow_abandon(link_id);
                 self.links
                     .forget(&link_id, &(transport_id, remote_addr.clone()));
                 self.remove_peer_machine(link_id);
@@ -812,18 +835,6 @@ impl Node {
             "Connection initiated"
         );
 
-        // The peer machine arms the first msg1 resend when it starts the
-        // handshake, after this preparation, at its own fixed interval; the
-        // wire is stored on the surviving carrier below, where the retransmit
-        // driver reads it. The deadline computed here is handed to the
-        // carrier, which does not use it.
-        let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
-        let first_resend_at_ms = at.interval_ms + resend_interval;
-
-        // Track in pending_outbound for msg2 dispatch
-        self.pending_outbound
-            .note((transport_id, our_index.as_u32()), link_id);
-
         let machine = self
             .peer_machines
             .get_mut(&link_id)
@@ -838,20 +849,70 @@ impl Node {
         // projects it to the promotion hand-off); holds even if a direct caller
         // reached here without the dial-time `on_dial` write.
         machine.set_conn_transport_id(transport_id);
-        // Record our session index on the surviving carrier, the single index
-        // home on the outbound path (the inbound path writes it at authorize).
-        // A dial-time carrier holds no index before its msg1. One it held
-        // would stay allocated, as an overwritten index always has, and the
-        // dropped lease counts the leak.
-        let _ = machine.set_conn_our_index(our_lease);
-        // Store the msg1 wire on the surviving carrier (the connection does not
-        // hold the resend source); the retransmit driver reads it from here.
-        machine.set_conn_handshake_msg1(wire_msg1, first_resend_at_ms);
+        let origin = machine.dial_origin();
+        let held = machine.held_link();
+
+        // The dial's leg, the settlement core's: the msg1, its resends and
+        // the handshake deadline, counted from this preparation on the
+        // interval clock, and the lease this node drew, held until the
+        // dial's msg2 completes it or the leg is reaped. A dial an mDNS
+        // advert directs at a node this node is not configured to dial
+        // resends fewer times. A leg the link already held is given up.
+        #[cfg(test)]
+        let shadow_msg1 = wire_msg1.clone();
+        let Some(no) = self.links.no(&link_id) else {
+            let _ = self
+                .index_allocator
+                .free(crate::utils::index::SessionIndex::new(our_lease.release()));
+            self.remove_peer_machine(link_id);
+            return Err(NodeError::ConnectionNotFound(link_id));
+        };
+        let start = Start {
+            link: no,
+            peer: Some(peer_node_addr),
+            msg1: wire_msg1,
+            lease: our_lease,
+            resends: matches!(origin, DialOrigin::MdnsAdvert)
+                .then_some(crate::peer::machine::DISCOVERY_RESENDS),
+            held: held.and_then(|link| self.links.no(&link)),
+        };
+        let params = crate::node::settle::leg_params(&self.config().node);
+        if let Some(old) = self
+            .legs
+            .dial(start, crate::time::mono_at(at.interval_ms), &params)
+        {
+            let _ = self
+                .index_allocator
+                .free(crate::utils::index::SessionIndex::new(
+                    old.lease().release(),
+                ));
+        }
+
+        // The shadow core's dial, with its msg1 built: on the link a
+        // connection-oriented dial opened, or opening its own. Decided at
+        // the instant the dial's leg was stamped, as the node's leg is.
+        #[cfg(test)]
+        {
+            use crate::proto::settle::{input, links::Pair};
+            let dial = input::Dial {
+                peer: peer_node_addr,
+                to: Pair {
+                    transport: transport_id,
+                    addr: remote_addr.clone(),
+                },
+                msg1: shadow_msg1,
+                lease: self.shadow.lease(our_index.as_u32()),
+                resends: matches!(origin, DialOrigin::MdnsAdvert)
+                    .then_some(crate::peer::machine::DISCOVERY_RESENDS),
+                link: self.shadow.no(link_id),
+            };
+            self.decide_stamped(Some(link_id), input::Input::Dial(dial), at.interval_ms);
+        }
 
         Ok(())
     }
 
-    /// Send the msg1 wire that `prepare_outbound_msg1` armed on the connection.
+    /// Send the msg1 wire that `prepare_outbound_msg1` stored on the dial's leg.
     /// On send error, steps the machine with `HandshakeSendFailed` — the machine
     /// marks its embedded leg failed and RETAINS it (the legacy resend tick
     /// retries); a missing wire or transport is a no-op. This is the body of the
@@ -866,19 +927,15 @@ impl Node {
         remote_addr: &TransportAddr,
         interval_now: u64,
     ) {
-        let wire_msg1 = match self
-            .peer_machines
-            .get(&link_id)
-            .and_then(|machine| machine.conn_handshake_msg1())
-        {
-            Some(w) => w.to_vec(),
-            None => return,
+        let Some(leg) = self.links.no(&link_id).and_then(|no| self.legs.get(no)) else {
+            return;
         };
+        let wire_msg1 = leg.msg1().to_vec();
         let our_index = self
             .peer_machines
             .get(&link_id)
             .filter(|machine| machine.leg().is_some())
-            .and_then(|machine| machine.our_index());
+            .map(|_| crate::utils::index::SessionIndex::new(leg.index()));
 
         // Send the wire format handshake message. It never dials: if the
         // connection the dial resolved to has gone, the send fails at once
@@ -909,11 +966,7 @@ impl Node {
                     // the stale-connection sweep reclaims it, and the
                     // event loop can handle retry logic until then.
                     if let Some(machine) = self.peer_machines.get_mut(&link_id) {
-                        let actions = machine.step(
-                            PeerEvent::HandshakeSendFailed,
-                            interval_now,
-                            &mut self.index_allocator,
-                        );
+                        let actions = machine.step(PeerEvent::HandshakeSendFailed, interval_now);
                         debug_assert!(
                             actions.is_empty(),
                             "HandshakeSendFailed must emit no actions"
@@ -1189,6 +1242,10 @@ impl Node {
                                 .map(|(_, machine)| machine.link_id())
                                 .collect();
                             for link_id in stale {
+                                // An adoption gives up the dial for a cause
+                                // the shadow core has no timer for.
+                                #[cfg(test)]
+                                self.shadow_abandon(link_id);
                                 self.cleanup_stale_connection(link_id, now_ms).await;
                             }
                         }
@@ -1797,6 +1854,8 @@ impl Node {
                 );
 
                 // Clean up link and dial-time machine, then schedule retry
+                #[cfg(test)]
+                self.shadow_abandon(pending.link_id);
                 self.remove_link(&pending.link_id);
                 self.remove_peer_machine(pending.link_id);
                 self.note_handshake_timeout(

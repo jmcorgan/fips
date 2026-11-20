@@ -369,6 +369,8 @@ async fn reaping_a_handshake_leg_keeps_the_peer_link_it_shares() {
         ),
     );
 
+    // Reaped past the node's timers, so the test tells the shadow core.
+    node.shadow_abandon(leg);
     node.cleanup_stale_connection(leg, 2000).await;
 
     assert!(!nodes[0].node.links.contains_key(&leg), "the leg is reaped");
@@ -962,7 +964,7 @@ async fn crossed_on_two_links(
     dial_at(nodes, 0, 1, a1x.clone()).await;
     initiate_handshake(nodes, 1, 0).await;
     let outbound = {
-        let keys: Vec<_> = nodes[0].node.pending_outbound.keys().copied().collect();
+        let keys: Vec<_> = nodes[0].node.pending_outbound().keys().copied().collect();
         assert_eq!(keys.len(), 1, "precondition: node 0 has one dial pending");
         SessionIndex::new(keys[0].1)
     };

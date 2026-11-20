@@ -206,6 +206,13 @@ impl SilentSessions {
         })
     }
 
+    /// The identities a record is held for, for a shell's comparison of
+    /// this memory with another.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn known(&self) -> impl Iterator<Item = &NodeAddr> {
+        self.records.keys()
+    }
+
     /// Silent sessions counted for `peer`, or `None` with no record.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn count(&self, peer: &NodeAddr) -> Option<u32> {

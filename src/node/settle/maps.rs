@@ -1,13 +1,13 @@
 //! The per-peer maps other than the link table: the handshake machines with
-//! their timers, the pending dials, the active peers and the session-index
-//! map.
+//! their timers, the active peers and the session-index map. The handshake
+//! legs are the settlement core's (`Node::legs`).
 
 use std::collections::HashMap;
 
 use crate::NodeAddr;
 use crate::peer::ActivePeer;
 use crate::peer::machine::{PeerMachine, TimerKind};
-use crate::transport::{LinkId, TransportId};
+use crate::transport::LinkId;
 use crate::utils::index::SessionIndex;
 
 /// The per-peer control machines, keyed by the `LinkId` that spans a peer's
@@ -66,7 +66,9 @@ impl MachineMap {
         self.machines.get_mut(link)
     }
 
-    /// The timer store: each link's armed timers and their deadlines (ms).
+    /// The timer store: each link's armed timers and their deadlines (ms),
+    /// which the tests read.
+    #[cfg(test)]
     pub(in crate::node) fn timers(&self) -> &HashMap<LinkId, HashMap<TimerKind, u64>> {
         &self.timers
     }
@@ -91,29 +93,6 @@ impl MachineMap {
     pub(in crate::node) fn raw_timers(&mut self) -> &mut HashMap<LinkId, HashMap<TimerKind, u64>> {
         self.planted = true;
         &mut self.timers
-    }
-}
-
-/// The dials waiting for their msg2, keyed by the transport and the session
-/// index our msg1 carried, naming the dial's link.
-#[derive(Default)]
-pub(in crate::node) struct DialMap {
-    dials: HashMap<(TransportId, u32), LinkId>,
-    #[cfg(test)]
-    planted: bool,
-}
-
-reads!(DialMap, dials, HashMap<(TransportId, u32), LinkId>);
-
-impl DialMap {
-    /// A msg1 sent for the dial on `link`: its msg2 is looked up at `key`.
-    pub(in crate::node) fn note(&mut self, key: (TransportId, u32), link: LinkId) {
-        self.dials.insert(key, link);
-    }
-
-    /// The dial at `key` is over, or its entry stale.
-    pub(in crate::node) fn forget(&mut self, key: &(TransportId, u32)) {
-        self.dials.remove(key);
     }
 }
 
@@ -196,8 +175,7 @@ pub(in crate::node) struct Redial {
     pub(in crate::node) at: u64,
 }
 
-/// The pending redials, at most one per held identity, and the memory of
-/// the msg1 ephemerals that armed one.
+/// The pending redials, at most one per held identity.
 ///
 /// A redial is a fresh same-epoch msg1 that arrived off a held peer's
 /// established link. It is answered by a leg on its own inbound link,
@@ -206,15 +184,14 @@ pub(in crate::node) struct Redial {
 /// when the leg is armed and forgotten when the leg is promoted, reaped or
 /// replaced; the audit's `redial-leg` clause holds each entry to a leg.
 ///
-/// The memory keeps, per identity, the ephemerals that armed a redial in
-/// the last 15 s, so a capture is answered once per interval. It is kept
-/// apart from the replay memory of unheard promotions, which forgets a
-/// peer's entries at its first frame: the held peering keeps sending
-/// frames. It forgets an identity's entries only at that identity's swap.
+/// The memory of the ephemerals that armed a redial is the restart gates'
+/// (`Node.gates`): per identity, the ephemerals of the last 15 s, so a
+/// capture is answered once per interval, kept apart from the replay memory
+/// of unheard promotions, which a frame forgets, and forgotten only at the
+/// identity's swap.
 #[derive(Debug, Default)]
 pub(in crate::node) struct RedialMap {
     by_peer: HashMap<NodeAddr, Redial>,
-    memory: crate::node::handlers::handshake::ReplayedMsg1s,
 }
 
 impl RedialMap {
@@ -251,10 +228,5 @@ impl RedialMap {
     /// Every pending redial.
     pub(in crate::node) fn iter(&self) -> impl Iterator<Item = (&NodeAddr, &Redial)> {
         self.by_peer.iter()
-    }
-
-    /// The memory of the ephemerals that armed a redial.
-    pub(in crate::node) fn seen(&mut self) -> &mut crate::node::handlers::handshake::ReplayedMsg1s {
-        &mut self.memory
     }
 }

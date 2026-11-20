@@ -64,6 +64,14 @@ pub(crate) enum Fault {
     ReplaySeenIgnored,
     /// A frame forgets neither the replay memory nor the silent sessions.
     HeardKeepsMemory,
+    /// A frame on a peering heard already, by this node's own dial or a
+    /// move, forgets the replay memory an earlier unheard peering left.
+    FrameForgetsReplays,
+    /// A removed session counts as silent only when its peering was
+    /// unheard, so an own dial's session with no frame is not counted.
+    SilentReadsHeard,
+    /// A standby path's roam is marked a roam, so the core resets the peer.
+    StandbyRoamResets,
     /// The gates keep a memory entry for every identity they were asked
     /// about, and never drop one whose state has lapsed.
     MemoryNeverDropped,
@@ -109,6 +117,9 @@ pub(crate) enum Fault {
     MoveNoReset,
     /// A move leaves the peering unheard until the peer's first frame.
     MoveLeavesUnheard,
+    /// A move that makes a peering heard keeps the replay memory of the
+    /// msg1s that promoted it unheard.
+    MoveKeepsReplayMemory,
     /// An own dial completing on a held link this node dialed is judged by
     /// the tie-break alone.
     IgnoreOwnDial,
@@ -136,6 +147,14 @@ pub(crate) enum Fault {
     /// peering, or the lapse of the identity's other memory, drops the
     /// ephemerals that armed a redial of it.
     RedialMemoryLapses,
+    /// A redial's swap installs the peer heard, forgetting its replay
+    /// memory and silent sessions at the swap, rather than unheard until
+    /// the frame's own `Heard`.
+    RedialSwapHeard,
+    /// An operator disconnect of a held peer leaves its pending redial.
+    RedialKeptAtDisconnect,
+    /// A redial's answer given up as unsendable leaves the redial's mark.
+    UnsendableKeepsRedial,
     /// A msg1 counts as on the link only from the link's setup address.
     AttributeBySetupOnly,
     /// A msg1 from the pair the core's record of the peer is at counts as
@@ -173,6 +192,8 @@ pub(crate) enum Fault {
     /// A peer removed for a restart, a replacement or an own-dial restart
     /// is removed with no reconnect.
     RestartNoRetry,
+    /// A peer a redial's swap replaces is removed with no reconnect.
+    RedialNoRetry,
     /// An orphaned or disconnected peer's removal closes every pair of its
     /// link no other link uses, and a disconnect guards the peer's pair.
     RemovalClosesEveryPair,
@@ -332,12 +353,25 @@ pub(crate) enum Fault {
     /// A dial's resend waits double from the first interval, whatever
     /// multiplier the node is configured with.
     BackoffDoubles,
+    /// A dial's first resend comes one configured resend interval after
+    /// its msg1, not the node's fixed second.
+    FirstResendAtInterval,
     /// A dial's own resend cap is ignored, so a dial an mDNS advert directs
     /// at a node not configured to dial resends the configured count.
     OriginIgnored,
     /// A dial on a connection still to be opened has no link record until
     /// its msg1, so its address is in no index and in use by nothing.
     ConnectingUnlinked,
+    /// A dial given up while still connecting closes the pair it dialed.
+    ConnectingCloses,
+    /// An answer whose msg2 could not be sent at all closes the msg1's
+    /// pair when it is given up.
+    UnsendableCloses,
+    /// A teardown closes its link's paths by the link's records alone,
+    /// not by its bundle's keep: a removal other than an orphaned bundle's,
+    /// an operator disconnect's and the core's close closes none, and those
+    /// and a move close every path.
+    TeardownIgnoresKeep,
     /// A move onto this node's own dial ends an operator's pin of the
     /// peer's path only when the link it left was this node's dial, not
     /// when the dial was made while the peer was held on that link.
@@ -363,6 +397,9 @@ impl Fault {
         Self::ReplayUnbounded,
         Self::ReplaySeenIgnored,
         Self::HeardKeepsMemory,
+        Self::FrameForgetsReplays,
+        Self::SilentReadsHeard,
+        Self::StandbyRoamResets,
         Self::MemoryNeverDropped,
         Self::SilentEarly,
         Self::SilentFlat,
@@ -382,6 +419,7 @@ impl Fault {
         Self::MoveLeavesDialOpen,
         Self::MoveNoReset,
         Self::MoveLeavesUnheard,
+        Self::MoveKeepsReplayMemory,
         Self::IgnoreOwnDial,
         Self::ModelFallbackInCore,
         Self::ReplacementUngated,
@@ -392,6 +430,9 @@ impl Fault {
         Self::RedialSlotIgnored,
         Self::RedialLegKept,
         Self::RedialMemoryLapses,
+        Self::RedialSwapHeard,
+        Self::RedialKeptAtDisconnect,
+        Self::UnsendableKeepsRedial,
         Self::AttributeBySetupOnly,
         Self::AttributeByCurrent,
         Self::PathMoveIgnored,
@@ -407,6 +448,7 @@ impl Fault {
         Self::OrphanedIgnored,
         Self::OrphanedNoRetry,
         Self::RestartNoRetry,
+        Self::RedialNoRetry,
         Self::RemovalClosesEveryPair,
         Self::CapLifted,
         Self::AnswerBeforeAdmit,
@@ -467,8 +509,12 @@ impl Fault {
         Self::CloseSkipped,
         Self::OrphanKept,
         Self::BackoffDoubles,
+        Self::FirstResendAtInterval,
         Self::OriginIgnored,
         Self::ConnectingUnlinked,
+        Self::ConnectingCloses,
+        Self::UnsendableCloses,
+        Self::TeardownIgnoresKeep,
         Self::UnpinOwnOnly,
     ];
 

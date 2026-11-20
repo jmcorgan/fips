@@ -459,6 +459,7 @@ fn a_roam_is_moved_and_a_bind_is_a_live_path() {
         link: LINK,
         from: Some(from.clone()),
         to: to.clone(),
+        standby: false,
     })
     .iter()
     .map(shown)
@@ -474,6 +475,7 @@ fn a_roam_is_moved_and_a_bind_is_a_live_path() {
         link: LINK,
         from: None,
         to: to.clone(),
+        standby: false,
     })
     .iter()
     .map(shown)
@@ -484,6 +486,35 @@ fn a_roam_is_moved_and_a_bind_is_a_live_path() {
         proven: Proven::Live,
     };
     assert_eq!(bind, [format!("core {live:?}")], "a bind is a Live path");
+}
+
+/// The roam of a link's one path while it is not the active path moves
+/// the path, and is not marked a roam: the node resets nothing for it
+/// (`Roam::changed` is false for a standby roam), so the core must not
+/// reset the peer either.
+#[test]
+fn a_standby_paths_roam_is_moved_and_not_marked_a_roam() {
+    let (from, to) = (pair(&path(1)), pair(&path(2)));
+    let got: Vec<String> = joined(Event::Roam {
+        link: LINK,
+        from: Some(from.clone()),
+        to: to.clone(),
+        standby: true,
+    })
+    .iter()
+    .map(shown)
+    .collect();
+    let moved = In::Moved {
+        link: LINK,
+        from,
+        to,
+        roam: false,
+    };
+    assert_eq!(
+        got,
+        [format!("core {moved:?}")],
+        "defect: a standby path's roam was not a move left unmarked"
+    );
 }
 
 /// A step's outputs come back in the order the machine gave them, each

@@ -20,14 +20,21 @@
 //! wall step does not hold an announce whose interval has passed, and a peer
 //! never sent one is not rate-limited at the clock's first instants.
 //!
+//! A dial's first msg1 resend goes out a second after its msg1 on the
+//! interval clock, whatever the configured resend interval, and the later
+//! ones at waits grown from that interval.
+//!
 //! The node's tick is reproduced as `check_timeouts()` followed by
 //! `drive_peer_timers(Node::interval_ms())`, the order the receive loop runs
 //! them in.
 
 use super::super::establish_chartests::craft_msg1_wire;
-use super::super::link_setup_diag::{EPOCH, Established, established_from, packet, stop_transport};
+use super::super::link_setup_diag::{
+    EPOCH, Established, established_from, hear_now, packet, stop_transport,
+};
 use super::super::spanning_tree::{
-    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, restarted_node,
+    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, make_test_node_with_config,
+    restarted_node,
 };
 use super::super::*;
 use super::{PAST_THE_RESTART_INTERVAL, loopback_node, tap, with_path};
@@ -80,7 +87,16 @@ async fn dial_into_tap() -> (
     TestNode,
     tokio::sync::mpsc::UnboundedReceiver<ReceivedPacket>,
 ) {
-    let mut tn = loopback_node(false).await;
+    dial_from_into_tap(loopback_node(false).await).await
+}
+
+/// `tn` dialing a loopback tap that never answers, and the tap.
+async fn dial_from_into_tap(
+    mut tn: TestNode,
+) -> (
+    TestNode,
+    tokio::sync::mpsc::UnboundedReceiver<ReceivedPacket>,
+) {
     let other = loopback_node(false).await;
     let id = PeerIdentity::from_pubkey_full(other.node.identity().pubkey_full());
     let tid = tn.transport_id;
@@ -105,19 +121,53 @@ async fn a_forward_wall_clock_step_does_not_time_out_a_fresh_dial() {
     assert_eq!(drain(&mut tap), 1, "precondition: the dial's msg1 went out");
     tick(&mut tn.node).await;
     assert_eq!(
-        tn.node.pending_outbound.len(),
+        tn.node.pending_outbound().len(),
         1,
         "precondition: a dial started just now survives a tick"
     );
     let timeout_ms = tn.node.config().node.rate_limit.handshake_timeout_secs * 1000;
     step_wall(i64::try_from(timeout_ms).expect("precondition: the timeout fits an i64") + 1_000);
     tick(&mut tn.node).await;
-    let left = tn.node.pending_outbound.len();
+    let left = tn.node.pending_outbound().len();
     cleanup_nodes(std::slice::from_mut(&mut tn)).await;
     assert_eq!(
         left, 1,
         "defect: a dial started just now timed out because the wall clock stepped forward"
     );
+}
+
+/// The instants, in ms after the dial, at which a node configured with a
+/// msg1 resend interval of `interval_ms` resent the msg1 of a dial nothing
+/// answers, ticking every quarter second for four seconds.
+async fn resend_instants(interval_ms: u64) -> Vec<u64> {
+    let mut config = with_path(crate::config::Config::new(), false);
+    config.node.rate_limit.handshake_resend_interval_ms = interval_ms;
+    let (mut tn, mut tap) =
+        dial_from_into_tap(make_test_node_with_config(config, 1280).await).await;
+    assert_eq!(drain(&mut tap), 1, "precondition: the dial's msg1 went out");
+    let mut at = Vec::new();
+    for step in 1..=16u64 {
+        crate::time::advance(std::time::Duration::from_millis(250));
+        tick(&mut tn.node).await;
+        at.extend(std::iter::repeat_n(step * 250, drain(&mut tap)));
+    }
+    cleanup_nodes(std::slice::from_mut(&mut tn)).await;
+    at
+}
+
+#[tokio::test]
+async fn a_dials_first_resend_goes_out_a_second_after_the_dial_whatever_the_interval() {
+    for (interval, want) in [
+        (500, vec![1_000, 2_000, 4_000]),
+        (1_000, vec![1_000, 3_000]),
+        (3_000, vec![1_000]),
+    ] {
+        assert_eq!(
+            resend_instants(interval).await,
+            want,
+            "defect: at a configured resend interval of {interval} ms the dial's msg1 resends went out at other instants"
+        );
+    }
 }
 
 #[tokio::test]
@@ -208,11 +258,7 @@ async fn a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_loopback_peerin
 #[tokio::test]
 async fn a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_peering_heard_just_now() {
     let mut e = established_from(5, with_path(Config::new(), false)).await;
-    let peer = e
-        .node
-        .get_peer_mut(&e.peer)
-        .expect("precondition: the node holds the peer");
-    peer.touch(Node::now_ms());
+    let peer = hear_now(&mut e);
     let (link, index) = (peer.link_id(), peer.our_index());
 
     let msg1s = fresh_msg1s(&e, 0x0A00, 1);

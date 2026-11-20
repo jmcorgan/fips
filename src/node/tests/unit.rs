@@ -838,23 +838,29 @@ fn test_node_pending_outbound_tracking() {
     // Allocate an index
     let index = node.index_allocator.allocate().unwrap();
 
-    // Track in pending_outbound
-    node.pending_outbound
-        .raw()
-        .insert((transport_id, index.as_u32()), link_id);
+    // Track in pending_outbound: the dial's leg, on its link
+    node.links.open(Link::connectionless(
+        link_id,
+        transport_id,
+        TransportAddr::from_string("127.0.0.1:5000"),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    ));
+    node.plant_dial_at((transport_id, index.as_u32()), link_id, None);
 
     // Verify we can look it up
-    let found = node.pending_outbound.get(&(transport_id, index.as_u32()));
-    assert_eq!(found, Some(&link_id));
+    let found = node
+        .pending_outbound()
+        .get(&(transport_id, index.as_u32()))
+        .copied();
+    assert_eq!(found, Some(link_id));
 
     // Clean up
-    node.pending_outbound
-        .raw()
-        .remove(&(transport_id, index.as_u32()));
+    node.forget_dial_at(&(transport_id, index.as_u32()));
     let _ = node.index_allocator.free(index);
 
     assert_eq!(node.index_allocator.count(), 0);
-    assert!(node.pending_outbound.is_empty());
+    assert!(node.pending_outbound().is_empty());
 }
 
 #[test]
@@ -982,9 +988,11 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     node.links
         .raw_index()
         .insert((transport_id, pending_addr.clone()), pending_link_id);
-    node.pending_outbound
-        .raw()
-        .insert((transport_id, pending_index.as_u32()), pending_link_id);
+    node.plant_dial_at(
+        (transport_id, pending_index.as_u32()),
+        pending_link_id,
+        None,
+    );
 
     // Verify pending state
     assert_eq!(node.connection_count(), 1);
@@ -1057,7 +1065,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     );
     assert_eq!(node.peer_count(), 1, "Promoted peer should exist");
     assert!(
-        node.pending_outbound
+        node.pending_outbound()
             .contains_key(&(transport_id, pending_index.as_u32())),
         "pending_outbound entry should still exist (awaiting msg2)"
     );
@@ -2434,6 +2442,8 @@ async fn dropping_an_unused_bootstrap_transport_restores_the_tun_mss_ceiling() {
         .find(|link| link.transport_id() == result.transport_id)
         .map(|link| link.link_id())
         .expect("the adoption opened a link on the adopted transport");
+    // Reaped past the node's timers, so the test tells the shadow core.
+    node.shadow_abandon(link_id);
     node.cleanup_stale_connection(link_id, 0).await;
 
     assert!(
@@ -3057,13 +3067,15 @@ async fn test_releasing_a_path_for_a_still_linked_peer_reseeds_both_stores() {
 // === Outbound admission gate tests ===
 
 /// Inject `count` synthetic active peers into `node.peers` so peer_count()
-/// reflects a desired saturation level for admission-gate tests.
+/// reflects a desired saturation level for admission-gate tests. Each sits on
+/// a link id the node allocates, so none shares a link with one a test opens.
 fn inject_dummy_peers(node: &mut Node, count: usize) {
     use crate::peer::ActivePeer;
-    for i in 0..count {
+    for _ in 0..count {
         let identity = make_peer_identity();
         let addr = *identity.node_addr();
-        let peer = ActivePeer::new(identity, LinkId::new((i + 1) as u64), 0);
+        let link = node.allocate_link_id();
+        let peer = ActivePeer::new(identity, link, 0);
         node.peers.raw().insert(addr, peer);
     }
 }
@@ -3380,6 +3392,28 @@ async fn craft_and_send_msg1(
     addr_b: std::net::SocketAddr,
     timestamp_ms: u64,
 ) -> NodeAddr {
+    let mut startup_epoch = [0u8; 8];
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut startup_epoch);
+    craft_and_send_msg1_at(
+        node_b,
+        sender_identity,
+        socket_a,
+        addr_b,
+        timestamp_ms,
+        startup_epoch,
+    )
+    .await
+}
+
+/// [`craft_and_send_msg1`] carrying the startup epoch `startup_epoch`.
+async fn craft_and_send_msg1_at(
+    node_b: &Node,
+    sender_identity: &Identity,
+    socket_a: &tokio::net::UdpSocket,
+    addr_b: std::net::SocketAddr,
+    timestamp_ms: u64,
+    startup_epoch: [u8; 8],
+) -> NodeAddr {
     use crate::proto::fmp::wire::build_msg1;
     use crate::utils::index::SessionIndex;
 
@@ -3391,8 +3425,6 @@ async fn craft_and_send_msg1(
     let mut conn = outbound_leg(link_id, peer_b_identity, timestamp_ms);
 
     let sender_keypair = sender_identity.keypair();
-    let mut startup_epoch = [0u8; 8];
-    rand::Rng::fill_bytes(&mut rand::rng(), &mut startup_epoch);
     let noise_msg1 = conn
         .start_handshake(sender_keypair, startup_epoch, LegStamp::at(timestamp_ms))
         .expect("start_handshake should produce noise msg1");
@@ -3538,9 +3570,12 @@ async fn handle_msg1_admits_existing_peer_at_cap() {
     let existing_pid = PeerIdentity::from_pubkey_full(existing_sender.pubkey_full());
     let existing_node_addr = *existing_pid.node_addr();
     let existing_link_id = LinkId::new(7777);
+    // The peering holds the epoch the msg1 carries, as every promoted peer
+    // holds the epoch its handshake gave it.
+    let epoch = [0x3C; 8];
     {
-        use crate::peer::ActivePeer;
-        let peer = ActivePeer::new(existing_pid, existing_link_id, 0);
+        let mut peer = keyed_peer(&node, &existing_sender, existing_link_id, 0);
+        peer.set_remote_epoch(Some(epoch));
         node.peers.raw().insert(existing_node_addr, peer);
     }
     assert_eq!(node.peer_count(), 2, "precondition: at cap");
@@ -3565,7 +3600,7 @@ async fn handle_msg1_admits_existing_peer_at_cap() {
     let before_pending = node.msg1_rate_limiter.pending_count();
 
     let sender_node_addr =
-        craft_and_send_msg1(&node, &existing_sender, &socket_a, addr_b, 2000).await;
+        craft_and_send_msg1_at(&node, &existing_sender, &socket_a, addr_b, 2000, epoch).await;
     assert_eq!(
         sender_node_addr, existing_node_addr,
         "sanity: crafted msg1 carries the existing peer's NodeAddr"
@@ -4007,6 +4042,55 @@ async fn stranger_msg1_still_refused_when_bucket_drained() {
         node.peer_count(),
         1,
         "the refused stranger must not have been admitted"
+    );
+}
+
+/// A msg1 the rate limiter refuses is the node's resource admission, not a
+/// settlement decision: it reaches neither the shadow settlement core nor
+/// the record of what the node did, so the shadow's comparison finds no
+/// difference at the refusal. The admitted control msg1 is the one the
+/// shadow takes.
+#[tokio::test]
+async fn a_msg1_the_rate_limiter_refuses_is_kept_out_of_the_shadow_cores_comparison() {
+    let (mut node, _transport_id, wire_addr, mut packet_rx) =
+        node_with_single_stranger_token().await;
+    let socket_ok = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind sender socket");
+    craft_and_send_msg1(&node, &Identity::generate(), &socket_ok, wire_addr, 1000).await;
+    pump_one_msg1_into_node(&mut node, &mut packet_rx, 1000)
+        .await
+        .expect("control msg1 must reach packet_rx");
+    assert!(
+        poll_for_msg2(&socket_ok).await.is_some(),
+        "precondition: the control msg1 is answered"
+    );
+    let socket_refused = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind second sender socket");
+    craft_and_send_msg1(
+        &node,
+        &Identity::generate(),
+        &socket_refused,
+        wire_addr,
+        2000,
+    )
+    .await;
+    pump_one_msg1_into_node(&mut node, &mut packet_rx, 1000)
+        .await
+        .expect("refused msg1 must still reach packet_rx");
+    assert!(
+        poll_for_msg2(&socket_refused).await.is_none(),
+        "precondition: the second msg1 is refused by the drained bucket"
+    );
+    assert_eq!(
+        node.shadow.seen("Arrived"),
+        1,
+        "defect: the shadow took the msg1 the rate limiter refused"
+    );
+    assert!(
+        !node.shadow.diverged(),
+        "defect: the shadow's comparison found a difference at the rate limiter's refusal"
     );
 }
 
@@ -5343,6 +5427,13 @@ async fn test_machine_carries_link_direction_and_address_on_dial_and_inbound() {
         link_id,
         PeerMachine::new_outbound(link_id, peer_identity, LegStamp::at(1000)),
     );
+    node.links.open(Link::connectionless(
+        link_id,
+        transport_id,
+        remote_addr.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    ));
     node.prepare_outbound_msg1(link_id, transport_id, &remote_addr, peer_identity)
         .unwrap();
 

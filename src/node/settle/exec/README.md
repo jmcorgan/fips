@@ -19,7 +19,15 @@ statements at its site.
   kinds of change share (the restart's, the dial's forget, the tree
   announce with `announce_line`, the filter mark, the backoff reset, the
   path renewal, and the connected-socket clear and relink under a moved
-  pair); and the call of every other effect's function in its file.
+  pair); and the call of every other effect's function in its file. In
+  test builds also `Did`, what the node did or the settlement core decides
+  in the words the two share, for the shadow core's comparison
+  (`../decide.rs`, `../audit.rs`): `from_node`, the node's transition in
+  those words, which `Node::run` and `run_promotion` record, and `from_core`, the mapping of
+  the core's outputs onto the table's columns (its six transitions by their
+  resets, the install beside a reset naming the end that started the
+  handshake), its standalone removals, and its reconnect, refusal, ask,
+  answer and swap.
 - `plan.rs`: `Effect`, one step the node takes for a transition, and
   `plan`, the effects of each transition in their order, each list the
   statements its sites ran.
@@ -72,13 +80,17 @@ statements at its site.
   table's cell for the cause, with their `Facts`. The same effects run at
   a replacement's removal, reading its `Removed` from `install.rs`'s
   `Facts` and the replacement's cells. A loss noted for a reconnect where
-  the removal was decided is not noted again.
+  the removal was decided is not noted again. In test builds,
+  `Node::remove_active_peer`, the removal a test makes, which runs nothing
+  after it and so records the node's side of it for the shadow core's
+  comparison itself.
 - `links.rs`: the feed of the settlement core's link records, which the
   link table keeps beside its own: `pathed`, which runs what a step of a
   link's bundle returned through the core's join, each output followed by
   the core input it stands for, for the path machine's executor in
   `../../handlers/path.rs`; `Node::roamed`, which tells the join of a
-  one-path roam or a bind, which the bundle reports in no output, for the
+  one-path roam, and whether the path was a standby one, or a bind, which
+  the bundle reports in no output, for the
   frame's accounting in `../../dataplane/encrypted.rs`; and `Node::feed`,
   which applies a path's state, move, switch or release, or the peer
   turning capable, to the record. A

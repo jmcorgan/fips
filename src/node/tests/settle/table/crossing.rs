@@ -330,7 +330,7 @@ async fn run_move(
 
 /// The link of `node`'s one pending dial.
 fn dial_link(node: &Node) -> LinkId {
-    let dials: Vec<LinkId> = node.pending_outbound.values().copied().collect();
+    let dials: Vec<LinkId> = node.pending_outbound().values().copied().collect();
     assert_eq!(dials.len(), 1, "precondition: one dial is pending");
     dials[0]
 }

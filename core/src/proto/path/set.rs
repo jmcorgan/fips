@@ -459,6 +459,14 @@ impl<I: Instant, D: Default> PathSet<I, D> {
         self.transition(index, PathState::Dead, now);
     }
 
+    /// Leave the set with no active path, for the root crate's tests that
+    /// need a lone path that is not active, which the machine never leaves
+    /// past a step.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn deactivate(&mut self) {
+        self.active = None;
+    }
+
     /// Move the path at `index` to the peer's address `addr` on its
     /// transport, as an authenticated path message from that address allows
     /// (multipath v1 draft, Section 5.3). Returns the address it left, or

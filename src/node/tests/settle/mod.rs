@@ -44,7 +44,7 @@ use crate::transport::{TransportHandle, TransportId};
 /// CI runner boots.
 pub(super) const AGED: Duration = Duration::from_secs(31);
 
-/// The restart interval, `EPOCH_RESTART_MIN_INTERVAL_SECS`, plus a second.
+/// The restart interval, the restart gates' `Params::interval`, plus a second.
 /// A copy of the constant's value, which is private to the handshake
 /// handler.
 pub(super) const PAST_THE_RESTART_INTERVAL: Duration = Duration::from_secs(15 + 1);
@@ -246,14 +246,19 @@ pub(super) async fn crossed_tcp(on: bool, zero_smaller: bool) -> (Vec<TestNode>,
     tcp_dial(&mut nodes, 1, 0).await;
     resolve_connect(&mut nodes[0]).await;
     resolve_connect(&mut nodes[1]).await;
-    let s_out: Vec<u32> = nodes[s].node.pending_outbound.keys().map(|k| k.1).collect();
+    let s_out: Vec<u32> = nodes[s]
+        .node
+        .pending_outbound()
+        .keys()
+        .map(|k| k.1)
+        .collect();
     assert_eq!(
         s_out.len(),
         1,
         "precondition: the smaller node's dial is pending"
     );
     assert_eq!(
-        nodes[l].node.pending_outbound.len(),
+        nodes[l].node.pending_outbound().len(),
         1,
         "precondition: the larger node's dial is pending"
     );

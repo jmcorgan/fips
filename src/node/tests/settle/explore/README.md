@@ -52,7 +52,10 @@ helper that seeds a handshake machine by hand.
     every worker to handle what it was sent before (bounded at 60 s), then
     runs what the workers sent back, as the receive loop does (below), so a
     round never counts quiet with a frame on a worker.
-  - The world's tests: a dial is the one `initiate_connection` makes on each
+  - The world's tests: the shadow settlement core reaps a dial whose msg1
+    was lost where the node does, in its peers' timers and not in
+    `check_timeouts`, by its own reap and not by being handed the node's
+    give-up; a dial is the one `initiate_connection` makes on each
     transport (a connection-oriented link starts connecting, with a pending
     connect and no msg1; the loopback's is connected with its msg1 armed); a
     node is handed a msg1 or a msg2 only at the step that names it, on each
@@ -95,9 +98,14 @@ helper that seeds a handshake machine by hand.
   `heal` heals the leaf (below); `spawn_walk` starts one walk on a thread
   of its own, with an 8 MiB stack, since a walk in a debug build comes
   within a few per cent of the default 2 MiB, and a runtime of its own, once
-  fewer than `WALKS_AT_ONCE` walks run in the process (below); `parallel`
-  runs a job per start and order that way and gathers what they found. Its
-  tests: the map covers every pinned defect and every core start number;
+  fewer than `WALKS_AT_ONCE` walks run in the process (below), the thread
+  `titled` for the test that started it, followed by `::walk`, so the
+  shadow core's lines and the audit's reach rows from a walk's nodes name
+  that test, while a panic on the walk's thread is not taken for the test
+  thread's own by `testing/lib/test-verdict.sh` (`parity.rs` names its
+  threads the same way); `parallel` runs a job per start and order that way
+  and gathers what they found. Its tests: a walk's thread is named for its
+  test; the map covers every pinned defect and every core start number;
   every start reaches its target: its scripted path runs to its end on its
   transport, and the explorer walks the number of paths the start states,
   in both orders and at both settings; and no more than `WALKS_AT_ONCE`

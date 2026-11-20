@@ -1,0 +1,84 @@
+# The settlement core's known first differences from the node, read by the
+# shadow core's comparison in the live audit (`audit::SHADOW_KNOWN`): a first
+# difference in a test that no line below names fails that test when the node
+# is dropped, unless the test has failed already or a switch the settlement
+# core does not read is on (`decide::node_broken`): such a switch breaks the
+# node, which is then not the spec. CrossedRunsKeep, a node-side site switch,
+# is the exception (`decide::SHADOW_REDS`): a test the comparison finds it in
+# fails. One line per
+# known difference, tab-separated: `<test>\t<site>\t<clause>`, the test's
+# thread name, the node entry the audit ran at, and the clause that found it.
+# No line names a planted node, and a planted state is no reason for one.
+# Every line is `closes-agree`'s: the rest of the comparison gives no first
+# difference over the whole fips-mesh lib suite, with multipath off or on.
+# Each group below is one difference, and its comment says what the node and
+# the core close.
+#
+# Reach gaps: switches of the core whose node half reds no root test, through
+# the shadow or otherwise (each by a run of the whole fips-mesh lib suite with
+# the switch alone on). The shadow does not cover the decision each breaks.
+#
+# - SwitchLeavesPeer: where the core holds the peer after a path switch. No
+#   clause compares the held peer's current pair, and no root test makes a
+#   decision that reads it after a switch.
+# - AttributeByCurrent: a msg1 from the pair the core's record of the peer is
+#   at, or from an unproven setup path, where the node counts it off the link.
+#   No root test sends a held peer's msg1 from such a pair. Its site is the
+#   table's own attribution, which `placement-agrees` does not read, and whose
+#   answer only the core's Rekey output carries, which `core-agrees` maps to
+#   nothing.
+# - MemoryNeverDropped: whether the gates keep an identity whose stamp,
+#   replays and silence have lapsed. `gates-agree` compares what the memory
+#   says of an identity, which a lapsed entry says alike kept or dropped.
+# - UnsentPastCap: a failed send of a dial's last resend. No root test fails
+#   one.
+# - UnsentStaysDue: a failed dial resend tried again at every poll before
+#   the next tick. The shadow polls only where the node's timers run, once a
+#   tick, so a retry at every poll and one at the next tick read alike.
+#
+# RemovalClosesEveryPair and MoveClosesNewPair, which change the
+# connections a removal or a move closes, are no reach gaps: `closes-agree`
+# reds root tests with each on, and each has a root manifest line through
+# it.
+#
+# `placement-agrees` compares the one attribution question the node still
+# answers by its own reading, the duplicate msg1 check's read of the index,
+# with what `Links::placement` over the node's own link records answers.
+# Neither attribution switch below reds a root test through it, since the
+# node's other attribution questions are answered by `Links::placement`
+# itself.
+#
+# Switches whose node half reds root tests by the node's own behaviour or
+# its own audit clauses, ahead of the shadow, and none through it: their root
+# manifest lines are by behaviour, and the shadow covers none of these
+# decisions.
+#
+# - CapableIgnored: a msg1 from a capable peer's setup pair at which its
+#   bundle holds no path is answered (node::tests::paths, the two capable
+#   refusals).
+# - AttributeBySetupOnly: a msg1 or rekey msg2 on a proven path other than
+#   the setup pair is off the link (node::tests::paths and session).
+# - SwitchWritesLive: the node's own link records run the same switch, and
+#   `links-mirror` reds first (node::tests::paths).
+# - MoveLeavesDialOpen: the node's own close runs the same switch (its root
+#   lines in node::tests::ble and settle::table::crossing), so `closes-agree`
+#   finds the two sides alike with it on.
+# - CloseByPeerAddress, CloseBySetupAddress: the node's close rule asks the
+#   same records, through `Links::in_use`, so the two sides close alike with
+#   either on.
+#
+# A switch the core does not read is seen by the comparison too, as the
+# first-difference line it writes to FIPS_CORE_SHADOW, and fails no test
+# through it; its root lines are by behaviour. CapableUnmirrored, which keeps
+# the bundle's capability from the core's records, is one. CrossedRunsKeep
+# is not: with it on, the tests the comparison finds it in fail, and two of
+# them are its manifest lines through the shadow.
+
+# The late ACL refuses a msg1 the core asked the answer to: the core
+# retires its link and closes the msg1's pair when no live link uses it; the
+# node closes nothing, and leaves the connection to the transport's idle
+# deadline.
+node::tests::acl::test_acl_rejected_msg1_leaves_no_registry_trace	handle_msg1	closes-agree
+node::tests::acl::test_inbound_msg1_denied_by_acl	handle_msg1	closes-agree
+node::tests::settle::table::replace::a_replacement_refused_by_the_acl_after_its_removal_keeps_the_removal	handle_msg1	closes-agree
+node::tests::settle::table::replace::a_replacement_refused_by_the_acl_after_its_removal_keeps_the_removal_with_multipath_on	handle_msg1	closes-agree

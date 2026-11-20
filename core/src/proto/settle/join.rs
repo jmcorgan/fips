@@ -144,6 +144,9 @@ pub enum Event<'a, 'c, 'e, P: Profile, C: Clock, E: EntropySource, D: Default> {
         from: Option<Pair>,
         /// The pair it holds now.
         to: Pair,
+        /// The path was not the link's active path: a standby path's roam,
+        /// which moves the path and, as the node has it, resets nothing.
+        standby: bool,
     },
 }
 
@@ -317,13 +320,18 @@ where
             }
             Joined::new(peer, head, Vec::new(), Vec::new())
         }
-        Event::Roam { link, from, to } => {
+        Event::Roam {
+            link,
+            from,
+            to,
+            standby,
+        } => {
             let input = match from {
                 Some(from) => In::Moved {
                     link,
                     from,
                     to,
-                    roam: true,
+                    roam: !standby || fault!(StandbyRoamResets) || node_fault!(StandbyRoamResets),
                 },
                 None => In::State {
                     link,

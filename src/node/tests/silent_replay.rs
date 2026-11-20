@@ -25,7 +25,7 @@ async fn copies_of_one_msg1_with_a_changed_sender_idx_count_once_and_leave_the_g
     }
     rig.drain().await;
     let refused = rig.silent_rejects();
-    let silent = rig.node.silent_sessions.count(&rig.peer());
+    let silent = rig.node.gates.silent(&rig.peer());
 
     let data = rig.msg1(EPOCH);
     rig.deliver(data).await;

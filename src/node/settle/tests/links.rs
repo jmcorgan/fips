@@ -443,8 +443,9 @@ async fn a_path_acked_past_the_feed_is_in_its_links_record_after_a_drain() {
 
 /// A link a test put in the link map itself has a record once the node
 /// resyncs, held as a leg at its setup pair, so the close rule counts its
-/// pair; an index entry a test wrote at a pair no record names is in its
-/// link's record, which is opened as a leg there if the link has none.
+/// pair; an index entry a test wrote at a pair no record names is named
+/// there by its link's records, not held as a path its bundle does not
+/// hold, and opens a record as a leg there if the link has none.
 #[tokio::test]
 async fn a_planted_link_and_a_planted_index_entry_are_in_the_records_after_a_resync() {
     let mut node = crate::node::tests::make_node();
@@ -469,15 +470,16 @@ async fn a_planted_link_and_a_planted_index_entry_are_in_the_records_after_a_res
         node.in_use(TransportId::new(1), &at("10.0.0.1:2121").addr, other),
         "defect: the planted link does not use its setup pair"
     );
-    let paths = node
-        .links
-        .no(&other)
+    let no = node.links.no(&other);
+    let paths = no
         .and_then(|no| node.links.core().get(no))
         .map(|r| r.paths.clone())
         .unwrap_or_default();
-    assert!(
-        paths.contains(&(at("10.0.0.3:2121"), Proven::Live)),
-        "defect: the entry is not in its link's record: {paths:?}"
+    let named: Vec<_> = node.links.core().at(&at("10.0.0.3:2121")).collect();
+    assert_eq!(
+        (named, paths.is_empty()),
+        (no.into_iter().collect(), true),
+        "defect: the entry is not named by its link's records alone: {paths:?}"
     );
     let opened = node
         .links
@@ -488,5 +490,60 @@ async fn a_planted_link_and_a_planted_index_entry_are_in_the_records_after_a_res
         opened,
         Some((at("10.0.0.4:2121"), Holder::Leg)),
         "defect: the entry naming a link with no record opened none"
+    );
+}
+
+/// A peer a test planted on a link the link map lacks has a record once the
+/// node resyncs, set up at the pair the peer is at and held by it, so the
+/// records place a msg1 from that pair on its link as the node does; and an
+/// index entry naming a link the map lacks opens a record that is no
+/// inbound leg, as the node answers no duplicate msg1 on a link it does not
+/// hold, until the test puts the link in the map, when the record is opened
+/// again from the link.
+#[tokio::test]
+async fn a_planted_peers_link_and_an_entrys_link_put_in_the_map_after_are_in_the_records() {
+    let mut node = crate::node::tests::make_node();
+    let remote = Identity::generate();
+    let mut peer = keyed_peer(&node, &remote, LinkId::new(1), 0);
+    let addr = *peer.identity().node_addr();
+    let (t1, at1) = key("10.0.0.1:2121");
+    peer.set_current_addr(t1, at1.clone());
+    node.peers.raw().insert(addr, peer);
+    let orphan = LinkId::new(2);
+    node.links.raw_index().insert(key("10.0.0.2:2121"), orphan);
+    node.resync();
+
+    let place = node.placement(&(t1, at1));
+    assert_eq!(
+        (
+            place.established(),
+            place.expected(),
+            node.links.no(&LinkId::new(1)).map(|no| place.on_link(no)),
+        ),
+        (true, Some(addr), Some(true)),
+        "defect: the planted peer's link has no record at its pair: {place:?}"
+    );
+    assert_eq!(
+        node.placement(&key("10.0.0.2:2121")).unanswered(),
+        None,
+        "defect: an entry naming a link the map lacks is an inbound leg's"
+    );
+
+    let (t2, at2) = key("10.0.0.2:2121");
+    let mapped = Link::connectionless(
+        orphan,
+        t2,
+        at2,
+        LinkDirection::Inbound,
+        Duration::from_millis(100),
+    );
+    node.links.raw().insert(orphan, mapped);
+    node.resync();
+    assert_eq!(
+        node.placement(&key("10.0.0.2:2121"))
+            .unanswered()
+            .and_then(|no| node.links.id(no)),
+        Some(orphan),
+        "defect: the entry's link, now an inbound link in the map, is no leg"
     );
 }

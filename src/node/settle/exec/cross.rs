@@ -278,6 +278,6 @@ pub(super) async fn lease_freed(node: &mut Node, r: &mut Run) {
 pub(super) async fn replay_forget(node: &mut Node, r: &mut Run) {
     // The mutation lane's break: the memory stays until the peer's removal.
     if r.crossing().first_heard && !node_fault!(MoveKeepsReplayMemory) {
-        node.replayed_msg1s.forget(&r.peer);
+        node.gates.forget(&r.peer);
     }
 }

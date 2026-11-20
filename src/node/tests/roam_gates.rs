@@ -244,10 +244,18 @@ async fn a_redial_during_the_silent_session_back_off_is_refused() {
     let a = pair.a_addr();
     let epoch = pair.nodes[0].node.startup_epoch();
     for _ in 0..3 {
-        pair.nodes[1]
-            .node
-            .silent_sessions
-            .ended(a, Some(epoch), None, crate::time::mono_ms());
+        let params = pair.nodes[1].node.gate_params();
+        pair.nodes[1].node.gates.ended(
+            a,
+            Some(epoch),
+            None,
+            crate::peer::peer_now(),
+            None,
+            &params,
+        );
+        pair.nodes[1].node.shadow_gates(|gates, now, params| {
+            gates.ended(a, Some(epoch), None, now, None, params);
+        });
     }
     let was = counters(&pair);
     detach(&mut pair).await;

@@ -42,6 +42,13 @@ pub(crate) fn mono_ms_at(instant: HostInstant) -> u64 {
     instant.0.saturating_duration_since(*START).as_millis() as u64
 }
 
+/// The instant [`mono_ms_at`] reads as `ms`: `ms` milliseconds after the
+/// epoch, so a clock kept in whole milliseconds is read as instants that
+/// compare exactly as its readings do.
+pub(crate) fn mono_at(ms: u64) -> HostInstant {
+    deadline(HostInstant(*START), Duration::from_millis(ms))
+}
+
 /// Now on [`HostClock`], as the `std::time::Instant` that code holding std
 /// instants stores and measures from. Outside test builds it is exactly
 /// `std::time::Instant::now()`; in a test it moves with [`advance`] and stops

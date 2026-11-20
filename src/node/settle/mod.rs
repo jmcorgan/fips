@@ -55,25 +55,40 @@ macro_rules! reads {
 
 #[cfg(any(test, debug_assertions))]
 pub(in crate::node) mod audit;
+#[cfg(test)]
+mod decide;
 pub(in crate::node) mod exec;
 mod links;
 mod maps;
-mod params;
+pub(in crate::node) mod params;
 pub(crate) mod table;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(in crate::node) use decide::Shadow;
 pub(in crate::node) use links::LinkTable;
 #[cfg(test)]
 pub(in crate::node) use links::recorded;
-pub(in crate::node) use maps::{BindMap, DialMap, MachineMap, PeerMap, Redial, RedialMap};
+pub(in crate::node) use maps::{BindMap, MachineMap, PeerMap, Redial, RedialMap};
+pub(in crate::node) use params::leg_params;
+
+/// The settlement core's handshake legs as the node holds them, on the peer
+/// clock's instants and keyed by the link table's numbers. The transition
+/// table's dial row says what each change does to them.
+pub(in crate::node) type Legs = crate::proto::settle::legs::Legs<crate::peer::PeerInstant>;
 
 impl crate::node::Node {
     /// Audit the per-peer maps as the node entry `site` returns, panicking
     /// on a breach, in a debug build; nothing in a release build. Every
     /// node entry that can change one of the maps calls it on its way out.
     #[inline]
-    pub(in crate::node) fn audit_live(&self, site: &str) {
+    pub(in crate::node) fn audit_live(&mut self, site: &str) {
+        // The shadow core takes what a test built past the decision sites
+        // since its last input before it is compared, as it would at its
+        // next input.
+        #[cfg(all(test, debug_assertions))]
+        self.shadow_resync(None);
         #[cfg(debug_assertions)]
         audit::live(self, site);
         #[cfg(not(debug_assertions))]
@@ -96,7 +111,6 @@ impl crate::node::Node {
         self.links.planted()
             || self.peers.planted()
             || self.peers_by_index.planted()
-            || self.pending_outbound.planted()
             || self.peer_machines.planted()
     }
 }

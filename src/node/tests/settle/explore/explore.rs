@@ -187,7 +187,7 @@ fn agree(world: &World, a: usize, b: usize) -> bool {
 /// connect or a msg1 out.
 fn dialing(world: &World, at: usize) -> bool {
     let node = &world.nodes[at].node;
-    !node.pending_outbound.is_empty() || !node.peering.pending_connects.is_empty()
+    !node.pending_outbound().is_empty() || !node.peering.pending_connects.is_empty()
 }
 
 /// Whether node `at` of `world` still waits for a connection a held peer's
@@ -311,10 +311,24 @@ impl Drop for Place {
     }
 }
 
-/// Start a walk on a thread of its own: once it has a place among the
-/// `WALKS_AT_ONCE`, it runs the future `make` gives on a runtime of its own,
-/// and so on its own test clock, and gives the place back when the runtime
-/// and everything on it is dropped.
+/// A thread builder that names the thread for the thread that calls, which
+/// in a test run is the test's, followed by `::walk`, so what a walk's
+/// nodes record by thread (the shadow core's lines, the audit's reach rows)
+/// names the test, while a panic on the walk's thread is not read as the
+/// test thread's own by the lanes that classify a test's run by its
+/// thread's first panic (`testing/lib/test-verdict.sh`).
+pub(super) fn titled() -> std::thread::Builder {
+    let builder = std::thread::Builder::new();
+    match std::thread::current().name() {
+        Some(name) => builder.name(format!("{name}::walk")),
+        None => builder,
+    }
+}
+
+/// Start a walk on a thread of its own, [`titled`] for the thread that
+/// called: once it has a place among the `WALKS_AT_ONCE`, it runs the future
+/// `make` gives on a runtime of its own, and so on its own test clock, and
+/// gives the place back when the runtime and everything on it is dropped.
 pub(super) fn spawn_walk<T, M, Fut>(make: M) -> JoinHandle<T>
 where
     M: FnOnce() -> Fut + Send + 'static,
@@ -324,7 +338,7 @@ where
     // A walk runs a node's handlers to their full depth in a debug build,
     // which on the loopback starts alone comes within a few per cent of the
     // default 2 MiB thread stack, so each walk takes more.
-    std::thread::Builder::new()
+    titled()
         .stack_size(WALK_STACK)
         .spawn(move || {
             let _place = Place::take();
@@ -387,6 +401,23 @@ pub(super) fn named(start: &Start, order: Order, on: bool, path: Path) -> String
 // ---------------------------------------------------------------------------
 // The explorer's own tests
 // ---------------------------------------------------------------------------
+
+/// A walk runs on a thread named for the test that started it, followed by
+/// `::walk`, so a line the shadow core writes from a walk's node names that
+/// test, and a panic on it is not the test thread's own.
+#[test]
+fn each_walk_runs_on_a_thread_named_for_the_test_that_started_it() {
+    let job = jobs(Medium::Loopback, &[false])
+        .into_iter()
+        .take(1)
+        .collect();
+    let names = parallel(job, |_, _| async {
+        vec![std::thread::current().name().unwrap_or("").to_owned()]
+    });
+    let me = std::thread::current().name().map(str::to_owned);
+    let me = me.expect("precondition: the test runs on a thread named for it");
+    assert_eq!(names, vec![format!("{me}::walk")]);
+}
 
 /// Every `fips-mesh` known-defect line of the inventory is in the map once,
 /// at its setting, and the map holds no other; each start it names runs on

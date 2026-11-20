@@ -34,9 +34,11 @@
 //!   installs nothing while the peer is held. The first frame that
 //!   authenticates under it (`LegHeard`) replaces the peering by the leg,
 //!   for a redial (`Why::Redial`), and the swap stamps the dampener if the
-//!   peering it replaced was heard. A leg no frame proves is reaped at its
-//!   deadline. If the held peer is gone before then, the leg's send
-//!   installs it as any answer's does.
+//!   peering it replaced was heard. The leg is installed unheard, as an
+//!   answer's send installs one, and the frame's own `Heard` hears it. A
+//!   leg no frame proves is reaped at its deadline, and an operator
+//!   disconnect of the held peer abandons it. If the held peer is gone
+//!   before then, the leg's send installs it as any answer's does.
 //! - **A dial** opens its link when the node starts it: with its msg1
 //!   for a dial that opens no connection first, and before its msg1 for
 //!   one that does (`Input::Connecting`), whose leg starts when the msg1
@@ -59,7 +61,9 @@
 //!   link or a `Disconnect` keeps the old link's connection, as the
 //!   current node keeps it; an operator disconnect, an orphaned bundle and
 //!   the core's close apply the close rule. A peer removed before one
-//!   frame authenticated is a silent session to the gates.
+//!   frame of its session authenticated is a silent session to the gates,
+//!   a session of this node's own dial included, though it is heard from
+//!   its install.
 //! - **Heard**: a frame sets the peering heard and its last frame and
 //!   makes the gates forget its replay memory and silent sessions. A move
 //!   onto this node's own dial sets heard too (FRC-1201 Section 5.5); the
@@ -112,6 +116,10 @@ pub struct Held<I> {
     pub last: Option<I>,
     /// The ephemeral of the msg1 it was installed from, as responder.
     pub setup: Option<EphemeralDigest>,
+    /// The path the peer sends on, as its bundle reads it: the source of
+    /// its last frame that shows it, while a path of the link is there.
+    /// A teardown's closes keep it.
+    pub sending: Option<Pair>,
 }
 
 impl<I: Instant> Held<I> {
@@ -244,6 +252,100 @@ impl<I: Instant> Table<I> {
         self.redials.get(peer).map(|(link, _)| *link)
     }
 
+    /// Hold `peer` as `held` says, on the record of `held.link`: a shell's
+    /// resync of a peer a test planted past the shell's writers, or whose
+    /// facts it set past them. A held peer's facts are replaced.
+    #[cfg(any(test, feature = "test-hooks"))]
+    /// The path the peer sends on, which a shell cannot read from its
+    /// bundle, is kept from the peer held before on the same link.
+    pub fn plant(&mut self, peer: NodeAddr, mut held: Held<I>) {
+        if held.sending.is_none()
+            && let Some(was) = self.held.get(&peer).filter(|h| h.link == held.link)
+        {
+            held.sending = was.sending.clone();
+        }
+        self.links.hold(held.link, Holder::Peer(peer));
+        self.held.insert(peer, held);
+    }
+
+    /// The restart gates' memory, for a shell's comparison of its own.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn gates(&self) -> &Gates<I> {
+        &self.gates
+    }
+
+    /// The restart gates' memory and the table's parameters, for a shell's
+    /// test that writes its own memory past its decisions and gives the
+    /// gates the same, through their writers.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn gates_mut(&mut self) -> (&mut Gates<I>, &Params) {
+        (&mut self.gates, &self.params)
+    }
+
+    /// The link records, for a shell's resync of the links and index
+    /// entries a test planted past its writers.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn records(&mut self) -> &mut Links {
+        &mut self.links
+    }
+
+    /// Open a leg at `now` as `start` says, a responder's holding `msg2`
+    /// and a dial's otherwise, for a shell's resync of a handshake a test
+    /// planted past its writers. Returns the lease of a leg the link
+    /// already held.
+    ///
+    /// A responder's leg is planted as an answer that could not be sent:
+    /// a sent answer installs its peer, so a node holds a responder's
+    /// handshake with its msg2 and no peer only when the send failed, and
+    /// such an answer draws its stored msg2 for any msg1 from its address,
+    /// as the node's does. The plant knows neither the epoch nor the
+    /// ephemeral the answered msg1 carried, so an install it later makes
+    /// holds the msg1's ephemeral where its bytes carry one, and epoch 0.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn plant_leg(
+        &mut self,
+        start: Start,
+        msg2: Option<Vec<u8>>,
+        now: I,
+    ) -> Option<crate::proto::rekey::IndexLease> {
+        let link = start.link;
+        let old = match msg2 {
+            Some(msg2) => {
+                let ephemeral = EphemeralDigest::of_noise_msg1(&start.msg1)
+                    .or_else(|| EphemeralDigest::of_noise_msg1(&[0; crate::noise::PUBKEY_SIZE]));
+                let old = self.legs.answer(start, msg2, now, &self.params);
+                if let Some(ephemeral) = ephemeral {
+                    let answered = Answered {
+                        ephemeral,
+                        epoch: Epoch::default(),
+                        replaces: false,
+                        sent: false,
+                        redial: false,
+                    };
+                    self.answered.insert(link, answered);
+                }
+                old
+            }
+            None => self.legs.dial(start, now, &self.params),
+        };
+        old.map(super::legs::Leg::lease)
+    }
+
+    /// Give the leg on `link` its own reaping instant and next resend, for
+    /// a shell's resync of a handshake a test planted with instants of its
+    /// own ([`Legs::replant`]).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn replant_leg(&mut self, link: LinkNo, deadline: I, next: Option<I>) {
+        self.legs.replant(link, deadline, next);
+    }
+
+    /// Take the leg on `link` away, for a shell's resync of a handshake a
+    /// test planted and then ended past its writers. Returns its lease.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn take_leg(&mut self, link: LinkNo) -> Option<crate::proto::rekey::IndexLease> {
+        self.legs.take(link).map(super::legs::Leg::lease)
+    }
+
     /// When [`Table::poll`] next has something to do.
     pub fn next_wake(&self) -> Option<I> {
         #[cfg(test)]
@@ -277,12 +379,13 @@ impl<I: Instant> Table<I> {
             Input::Ended { peer } => self.remove(peer, Why::Ended, now, &mut out),
             Input::Orphaned { .. } if fault!(OrphanedIgnored) => {}
             Input::Orphaned { peer } => self.remove(peer, Why::Orphaned, now, &mut out),
-            Input::Heard { peer, from } => self.heard(peer, from, now, &mut out),
+            Input::Heard { peer, from, kind } => self.heard(peer, from, kind, now, &mut out),
             Input::Disconnect { peer } => self.remove(peer, Why::Disconnect, now, &mut out),
             Input::Dead { peer } => self.remove(peer, Why::Dead, now, &mut out),
-            Input::Admin { peer } => self.remove(peer, Why::Admin, now, &mut out),
+            Input::Admin { peer } => self.admin(peer, now, &mut out),
             Input::Sent { link } => self.sent(link, now, &mut out),
             Input::SendFailed { link } => self.unsent(link, now, &mut out),
+            Input::Unsendable { link } => self.unsendable(link, &mut out),
             Input::Moved { .. } if fault!(PathMoveIgnored) => {}
             Input::Switched { .. } if fault!(SwitchIgnored) => {}
             Input::State { .. } if fault!(StateIgnored) => {}
@@ -319,24 +422,43 @@ impl<I: Instant> Table<I> {
         #[cfg(test)]
         self.expire(now, &mut out);
         for o in self.legs.poll(now, &mut self.links) {
-            match o {
-                LegOut::Resend { link, bytes } => out.push(Output::Resend { link, bytes }),
-                LegOut::Reaped {
-                    link,
-                    closes,
-                    lease,
-                    ..
-                } => {
-                    self.answered.remove(&link);
-                    if !fault!(RedialLegKept) {
-                        self.redials.retain(|_, (l, _)| *l != link);
-                    }
-                    out.push(Output::Free { lease });
-                    out.push(Output::Retire { link, closes });
-                }
-            }
+            self.leg_out(o, &mut out);
         }
         out
+    }
+
+    /// What [`Table::poll`] makes at `now` of the leg on `link` alone: its
+    /// reap, if it is past its deadline then, and no resend. For a shell's
+    /// comparison that asks whether the core reaps a leg the shell is
+    /// reaping, at an instant of the shell's choosing ([`Legs::reap_one`]).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn reap_leg(&mut self, link: LinkNo, now: I) -> Vec<Output> {
+        let mut out = Vec::new();
+        for o in self.legs.reap_one(link, now, &mut self.links) {
+            self.leg_out(o, &mut out);
+        }
+        out
+    }
+
+    /// Carry one of the legs' outputs into `out`: a resend as it is, and a
+    /// reaped leg's lease handed back and its link retired.
+    fn leg_out(&mut self, o: LegOut, out: &mut Vec<Output>) {
+        match o {
+            LegOut::Resend { link, bytes } => out.push(Output::Resend { link, bytes }),
+            LegOut::Reaped {
+                link,
+                closes,
+                lease,
+                ..
+            } => {
+                self.answered.remove(&link);
+                if !fault!(RedialLegKept) {
+                    self.redials.retain(|_, (l, _)| *l != link);
+                }
+                out.push(Output::Free { lease });
+                out.push(Output::Retire { link, closes });
+            }
+        }
     }
 
     /// Give everything back: every leg's lease, every held peer, every
@@ -446,10 +568,17 @@ impl<I: Instant> Table<I> {
 
     /// A leg ends unfinished: its lease returns and its link is retired. A
     /// dial still connecting has no leg and no lease, and its link is
-    /// retired alone.
+    /// retired alone, closing nothing, as the node closes nothing for a dial
+    /// it gives up before its msg1: its connection failed or never opened,
+    /// or its msg1 could not be built on it.
     fn abandon(&mut self, link: LinkNo, out: &mut Vec<Output>) {
         if self.connects.remove(&link).is_some() {
             let closes = self.links.retire(link);
+            let closes = if fault!(ConnectingCloses) || node_fault!(ConnectingCloses) {
+                closes
+            } else {
+                Vec::new()
+            };
             out.push(Output::Retire { link, closes });
             return;
         }
@@ -602,6 +731,7 @@ impl<I: Instant> Table<I> {
                 held,
                 ephemeral: Some(read.ephemeral),
                 epoch: Some(read.epoch),
+                memory: None,
             };
             self.gates
                 .gate(peer, ask, now, &self.params)
@@ -759,9 +889,11 @@ impl<I: Instant> Table<I> {
                 installed: now,
                 last: None,
                 setup: Some(a.ephemeral),
+                sending: None,
             },
         );
-        self.gates.promoted(peer, a.ephemeral, now, &self.params);
+        self.gates
+            .promoted(peer, a.ephemeral, now, None, &self.params);
         out.push(Output::Install(Install {
             peer,
             link,
@@ -806,6 +938,7 @@ impl<I: Instant> Table<I> {
                 held: Some(held),
                 ephemeral: Some(read.ephemeral),
                 epoch: Some(read.epoch),
+                memory: None,
             };
             self.gates
                 .gate(peer, ask, now, &self.params)
@@ -836,6 +969,20 @@ impl<I: Instant> Table<I> {
         self.gates.redialed(peer, ephemeral, now, &self.params);
     }
 
+    /// The operator disconnected `peer`: a held peer is removed, and its
+    /// pending redial goes with it, as the node drops it, so no frame of
+    /// the redial promotes the peer again.
+    fn admin(&mut self, peer: NodeAddr, now: I, out: &mut Vec<Output>) {
+        let held = self.held.contains_key(&peer);
+        self.remove(peer, Why::Admin, now, out);
+        if held
+            && !(fault!(RedialKeptAtDisconnect) || node_fault!(RedialKeptAtDisconnect))
+            && let Some((leg, _)) = self.redials.get(&peer).copied()
+        {
+            self.abandon(leg, out);
+        }
+    }
+
     /// A frame authenticated under the redial's leg on `link`, from
     /// `from`: the peer holds the redial's keys, so the leg replaces the
     /// held peer, or installs the peer if none is held by now.
@@ -852,7 +999,10 @@ impl<I: Instant> Table<I> {
     }
 
     /// Replace the peer held for `peer`, if any, by the redial's leg on
-    /// `link`, heard at `now` from `from` (its setup address when `None`).
+    /// `link`, proven at `now` by a frame from `from` (its setup address
+    /// when `None`). As the node promotes a redial's leg, the peer is
+    /// installed unheard, with the msg1's ephemeral in its replay memory,
+    /// and the frame's own `Heard`, which follows, hears it.
     fn swap(
         &mut self,
         peer: NodeAddr,
@@ -876,19 +1026,26 @@ impl<I: Instant> Table<I> {
         }
         self.gates.swapped(peer, heard == Some(true), now);
         self.links.hold(link, Holder::Peer(peer));
+        let at_once = fault!(RedialSwapHeard) || node_fault!(RedialSwapHeard);
         self.held.insert(
             peer,
             Held {
                 link,
                 epoch: a.epoch,
                 current: pair.clone(),
-                heard: true,
+                heard: at_once,
                 installed: now,
-                last: Some(now),
+                last: at_once.then_some(now),
                 setup: Some(a.ephemeral),
+                sending: None,
             },
         );
-        self.gates.heard(&peer);
+        if at_once {
+            self.gates.heard(&peer);
+        } else {
+            self.gates
+                .promoted(peer, a.ephemeral, now, None, &self.params);
+        }
         out.push(Output::Install(Install {
             peer,
             link,
@@ -923,6 +1080,35 @@ impl<I: Instant> Table<I> {
         }
     }
 
+    /// An answer whose msg2 could not be sent at all is given up: its
+    /// lease returns and its link is retired, closing nothing, as the node
+    /// forgets such a link and leaves its connection to the transport. A
+    /// redial's answer is no longer a pending redial, as the node forgets a
+    /// redial with its leg's machine.
+    fn unsendable(&mut self, link: LinkNo, out: &mut Vec<Output>) {
+        if !matches!(
+            self.legs.get(link).map(|l| l.kind()),
+            Some(Kind::Answer { .. })
+        ) {
+            return;
+        }
+        let Some(leg) = self.legs.take(link) else {
+            return;
+        };
+        self.answered.remove(&link);
+        if !(fault!(UnsendableKeepsRedial) || node_fault!(UnsendableKeepsRedial)) {
+            self.redials.retain(|_, (l, _)| *l != link);
+        }
+        out.push(Output::Free { lease: leg.lease() });
+        let closes = self.links.retire(link);
+        let closes = if fault!(UnsendableCloses) || node_fault!(UnsendableCloses) {
+            closes
+        } else {
+            Vec::new()
+        };
+        out.push(Output::Retire { link, closes });
+    }
+
     fn msg2(&mut self, link: LinkNo, epoch: Epoch, from: Pair, now: I, out: &mut Vec<Output>) {
         let peer = match self.legs.get(link).map(|l| (l.kind(), l.peer())) {
             Some((Kind::Dial, Some(peer))) => peer,
@@ -938,6 +1124,7 @@ impl<I: Instant> Table<I> {
                 held: Some(h.liveness()),
                 ephemeral: None,
                 epoch: Some(epoch),
+                memory: None,
             };
             if let Some(r) = self.gates.gate(peer, ask, now, &self.params) {
                 out.push(Output::Reject {
@@ -1006,6 +1193,7 @@ impl<I: Instant> Table<I> {
                 installed: now,
                 last: None,
                 setup: None,
+                sending: None,
             },
         );
         out.push(Output::Install(Install {
@@ -1039,6 +1227,7 @@ impl<I: Instant> Table<I> {
         #[cfg(test)]
         let before = h.clone();
         let old = h.link;
+        let sending = h.sending.take();
         let later = leg.held() == Some(old) && !fault!(UnpinOwnOnly) && !node_fault!(UnpinOwnOnly);
         let unpin = own || later;
         h.link = link;
@@ -1051,9 +1240,11 @@ impl<I: Instant> Table<I> {
         // FRC-1201 Section 5.5: a peering this node set up as initiator is
         // heard once that handshake completed, and the move holds this
         // node's own dial.
+        let unheard = !h.heard;
         if !fault!(MoveLeavesUnheard) {
             h.heard = true;
         }
+        let first = unheard && h.heard;
         let pair = h.current.clone();
         self.links.hold(link, Holder::Peer(peer));
         // The shell renews the bundle at the install's pair only after this
@@ -1062,6 +1253,12 @@ impl<I: Instant> Table<I> {
         // retire below must count the connection the peering moved onto.
         if !(fault!(MoveClosesNewPair) || node_fault!(MoveClosesNewPair)) {
             self.links.path(link, pair.clone(), Proven::Live);
+        }
+        // The replay memory bounds the replacements of an unheard peering,
+        // and this one is heard now, so it goes, as the node forgets it at
+        // the move.
+        if first && !(fault!(MoveKeepsReplayMemory) || node_fault!(MoveKeepsReplayMemory)) {
+            self.gates.forget(&peer);
         }
         let retire = !kept(own);
         #[cfg(test)]
@@ -1082,7 +1279,20 @@ impl<I: Instant> Table<I> {
         }
         out.push(Output::Swapped { peer, own, unpin });
         if retire {
+            // The left link's connection, at its setup pair, and of its
+            // paths only those its bundle does not keep as it renews onto
+            // the dial, as the node closes them.
+            let keeps = (!(fault!(TeardownIgnoresKeep) || node_fault!(TeardownIgnoresKeep)))
+                .then(|| {
+                    self.links
+                        .get(old)
+                        .map(|r| (r.setup.clone(), unkept(r, sending.as_ref())))
+                })
+                .flatten();
             let mut closes = self.links.retire(old);
+            if let Some((setup, unkept)) = keeps {
+                closes.retain(|p| *p == setup || unkept.contains(p));
+            }
             if !answered {
                 self.unused(link, old, &mut closes);
             }
@@ -1119,6 +1329,7 @@ impl<I: Instant> Table<I> {
             held: Some(h.liveness()),
             ephemeral: None,
             epoch: Some(epoch),
+            memory: None,
         };
         if let Some(r) = self.gates.gate(peer, ask, now, &self.params) {
             out.push(Output::Reject {
@@ -1188,13 +1399,31 @@ impl<I: Instant> Table<I> {
     /// A frame of `peer` authenticated, from `from`: the peering is heard
     /// and the gates forget. Where the peer is moves only where its bundle
     /// moves it, at a path's move or switch, never with the frame alone.
-    fn heard(&mut self, peer: NodeAddr, from: Pair, now: I, out: &mut Vec<Output>) {
+    fn heard(&mut self, peer: NodeAddr, from: Pair, kind: u8, now: I, out: &mut Vec<Output>) {
         let Some(h) = self.held.get_mut(&peer) else {
             return;
         };
+        // As the bundle: a frame that shows the path the peer sends on
+        // marks the link's path at its source, and none where it has none.
+        if crate::proto::path::marks(kind) {
+            let path = self
+                .links
+                .get(h.link)
+                .is_some_and(|r| r.paths.iter().any(|(p, _)| *p == from));
+            h.sending = path.then(|| from.clone());
+        }
+        // As the node: a session's first frame forgets the identity's
+        // silent sessions, and the replay memory goes only with a frame
+        // that makes the peering heard; a peering heard from its install,
+        // this node's own dial, keeps what an earlier unheard one left.
+        let (unheard, framed) = (!h.heard, h.last.is_some());
         h.heard = true;
         h.last = Some(now);
-        self.gates.heard(&peer);
+        if unheard || fault!(FrameForgetsReplays) || node_fault!(FrameForgetsReplays) {
+            self.gates.heard(&peer);
+        } else if !framed {
+            self.gates.framed(&peer);
+        }
         #[cfg(test)]
         let h = {
             self.unhold(peer, true, out);
@@ -1209,26 +1438,35 @@ impl<I: Instant> Table<I> {
         }
     }
 
-    /// Tear the held peer down and retire its link. Only an operator
-    /// disconnect, an orphaned bundle and the core's close close its
-    /// connections; the other teardowns keep them, as the current node
-    /// does. An orphaned bundle and an operator disconnect close what the
-    /// node's removal closes: each path the bundle still holds that no
-    /// other link uses, and not a setup pair whose path the bundle already
-    /// released, which that release closed or kept; a disconnect closes
-    /// the pair the peer was held at too, whatever else uses it. A
+    /// Tear the held peer down and retire its link. Every teardown closes
+    /// what the node's removal closes, by its bundle's keep: on a link
+    /// known capable, each path other than the one the peer sends on that
+    /// no other link uses, and on any other link none, the bundle keeping
+    /// them all; and not a setup pair whose
+    /// path the bundle already released, which that release closed or kept.
+    /// An operator disconnect closes the pair the peer was held at too,
+    /// whatever else uses it, and the core's close closes every pair no
+    /// other link uses. A
     /// reconnect is asked for where the node notes the loss for
     /// one: a dead link, a `Disconnect` and an orphaned bundle, which the
     /// node removes through its link-dead path, and a restart, a
-    /// replacement and an own-dial restart, whose loss the peer's control
-    /// machine reports before the new session is promoted.
+    /// replacement, an own-dial restart and a redial's swap, whose loss the
+    /// peer's control machine reports before the new session is promoted.
     fn remove(&mut self, peer: NodeAddr, why: Why, now: I, out: &mut Vec<Output>) {
         let Some(h) = self.held.remove(&peer) else {
             return;
         };
-        if !h.heard {
+        // As the node: a session that carried no frame counts, whatever
+        // its role, so this node's own dial, heard from its install, counts
+        // when it ends before the peer's first frame.
+        let silent = if fault!(SilentReadsHeard) || node_fault!(SilentReadsHeard) {
+            !h.heard
+        } else {
+            h.last.is_none()
+        };
+        if silent {
             self.gates
-                .ended(peer, Some(h.epoch), h.setup, now, &self.params);
+                .ended(peer, Some(h.epoch), h.setup, now, None, &self.params);
         }
         #[cfg(test)]
         if self.holds.get(&peer).is_some_and(|k| k.held.link == h.link) {
@@ -1236,10 +1474,22 @@ impl<I: Instant> Table<I> {
             out.push(Output::Remove { peer, why });
             return;
         }
-        let own = self.links.get(h.link).map(removable).unwrap_or_default();
+        let ignores = fault!(TeardownIgnoresKeep) || node_fault!(TeardownIgnoresKeep);
+        let own = self
+            .links
+            .get(h.link)
+            .map(|r| {
+                if ignores {
+                    removable(r)
+                } else {
+                    unkept(r, h.sending.as_ref())
+                }
+            })
+            .unwrap_or_default();
         let mut closes = self.links.retire(h.link);
-        if matches!(why, Why::Orphaned | Why::Admin)
-            && !(fault!(RemovalClosesEveryPair) || node_fault!(RemovalClosesEveryPair))
+        if why != Why::Closed
+            && !(matches!(why, Why::Orphaned | Why::Admin)
+                && (fault!(RemovalClosesEveryPair) || node_fault!(RemovalClosesEveryPair)))
         {
             closes.retain(|p| own.contains(p));
             if why == Why::Admin && !closes.contains(&h.current) {
@@ -1254,7 +1504,7 @@ impl<I: Instant> Table<I> {
             | Why::OwnRestart
             | Why::Ended
             | Why::Disconnect
-            | Why::Dead => false,
+            | Why::Dead => !ignores,
         };
         #[cfg(test)]
         self.unhold(peer, close, out);
@@ -1269,7 +1519,8 @@ impl<I: Instant> Table<I> {
             Why::Restart | Why::Replacement | Why::OwnRestart => {
                 !(fault!(RestartNoRetry) || node_fault!(RestartNoRetry))
             }
-            Why::Redial | Why::Ended | Why::Admin | Why::Closed => false,
+            Why::Redial => !(fault!(RedialNoRetry) || node_fault!(RedialNoRetry)),
+            Why::Ended | Why::Admin | Why::Closed => false,
         };
         if retry {
             out.push(Output::Retry { peer });
@@ -1420,9 +1671,25 @@ impl<I: Instant> Table<I> {
     }
 }
 
-/// The pairs a removal of the link `r` may close: the paths its bundle
-/// still holds, or its setup pair while it holds none and has not released
-/// its path there, the link then having no bundle to report one.
+/// The paths of `r` its bundle does not keep when it releases them at a
+/// teardown, as the node's bundle decides: on a link known capable, each
+/// path other than the one the peer sends on, `active`, and on any other
+/// link none.
+fn unkept(r: &LinkRec, active: Option<&Pair>) -> Vec<Pair> {
+    if !r.capable {
+        return Vec::new();
+    }
+    r.paths
+        .iter()
+        .map(|(p, _)| p)
+        .filter(|p| Some(*p) != active)
+        .cloned()
+        .collect()
+}
+
+/// What a removal closed of `r` before it read the bundle's keep, which only
+/// a test-only switch restores: each of its paths, or its setup pair while
+/// it holds none and has not released it.
 fn removable(r: &LinkRec) -> Vec<Pair> {
     if r.paths.is_empty() && !r.released {
         return alloc::vec![r.setup.clone()];

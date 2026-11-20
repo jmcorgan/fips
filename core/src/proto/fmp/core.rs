@@ -114,11 +114,10 @@ impl PromotionResult {
 /// the shell so the core decides without touching live `Node` state or reading
 /// a clock.
 ///
-/// Produced by the [`LifecycleView`] read-seam. Each `poll_*` decision only
-/// reads the subset of fields relevant to it; the producing view method leaves
-/// the rest at their defaults.
+/// Produced by the [`LifecycleView`] read-seam for the teardown decision,
+/// [`Fmp::poll_timeouts`].
 pub struct ConnSnapshot {
-    /// The connection's link identifier (teardown/resend target).
+    /// The connection's link identifier (the teardown target).
     pub link: LinkId,
     /// Teardown path: is this an outbound connection? Drives retry scheduling
     /// (only outbound auto-connect peers are retried).
@@ -126,12 +125,6 @@ pub struct ConnSnapshot {
     /// Teardown path: the retry target learned from the connection's expected
     /// identity, if any. `None` when no identity is known.
     pub retry_addr: Option<NodeAddr>,
-    /// Resend path: prior msg1 resend count. Drives the backoff exponent.
-    pub resend_count: u32,
-    /// Resend path: the stored outbound handshake msg1 wire bytes (an opaque
-    /// blob — the core never parses or constructs a Noise message). Empty on
-    /// the teardown path, which never reads it.
-    pub msg1: Vec<u8>,
 }
 
 /// A digest of one link handshake msg1 exactly as it arrived, header included.
@@ -267,7 +260,7 @@ pub struct OutboundSnapshot {
 
 /// A registry/transport effect the async shell performs on the core's behalf.
 ///
-/// The maintain/teardown subset (`Teardown`..`ResendMsg1`) covers the
+/// The maintain/teardown subset (`Teardown`, `ScheduleRetry`) covers the
 /// tick-poll half of the lifecycle. The establish-machine subset
 /// (`PromoteToActive`..) is the master-side IK handshake decision; the shell
 /// executes each, resolving the ambient identity/time/wire payload it needs.
@@ -279,16 +272,6 @@ pub enum ConnAction {
     /// Schedule an auto-connect retry toward `peer` (`schedule_retry`) before
     /// its failed/stale outbound connection is torn down.
     ScheduleRetry { peer: NodeAddr },
-    /// Resend the stored handshake msg1 `bytes` on `link`, then (on a
-    /// successful send) record the resend and reschedule the next one at
-    /// `next_resend_at_ms`. The shell resolves the transport + remote address
-    /// from the live connection and performs the send; `bytes` is an opaque
-    /// blob the core neither parses nor builds.
-    ResendMsg1 {
-        link: LinkId,
-        bytes: Vec<u8>,
-        next_resend_at_ms: u64,
-    },
 }
 
 /// Read-only view of FMP connection/peer state the lifecycle core needs.
@@ -446,37 +429,6 @@ impl Fmp {
         actions
     }
 
-    /// Decide the msg1 resend schedule for the outbound handshake connections
-    /// the shell snapshotted as due. Each candidate yields one
-    /// [`ConnAction::ResendMsg1`] carrying the opaque msg1 bytes and the
-    /// next-resend deadline computed from the exponential backoff
-    /// (`interval_ms * backoff^(count+1)`). Pure over the snapshots.
-    ///
-    /// The shell performs the send and only commits the resend (count++ and
-    /// reschedule) when it succeeds, preserving the pre-refactor behavior where
-    /// a failed send neither advances the count nor reschedules.
-    pub fn poll_resends(
-        &self,
-        candidates: Vec<ConnSnapshot>,
-        now_ms: u64,
-        interval_ms: u64,
-        backoff: f64,
-    ) -> Vec<ConnAction> {
-        candidates
-            .into_iter()
-            .map(|snap| ConnAction::ResendMsg1 {
-                link: snap.link,
-                next_resend_at_ms: next_resend_at_ms(
-                    now_ms,
-                    interval_ms,
-                    backoff,
-                    snap.resend_count,
-                ),
-                bytes: snap.msg1,
-            })
-            .collect()
-    }
-
     /// Classify one inbound handshake msg1 from the establish snapshot and the
     /// Noise wire outcome. Pure: reads only `snap` and `wire`, mutates nothing,
     /// consumes nothing. The returned [`InboundDecision`] tells the shell which
@@ -566,14 +518,6 @@ impl Fmp {
             OutboundDecision::CrossConnectionKeep
         }
     }
-}
-
-/// Exponential-backoff schedule for the next handshake/rekey msg1 resend:
-/// `now_ms + interval_ms * backoff^(prior_count + 1)`. Matches the pre-refactor
-/// arithmetic (the exponent is the resend count *after* this attempt).
-fn next_resend_at_ms(now_ms: u64, interval_ms: u64, backoff: f64, prior_count: u32) -> u64 {
-    let count = prior_count + 1;
-    now_ms + (interval_ms as f64 * crate::proto::math::powi(backoff, count)) as u64
 }
 
 /// Whether a refusal for silent sessions covers this msg1: one is in force

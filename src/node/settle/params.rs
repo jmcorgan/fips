@@ -3,7 +3,8 @@
 //! The core holds its own defaults (`Params::default`), which are the
 //! node's configuration defaults and the gate constants. The node overrides
 //! only what it lets an operator configure: the handshake timeout, the msg1
-//! resend interval, multiplier and count, and the cap on answers in flight.
+//! resend interval, multiplier and count, the cap on answers in flight and
+//! the max-peers cap.
 //! The gate constants stay the core's, so a configuration cannot move them.
 
 use crate::config::NodeConfig;
@@ -12,9 +13,9 @@ use std::time::Duration;
 
 /// The settlement core's parameters for a node configured as `node`.
 ///
-/// Nothing in the node steps the core yet, so outside tests nothing calls
-/// this.
-#[cfg_attr(not(test), allow(dead_code))]
+/// The node's handshake legs take these through [`leg_params`]; only the
+/// shadow core of a test build steps a whole table yet, and it takes them
+/// through [`leg_params`] too, so its legs are reaped at the node's tick.
 pub(in crate::node) fn settle_params(node: &NodeConfig) -> Params {
     let rl = &node.rate_limit;
     Params {
@@ -23,7 +24,23 @@ pub(in crate::node) fn settle_params(node: &NodeConfig) -> Params {
         backoff: rl.handshake_resend_backoff.to_bits(),
         resends: rl.handshake_max_resends,
         pending: node.limits.max_pending_inbound,
+        peers: node.limits.max_peers,
         ..Params::default()
+    }
+}
+
+/// The parameters of the node's own handshake legs: [`settle_params`],
+/// with the handshake deadline one millisecond later. The node reaps a leg
+/// once it has been idle longer than the handshake timeout, in whole
+/// milliseconds of its interval clock, and the core reaps a leg at its
+/// deadline, so a leg stamped at a whole millisecond is reaped by the core
+/// at the node's tick exactly when its deadline lies a millisecond past the
+/// timeout.
+pub(in crate::node) fn leg_params(node: &NodeConfig) -> Params {
+    let params = settle_params(node);
+    Params {
+        handshake: params.handshake.saturating_add(Duration::from_millis(1)),
+        ..params
     }
 }
 

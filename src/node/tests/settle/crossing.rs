@@ -1405,6 +1405,8 @@ async fn two_dials(nodes: &mut [TestNode]) -> LinkId {
 /// Reap the dial whose link is `first` at node 0, as its handshake timeout
 /// does.
 async fn reap(nodes: &mut [TestNode], first: LinkId) {
+    // Reaped before its deadline, so the test tells the shadow core.
+    nodes[0].node.shadow_abandon(first);
     nodes[0].node.cleanup_stale_connection(first, 0).await;
     assert!(
         !nodes[0].node.links.contains_key(&first),
@@ -1684,7 +1686,7 @@ async fn second_ends_pin(on: bool) {
     initiate_handshake(&mut nodes, s, l).await;
     let mut dials: Vec<(LinkId, u32)> = nodes[s]
         .node
-        .pending_outbound
+        .pending_outbound()
         .iter()
         .map(|((_, index), id)| (*id, *index))
         .collect();
@@ -2127,7 +2129,7 @@ async fn roamed_through(on: bool) {
         "precondition: the smaller node's msg2 reaches the larger"
     );
     let kept = nodes[l].node.get_peer(&s_addr).and_then(|p| p.our_index());
-    let dials = nodes[l].node.pending_outbound.len();
+    let dials = nodes[l].node.pending_outbound().len();
     let closed = closes(&nodes[l], tid);
     cleanup_nodes(&mut nodes).await;
     assert_eq!(
@@ -2209,14 +2211,19 @@ async fn left_closed(on: bool, zero_smaller: bool) {
     tcp_dial(&mut nodes, 1, 0).await;
     resolve_connect(&mut nodes[0]).await;
     resolve_connect(&mut nodes[1]).await;
-    let s_dial: Vec<u32> = nodes[s].node.pending_outbound.keys().map(|k| k.1).collect();
+    let s_dial: Vec<u32> = nodes[s]
+        .node
+        .pending_outbound()
+        .keys()
+        .map(|k| k.1)
+        .collect();
     assert_eq!(
         s_dial.len(),
         1,
         "precondition: the smaller node's dial is pending"
     );
     assert_eq!(
-        nodes[l].node.pending_outbound.len(),
+        nodes[l].node.pending_outbound().len(),
         1,
         "precondition: the larger node's dial is pending"
     );
@@ -2260,7 +2267,7 @@ async fn left_closed(on: bool, zero_smaller: bool) {
     let mut answered = false;
     for _ in 0..500 {
         process_available_packets(std::slice::from_mut(&mut nodes[l])).await;
-        if nodes[l].node.pending_outbound.is_empty() {
+        if nodes[l].node.pending_outbound().is_empty() {
             answered = true;
             break;
         }

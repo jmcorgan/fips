@@ -30,6 +30,12 @@ fn large() -> NodeAddr {
     NodeAddr::from_bytes([2; 16])
 }
 
+/// A heartbeat's link message type: a frame that shows the path the peer
+/// sends on.
+fn heartbeat() -> u8 {
+    crate::proto::link::LinkMessageType::Heartbeat.to_byte()
+}
+
 fn t(ms: u64) -> TestInstant {
     TestInstant(ms)
 }
@@ -672,6 +678,35 @@ fn a_send_failure_after_a_dials_last_resend_asks_for_no_more() {
     );
 }
 
+/// An answer whose msg2 could not be sent, for a cause no resend outlasts,
+/// is given up: its lease returns and its link is retired, and, as the node
+/// forgets such a link and leaves its connection to the transport, no
+/// connection is closed, though no other link uses the msg1's pair.
+#[test]
+fn an_answer_whose_msg2_cannot_be_sent_is_given_up_and_closes_nothing() {
+    let mut table = Table::new(small(), Params::default());
+    let link = answered(&hi(&mut table, large(), 10, 9, 0));
+    let unused = !table.links().in_use(&pair(9), link);
+    let out = table.step(Input::Unsendable { link }, t(0));
+    let freed = out
+        .iter()
+        .filter(|o| matches!(o, Output::Free { .. }))
+        .count();
+    let out = drain(out);
+    assert!(unused, "precondition: no other link uses the msg1's pair");
+    assert_eq!(freed, 1, "the answer's lease returns");
+    assert_eq!(
+        out,
+        [Output::Retire {
+            link,
+            closes: alloc::vec![],
+        }],
+        "defect: an answer given up for a send that cannot be made closed the msg1's pair"
+    );
+    assert!(table.legs().get(link).is_none(), "the leg is gone");
+    assert!(table.links().get(link).is_none(), "the link is retired");
+}
+
 #[test]
 fn a_msg1_from_the_address_of_an_unsent_answer_draws_that_answer_whatever_its_bytes() {
     // FRC-1201 Section 5.8: the stored msg2 alone, before any Noise read,
@@ -780,10 +815,12 @@ fn retired(out: &[Output]) -> Vec<Pair> {
 /// The node's removal hands back the paths the bundle still holds and
 /// closes the ones it does not mark to keep; the path at the setup pair,
 /// released before the bundle was orphaned and marked to keep, was not
-/// closed at its release, and the removal does not close it either.
+/// closed at its release, and the removal does not close it either. The
+/// link is capable, as one whose bundle holds a second path is.
 #[test]
 fn an_orphaned_peer_closes_its_bundles_paths_and_not_a_setup_pair_released_to_keep() {
     let (mut table, link) = dialer(1);
+    go(&mut table, Input::Capable { link }, 0);
     for (port, proven) in [(1, Proven::Live), (5, Proven::Probing)] {
         let state = Input::State {
             link,
@@ -806,6 +843,102 @@ fn an_orphaned_peer_closes_its_bundles_paths_and_not_a_setup_pair_released_to_ke
         retired(&out),
         alloc::vec![pair(5)],
         "defect: the removal closes the setup pair its release kept: {out:?}"
+    );
+}
+
+/// `small()` holding `large()` on its own dial to `at(1)`, the link holding
+/// a second path at `at(5)` as well, both live, and capable if `capable`.
+fn two_paths(capable: bool) -> (Table<TestInstant>, LinkNo) {
+    let (mut table, link) = dialer(1);
+    for port in [1, 5] {
+        let state = Input::State {
+            link,
+            pair: pair(port),
+            proven: Proven::Live,
+        };
+        go(&mut table, state, 0);
+    }
+    if capable {
+        go(&mut table, Input::Capable { link }, 0);
+    }
+    (table, link)
+}
+
+/// A link's teardown closes what its bundle does not keep, as the node's
+/// removal does: on a capable link, each path other than the one the peer
+/// sends on (the source of its last frame) that no other link uses, at a
+/// dead link as at one its rekey machine ended, and not the path the peer
+/// sends on.
+#[test]
+fn a_teardown_of_a_capable_link_closes_each_path_but_the_one_the_peer_sends_on() {
+    for why in ["dead", "ended"] {
+        let (mut table, _) = two_paths(true);
+        let frame = Input::Heard {
+            peer: large(),
+            from: pair(1),
+            kind: heartbeat(),
+        };
+        go(&mut table, frame, 0);
+        let input = if why == "dead" {
+            Input::Dead { peer: large() }
+        } else {
+            Input::Ended { peer: large() }
+        };
+        let out = go(&mut table, input, 0);
+        assert_eq!(
+            retired(&out),
+            alloc::vec![pair(5)],
+            "defect: the {why} teardown of a capable link closed other than its unkept path: {out:?}"
+        );
+    }
+}
+
+/// On a link not known capable the bundle keeps every path it releases, so
+/// an operator disconnect closes only the pair the peer was held at, as the
+/// node closes it, though no other link uses the second path.
+#[test]
+fn a_link_not_known_capable_keeps_its_other_paths_at_an_operator_disconnect() {
+    let (mut table, _) = two_paths(false);
+    let out = go(&mut table, Input::Admin { peer: large() }, 0);
+    assert_eq!(
+        retired(&out),
+        alloc::vec![pair(1)],
+        "defect: an operator disconnect closed a path the bundle keeps: {out:?}"
+    );
+}
+
+/// A move off a link not known capable closes the connection of the link it
+/// leaves and none of that link's other paths, which its bundle keeps, as
+/// the node closes it, though no other link uses the second path.
+#[test]
+fn a_link_not_known_capable_keeps_its_other_paths_at_a_move() {
+    let mut table = Table::new(small(), Params::default());
+    let dialed = opened(&go(&mut table, Input::Dial(dial(large(), 1, 2)), 0));
+    let inbound = answered(&hi(&mut table, large(), 2, 12, 0));
+    go(&mut table, Input::Sent { link: inbound }, 0);
+    for port in [12, 6] {
+        let state = Input::State {
+            link: inbound,
+            pair: pair(port),
+            proven: Proven::Live,
+        };
+        go(&mut table, state, 0);
+    }
+    let msg2 = Input::Msg2 {
+        link: dialed,
+        epoch: E1,
+        from: pair(2),
+    };
+    let out = go(&mut table, msg2, 0);
+    assert_eq!(
+        table.held(&large()).map(|h| h.link),
+        Some(dialed),
+        "precondition: the peering moved onto the dial"
+    );
+    assert_eq!(
+        retired(&out),
+        alloc::vec![pair(12)],
+        "defect: the move closed a path of the left link the bundle keeps: {out:?}"
     );
 }
 
@@ -939,6 +1072,147 @@ fn a_move_onto_a_dial_answered_from_the_peers_other_pair_closes_the_dials_own_co
     assert!(
         retired(&out).contains(&pair(2)),
         "defect: the move left the dial's own connection open with no link using it: {out:?}"
+    );
+}
+
+/// The smaller node's crossing, its peering promoted unheard from the
+/// larger node's msg1 and then moved onto its own dial, which makes it
+/// heard: the replay memory of the msg1 that promoted it goes, as the node
+/// forgets it at the move, and a silent session counted before stays, since
+/// only a frame forgets that.
+#[test]
+fn a_move_that_makes_the_peering_heard_forgets_its_replay_memory_and_keeps_its_silent_sessions() {
+    let mut table = Table::new(small(), Params::default());
+    let params = Params::default();
+    table
+        .gates
+        .ended(large(), Some(E1), None, t(0), None, &params);
+    let dialed = opened(&go(&mut table, Input::Dial(dial(large(), 1, 2)), 0));
+    let inbound = answered(&hi(&mut table, large(), 2, 12, 0));
+    go(&mut table, Input::Sent { link: inbound }, 0);
+    let before = (
+        table.held(&large()).map(|h| h.heard),
+        table.gates().replays(&large()),
+        table.gates().silent(&large()),
+    );
+    let msg2 = Input::Msg2 {
+        link: dialed,
+        epoch: E1,
+        from: pair(2),
+    };
+    go(&mut table, msg2, 0);
+    assert_eq!(
+        before,
+        (Some(false), 1, Some(1)),
+        "precondition: the peering is promoted unheard, its msg1 remembered, one silent session counted"
+    );
+    assert_eq!(
+        table.held(&large()).map(|h| (h.link, h.heard)),
+        Some((dialed, true)),
+        "precondition: the move holds the peering on the dial, heard"
+    );
+    assert_eq!(
+        (
+            table.gates().replays(&large()),
+            table.gates().silent(&large())
+        ),
+        (0, Some(1)),
+        "defect: the move that made the peering heard did not forget its replay memory alone"
+    );
+}
+
+/// A peering of the larger node promoted unheard from its msg1 ends with no
+/// frame, which counts a silent session and leaves the msg1 in the replay
+/// memory; then this node's own dial to it completes, heard from its
+/// install, and its first frame comes. As the node, the frame forgets the
+/// silent sessions and keeps the replay memory, which only a frame or a
+/// move that makes a peering heard forgets.
+#[test]
+fn a_frame_on_a_peering_heard_from_its_install_keeps_the_replay_memory_and_forgets_the_silent_sessions()
+ {
+    let mut table = Table::new(small(), Params::default());
+    let inbound = answered(&hi(&mut table, large(), 2, 12, 0));
+    go(&mut table, Input::Sent { link: inbound }, 0);
+    go(&mut table, Input::Ended { peer: large() }, 1_000);
+    let dialed = opened(&go(&mut table, Input::Dial(dial(large(), 3, 2)), 2_000));
+    let msg2 = Input::Msg2 {
+        link: dialed,
+        epoch: E1,
+        from: pair(2),
+    };
+    go(&mut table, msg2, 2_000);
+    let before = (
+        table.held(&large()).map(|h| (h.heard, h.last.is_some())),
+        table.gates().replays(&large()),
+        table.gates().silent(&large()),
+    );
+    let frame = Input::Heard {
+        peer: large(),
+        from: pair(2),
+        kind: heartbeat(),
+    };
+    go(&mut table, frame, 3_000);
+    assert_eq!(
+        before,
+        (Some((true, false)), 1, Some(1)),
+        "precondition: the dial's peering is heard with no frame yet, one msg1 remembered, one silent session counted"
+    );
+    assert_eq!(
+        (
+            table.gates().replays(&large()),
+            table.gates().silent(&large())
+        ),
+        (1, None),
+        "defect: the frame on a peering heard from its install did not keep the replay memory and forget the silent sessions"
+    );
+}
+
+/// This node's own dial completes, so its peering is heard from its
+/// install, and the peer is removed before one frame of the session comes.
+/// As the node, the session counts toward the identity's silent-session
+/// back-off, which reads whether the session carried a frame, not whether
+/// the peering was heard; a second dial whose session carries a frame
+/// before it ends counts nothing more.
+#[test]
+fn an_own_dials_session_that_ends_before_the_peers_first_frame_counts_as_a_silent_session() {
+    let mut table = Table::new(small(), Params::default());
+    let first = opened(&go(&mut table, Input::Dial(dial(large(), 1, 2)), 0));
+    let msg2 = Input::Msg2 {
+        link: first,
+        epoch: E1,
+        from: pair(2),
+    };
+    go(&mut table, msg2, 0);
+    let before = table.held(&large()).map(|h| (h.heard, h.last.is_some()));
+    go(&mut table, Input::Dead { peer: large() }, 1_000);
+    assert_eq!(
+        before,
+        Some((true, false)),
+        "precondition: the dial's peering is heard from its install with no frame yet"
+    );
+    assert_eq!(
+        table.gates().silent(&large()),
+        Some(1),
+        "defect: an own dial's session that ended before the peer's first frame did not count as a silent session"
+    );
+    let second = opened(&go(&mut table, Input::Dial(dial(large(), 2, 2)), 2_000));
+    let msg2 = Input::Msg2 {
+        link: second,
+        epoch: E1,
+        from: pair(2),
+    };
+    go(&mut table, msg2, 2_000);
+    let frame = Input::Heard {
+        peer: large(),
+        from: pair(2),
+        kind: heartbeat(),
+    };
+    go(&mut table, frame, 2_500);
+    go(&mut table, Input::Dead { peer: large() }, 3_000);
+    assert_eq!(
+        table.gates().silent(&large()),
+        None,
+        "a session that carried a frame forgot the count and added nothing to it"
     );
 }
 
@@ -1083,11 +1357,38 @@ fn a_connecting_dials_pair_is_in_use_before_its_msg1_and_a_failed_connect_retire
         out,
         [Output::Retire {
             link,
-            closes: alloc::vec![pair(7)],
+            closes: alloc::vec![],
         }],
-        "the failed connect retires the link, closes its connection and frees no lease"
+        "the failed connect retires the link, closes nothing and frees no lease"
     );
     assert!(table.links().get(link).is_none());
+}
+
+/// A dial on a connection still to be opened is given up before its msg1:
+/// its connect failed, or its msg1 could not be built. Its link is retired
+/// and, as the node closes nothing for a dial it gives up before its msg1,
+/// no connection is closed, though no other link uses the pair it dialed.
+#[test]
+fn a_dial_given_up_while_connecting_closes_nothing() {
+    let mut table = Table::new(small(), Params::default());
+    let connecting = Input::Connecting {
+        peer: large(),
+        to: pair(7),
+        resends: None,
+    };
+    let link = opened(&go(&mut table, connecting, 0));
+    let unused = !table.links().in_use(&pair(7), link);
+    let out = table.step(Input::ConnectFailed { link }, t(500));
+    assert!(unused, "precondition: no other link uses the pair dialed");
+    assert_eq!(
+        out,
+        [Output::Retire {
+            link,
+            closes: alloc::vec![],
+        }],
+        "defect: a dial given up while connecting closed the pair it dialed"
+    );
+    assert!(table.links().get(link).is_none(), "the link is retired");
 }
 
 #[test]
@@ -1548,6 +1849,7 @@ fn a_frame_from_another_transport_moves_nothing_in_the_core() {
     let heard = Input::Heard {
         peer: large(),
         from: other(1),
+        kind: heartbeat(),
     };
     let out = go(&mut table, heard, 1_000);
     let h = table
@@ -1573,6 +1875,7 @@ fn a_one_path_roam_moves_the_cores_record_and_resets_once() {
     let heard = Input::Heard {
         peer: large(),
         from: pair(4),
+        kind: heartbeat(),
     };
     let mut out = go(&mut table, heard, 1_000);
     let roam = Input::Moved {
@@ -1611,6 +1914,7 @@ fn a_path_the_bundle_followed_moves_the_cores_record_and_resets_nothing() {
     let heard = Input::Heard {
         peer: large(),
         from: pair(4),
+        kind: heartbeat(),
     };
     let mut out = go(&mut table, heard, 1_000);
     let follow = Input::Moved {
@@ -1674,6 +1978,7 @@ fn held_heard() -> Table<TestInstant> {
         Input::Heard {
             peer: large(),
             from: pair(9),
+            kind: heartbeat(),
         },
         40_000,
     );
@@ -1734,6 +2039,16 @@ fn a_frame_under_a_sent_redial_leg_replaces_the_held_peer_for_redial() {
             }
         )),
         "defect: the leg's frame did not replace the peer for a redial: {out:?}"
+    );
+    // The frame that proved the redial is heard as any frame is.
+    go(
+        &mut table,
+        Input::Heard {
+            peer: large(),
+            from: pair(8),
+            kind: heartbeat(),
+        },
+        40_200,
     );
     let h = table.held(&large()).expect("held");
     assert!(h.link == link && h.heard && h.current == pair(8));
@@ -1848,5 +2163,172 @@ fn the_redial_memory_refuses_a_seen_ephemeral() {
             }
         )),
         "defect: {again:?}"
+    );
+}
+
+/// The test hook's reap of one leg is a poll's reap of that leg alone: a
+/// leg not yet at its deadline is kept, one at it is reaped, its link
+/// retired, and another leg at its deadline at the same instant is left
+/// for the poll.
+#[test]
+fn a_reap_of_one_leg_reaps_only_that_leg_and_only_from_its_deadline() {
+    let mut table = Table::new(small(), Params::default());
+    let first = opened(&go(&mut table, Input::Dial(dial(large(), 1, 1)), 0));
+    let other = NodeAddr::from_bytes([3; 16]);
+    let second = opened(&go(&mut table, Input::Dial(dial(other, 2, 2)), 0));
+    let deadline = Params::default().handshake.as_millis() as u64;
+    let early = drain(table.reap_leg(first, t(deadline - 1)));
+    let kept = table.legs().get(first).is_some();
+    let late = drain(table.reap_leg(first, t(deadline)));
+    let (reaped, left) = (
+        table.legs().get(first).is_none(),
+        table.legs().get(second).is_some(),
+    );
+    drain(table.close(t(deadline)));
+    assert!(
+        early.is_empty() && kept,
+        "defect: a leg was reaped before its deadline: {early:?}"
+    );
+    assert!(
+        reaped
+            && late
+                .iter()
+                .any(|o| matches!(o, Output::Retire { link, .. } if *link == first)),
+        "defect: a leg at its deadline was not reaped with its link retired: {late:?}"
+    );
+    assert!(
+        left,
+        "defect: the reap of one leg reaped another at its deadline too"
+    );
+}
+
+#[test]
+fn a_peer_a_redials_swap_replaces_is_retried() {
+    // The node's control machine reports the held peering's loss before it
+    // promotes the redial's leg, and the node notes a reconnect for it, as
+    // for a replacement.
+    let mut table = held_heard();
+    let link = redialed(&mut table, 2, 8, 40_100);
+    let out = go(
+        &mut table,
+        Input::LegHeard {
+            link,
+            from: pair(8),
+        },
+        40_200,
+    );
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::Retry { peer } if *peer == large())),
+        "defect: the swap asked for no reconnect: {out:?}"
+    );
+}
+
+#[test]
+fn a_redials_swap_installs_the_peer_unheard_and_its_frames_heard_hears_it() {
+    // As the node: the redial's leg is promoted unheard, its msg1's
+    // ephemeral noted in the replay memory, and the proving frame's own
+    // entry, a later one under decrypt workers, hears it.
+    let mut table = held_heard();
+    let link = redialed(&mut table, 2, 8, 40_100);
+    go(
+        &mut table,
+        Input::LegHeard {
+            link,
+            from: pair(8),
+        },
+        40_200,
+    );
+    let swapped = table.held(&large()).map(|h| (h.link, h.heard, h.last));
+    let replays = table.gates().replays(&large());
+    go(
+        &mut table,
+        Input::Heard {
+            peer: large(),
+            from: pair(8),
+            kind: heartbeat(),
+        },
+        40_300,
+    );
+    let heard = table.held(&large()).map(|h| (h.heard, h.last));
+    let after = table.gates().replays(&large());
+    assert_eq!(
+        (swapped, replays),
+        (Some((link, false, None)), 1),
+        "defect: the swap installed the peer heard, or noted no ephemeral"
+    );
+    assert_eq!(
+        (heard, after),
+        (Some((true, Some(t(40_300)))), 0),
+        "defect: the frame's Heard did not hear the swapped peer"
+    );
+}
+
+#[test]
+fn an_operator_disconnect_abandons_the_peers_pending_redial() {
+    // As the node: the disconnect drops the pending redial with the peer,
+    // its lease back and its link retired, so its frame promotes nothing.
+    let mut table = held_heard();
+    let link = redialed(&mut table, 2, 8, 40_100);
+    let out = go(&mut table, Input::Admin { peer: large() }, 40_200);
+    let kept = (table.redialing(&large()), table.legs().get(link).is_some());
+    let late = go(
+        &mut table,
+        Input::LegHeard {
+            link,
+            from: pair(8),
+        },
+        40_300,
+    );
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::Retire { link: l, .. } if *l == link)),
+        "defect: the disconnect left the redial's link: {out:?}"
+    );
+    assert_eq!(
+        kept,
+        (None, false),
+        "defect: the pending redial outlived the disconnect"
+    );
+    assert!(
+        table.held(&large()).is_none() && late.is_empty(),
+        "defect: the dropped redial's frame promoted the peer: {late:?}"
+    );
+}
+
+#[test]
+fn a_redials_answer_given_up_as_unsendable_is_no_longer_a_pending_redial() {
+    // As the node: a redial's msg2 that cannot be sent at all gives the
+    // answer up, and the redial goes with its leg's machine, so a later
+    // redial is not held by the slot of one that is gone.
+    let mut table = held_heard();
+    let out = greet(
+        &mut table,
+        Input::Redial(read(large(), 2, 8, E1)),
+        2,
+        40_100,
+    );
+    let link = answered(&out);
+    go(&mut table, Input::Unsendable { link }, 40_100);
+    let left = table.redialing(&large());
+    let again = greet(
+        &mut table,
+        Input::Redial(read(large(), 3, 7, E1)),
+        3,
+        40_200,
+    );
+    assert_eq!(
+        left, None,
+        "defect: the unsendable redial's mark outlived its leg"
+    );
+    assert!(
+        !again.iter().any(|o| matches!(
+            o,
+            Output::Reject {
+                why: Denial::Held,
+                ..
+            }
+        )),
+        "defect: a later redial was held by the slot of the given-up one: {again:?}"
     );
 }

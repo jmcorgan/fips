@@ -2,9 +2,9 @@
 //! its resend schedule and the session index it holds.
 //!
 //! A dial leg is this node's own initial handshake: it holds the msg1 it
-//! sent, resends it byte for byte (FRC-1201 Section 5.8) one resend
-//! interval after the dial and then at intervals growing by the configured
-//! multiplier, up to the configured count or the dial's own lower cap, and
+//! sent, resends it byte for byte (FRC-1201 Section 5.8) a second after
+//! the dial, as the node does whatever its configured interval, and then at
+//! waits of the configured interval growing by the configured multiplier, up to the configured count or the dial's own lower cap, and
 //! is reaped at its handshake deadline. A responder
 //! leg holds the msg1 it answered and the msg2 it built, answers a resend
 //! of that msg1 with the same msg2, and is reaped at its deadline too. Each
@@ -89,6 +89,36 @@ impl<I: Instant> Leg<I> {
     /// answer.
     pub fn held(&self) -> Option<LinkNo> {
         self.held
+    }
+
+    /// How many resends it has sent.
+    pub fn sent(&self) -> u32 {
+        self.sent
+    }
+
+    /// How many resends it may send in all.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn resends(&self) -> u32 {
+        self.resends
+    }
+
+    /// When its next resend is scheduled, if one is: `None` for an answer
+    /// and for a dial with every resend sent.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn next_resend(&self) -> Option<I> {
+        self.next
+    }
+
+    /// Whether a poll at `now` resends its msg1: a resend that could not be
+    /// sent, or one scheduled at or before `now`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn resend_due(&self, now: I) -> bool {
+        self.retry || self.next.is_some_and(|n| due(n, now))
+    }
+
+    /// The session index its lease holds.
+    pub fn index(&self) -> u32 {
+        self.lease.index()
     }
 
     /// When it is reaped.
@@ -211,7 +241,12 @@ impl<I: Instant> Legs<I> {
             }
             Some(_) | None => params.resends,
         };
-        let next = (cap > 0).then(|| deadline(now, params.resend));
+        let first = if fault!(FirstResendAtInterval) || node_fault!(FirstResendAtInterval) {
+            params.resend
+        } else {
+            params.first
+        };
+        let next = (cap > 0).then(|| deadline(now, first));
         self.open(start, Kind::Dial, cap, next, now, params)
     }
 
@@ -253,9 +288,25 @@ impl<I: Instant> Legs<I> {
         self.legs.insert(start.link, leg)
     }
 
+    /// Every leg, by link.
+    pub fn iter(&self) -> impl Iterator<Item = &Leg<I>> {
+        self.legs.values()
+    }
+
     /// The leg on `link`.
     pub fn get(&self, link: LinkNo) -> Option<&Leg<I>> {
         self.legs.get(&link)
+    }
+
+    /// Give the leg on `link` its own reaping instant and next resend, for
+    /// a shell's resync of a handshake a test planted past its writers with
+    /// instants of its own.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn replant(&mut self, link: LinkNo, deadline: I, next: Option<I>) {
+        if let Some(leg) = self.legs.get_mut(&link) {
+            leg.deadline = deadline;
+            leg.next = next;
+        }
     }
 
     /// Take the leg on `link` away: its handshake completed or was
@@ -330,24 +381,8 @@ impl<I: Instant> Legs<I> {
     /// The resends due and the legs past their deadline at `now`. A
     /// reaped leg's link is retired from `links`.
     pub fn poll(&mut self, now: I, links: &mut Links) -> Vec<LegOut> {
-        let reaped: Vec<LinkNo> = self
-            .legs
-            .values()
-            .filter(|l| due(l.deadline, now) && !fault!(LegNeverReaped))
-            .map(|l| l.link)
-            .collect();
         let mut out = Vec::new();
-        for link in reaped {
-            if let Some(leg) = self.legs.remove(&link) {
-                out.push(LegOut::Reaped {
-                    link,
-                    peer: leg.peer,
-                    dialed: leg.kind == Kind::Dial,
-                    closes: links.retire(link),
-                    lease: leg.lease,
-                });
-            }
-        }
+        self.reap(now, None, links, &mut out);
         for leg in self.legs.values() {
             if leg.retry || leg.next.is_some_and(|n| due(n, now)) {
                 let mut bytes = leg.msg1.clone();
@@ -361,6 +396,39 @@ impl<I: Instant> Legs<I> {
             }
         }
         out
+    }
+
+    /// [`Legs::poll`]'s reap of the leg on `link` alone at `now`, if it is
+    /// past its deadline then, and no resend: for a shell that times its
+    /// answers out at a sweep of its own, and for a shell's comparison that
+    /// asks whether the core would reap a leg its shell is reaping.
+    pub fn reap_one(&mut self, link: LinkNo, now: I, links: &mut Links) -> Vec<LegOut> {
+        let mut out = Vec::new();
+        self.reap(now, Some(link), links, &mut out);
+        out
+    }
+
+    /// Reap into `out` the legs past their deadline at `now`, or only the
+    /// one on `only`, retiring each one's link from `links`.
+    fn reap(&mut self, now: I, only: Option<LinkNo>, links: &mut Links, out: &mut Vec<LegOut>) {
+        let reaped: Vec<LinkNo> = self
+            .legs
+            .values()
+            .filter(|l| only.is_none_or(|o| o == l.link))
+            .filter(|l| due(l.deadline, now) && !fault!(LegNeverReaped))
+            .map(|l| l.link)
+            .collect();
+        for link in reaped {
+            if let Some(leg) = self.legs.remove(&link) {
+                out.push(LegOut::Reaped {
+                    link,
+                    peer: leg.peer,
+                    dialed: leg.kind == Kind::Dial,
+                    closes: links.retire(link),
+                    lease: leg.lease,
+                });
+            }
+        }
     }
 
     /// Close every leg: each lease is returned and each link retired.

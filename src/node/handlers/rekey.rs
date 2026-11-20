@@ -309,6 +309,27 @@ impl Node {
                 // announces the reset sends are sealed under the session
                 // the restarted peer holds.
                 Step::Core(In::Restarted { epoch, .. }) => {
+                    #[cfg(test)]
+                    self.decide(In::Restarted {
+                        peer: *node_addr,
+                        epoch,
+                    });
+                    // The restart gates pass a restart a rekey msg2 reveals,
+                    // as the reply to this node's own rekey.
+                    if let Some(refusal) =
+                        self.gate_msg2(*node_addr, true, Some(epoch), Self::now_ms())
+                    {
+                        debug!(
+                            peer = %self.peer_display_name(node_addr),
+                            reason = ?refusal,
+                            "Restart found during FMP rekey refused by the restart gates"
+                        );
+                        #[cfg(test)]
+                        self.did(crate::node::settle::exec::Did::Reject {
+                            peer: Some(*node_addr),
+                        });
+                        continue;
+                    }
                     if !node_fault!(RestartNotRouted) {
                         self.reset_restarted(node_addr, epoch).await;
                     }

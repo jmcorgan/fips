@@ -10,7 +10,6 @@ use crate::node::tests::spanning_tree::{
     TestNode, cleanup_nodes, initiate_handshake, make_test_node, process_available_packets,
 };
 use crate::noise::HANDSHAKE_MSG2_SIZE;
-use crate::peer::machine::TimerKind;
 use crate::proto::fmp::wire::{Msg1Header, build_msg2};
 use crate::transport::ReceivedPacket;
 use crate::utils::index::SessionIndex;
@@ -127,15 +126,17 @@ struct Attempt {
 
 fn attempt(node: &Node, link: LinkId) -> Attempt {
     let machine = node.peer_machines.get(&link).expect("the dial's machine");
-    let timers = node.peer_machines.timers().get(&link);
+    let leg = node.leg(link);
     Attempt {
         link,
         handshake_held: machine
             .leg()
             .is_some_and(|leg| leg.noise_handshake.is_some()),
-        resend_count: machine.resend_count(),
-        retransmit_at: timers.and_then(|t| t.get(&TimerKind::HandshakeRetransmit).copied()),
-        timeout_at: timers.and_then(|t| t.get(&TimerKind::HandshakeTimeout).copied()),
+        resend_count: leg.map_or(0, |leg| leg.sent()),
+        retransmit_at: leg
+            .and_then(|leg| leg.next_resend())
+            .map(crate::time::mono_ms_at),
+        timeout_at: leg.map(|leg| crate::time::mono_ms_at(leg.deadline())),
         last_activity: machine.conn_last_activity(),
     }
 }
@@ -166,7 +167,7 @@ async fn dial_unanswered() -> (Vec<TestNode>, LinkId, Vec<u8>, SessionIndex) {
         .sender_idx;
     let link = *nodes[0]
         .node
-        .pending_outbound
+        .pending_outbound()
         .get(&(tid, observed.as_u32()))
         .expect("the dial is registered under its msg1 index");
     (nodes, link, msg1.data, observed)
@@ -206,7 +207,7 @@ async fn a_forged_initial_msg2_leaves_the_resend_schedule_as_it_was() {
         before.resend_count + 1
     );
     assert_eq!(
-        nodes[0].node.pending_outbound.len(),
+        nodes[0].node.pending_outbound().len(),
         1,
         "the resend belongs to the same attempt"
     );

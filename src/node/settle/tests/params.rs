@@ -3,11 +3,10 @@
 //! schedule.
 
 use super::*;
-use crate::proto::fmp::{ConnAction, ConnSnapshot, Fmp};
 use crate::proto::rekey::IndexLease;
 use crate::proto::settle::legs::{LegOut, Legs, Start};
 use crate::proto::settle::links::{Dir, Holder, Links, Pair};
-use crate::transport::{LinkId, TransportAddr, TransportId};
+use crate::transport::{TransportAddr, TransportId};
 
 /// Milliseconds on a test clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -72,40 +71,23 @@ fn core_resends(p: &Params) -> Vec<u64> {
 }
 
 /// The instants, from a dial at 0, of the resends the node makes when
-/// configured as `node`: the first one resend interval after the dial
-/// (`prepare_outbound_msg1`), each later one where `Fmp::poll_resends`
-/// schedules it, up to the configured count, within the handshake timeout.
+/// configured as `node`, up to the configured count, within the handshake
+/// timeout: the first a second after the dial, whatever the configured
+/// interval, and each later wait, after `n` resends, the interval times the
+/// multiplier to the power of `n`, truncated to the millisecond.
 fn node_resends(node: &NodeConfig) -> Vec<u64> {
     let rl = &node.rate_limit;
     let deadline = rl.handshake_timeout_secs * 1000;
-    let mut at = rl.handshake_resend_interval_ms;
+    let interval = rl.handshake_resend_interval_ms;
+    let mut at = 1_000;
     let mut times = Vec::new();
-    for count in 0..rl.handshake_max_resends {
+    for sent in 1..=rl.handshake_max_resends {
         if at >= deadline {
             break;
         }
         times.push(at);
-        let snap = ConnSnapshot {
-            link: LinkId::new(1),
-            is_outbound: true,
-            retry_addr: None,
-            resend_count: count,
-            msg1: Vec::new(),
-        };
-        let actions = Fmp::new().poll_resends(
-            vec![snap],
-            at,
-            rl.handshake_resend_interval_ms,
-            rl.handshake_resend_backoff,
-        );
-        assert_eq!(actions.len(), 1, "one resend is scheduled");
-        let Some(ConnAction::ResendMsg1 {
-            next_resend_at_ms, ..
-        }) = actions.first()
-        else {
-            panic!("the action is a resend");
-        };
-        at = *next_resend_at_ms;
+        let factor = crate::proto::math::powi(rl.handshake_resend_backoff, sent);
+        at += (interval as f64 * factor) as u64;
     }
     times
 }
@@ -126,6 +108,26 @@ fn a_configured_backoff_gives_the_nodes_resend_schedule() {
             core_resends(&settle_params(&node)),
             want,
             "defect: at a multiplier of {multiplier} the core's resends are not where the node sends them"
+        );
+    }
+}
+
+#[test]
+fn a_configured_interval_leaves_the_first_resend_a_second_after_the_dial() {
+    for interval in [500, 1_000, 3_000] {
+        let mut node = NodeConfig::default();
+        node.rate_limit.handshake_resend_interval_ms = interval;
+        node.rate_limit.handshake_timeout_secs = 120;
+        let want = node_resends(&node);
+        assert_eq!(
+            want.len(),
+            5,
+            "precondition: all five resends fall inside the timeout at {interval} ms"
+        );
+        assert_eq!(
+            core_resends(&settle_params(&node)),
+            want,
+            "defect: at a resend interval of {interval} ms the core's resends are not where the node sends them"
         );
     }
 }

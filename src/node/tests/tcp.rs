@@ -412,7 +412,7 @@ async fn test_tcp_oriented_connect_success_reaches_handshake() {
 
     // One pending connect queued, no msg1 dispatched yet.
     assert_eq!(nodes[0].node.peering.pending_connects.len(), 1);
-    assert!(nodes[0].node.pending_outbound.is_empty());
+    assert!(nodes[0].node.pending_outbound().is_empty());
 
     // Drive the tick-side poll until the background connect resolves.
     for _ in 0..100 {
@@ -430,7 +430,7 @@ async fn test_tcp_oriented_connect_success_reaches_handshake() {
     // Reaching start_handshake -> prepare_outbound_msg1 tracks the outbound msg1
     // in pending_outbound: proof the connect-success path dispatched the handshake.
     assert_eq!(
-        nodes[0].node.pending_outbound.len(),
+        nodes[0].node.pending_outbound().len(),
         1,
         "connect-success path should have reached start_handshake and dispatched msg1"
     );
@@ -488,7 +488,7 @@ async fn test_tcp_oriented_connect_failure_tears_down_link() {
         "connect-failure path should have torn down the link"
     );
     assert!(
-        nodes[0].node.pending_outbound.is_empty(),
+        nodes[0].node.pending_outbound().is_empty(),
         "connect-failure path must not dispatch msg1"
     );
 

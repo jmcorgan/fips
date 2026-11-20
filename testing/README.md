@@ -571,7 +571,10 @@ into which each audit writes one row per test thread, node and outcome, and
 pairs (recorded here as `audit-reach`). It exits 1 when fewer than 97.0% of
 the pairs that reach an audit are audited, or fewer than 2300 are, and 2 on
 an empty or unreadable file. The floors are constants at the top of the
-script; lowering one is an edit a review sees. Under nextest a test's thread
+script; lowering one is an edit a review sees. It also prints how many pairs
+the settlement core beside the node first differed on (`diverged`), a count
+held to no floor, since the core's own record of its known differences
+settles which are expected. Under nextest a test's thread
 does not name it, so the check does not read nextest runs.
 
 ### The open-file limit and `fd-peak.py`

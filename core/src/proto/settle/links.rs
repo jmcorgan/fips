@@ -10,7 +10,9 @@
 //! record recomputes it, from each live link's setup address and its
 //! proven paths, so it cannot drift from the records. A setup address
 //! whose path the bundle released leaves the index; one the path roamed
-//! away from stays, since the link was set up there.
+//! away from stays, since the link was set up there. Under the test
+//! hooks a shell may also name a link at a pair past its record, for the
+//! index entries a test wrote past the shell's writers.
 //!
 //! Where a msg1 from a pair stands among the records ([`Placement`]) is
 //! read in one walk, and answers each question the node asks of a msg1's
@@ -223,6 +225,10 @@ pub struct Links {
     recs: BTreeMap<LinkNo, LinkRec>,
     next: u64,
     index: BTreeSet<(Pair, LinkNo)>,
+    /// Pairs a shell's test named a link at past its records
+    /// ([`Links::name`]), which the index names it at while it lives.
+    #[cfg(any(test, feature = "test-hooks"))]
+    named: BTreeSet<(Pair, LinkNo)>,
 }
 
 impl Links {
@@ -307,6 +313,26 @@ impl Links {
         self.reindex();
     }
 
+    /// Name each link of `named` at its pair in the index, besides where
+    /// its record names it, for as long as the link lives, in place of
+    /// what an earlier call named: a shell's resync of the index entries a
+    /// test wrote past its writers. A record holds what its bundle holds,
+    /// so an entry at a pair the bundle holds no proven path at, which no
+    /// record can give, is named this way and not as a path.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn name(&mut self, named: BTreeSet<(Pair, LinkNo)>) {
+        if self.named != named {
+            self.named = named;
+            self.reindex();
+        }
+    }
+
+    /// The pairs [`Links::name`] names links at.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn names(&self) -> &BTreeSet<(Pair, LinkNo)> {
+        &self.named
+    }
+
     /// Apply what a link's bundle reported, `input`, to the link's record:
     /// the one reading of a path's move, switch, state change and release,
     /// and of the peer turning capable, that the table and a shell's record
@@ -348,7 +374,8 @@ impl Links {
             | Input::Dead { .. }
             | Input::Admin { .. }
             | Input::Sent { .. }
-            | Input::SendFailed { .. } => {}
+            | Input::SendFailed { .. }
+            | Input::Unsendable { .. } => {}
             #[cfg(test)]
             Input::HeldFrame { .. } | Input::HoldLost { .. } => {}
         }
@@ -417,6 +444,13 @@ impl Links {
                 }
             }
         }
+        #[cfg(any(test, feature = "test-hooks"))]
+        out.extend(
+            self.named
+                .iter()
+                .filter(|(_, l)| self.recs.contains_key(l))
+                .cloned(),
+        );
         out
     }
 

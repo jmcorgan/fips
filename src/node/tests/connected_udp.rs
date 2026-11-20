@@ -64,7 +64,17 @@ pub(super) fn promoted_peer_with_the_far_side_session(
     transport_id: TransportId,
 ) -> (Node, NodeAddr, SessionIndex, NoiseSession) {
     let mut node = make_node();
-    let link_id = LinkId::new(1);
+    let link_id = node.allocate_link_id();
+    // The dial's link, as the dial opens it, so the peer is promoted onto a
+    // link the node records.
+    node.add_link(Link::connectionless(
+        link_id,
+        transport_id,
+        TransportAddr::from_string(PROMOTED_ADDR),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    ))
+    .unwrap();
 
     let peer_identity_full = Identity::generate();
     // from_pubkey_full, not from_pubkey: the ECDH needs the parity bit.
@@ -118,8 +128,10 @@ pub(super) fn promoted_peer_with_the_far_side_session(
         .get_peer(&node_addr)
         .and_then(|p| p.our_index())
         .expect("a promoted peer carries the index it was allocated");
-    // The peer is promoted with no link, which no production path does.
-    node.plant();
+    // The peer was promoted past the decision sites; the node's resync
+    // takes it into the settlement core beside the node now, as a planted
+    // test's setup does, before any frame moves it.
+    node.resync();
 
     (node, node_addr, our_index, far_side_session)
 }

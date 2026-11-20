@@ -69,11 +69,11 @@ use crate::node::session::SessionEntry;
 use crate::peer::machine::{DialOrigin, PeerMachine};
 use crate::peer::{ActivePeer, ConnectivityState};
 use crate::proto::bloom::{BloomFilter, BloomState};
+use crate::proto::fmp::Fmp;
 use crate::proto::fmp::wire::{
     ESTABLISHED_HEADER_SIZE, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP, build_encrypted,
     build_established_header, prepend_inner_header,
 };
-use crate::proto::fmp::{Fmp, SilentSessions};
 use crate::proto::fsp::Fsp;
 use crate::proto::fsp::quorum::LinkQuorum;
 use crate::proto::lookup::{Lookup, LookupBackoff, LookupForwardRateLimiter};
@@ -661,13 +661,11 @@ pub struct Node {
     /// (`MachineMap::timers`). The sans-IO time-as-input backing
     /// for `PeerEvent::Timeout`: populated/cleared by the machine's
     /// `SetTimer`/`CancelTimer` actions (`dataplane/peer_actions.rs`) and dropped
-    /// alongside the machine through the `remove_peer_machine` choke-point. The
-    /// `HandshakeRetransmit`/`HandshakeTimeout` kinds are driven by
-    /// `drive_peer_timers` (the retransmit fires on the stored deadline; the
-    /// timeout reap keys on the timer's presence, with the threshold read from
-    /// config); the rekey/liveness kinds are still SHADOWS of their
-    /// own shell drivers, and the machine's `on_timeout` handlers stay dormant
-    /// (`PeerEvent::Timeout` is never dispatched in production).
+    /// alongside the machine through the `remove_peer_machine` choke-point. Its
+    /// one kind, liveness, is still a SHADOW of its own shell driver, and the
+    /// machine's `on_timeout` handler stays dormant (`PeerEvent::Timeout` is
+    /// never dispatched in production). A handshake's resends and deadline
+    /// are its leg's, in `legs`.
     peer_machines: settle::MachineMap,
 
     // === Peers (Active Phase) ===
@@ -808,28 +806,30 @@ pub struct Node {
     /// Budget for the line logged for an unknown link message type. One
     /// node-wide budget rather than one per peer, so it adds no per-peer state.
     msgtype_budget: diag::LogBudget,
-    /// Pending outbound handshakes by our sender_idx.
-    /// Tracks which LinkId corresponds to which session index.
-    pending_outbound: settle::DialMap,
-    /// When each peer identity's last ACCEPTED epoch change tore down its
-    /// peering. Keyed on identity rather than address, and held here rather
-    /// than on `ActivePeer`, because the teardown being dampened destroys
-    /// the peer entry itself. Pruned on insert; see
-    /// `EPOCH_RESTART_MIN_INTERVAL_SECS`.
-    restart_dampener: HashMap<NodeAddr, std::time::Instant>,
-    /// Each identity's recent link sessions that ended without one
-    /// authenticated frame, and the msg1 refusal they drive. Held here, not
-    /// on `ActivePeer`, for the same reason as `restart_dampener`: the
-    /// removal it counts destroys the peer entry.
-    silent_sessions: SilentSessions,
-    /// Per peer, the ephemerals of msg1s that promoted a peering not yet
-    /// heard from. Held beside `restart_dampener` for the same reason: a
-    /// replacement destroys the peer entry. See `MAX_REPLAYED_MSG1S`.
-    replayed_msg1s: handlers::handshake::ReplayedMsg1s,
-    /// The pending redials, one per held identity at most, and the memory
-    /// of the msg1 ephemerals that armed one. Held here because a redial's
-    /// leg is not a peer, and its swap destroys the peer entry it replaces.
+    /// The handshake legs in flight, the settlement core's: each dial's and
+    /// each answer's msg1, resend schedule, deadline and the session index
+    /// lease it holds, keyed by the link table's number for its link. A
+    /// dial's msg2 is found by the index its msg1 carried.
+    legs: settle::Legs,
+    /// The settlement core's restart gates and what they remember of each
+    /// peer identity: when its last accepted restart or replacement of a
+    /// heard peering stamped the dampener, the ephemerals of the msg1s that
+    /// promoted a peering not yet heard from, and its link sessions that
+    /// ended without one authenticated frame, which drive the msg1 refusal,
+    /// with the msg1s that refusal has refused, for the lines that report
+    /// them. Keyed on identity and held here rather than on `ActivePeer`, because
+    /// the teardown, replacement or removal they bound destroys the peer
+    /// entry itself.
+    gates: crate::proto::settle::gates::Gates<crate::peer::PeerInstant>,
+    /// The pending redials, one per held identity at most. Held here
+    /// because a redial's leg is not a peer, and its swap destroys the peer
+    /// entry it replaces. The memory of the msg1 ephemerals that armed one
+    /// is in `gates`.
     redials: settle::RedialMap,
+    /// The settlement core beside the node, fed what each decision site
+    /// decided and deciding nothing (test builds only).
+    #[cfg(test)]
+    shadow: settle::Shadow,
     /// The replay record of each closed link, under the peer's address and
     /// startup epoch, handed to the next link with that peer at that epoch.
     /// Held here because closing a link destroys its peer entry.
@@ -1172,11 +1172,11 @@ impl Node {
             version_budget: diag::LogBudget::new(std::time::Instant::now()),
             length_budget: diag::LogBudget::new(std::time::Instant::now()),
             msgtype_budget: diag::LogBudget::new(std::time::Instant::now()),
-            pending_outbound: settle::DialMap::default(),
-            restart_dampener: HashMap::new(),
-            silent_sessions: SilentSessions::new(),
-            replayed_msg1s: Default::default(),
+            legs: Default::default(),
+            gates: Default::default(),
             redials: Default::default(),
+            #[cfg(test)]
+            shadow: settle::Shadow::default(),
             link_records: handlers::rekey::link_records(&config.node.limits),
             paths: handlers::path::PathDriver::default(),
             msg1_rate_limiter,
@@ -1359,11 +1359,11 @@ impl Node {
             version_budget: diag::LogBudget::new(std::time::Instant::now()),
             length_budget: diag::LogBudget::new(std::time::Instant::now()),
             msgtype_budget: diag::LogBudget::new(std::time::Instant::now()),
-            pending_outbound: settle::DialMap::default(),
-            restart_dampener: HashMap::new(),
-            silent_sessions: SilentSessions::new(),
-            replayed_msg1s: Default::default(),
+            legs: Default::default(),
+            gates: Default::default(),
             redials: Default::default(),
+            #[cfg(test)]
+            shadow: settle::Shadow::default(),
             link_records: handlers::rekey::link_records(&config.node.limits),
             paths: handlers::path::PathDriver::default(),
             msg1_rate_limiter,
@@ -2448,13 +2448,13 @@ impl Node {
     /// point of stamping on acceptance rather than on every sighting.
     #[cfg(test)]
     pub(crate) fn restart_dampener_stamp(&self, peer: &NodeAddr) -> Option<std::time::Instant> {
-        self.restart_dampener.get(peer).copied()
+        self.gates.stamp(peer).map(Into::into)
     }
 
     /// How many msg1 ephemerals the replay memory holds for `peer`. Test-only.
     #[cfg(test)]
     pub(crate) fn replayed_msg1_count(&self, peer: &NodeAddr) -> usize {
-        self.replayed_msg1s.count(peer)
+        self.gates.replays(peer)
     }
 
     #[cfg(test)]
@@ -3261,6 +3261,8 @@ impl Node {
             }
             return;
         }
+        #[cfg(test)]
+        self.closed(transport_id, addr);
         if let Some(transport) = self.transports.get(&transport_id) {
             transport.close_connection(addr).await;
         }
@@ -3289,10 +3291,14 @@ impl Node {
     /// whether its bundle found it capable, of each peer a test mutator
     /// flagged past the feed, which the flag then no longer marks, each
     /// record held by its peer; a record for each link a test put in the
-    /// link map; and each entry it wrote in the index, in its link's record.
-    /// A test that changes a bundle and then drives the node needs no call of
-    /// its own: the node resyncs at the head of each msg1 and msg2 and before
-    /// each read of the close rule. With nothing planted or flagged it writes
+    /// link map, and for the link of each peer it planted on a link the map
+    /// lacks, at the pair the peer is at; and each entry it wrote in the
+    /// index, named in the index through its link's record, or opening one.
+    /// The shadow core takes the same, and the facts of each planted peer and
+    /// each peer a test setter changed ([`Node::shadow_resync`]). A test that
+    /// changes a bundle and then drives the node needs no call of its own:
+    /// the node resyncs at the head of each msg1 and msg2 and before each
+    /// read of the close rule. With nothing planted or flagged it writes
     /// nothing (test builds only).
     #[cfg(test)]
     pub(in crate::node) fn resync(&mut self) {
@@ -3313,7 +3319,26 @@ impl Node {
                 (peer.link_id(), *addr, settle::recorded(peer), capable)
             })
             .collect();
-        self.links.resync(held, &holders);
+        // A peer a test planted on a link the map lacks gets a record at
+        // the pair it is at, as the shadow holds it.
+        let unrecorded = self
+            .peers
+            .iter()
+            .filter(|(_, peer)| {
+                self.links.no(&peer.link_id()).is_none()
+                    && !self.links.contains_key(&peer.link_id())
+            })
+            .filter_map(|(addr, peer)| {
+                let at = crate::proto::settle::links::Pair {
+                    transport: peer.transport_id()?,
+                    addr: peer.current_addr()?.clone(),
+                };
+                let capable = peer.bundle().is_some_and(|b| b.capable());
+                Some((peer.link_id(), *addr, at, settle::recorded(peer), capable))
+            })
+            .collect();
+        self.links.resync(held, unrecorded, &holders);
+        self.shadow_resync(None);
         for peer in self.peers.values_mut() {
             peer.set_fed(false);
         }
@@ -3367,14 +3392,12 @@ impl Node {
     }
 
     /// Operator-visible msg1 resend count for a pending handshake `link`, read
-    /// from the per-peer machine (the counter's home once the resend drive moved
-    /// off the shell connection). A link with no machine reports 0, and inbound
-    /// machines never resend, matching what the shell connection reported
-    /// before the counter moved.
+    /// from its handshake leg in the settlement core's legs, which counts each
+    /// resend once sent. A link with no leg reports 0, and an answer never
+    /// resends, matching what the shell connection reported before the
+    /// counter moved.
     pub(crate) fn connection_resend_count(&self, link: LinkId) -> u32 {
-        self.peer_machines
-            .get(&link)
-            .map_or(0, |machine| machine.resend_count())
+        self.leg(link).map_or(0, |leg| leg.sent())
     }
 
     /// Operator-visible connection-start timestamp for a pending handshake
@@ -3482,6 +3505,272 @@ impl Node {
     }
 
     // === Connection Management (Handshake Phase) ===
+
+    /// The link of this node's dial whose msg1 carried our session index
+    /// `index` and went out on `transport`, while the dial's leg waits for
+    /// its msg2: a fresh handshake is bound to the transport its msg1 went
+    /// out on.
+    pub(in crate::node) fn dial_at(&self, transport: TransportId, index: u32) -> Option<LinkId> {
+        self.legs
+            .iter()
+            .filter(|leg| *leg.kind() == crate::proto::settle::legs::Kind::Dial)
+            .filter(|leg| leg.index() == index)
+            .filter_map(|leg| self.links.id(leg.link()))
+            .find(|id| {
+                self.links
+                    .get(id)
+                    .is_some_and(|link| link.transport_id() == transport)
+            })
+    }
+
+    /// Take the handshake leg off `link`, if it holds one: its handshake
+    /// completed or ended, and the caller now holds its lease.
+    pub(in crate::node) fn take_leg(
+        &mut self,
+        link: LinkId,
+    ) -> Option<crate::proto::settle::legs::Leg<crate::peer::PeerInstant>> {
+        let no = self.links.no(&link)?;
+        self.legs.take(no)
+    }
+
+    /// End the handshake leg on `link`, if it holds one, its lease's index
+    /// back to the allocator.
+    pub(in crate::node) fn drop_leg(&mut self, link: LinkId) {
+        if let Some(leg) = self.take_leg(link) {
+            let _ = self
+                .index_allocator
+                .free(crate::utils::index::SessionIndex::new(
+                    leg.lease().release(),
+                ));
+        }
+    }
+
+    /// Start the answer's leg on `link`, in the settlement core's legs: this
+    /// node answered `msg1`, the framed msg1 that arrived at `at` on the
+    /// interval clock from `peer`, with `msg2`, and drew `lease` for it. The
+    /// leg's deadline counts from the msg1's arrival. A link with no record
+    /// leaves the lease's index to the allocator.
+    pub(in crate::node) fn answer_leg(
+        &mut self,
+        link: LinkId,
+        peer: NodeAddr,
+        msg1: &[u8],
+        msg2: Vec<u8>,
+        lease: fips_core::proto::rekey::IndexLease,
+        at: u64,
+    ) {
+        let Some(no) = self.links.no(&link) else {
+            let _ = self
+                .index_allocator
+                .free(crate::utils::index::SessionIndex::new(lease.release()));
+            return;
+        };
+        let start = crate::proto::settle::legs::Start {
+            link: no,
+            peer: Some(peer),
+            msg1: msg1.to_vec(),
+            lease,
+            resends: None,
+            held: None,
+        };
+        let params = settle::leg_params(&self.config().node);
+        if let Some(old) = self
+            .legs
+            .answer(start, msg2, crate::time::mono_at(at), &params)
+        {
+            let _ = self
+                .index_allocator
+                .free(crate::utils::index::SessionIndex::new(
+                    old.lease().release(),
+                ));
+        }
+    }
+
+    /// The handshake leg on `link`, if it holds one.
+    pub(in crate::node) fn leg(
+        &self,
+        link: LinkId,
+    ) -> Option<&crate::proto::settle::legs::Leg<crate::peer::PeerInstant>> {
+        self.legs.get(self.links.no(&link)?)
+    }
+
+    /// The dials whose legs wait for their msg2, each by the transport its
+    /// msg1 went out on and the index it carried (test builds only).
+    #[cfg(test)]
+    pub(in crate::node) fn pending_outbound(&self) -> HashMap<(TransportId, u32), LinkId> {
+        self.legs
+            .iter()
+            .filter(|leg| *leg.kind() == crate::proto::settle::legs::Kind::Dial)
+            .filter_map(|leg| {
+                let id = self.links.id(leg.link())?;
+                let transport = self.links.get(&id)?.transport_id();
+                Some(((transport, leg.index()), id))
+            })
+            .collect()
+    }
+
+    /// Give each link a test put in the link table itself a record, and so
+    /// a number, as the node's resync does, without the shadow's (test
+    /// builds only).
+    #[cfg(test)]
+    fn number_planted_links(&mut self) {
+        let holders: HashMap<LinkId, NodeAddr> = self
+            .peers
+            .iter()
+            .map(|(addr, peer)| (peer.link_id(), *addr))
+            .collect();
+        self.links.resync(Vec::new(), Vec::new(), &holders);
+    }
+
+    /// Start a dial's leg on the link `id` past the dial site, as a test
+    /// plants one, for a msg2 to find by `key`, the transport its msg1 went
+    /// out on and the index it carried. The leg takes the lease of that
+    /// index the link's machine holds, or else, with no such lease, one of
+    /// that index, drawn from the allocator if the test has not drawn it,
+    /// and the machine's msg1, identity and start;
+    /// it resends nothing, as a dial planted with no timer never did, unless
+    /// `resend` names the interval-clock millisecond its next resend is
+    /// due at, as a test armed a dial's resend timer. A link a test put in
+    /// the link table itself is numbered first (test builds only).
+    #[cfg(test)]
+    pub(in crate::node) fn plant_dial_at(
+        &mut self,
+        key: (TransportId, u32),
+        id: LinkId,
+        resend: Option<u64>,
+    ) {
+        self.number_planted_links();
+        let no = self
+            .links
+            .no(&id)
+            .expect("precondition: a planted dial's link is in the link table");
+        let (lease, msg1, peer, begun) = match self.peer_machines.get_mut(&id) {
+            Some(machine) => {
+                let lease = match machine.our_index() {
+                    Some(index) if index.as_u32() == key.1 => machine.take_our_index(),
+                    _ => None,
+                };
+                (
+                    lease,
+                    machine.conn_handshake_msg1().map(<[u8]>::to_vec),
+                    machine.conn_expected_identity().map(|i| *i.node_addr()),
+                    Some(machine.conn_active_at()),
+                )
+            }
+            None => (None, None, None, None),
+        };
+        let start = crate::proto::settle::legs::Start {
+            link: no,
+            peer,
+            msg1: msg1.unwrap_or_default(),
+            lease: lease.unwrap_or_else(|| {
+                let index = crate::utils::index::SessionIndex::new(key.1);
+                if !self.index_allocator.is_allocated(index) {
+                    self.index_allocator
+                        .reserve(index)
+                        .expect("precondition: a planted dial's index can be drawn");
+                }
+                fips_core::proto::rekey::IndexLease::for_test(key.1)
+            }),
+            resends: None,
+            held: None,
+        };
+        let params = settle::leg_params(&self.config().node);
+        let now = crate::time::mono_at(begun.unwrap_or_else(Self::interval_ms));
+        if let Some(old) = self.legs.dial(start, now, &params) {
+            let _ = old.lease().release();
+        }
+        if let Some(leg) = self.legs.get(no) {
+            let deadline = leg.deadline();
+            self.legs
+                .replant(no, deadline, resend.map(crate::time::mono_at));
+        }
+        self.shadow_planted(id);
+    }
+
+    /// End the handshake leg on `link`, its index back to the allocator, as
+    /// [`Node::drop_leg`] does, for a test that ends a dial it planted
+    /// past the writers: the shadow's leg on the link goes with it (test
+    /// builds only).
+    #[cfg(test)]
+    pub(in crate::node) fn forget_leg(&mut self, link: LinkId) {
+        self.drop_leg(link);
+        self.shadow_forget(link);
+    }
+
+    /// Start an answer's leg on the link `id` past the answer site, as a
+    /// test plants one with its stored `msg2`: the leg takes the lease the
+    /// link's machine holds, or else one the allocator draws, and the
+    /// machine's identity and start, and the machine keeps the
+    /// msg2 too, for the promotion's tail. A link a test put in the link
+    /// table itself is numbered first (test builds only).
+    #[cfg(test)]
+    pub(in crate::node) fn plant_answer_at(&mut self, id: LinkId, msg2: Vec<u8>) {
+        self.number_planted_links();
+        let machine = self
+            .peer_machines
+            .get_mut(&id)
+            .expect("precondition: a planted answer's link has its machine");
+        machine.set_conn_handshake_msg2(msg2.clone());
+        let lease = machine
+            .take_our_index()
+            .or_else(|| fips_core::proto::rekey::allocate(&mut self.index_allocator))
+            .expect("precondition: an index is free for a planted answer");
+        let peer = machine.conn_expected_identity().map(|i| *i.node_addr());
+        let at = machine.conn_active_at();
+        let no = self
+            .links
+            .no(&id)
+            .expect("precondition: a planted answer's link is in the link table");
+        let start = crate::proto::settle::legs::Start {
+            link: no,
+            peer,
+            msg1: Vec::new(),
+            lease,
+            resends: None,
+            held: None,
+        };
+        let params = settle::leg_params(&self.config().node);
+        if let Some(old) = self
+            .legs
+            .answer(start, msg2, crate::time::mono_at(at), &params)
+        {
+            let _ = old.lease().release();
+        }
+    }
+
+    /// End the planted dial a msg2 would find by `key`, if any: its lease
+    /// goes back to the link's machine if that machine carries a handshake,
+    /// or its index to the allocator (test builds only).
+    #[cfg(test)]
+    pub(in crate::node) fn forget_dial_at(&mut self, key: &(TransportId, u32)) {
+        let Some(id) = self.pending_outbound().get(key).copied() else {
+            return;
+        };
+        let Some(leg) = self.take_leg(id) else {
+            return;
+        };
+        self.shadow_forget(id);
+        // A lease a seeded handshake's machine held goes back to it.
+        match self
+            .peer_machines
+            .get_mut(&id)
+            .filter(|machine| machine.leg().is_some())
+        {
+            Some(machine) => {
+                if let Some(old) = machine.set_conn_our_index(leg.lease()) {
+                    let _ = old.release();
+                }
+            }
+            None => {
+                let _ = self
+                    .index_allocator
+                    .free(crate::utils::index::SessionIndex::new(
+                        leg.lease().release(),
+                    ));
+            }
+        }
+    }
 
     /// Whether `link_id` has a pending handshake, read through the control
     /// machine that carries it.

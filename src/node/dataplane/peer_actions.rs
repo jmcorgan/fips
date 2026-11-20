@@ -26,10 +26,10 @@
 //! see its arm for the note.
 //!
 //! The timer arms (`SetTimer`/`CancelTimer`) populate/clear the per-peer timer
-//! store (`MachineMap::timers`, on `peer_machines`). The `HandshakeRetransmit` and `HandshakeTimeout`
-//! deadlines are read and fired by `drive_peer_timers` (the handshake resend +
-//! reap home). The liveness kind is still SHADOW — driven by its own shell
-//! driver — so populating it stays behavior-neutral.
+//! store (`MachineMap::timers`, on `peer_machines`). Its one kind, liveness,
+//! is a SHADOW — driven by its own shell driver — so populating it stays
+//! behavior-neutral. A handshake's resends and deadline are its leg's in the
+//! settlement core (`Node::legs`), run by the node's timer sweeps.
 
 use crate::PeerIdentity;
 use crate::identity::NodeAddr;
@@ -112,7 +112,7 @@ impl Node {
         let actions = match self.peer_machines.get_mut(&link) {
             // Disjoint field borrow: `self.peer_machines` (the map entry) and
             // `self.index_allocator` (the capability) are separate fields.
-            Some(machine) => machine.step(event, interval_now, &mut self.index_allocator),
+            Some(machine) => machine.step(event, interval_now),
             None => return,
         };
         self.execute_peer_actions(link, ambient, actions).await;
@@ -173,6 +173,8 @@ impl Node {
                                     });
                             }
                             Err(_e) => {
+                                #[cfg(test)]
+                                self.shadow_abandon(link);
                                 self.links.forget(&link, &(transport_id, remote_addr));
                                 self.remove_peer_machine(link);
                                 return;
@@ -246,12 +248,20 @@ impl Node {
                                     error = %e,
                                     "Deferred msg2: the transport is between interfaces"
                                 );
+                                #[cfg(test)]
+                                self.shadow_sent(link, false);
                                 return;
                             }
                             // Restored pre-refactor msg2-send-failure warn!
                             // (`handle_msg1` L665): the send error text is surfaced
                             // at the executor point where the failure is now handled.
                             warn!(link_id = %link, error = %e, "Failed to send msg2");
+                            #[cfg(test)]
+                            self.shadow_unsendable(link);
+                            // The answer's leg goes; its index is freed below.
+                            if let Some(leg) = self.take_leg(link) {
+                                let _ = leg.lease().release();
+                            }
                             self.links.forget(
                                 &link,
                                 &(ambient.transport_id, ambient.remote_addr.clone()),
@@ -264,6 +274,8 @@ impl Node {
                                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                             return;
                         }
+                        #[cfg(test)]
+                        self.shadow_sent(link, true);
                     } else {
                         // msg1: the shell already allocated the index, ran the
                         // Noise leaf, and armed the wire on the connection at dial
@@ -337,7 +349,7 @@ impl Node {
                                 // OLD outbound (`handle_msg2` promote-Err): warn +
                                 // record_reject ONLY. NO `remove_link`, NO
                                 // `index_allocator.free`, NO link index removal —
-                                // the dead link, its index entry and pending_outbound were
+                                // the dead link and its index entry were
                                 // left for the 30s stale-connection reaper
                                 // (`promote_connection` already handled
                                 // `connections[link]`/its index on error). Restored
@@ -456,10 +468,9 @@ impl Node {
                 }
                 PeerAction::SetTimer { kind, at_ms } => {
                     // Populate the per-peer timer store (overwrite = reschedule).
-                    // The `HandshakeRetransmit` and `HandshakeTimeout` deadlines
-                    // are read + fired by `drive_peer_timers`. The liveness kind
-                    // is still SHADOW here — it keeps its own shell driver — so
-                    // populating it stays behavior-neutral.
+                    // Its one kind, liveness, is a SHADOW here — it keeps its
+                    // own shell driver — so populating it stays
+                    // behavior-neutral.
                     self.peer_machines.arm(link, kind, at_ms);
                 }
                 PeerAction::CancelTimer { kind } => {

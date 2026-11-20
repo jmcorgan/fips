@@ -58,6 +58,8 @@ impl Node {
             return None;
         };
         let link_id = peer.link_id();
+        #[cfg(test)]
+        self.shadow_remove(*node_addr, why);
         // Read while the machines are open: the transport for the bootstrap
         // cleanup below, and the startup epoch the silent-session note files
         // the refusal under.
@@ -235,9 +237,17 @@ impl Node {
     /// The removal a test makes: the routine for a link its rekey machine
     /// ended, the one cause whose table runs nothing after the removal, so
     /// a test that leaves out what follows a removal leaves out nothing.
+    /// Since nothing follows it, it records the node's side of the removal
+    /// for the shadow core's comparison itself, as [`Node::removed`]'s run
+    /// would.
     #[cfg(test)]
     pub(in crate::node) fn remove_active_peer(&mut self, node_addr: &NodeAddr) -> Option<Removed> {
-        self.remove(node_addr, Why::Ended)
+        let removed = self.remove(node_addr, Why::Ended)?;
+        self.did(super::Did::Remove {
+            peer: *node_addr,
+            why: Why::Ended,
+        });
+        Some(removed)
     }
 
     /// Count the session of the peer at `node_addr`, removed without having
@@ -250,16 +260,27 @@ impl Node {
         epoch: Option<[u8; 8]>,
         ephemeral: Option<EphemeralDigest>,
     ) {
-        let refusal =
-            self.silent_sessions
-                .ended(*node_addr, epoch, ephemeral, crate::time::mono_ms());
-        if let Some(refusal) = refusal {
+        let params = self.gate_params();
+        let refusal = self.gates.ended(
+            *node_addr,
+            epoch,
+            ephemeral,
+            crate::peer::peer_now(),
+            Self::memory_now(),
+            &params,
+        );
+        // A refusal the end starts reports what the record's previous one
+        // refused, and counts again from none; a record the end started
+        // afresh has refused nothing.
+        let silent = self.gates.silent(node_addr).unwrap_or(0);
+        if let Some(length) = refusal {
+            let prior = self.gates.take_refused(node_addr);
             debug!(
                 peer = %self.peer_display_name(node_addr),
                 startup_epoch = %OrNone(epoch.map(hex::encode)),
-                silent = refusal.backoff.silent,
-                refuse_s = refusal.backoff.remaining_ms / 1000,
-                prior_refused = refusal.prior_refused,
+                silent,
+                refuse_s = length.as_secs(),
+                prior_refused = prior,
                 "Session ended without a frame, refusing the peer's msg1s at this epoch"
             );
         }
@@ -328,9 +349,12 @@ pub(super) async fn close_held(node: &mut Node, r: &mut Run) {
     // connectionless default is a no-op.
     if !node_fault!(AdminKeepsConnection)
         && let Some((transport_id, addr)) = &removed.held
-        && let Some(transport) = node.transports.get(transport_id)
     {
-        transport.close_connection(addr).await;
+        #[cfg(test)]
+        node.closed(*transport_id, addr);
+        if let Some(transport) = node.transports.get(transport_id) {
+            transport.close_connection(addr).await;
+        }
     }
 }
 

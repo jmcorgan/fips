@@ -1089,6 +1089,13 @@ impl ActivePeer {
         paths.mark_acked(index);
     }
 
+    /// Leave the link's paths with none active, for tests of a lone path
+    /// that is not active, which the path machine leaves only inside a step.
+    #[cfg(test)]
+    pub(crate) fn idle_active(&mut self) {
+        self.test_paths().deactivate();
+    }
+
     /// Mark the held path (`transport_id`, `addr`) Dead, as unanswered
     /// probes would, for tests that need a held path given up on.
     #[cfg(test)]
@@ -1259,6 +1266,7 @@ impl ActivePeer {
     /// rekeys also exchange epochs and must keep restart detection current.
     #[cfg(test)]
     pub(crate) fn set_remote_epoch(&mut self, remote_epoch: Option<[u8; 8]>) {
+        self.past_feed = true;
         if let Some(rekey) = self.rekey.as_mut() {
             rekey.force_peer_epoch(remote_epoch);
         }
@@ -1528,6 +1536,7 @@ impl ActivePeer {
     /// peering quiet that long. The wall-clock `last_seen` is not moved.
     #[cfg(test)]
     pub(crate) fn test_backdate_heard(&mut self, age: Duration) {
+        self.past_feed = true;
         self.data.heard_at = fips_core::time::Instant::checked_sub(self.data.heard_at, age)
             .expect("the peer clock reaches back past the backdate");
     }
@@ -1537,6 +1546,7 @@ impl ActivePeer {
     /// not moved.
     #[cfg(test)]
     pub(crate) fn test_backdate_promoted(&mut self, age: Duration) {
+        self.past_feed = true;
         self.data.promoted_at = fips_core::time::Instant::checked_sub(self.data.promoted_at, age)
             .expect("the peer clock reaches back past the backdate");
     }

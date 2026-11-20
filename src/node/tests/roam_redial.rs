@@ -1334,7 +1334,7 @@ async fn reaped_first(workers: bool) {
     pair.pump().await;
     let r = since(&pair.nodes[1].node.stats().handshake.snapshot(), &was);
     let held = b_session(&pair);
-    let stamped = pair.nodes[1].node.restart_dampener.contains_key(&a);
+    let stamped = pair.nodes[1].node.gates.stamp(&a).is_some();
     cleanup_nodes(&mut pair.nodes).await;
     assert!(
         held == Some((pending.link, Some(pending.index))) && r.redials_proven == 1 && !stamped,

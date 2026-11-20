@@ -38,7 +38,12 @@ it out. Handshake message bytes are opaque here.
   are shown, and the caller's interval-clock reading, which the handshake
   timeout reads; and `Fmp`, the stateless lifecycle anchor `Node` holds.
 - `silent.rs`: `SilentSessions`, the record of link sessions that ended
-  without an authenticated frame, and the msg1 refusal it drives.
+  without an authenticated frame, and the msg1 refusal it drives, and
+  `ActiveBackoff`, the refusal in force as the inbound snapshot carries
+  it. The node keeps its record in the settlement core's restart gates
+  (`proto::settle::gates`) and fills the snapshot's refusal from them.
+  Under the test hooks `known` names the identities it holds a record
+  for, for a shell's comparison with another memory.
 - `limits.rs`: the connection-retry backoff arithmetic.
 - `rekey/`: the link's profile of the shared rekey machine
   (`proto::rekey`) over Noise IK, the node-level read of a peer's msg1,

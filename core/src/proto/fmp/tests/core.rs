@@ -1,6 +1,6 @@
 //! Tests for the sans-IO FMP connection-lifecycle decision core.
 
-use super::util::{establish_snapshot, resend_snapshot, stale_snapshot, wire_outcome};
+use super::util::{establish_snapshot, stale_snapshot, wire_outcome};
 use crate::proto::fmp::{
     ConnAction, Fmp, InboundDecision, InboundReject, OutboundDecision, OutboundSnapshot,
     cross_connection_winner,
@@ -48,54 +48,6 @@ fn outbound_stale_without_identity_only_tears_down() {
     let actions = fmp.poll_timeouts(vec![stale_snapshot(link, true, None)]);
     assert_eq!(actions.len(), 1);
     assert!(matches!(actions[0], ConnAction::Teardown { link: l } if l == link));
-}
-
-#[test]
-fn no_resend_candidates_yields_no_actions() {
-    let fmp = Fmp::new();
-    assert!(fmp.poll_resends(Vec::new(), 1_000, 500, 2.0).is_empty());
-}
-
-#[test]
-fn resend_emits_bytes_and_backoff_schedule() {
-    let fmp = Fmp::new();
-    let link = LinkId::new(5);
-    let msg1 = vec![0xde, 0xad, 0xbe, 0xef];
-    // now=1000, interval=500, backoff=2.0, prior_count=0 -> exponent 1 ->
-    // next = 1000 + 500 * 2^1 = 2000.
-    let actions = fmp.poll_resends(
-        vec![resend_snapshot(link, 0, msg1.clone())],
-        1_000,
-        500,
-        2.0,
-    );
-    assert_eq!(actions.len(), 1);
-    match &actions[0] {
-        ConnAction::ResendMsg1 {
-            link: l,
-            bytes,
-            next_resend_at_ms,
-        } => {
-            assert_eq!(*l, link);
-            assert_eq!(bytes, &msg1);
-            assert_eq!(*next_resend_at_ms, 2_000);
-        }
-        _ => panic!("expected ResendMsg1"),
-    }
-}
-
-#[test]
-fn resend_backoff_exponent_uses_count_plus_one() {
-    let fmp = Fmp::new();
-    let link = LinkId::new(6);
-    // prior_count=2 -> exponent 3 -> next = 0 + 100 * 2^3 = 800.
-    let actions = fmp.poll_resends(vec![resend_snapshot(link, 2, vec![1])], 0, 100, 2.0);
-    match &actions[0] {
-        ConnAction::ResendMsg1 {
-            next_resend_at_ms, ..
-        } => assert_eq!(*next_resend_at_ms, 800),
-        _ => panic!("expected ResendMsg1"),
-    }
 }
 
 // --- rekey decision (synthetic clock: elapsed_secs/counter fed directly) ---

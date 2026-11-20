@@ -315,7 +315,7 @@ pub fn route(events: Vec<Event>, mut ctx: Ctx<'_>) -> Routed {
                 );
                 stepped(steps, &mut ctx, &mut r);
             }
-            Event::Roamed { from, to } => {
+            Event::Roamed { from, to, standby } => {
                 if let Some(link) = ctx.link
                     && !fault!(PathsUnmirrored)
                 {
@@ -323,6 +323,7 @@ pub fn route(events: Vec<Event>, mut ctx: Ctx<'_>) -> Routed {
                         link,
                         from: Some(drive::pair(from)),
                         to: drive::pair(to),
+                        standby,
                     };
                     stepped(joined(ctx.key, roam), &mut ctx, &mut r);
                 }
@@ -333,6 +334,7 @@ pub fn route(events: Vec<Event>, mut ctx: Ctx<'_>) -> Routed {
                         link,
                         from: None,
                         to: drive::pair(at),
+                        standby: false,
                     };
                     stepped(joined(ctx.key, bind), &mut ctx, &mut r);
                 }

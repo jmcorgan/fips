@@ -722,6 +722,7 @@ impl Drive {
         let out = self.core(Input::Heard {
             peer,
             from: pair(from),
+            kind: crate::proto::link::LinkMessageType::Heartbeat.to_byte(),
         });
         self.effects(out, did);
         let moved = self.routed(None, roamed);

@@ -83,7 +83,7 @@ async fn promotion(initiator: bool, on: bool) {
     initiate_handshake(&mut nodes, 0, 1).await;
     let dial = *nodes[0]
         .node
-        .pending_outbound
+        .pending_outbound()
         .values()
         .next()
         .expect("precondition: node 0's dial is pending");
@@ -211,7 +211,7 @@ async fn ble_promotion(on: bool) {
         Some(PHASE_MSG2),
         "precondition: node 1's msg2 reaches node 0 first"
     );
-    let dial = nodes[0].node.pending_outbound.values().next().copied();
+    let dial = nodes[0].node.pending_outbound().values().next().copied();
     let before_i = Seen::of(&nodes[0].node, &b, &at(&nodes[0])).await;
     let unmarked_i = mark_at(&nodes[0], &link).await;
     hand(&mut nodes[0].node, msg2).await;

@@ -27,27 +27,29 @@
 //!
 //! At most one redial is pending per identity. Before one is armed it must
 //! pass, in order: the slot rule (a pending redial under 1 s old holds the
-//! slot; an older one is replaced), the redial memory (an ephemeral that
-//! armed a redial of the peer in the last 15 s, or a full memory, is
-//! refused), the restart dampener and the ACL. Only then is the msg1's ephemeral recorded, in the
-//! held link's replay record and the redial memory, so a genuine dial
-//! refused by a gate is judged again at its next resend.
+//! slot; an older one is replaced), the restart gates (`Node.gates`, asked
+//! as a redial: the redial memory, which refuses an ephemeral that armed a
+//! redial of the peer in the last 15 s or a full memory, then the
+//! dampener) and the ACL. Only then is the msg1's ephemeral recorded, in
+//! the held link's replay record and the gates' redial memory, so a genuine
+//! dial refused by a gate is judged again at its next resend.
 
 use crate::NodeAddr;
 use crate::node::Node;
 use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::diag::HsLine;
-use crate::node::handlers::handshake::{
-    Armed, EPOCH_RESTART_MIN_INTERVAL_SECS, ReplayVerdict, UNHEARD_PEERING_MIN_AGE_MS,
-};
+use crate::node::handlers::handshake::Armed;
 use crate::node::reject::{DataplaneReject, HandshakeReject, RejectReason};
 use crate::node::settle::Redial;
 use crate::peer::machine::{PeerAction, PeerEvent, PeerState};
-use crate::proto::fmp::WireOutcome;
 use crate::proto::fmp::wire::{EncryptedHeader, build_msg2};
+use crate::proto::fmp::{EphemeralDigest, WireOutcome};
+use crate::proto::settle::gates::{Ask, Refusal, Source};
 use crate::proto::settle::output::Why;
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
+use crate::utils::index::SessionIndex;
+use fips_core::proto::rekey::allocate;
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -57,7 +59,9 @@ enum Held {
     /// Another redial of the peer is pending and under 1 s old.
     Slot,
     /// Its ephemeral armed a redial of the peer in the last 15 s, or the
-    /// memory of them is full.
+    /// memory of them is full. A silent-session refusal, which the msg1's
+    /// classification makes before a redial is armed, would be counted here
+    /// too.
     Seen,
     /// The restart dampener holds the peer.
     Dampened,
@@ -84,7 +88,7 @@ impl Node {
         } = armed;
         let interval_ms = leg_at.interval_ms;
         let pending = self.redials.of(&peer);
-        if let Some(held) = self.redial_held(&peer, pending, ephemeral.as_ref(), interval_ms) {
+        if let Some(held) = self.redial_held(&peer, pending, ephemeral, wire, packet, interval_ms) {
             if self.shown(&peer, HsLine::Redial) {
                 debug!(
                     peer = %self.peer_display_name(&peer),
@@ -113,7 +117,7 @@ impl Node {
                 )
                 .is_err()
         {
-            let _ = machine.step(PeerEvent::Rejected, interval_ms, &mut self.index_allocator);
+            let _ = machine.step(PeerEvent::Rejected, interval_ms);
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -138,21 +142,22 @@ impl Node {
         if let Some(ephemeral) = ephemeral
             && !node_fault!(RedialMemoryIgnored)
         {
-            self.redials.seen().note(peer, ephemeral, interval_ms);
+            let params = self.gate_params();
+            let at = Self::memory_instant(packet).unwrap_or_else(crate::peer::peer_now);
+            self.gates.redialed(peer, ephemeral, at, &params);
         }
 
-        // Allocate the leg's index and send its msg2; nothing is promoted.
-        let actions = machine.step(
-            PeerEvent::AuthorizedHeld,
-            interval_ms,
-            &mut self.index_allocator,
-        );
-        let Some(our_index) = machine.our_index() else {
+        // Draw the leg's index, which the answer's leg holds until a
+        // promotion takes it, and send its msg2; nothing is promoted.
+        let Some(our_lease) = allocate(&mut self.index_allocator) else {
             warn!("Failed to allocate session index for a redial");
+            let _ = machine.step(PeerEvent::Rejected, interval_ms);
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         };
+        let our_index = SessionIndex::new(our_lease.index());
+        let actions = machine.step(PeerEvent::AuthorizedHeld, interval_ms);
         let their_index = wire.their_index;
         self.links.open(Link::connectionless(
             link,
@@ -161,7 +166,18 @@ impl Node {
             LinkDirection::Inbound,
             Duration::from_millis(self.config().node.base_rtt_ms),
         ));
-        machine.set_conn_handshake_msg2(build_msg2(our_index, their_index, &wire.msg2_payload));
+        let wire_msg2 = build_msg2(our_index, their_index, &wire.msg2_payload);
+        // The answer's leg, the settlement core's, reaped at the handshake
+        // deadline counted from the msg1's arrival.
+        self.answer_leg(
+            link,
+            peer,
+            &packet.data,
+            wire_msg2.clone(),
+            our_lease,
+            interval_ms,
+        );
+        machine.set_conn_handshake_msg2(wire_msg2);
         self.peer_machines.add(link, machine);
         self.redials.note(
             peer,
@@ -205,40 +221,55 @@ impl Node {
     }
 
     /// The first gate that holds back a redial of `peer`, whose pending
-    /// redial is `pending`, with the msg1's `ephemeral`, at `now_ms` on the
-    /// interval clock; `None` when every gate passes.
+    /// redial is `pending`, with the msg1's `ephemeral`, read as `wire` from
+    /// `packet`, at `now_ms` on the interval clock; `None` when every gate
+    /// passes. The slot rule is the node's; the redial memory and the
+    /// dampener are the restart gates', asked as a redial, which stamps
+    /// nothing.
     fn redial_held(
         &mut self,
         peer: &NodeAddr,
         pending: Option<Redial>,
-        ephemeral: Option<&crate::proto::fmp::EphemeralDigest>,
+        ephemeral: Option<EphemeralDigest>,
+        wire: &WireOutcome,
+        packet: &ReceivedPacket,
         now_ms: u64,
     ) -> Option<Held> {
         if node_fault!(RedialTearsDownAtMsg1) {
             return None;
         }
+        let params = self.gate_params();
+        let floor = u64::try_from(params.unheard.as_millis()).unwrap_or(u64::MAX);
         if let Some(pending) = pending
-            && now_ms.saturating_sub(pending.at) < UNHEARD_PEERING_MIN_AGE_MS
+            && now_ms.saturating_sub(pending.at) < floor
             && !node_fault!(RedialSlotIgnored)
         {
             return Some(Held::Slot);
         }
-        if let Some(ephemeral) = ephemeral
-            && !node_fault!(RedialMemoryIgnored)
-            && self.redials.seen().verdict(peer, ephemeral, now_ms) != ReplayVerdict::Fresh
+        let ask = Ask {
+            source: Source::Redial,
+            held: self.liveness(peer, packet.timestamp_ms),
+            ephemeral: ephemeral.filter(|_| !node_fault!(RedialMemoryIgnored)),
+            epoch: wire.remote_epoch,
+            memory: Self::memory_instant(packet),
+        };
+        match self
+            .gates
+            .gate(*peer, ask, crate::peer::peer_now(), &params)
         {
-            return Some(Held::Seen);
+            None => None,
+            Some(Refusal::Redialed) => Some(Held::Seen),
+            Some(Refusal::Dampened) if node_fault!(RedialSkipsDampener) => None,
+            Some(Refusal::Dampened) => Some(Held::Dampened),
+            Some(other) => {
+                debug_assert_eq!(
+                    other,
+                    Refusal::Silent,
+                    "a redial's gate refused it as no redial is refused"
+                );
+                Some(Held::Seen)
+            }
         }
-        let dampened = self.restart_dampener.get(peer).is_some_and(|t| {
-            crate::time::mono_now()
-                .saturating_duration_since(*t)
-                .as_secs()
-                < EPOCH_RESTART_MIN_INTERVAL_SECS
-        });
-        if dampened && !node_fault!(RedialSkipsDampener) {
-            return Some(Held::Dampened);
-        }
-        None
     }
 
     /// A frame in `packet`, with `header`, names the index of `peer`'s
@@ -295,11 +326,20 @@ impl Node {
         link: LinkId,
         now_ms: u64,
     ) {
-        let Some((identity, ours, theirs, transport_id, remote_addr)) =
+        // The leg's index is the shell's until the promotion takes it, so
+        // it is read from the pending redial.
+        let Some(ours) = self
+            .redials
+            .of(&peer)
+            .filter(|r| r.link == link)
+            .map(|r| r.index)
+        else {
+            return;
+        };
+        let Some((identity, theirs, transport_id, remote_addr)) =
             self.peer_machines.get(&link).and_then(|m| {
                 Some((
                     *m.conn_expected_identity()?,
-                    m.our_index()?,
                     m.conn_their_index()?,
                     m.conn_transport_id()?,
                     m.conn_source_addr()?.clone(),
@@ -344,7 +384,6 @@ impl Node {
                     peer_held: held.is_some(),
                 },
                 interval_ms,
-                &mut self.index_allocator,
             ),
             None => return,
         };
@@ -377,13 +416,10 @@ impl Node {
         }
         // Stamped as an accepted replacement of a heard peering is: it bounds
         // the churn two processes under one key could drive. A replayer
-        // cannot reach here, so it cannot stamp it.
-        if held.as_ref().is_some_and(|(heard, _, _)| *heard) {
-            let cutoff = Duration::from_secs(EPOCH_RESTART_MIN_INTERVAL_SECS);
-            self.restart_dampener
-                .retain(|_, t| crate::time::mono_now().saturating_duration_since(*t) < cutoff);
-            self.restart_dampener.insert(peer, crate::time::mono_now());
-        }
+        // cannot reach here, so it cannot stamp it. The swap also forgets
+        // the identity's redial memory.
+        let heard = held.as_ref().is_some_and(|(heard, _, _)| *heard);
+        self.gates.swapped(peer, heard, crate::peer::peer_now());
         let session_closed = had_session && !self.sessions.contains_key(&peer);
         let ambient = PeerActionCtx {
             verified_identity: identity,
@@ -406,7 +442,6 @@ impl Node {
         if !ended.is_empty() {
             self.log_paths_begun(&peer);
         }
-        self.redials.seen().forget(&peer);
         self.stats_mut().handshake.redials_proven += 1;
         // The peer's process and epoch are unchanged, so what it declared
         // and the filter it sent still hold for the peering that replaces

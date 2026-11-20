@@ -141,6 +141,22 @@ pub(super) async fn established_from(age: u64, config: Config) -> Established {
     }
 }
 
+/// Mark `e`'s peer heard now, as a frame from it would, and return it. The
+/// touch is past the frame path that tells the shadow core of a frame, so
+/// the peer is also marked for the shadow's resync to take its heard state:
+/// otherwise the core holds the peering unheard since its promotion, and
+/// refuses a msg1 by the unheard floor only while that is under a second
+/// old, which a loaded host's slow setup outlasts.
+pub(super) fn hear_now(e: &mut Established) -> &mut crate::peer::ActivePeer {
+    let peer = e
+        .node
+        .get_peer_mut(&e.peer)
+        .expect("precondition: the node holds the peer");
+    peer.touch(Node::now_ms());
+    peer.set_fed(true);
+    peer
+}
+
 /// Arm a responder pending on `e` with a rekey msg1 carrying `sender_index`,
 /// returning that msg1's wire bytes.
 pub(super) async fn arm_pending(e: &mut Established, sender_index: u32) -> Vec<u8> {
@@ -475,8 +491,9 @@ async fn a_resent_rekey_msg1_logs_its_path() {
     assert_eq!(field(&line, "remote_addr"), e.addr.to_string(), "{line}");
 }
 
-/// A pending inbound link with a stored msg2, as a lost msg2 leaves it.
-fn pending_inbound(node: &mut Node, tid: TransportId, addr: &TransportAddr) -> LinkId {
+/// A pending inbound link with a stored msg2, as a msg2 whose send failed
+/// leaves it: the index the node drew for the answer, and no peer.
+pub(super) fn pending_inbound(node: &mut Node, tid: TransportId, addr: &TransportAddr) -> LinkId {
     let link_id = node.allocate_link_id();
     let link = Link::connectionless(
         link_id,
@@ -487,16 +504,16 @@ fn pending_inbound(node: &mut Node, tid: TransportId, addr: &TransportAddr) -> L
     );
     node.links.raw().insert(link_id, link);
     node.links.raw_index().insert((tid, addr.clone()), link_id);
+    // The index the node drew for the answer before it wrote the msg2.
+    let lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
     node.seed_handshake_machine(
         HandshakeSeed::inbound(link_id, 1000)
+            .with_our_index(lease)
             .with_transport_id(tid)
             .with_source_addr(addr.clone()),
     )
     .unwrap();
-    node.peer_machines
-        .get_mut(&link_id)
-        .unwrap()
-        .set_conn_handshake_msg2(vec![0xC1, 0xC2, 0xC3, 0xC4, 0xC5]);
+    node.plant_answer_at(link_id, vec![0xC1, 0xC2, 0xC3, 0xC4, 0xC5]);
     link_id
 }
 
@@ -639,7 +656,7 @@ async fn dial(from: &mut Side, to: &Side) -> (Vec<u8>, SessionIndex) {
         .start_handshake(keypair, epoch, LegStamp::at(1000))
         .unwrap();
     let wire = build_msg1(our_index, &noise_msg1);
-    machine.set_conn_handshake_msg1(wire.clone(), 2000);
+    machine.set_conn_handshake_msg1(wire.clone());
     from.node.links.raw().insert(
         link_id,
         Link::connectionless(
@@ -655,9 +672,7 @@ async fn dial(from: &mut Side, to: &Side) -> (Vec<u8>, SessionIndex) {
         .raw_index()
         .insert((tid, to.addr.clone()), link_id);
     from.node
-        .pending_outbound
-        .raw()
-        .insert((tid, our_index.as_u32()), link_id);
+        .plant_dial_at((tid, our_index.as_u32()), link_id, None);
     from.node
         .transports
         .get(&tid)

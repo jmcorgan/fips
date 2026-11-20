@@ -385,13 +385,13 @@ async fn prepare(nodes: &mut [TestNode], bootstrap: bool) {
     let link = current_link(&nodes[0].node, &b);
     let noted: Vec<(TransportId, u32)> = nodes[0]
         .node
-        .pending_outbound
+        .pending_outbound()
         .iter()
         .filter(|(_, id)| **id == link)
         .map(|(key, _)| *key)
         .collect();
     for key in &noted {
-        nodes[0].node.pending_outbound.forget(key);
+        nodes[0].node.forget_dial_at(key);
     }
     if !bootstrap {
         unmark_bootstrap(&mut nodes[0].node, &b);

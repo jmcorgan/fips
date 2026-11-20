@@ -186,6 +186,9 @@ pub enum Input {
         peer: NodeAddr,
         /// Its source.
         from: Pair,
+        /// Its link message type, which says whether the frame shows the
+        /// path the peer sends on.
+        kind: u8,
     },
     /// The peer sent a `Disconnect`.
     Disconnect {
@@ -213,6 +216,14 @@ pub enum Input {
     /// msg1 resend is tried again at the next poll.
     SendFailed {
         /// The answer's or the dial's link.
+        link: LinkNo,
+    },
+    /// The msg2 an [`Output::Answer`](super::output::Output::Answer) asked
+    /// for could not be sent, for a cause no resend outlasts: the answer is
+    /// given up, its lease returned and its link retired, and no connection
+    /// is closed.
+    Unsendable {
+        /// The answer's link.
         link: LinkNo,
     },
     /// A path of `link` moved from one pair to another.

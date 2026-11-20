@@ -34,7 +34,8 @@ listed! {
         /// End the operator's pin on the peer's link.
         Unpin,
 
-        /// Forget this node's dial that the transition answered or ended.
+        /// Forget this node's dial that the transition answered or ended:
+        /// its handshake leg, if it still holds one, leaves the legs.
         DialForget,
         /// Mark a filter update due to the peer.
         BloomMark,

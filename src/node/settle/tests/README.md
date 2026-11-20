@@ -31,10 +31,47 @@ tests.
   default configuration, at each multipath setting, against the ones
   `fips_core::proto::settle::parity` states for the schedules a real node
   and the joint world both run, so the two run alike.
+- `decide.rs`: the settlement core beside the node in a test build, the
+  shadow: the leases it takes from a dial, an answered msg1 and a reap, all
+  released once its node is dropped; and a peer a test planted past the
+  writers held by the shadow after the node's resync, with the plant's
+  epoch, pair and instants; every decision site's file making its shadow
+  call under `#[cfg(test)]` once per site, by a scan that counts each call
+  and finds any one site's call removed, a call other sites in its file
+  share included; the shadow's count of the inputs it took, by kind; a
+  leg the node reaps at its deadline reaped by the core's own reap within
+  the legs' skew of the node's instant, and held past it, never handed
+  the node's give-up; and
+  a test's removal of a peer recorded on the node's side as the core
+  decides it; `gates-agree` reading an identity only the node's replay
+  memory or silent-session record holds; `links-agree` passing over a
+  planted link the node's table has not recorded, and the link of a
+  planted peer the node's link map does not hold; a link whose leg
+  the shadow reaped not taken for a plant while the node still holds it;
+  a link opened past the decision sites on a node not planted taken by
+  the resync; neither a link a decision site named nor one the shadow
+  retired at an input taken; a peer planted afresh on a new link taken
+  again, at its new link and epoch; `links-agree` passing over a link
+  the node records from a planted index entry with no link in its map;
+  and a first difference `shadow.txt` does not list failing the test at
+  its node's drop and not at the audit, each line of the file naming one
+  test, site and clause; and `CORE_READS` holding exactly the switches the
+  core's settlement sources read by `node_fault!`. It is a child module of `../decide.rs`, declared there with `#[path]`, as
+  `node::settle::decide::tests`.
+- `shadow.txt`: the settlement core's known first differences from the
+  node, one per line, tab-separated test, site and clause, which the
+  shadow core's comparison in the live audit reads (`audit::SHADOW_KNOWN`),
+  failing a test on any other when its node is dropped, `placement-agrees`
+  among its clauses; its header records the reach gaps, each
+  switch of the core whose node half reds no root test through the shadow,
+  with the reason, and the switches whose node half reds root tests by
+  behaviour ahead of it. It holds no line for a planted node.
 - `params.rs`: the settlement core's parameters a node's configuration
   gives, against the core's defaults at the default configuration, and
-  against the node's own resend schedule (`Fmp::poll_resends` from the
-  first resend one interval after the dial) at four multipliers. It is a
+  against the node's own resend schedule (the first resend one interval
+  after the dial, each later wait the interval times the multiplier to the
+  power of the resends made, truncated to the millisecond) at four
+  multipliers. It is a
   child module of `../params.rs`, declared there with `#[path]`, as
   `node::settle::params::tests`.
 - `links.rs`: the settlement core's link records the link table keeps, from
@@ -44,8 +81,12 @@ tests.
   the feed, every other clause still reading it, with one row per mutator
   that it flags its peer; and the node's resync of the records, after each
   mutator, after a msg1 or msg2 refused at its parse and after a drain with
-  nothing queued, and of a link and an index entry a test planted. The
-  clause on real nodes is in `../../tests/settle/live.rs`.
+  nothing queued, and of a link and an index entry a test planted, the entry
+  named by its link's records rather than held as a path; and of a peer a
+  test planted on a link the map lacks, at the pair the peer is at, and of
+  an entry naming such a link, which is no inbound leg until the link is
+  put in the map. The clause on real nodes is in
+  `../../tests/settle/live.rs`.
 - `plan.rs`: each transition's plan against the statements its sites ran,
   in their order, written beside each effect; that every transition but a
   cutover has a list and every effect is in one; each announcing

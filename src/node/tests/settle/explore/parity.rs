@@ -192,7 +192,7 @@ impl Walk {
     /// connect or a msg1 out.
     fn dialing(&self, at: usize) -> bool {
         let node = &self.world.nodes[at].node;
-        !node.pending_outbound.is_empty() || !node.peering.pending_connects.is_empty()
+        !node.pending_outbound().is_empty() || !node.peering.pending_connects.is_empty()
     }
 
     /// Redial each of `dials`, world node to world node, whose dialer holds
@@ -482,7 +482,11 @@ fn compare(setting: Setting) -> (usize, usize, Vec<String>) {
             continue;
         };
         let on = setting.enabled();
-        runs.push(std::thread::spawn(move || compared(script, m, on)));
+        runs.push(
+            super::explore::titled()
+                .spawn(move || compared(script, m, on))
+                .expect("precondition: a thread for the walk"),
+        );
     }
     let mut walked = 0;
     for run in runs {

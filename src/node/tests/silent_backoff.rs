@@ -122,7 +122,10 @@ impl Rig {
         session.test_set_authenticated_at(Node::now_ms() - idle_ms);
         session.test_backdate_heard(Duration::from_millis(idle_ms));
         session.test_backdate_promoted(Duration::from_millis(idle_ms));
-        self.node.restart_dampener.clear();
+        let stamped: Vec<NodeAddr> = self.node.gates.known().copied().collect();
+        for peer in stamped {
+            self.node.gates.unstamp(&peer);
+        }
     }
 
     /// Discard whatever the node has sent the peer socket so far, and return
@@ -342,12 +345,12 @@ async fn one_authenticated_frame_clears_the_count_so_three_more_silent_sessions_
     drain_all_packets(&mut nodes, false).await;
     let peer = nodes[1].node.get_peer(&a).expect("node 1's dial completed");
     assert!(peer.heard(), "node 0's frames reached node 1");
-    assert_eq!(nodes[1].node.silent_sessions.count(&a), None);
+    assert_eq!(nodes[1].node.gates.silent(&a), None);
 
     // A session that carried frames is not counted when it ends.
     nodes[1].node.remove_active_peer(&a);
     discard(&mut nodes[0]);
-    assert_eq!(nodes[1].node.silent_sessions.count(&a), None);
+    assert_eq!(nodes[1].node.gates.silent(&a), None);
 
     // Two more silent sessions do not reach the limit again.
     for index in 5..=6 {
@@ -420,9 +423,116 @@ async fn sessions_that_carried_a_frame_never_count_toward_the_back_off() {
         discard(&mut nodes[0]);
         discard(&mut nodes[1]);
     }
-    assert_eq!(nodes[1].node.silent_sessions.count(&a), None);
-    assert_eq!(nodes[0].node.silent_sessions.count(&b), None);
+    assert_eq!(nodes[1].node.gates.silent(&a), None);
+    assert_eq!(nodes[0].node.gates.silent(&b), None);
     assert_eq!(nodes[1].node.stats().handshake.silent_backoff, 0);
 
     cleanup_nodes(&mut nodes).await;
+}
+
+/// The next packet queued at `tn` of phase `want`, discarding others.
+async fn next_of(tn: &mut TestNode, want: u8) -> ReceivedPacket {
+    for _ in 0..2000 {
+        while let Ok(p) = tn.packet_rx.try_recv() {
+            if super::crossed_dial::phase(&p) == Some(want) {
+                return p;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("precondition: a packet of phase {want} reached the node within 10 s");
+}
+
+/// Node 1 dials node 0 and installs it from node 0's msg2, and the reaper
+/// removes it before any frame of node 0's arrives. The session carried no
+/// frame, so node 1 counts it toward node 0's back-off though node 1 set
+/// the peering up itself, and the settlement core beside the node counts
+/// it the same way.
+#[tokio::test]
+async fn an_own_dials_session_reaped_before_the_peers_first_frame_counts_in_the_node_and_the_core()
+{
+    use crate::proto::fmp::wire::{PHASE_MSG1, PHASE_MSG2};
+    let mut nodes = vec![
+        spanning_tree::make_test_node_with_config(Config::new(), 1280).await,
+        spanning_tree::make_test_node_with_config(Config::new(), 1280).await,
+    ];
+    let a = *nodes[0].node.node_addr();
+    set_link_dead_timeout(&mut nodes[1].node, 0);
+    initiate_handshake(&mut nodes, 1, 0).await;
+    let msg1 = next_of(&mut nodes[0], PHASE_MSG1).await;
+    nodes[0].node.handle_msg1(msg1).await;
+    let msg2 = next_of(&mut nodes[1], PHASE_MSG2).await;
+    nodes[1].node.handle_msg2(msg2).await;
+    discard(&mut nodes[0]);
+    assert!(
+        nodes[1]
+            .node
+            .get_peer(&a)
+            .is_some_and(|p| p.is_heard() && !p.heard()),
+        "precondition: node 1 holds its dial's peering, heard from its install, with no frame yet"
+    );
+    nodes[1].node.check_link_heartbeats().await;
+    let gone = nodes[1].node.get_peer(&a).is_none();
+    let planted = nodes[1].node.planted();
+    let counts = (
+        nodes[1].node.gates.silent(&a),
+        nodes[1]
+            .node
+            .shadow
+            .table()
+            .and_then(|t| t.gates().silent(&a)),
+    );
+    cleanup_nodes(&mut nodes).await;
+    assert!(
+        gone && !planted,
+        "precondition: the reaper removed the peer of an unplanted node"
+    );
+    assert_eq!(
+        counts,
+        (Some(1), Some(1)),
+        "defect: the node's and the settlement core's silent counts for a dial's session reaped before its first frame differ"
+    );
+}
+
+/// A test backdates the promotion of a peering promoted from a msg1, as
+/// the replay tests age a phantom, and the reaper removes it with no frame
+/// heard. The settlement core beside the node takes the backdate as a plant
+/// and, the peering being unheard, records no frame for it, so it counts
+/// the session as the node does.
+#[tokio::test]
+async fn an_unheard_session_whose_promotion_a_test_backdated_counts_in_the_node_and_the_core() {
+    let mut rig = Rig::new().await;
+    rig.promote(EPOCH).await;
+    let peer = rig.peer();
+    rig.node
+        .get_peer_mut(&peer)
+        .expect("the silent peer is present")
+        .test_backdate_promoted(Duration::from_millis(IDLE_MS));
+    // The node's next entry takes the backdate into the core as a plant,
+    // as a msg1's would before it replaced the peering.
+    rig.node.resync();
+    let planted = rig
+        .node
+        .shadow
+        .table()
+        .and_then(|t| t.held(&peer))
+        .map(|h| (h.heard, h.installed));
+    let promoted = rig.node.get_peer(&peer).map(|p| (false, p.promoted_at()));
+    rig.reap().await;
+    let counts = (
+        rig.node.gates.silent(&peer),
+        rig.node
+            .shadow
+            .table()
+            .and_then(|t| t.gates().silent(&peer)),
+    );
+    assert_eq!(
+        planted, promoted,
+        "precondition: the core holds the unheard peering at its backdated promotion"
+    );
+    assert_eq!(
+        counts,
+        (Some(1), Some(1)),
+        "defect: the node's and the settlement core's silent counts for a backdated unheard session differ"
+    );
 }

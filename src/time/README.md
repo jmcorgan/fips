@@ -16,7 +16,7 @@ traits, is `fips_core::time` (`core/src/time/`).
     held as an instant compares exactly with one held as milliseconds.
   - `mono_now()`: now on `HostClock`, as a `std::time::Instant`, for
     code that stores std instants and measures intervals from them (the
-    routing hold, the restart dampener, the per-peer budgets). Outside
+    routing hold, the per-peer budgets). Outside
     tests it is `std::time::Instant::now()`.
   - `wall_ms()`: Unix time in milliseconds. `Node::now_ms` delegates to
     it, and so does the receive stamp on every `ReceivedPacket`.

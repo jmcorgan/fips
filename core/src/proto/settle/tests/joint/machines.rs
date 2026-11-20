@@ -147,6 +147,8 @@ pub enum Event {
         from: Addr,
         /// The pair it holds now.
         to: Addr,
+        /// The path was not the active one: a standby path's roam.
+        standby: bool,
     },
     /// A bundle holding no path bound the frame's pair `at` as its
     /// original path.
@@ -661,12 +663,15 @@ impl Machines {
             Roam::Roamed { from } => Some(Event::Roamed {
                 from: super::facts::addr(from.0, &from.1),
                 to: src,
+                standby: false,
             }),
-            Roam::Standby { index } => before
-                .get(index)
-                .map(|&from| Event::Roamed { from, to: src }),
+            Roam::Standby { index } => before.get(index).map(|&from| Event::Roamed {
+                from,
+                to: src,
+                standby: true,
+            }),
         };
-        if let Some(Event::Roamed { from, to }) = &event {
+        if let Some(Event::Roamed { from, to, .. }) = &event {
             self.locals.retain(|(a, _)| a != from);
             self.locals.push((*to, local));
         } else if let Some(Event::Bound { at }) = &event {

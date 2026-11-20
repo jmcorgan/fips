@@ -67,7 +67,8 @@ builds, and changes no line of the core, the machine or the bundle.
   treats it, the bundle's active path. Each returns what the machines
   asked for as `Event`s, in order: a prompt is sealed and a released
   lease freed into the pool on the way, a one-path roam (which the
-  bundle reports in no output) is an event of its own, and everything
+  bundle reports in no output) is an event of its own, saying whether the
+  path was a standby one, and everything
   else is the machine's output as it gave it. It keeps this node's own
   address for each path, since a path names only the peer's, and the
   address each candidate was offered from, for the path the bundle may
@@ -430,7 +431,8 @@ builds, and changes no line of the core, the machine or the bundle.
   path message, a connection the bundle asks for),
   the core inputs they stand for, in order, each as the core's join
   function (`../../join.rs`) gives it (a bundle output as the path input
-  it mirrors, a one-path roam as `Moved` and a bind as a Live path, a
+  it mirrors, a one-path roam as `Moved`, marked a roam unless the path
+  was a standby one, and a bind as a Live path, a
   restart revealed as `Restarted`, a teardown as `Ended`), and what the
   call decided (a
   replacement asked for, a cutover, a refusal, a yield, a frame's

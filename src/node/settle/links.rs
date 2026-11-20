@@ -13,10 +13,12 @@ use crate::NodeAddr;
 use crate::node::AddrKey;
 #[cfg(test)]
 use crate::peer::ActivePeer;
+use crate::peer::PeerInstant;
 use crate::proto::settle::input::Input;
 #[cfg(test)]
 use crate::proto::settle::join;
-use crate::proto::settle::links::{Dir, Holder, LinkNo, Links, Pair, Proven};
+use crate::proto::settle::legs::{LegOut, Legs};
+use crate::proto::settle::links::{Dir, Holder, LinkNo, Links, Pair, Placement, Proven};
 use crate::transport::{Link, LinkDirection, LinkId};
 
 /// The node's links, keyed by `LinkId`, and the index from a
@@ -25,8 +27,10 @@ use crate::transport::{Link, LinkDirection, LinkId};
 /// The index is a reverse lookup from `(transport, address)` to link. It is
 /// **not** a packet-dispatch path: `find_link_by_addr` has no callers outside
 /// its own tests, and encrypted frames are dispatched by session index. Its
-/// live readers are the `should_admit_msg1` fast path and the
-/// duplicate-inbound-handshake check in `handle_msg1`.
+/// live readers are the duplicate-inbound-handshake check in `handle_msg1`
+/// and the sweep of unproven BLE channels; the attribution questions a msg1
+/// or a rekey msg2 asks of its source read the core's records the cache is
+/// built from ([`LinkTable::placement`]).
 ///
 /// **Do not key a peer-identity question on it.** The address form is not
 /// canonical: an outbound dial registers the literal configured string, which
@@ -70,6 +74,11 @@ pub(in crate::node) struct LinkTable {
     /// writer names them again.
     #[cfg(test)]
     taken: HashSet<AddrKey>,
+    /// Links whose record the resync opened from an index entry a test
+    /// wrote, while the map lacked the link: the record is opened again
+    /// from the link once a test puts it in the map.
+    #[cfg(test)]
+    orphans: HashSet<LinkId>,
     /// How many times the live audit has checked the node this table is in.
     #[cfg(test)]
     audits: Cell<u64>,
@@ -195,7 +204,10 @@ impl LinkTable {
             let _closes = self.core.retire(no);
         }
         #[cfg(test)]
-        self.overlay.retain(|_, named| named != id);
+        {
+            self.overlay.retain(|_, named| named != id);
+            self.orphans.remove(id);
+        }
     }
 
     /// The pairs the index names the link `id` at.
@@ -208,8 +220,20 @@ impl LinkTable {
             .collect()
     }
 
-    /// Rebuild the index from the core's records.
+    /// Rebuild the index from the core's records. In a test build the
+    /// records first name each link at the pairs a test wrote in the index
+    /// for it past the writers ([`Links::name`]), so the records answer
+    /// for the index the test wrote.
     fn rebuild(&mut self) {
+        #[cfg(test)]
+        {
+            let named = self
+                .overlay
+                .iter()
+                .filter_map(|(key, id)| Some((pair(key), self.no(id)?)))
+                .collect();
+            self.core.name(named);
+        }
         self.index = reduce(self.core.index(), &self.nos);
         #[cfg(test)]
         {
@@ -227,6 +251,25 @@ impl LinkTable {
         self.nos.get(id).copied()
     }
 
+    /// The link the core numbers `no`, while it is open.
+    pub(in crate::node) fn id(&self, no: LinkNo) -> Option<LinkId> {
+        self.nos
+            .iter()
+            .find_map(|(id, n)| (*n == no).then_some(*id))
+    }
+
+    /// Where a msg1 from `key` stands among the core's link records
+    /// ([`Links::placement`]); `leg` gives the identity the handshake leg on
+    /// one of the node's links expects.
+    pub(in crate::node) fn placement(
+        &self,
+        key: &AddrKey,
+        leg: impl Fn(LinkId) -> Option<NodeAddr>,
+    ) -> Placement {
+        self.core
+            .placement(&pair(key), |no| self.id(no).and_then(&leg))
+    }
+
     /// The core's link records.
     #[cfg(any(test, debug_assertions))]
     pub(in crate::node) fn core(&self) -> &Links {
@@ -238,6 +281,40 @@ impl LinkTable {
     #[cfg(any(test, debug_assertions))]
     pub(in crate::node) fn derived(&self) -> HashMap<AddrKey, LinkId> {
         reduce(&self.core.derived(), &self.nos)
+    }
+
+    /// Run the handshake legs' timers at `now`: the resends due, and the
+    /// legs past their deadline, each reaped leg's record retired from the
+    /// core's records by the close rule, which names the connections its
+    /// retirement closes. The index is rebuilt after, as at every writer.
+    pub(in crate::node) fn poll(
+        &mut self,
+        legs: &mut Legs<PeerInstant>,
+        now: PeerInstant,
+    ) -> Vec<LegOut> {
+        let out = legs.poll(now, &mut self.core);
+        if node_fault!(IndexNotRebuilt) {
+            return out;
+        }
+        self.rebuild();
+        out
+    }
+
+    /// [`LinkTable::poll`]'s reap of the leg on the core's link `no` alone,
+    /// if it is past its deadline at `now`, its record retired by the close
+    /// rule and the index rebuilt after.
+    pub(in crate::node) fn reap(
+        &mut self,
+        legs: &mut Legs<PeerInstant>,
+        no: LinkNo,
+        now: PeerInstant,
+    ) -> Vec<LegOut> {
+        let out = legs.reap_one(no, now, &mut self.core);
+        if node_fault!(IndexNotRebuilt) {
+            return out;
+        }
+        self.rebuild();
+        out
     }
 
     /// The link `id` is now held by the peer at `peer`.
@@ -272,24 +349,31 @@ impl LinkTable {
     /// Write into the core's records what a test changed past the writers,
     /// for the node's resync before it next reads them. Each link a test put
     /// in the map itself gets a record, as a leg at its setup pair; each
-    /// peer named in `held`, by its link, address, bundle paths and whether
-    /// its bundle found it capable, has its record hold exactly those paths
-    /// and that flag and be held by it; and each entry a
-    /// test wrote in the index at a pair no record names goes in its link's
-    /// record as a Live path, or opens one there as a leg if the link has
-    /// none. A record opened here is held by the peer `holders` puts on its
-    /// link, if any. Nothing a writer set is overwritten but `held`'s paths
-    /// and holders.
+    /// entry a test wrote in the index naming a link with no record opens
+    /// one there, as a leg; each peer in `unrecorded`, held on a link the
+    /// map lacks and no record has, by its link, address, pair, bundle
+    /// paths and whether its bundle found it capable, gets a record set up
+    /// at that pair and held by it, holding those paths; and each peer
+    /// named in `held`, the same facts but its pair, has its record hold
+    /// exactly those paths and that flag and be held by it. A record
+    /// opened here is held by the peer `holders` puts on its link, if any;
+    /// one opened from an index entry is opened again from its link once a
+    /// test puts the link in the map. Each entry a test wrote in the index
+    /// for a link the records have names the link there through the
+    /// records ([`LinkTable::rebuild`]), not as a path its bundle does not
+    /// hold. Nothing a writer set is overwritten but `held`'s paths and
+    /// holders.
     #[cfg(test)]
     pub(in crate::node) fn resync(
         &mut self,
         held: Vec<(LinkId, NodeAddr, Paths, bool)>,
+        unrecorded: Vec<(LinkId, NodeAddr, Pair, Paths, bool)>,
         holders: &HashMap<LinkId, NodeAddr>,
     ) {
         let planted: Vec<(LinkId, Pair, Dir)> = self
             .links
             .iter()
-            .filter(|(id, _)| !self.nos.contains_key(id))
+            .filter(|(id, _)| !self.nos.contains_key(id) || self.orphans.contains(id))
             .map(|(id, link)| {
                 let at = pair(&(link.transport_id(), link.remote_addr().clone()));
                 let dir = match link.direction() {
@@ -300,15 +384,12 @@ impl LinkTable {
             })
             .collect();
         for (id, at, dir) in planted {
-            self.adopt(id, at, dir, holders);
-        }
-        for (id, peer, paths, capable) in held {
-            if let Some(no) = self.no(&id) {
-                self.core.resync(no, paths, capable);
-                if self.core.get(no).map(|r| r.holder) != Some(Holder::Peer(peer)) {
-                    self.core.hold(no, Holder::Peer(peer));
-                }
+            if self.orphans.remove(&id)
+                && let Some(no) = self.nos.remove(&id)
+            {
+                let _closes = self.core.retire(no);
             }
+            self.adopt(id, at, dir, holders);
         }
         let mut entries: Vec<(AddrKey, LinkId)> = self
             .overlay
@@ -318,14 +399,31 @@ impl LinkTable {
         entries.sort_by(|(a, _), (b, _)| pair(a).cmp(&pair(b)));
         for (key, id) in entries {
             let at = pair(&key);
-            if self.core.at(&at).next().is_some() {
+            if self.no(&id).is_some() || self.core.at(&at).next().is_some() {
                 continue;
             }
-            match self.no(&id) {
-                Some(no) => self.core.path(no, at, Proven::Live),
-                // An entry naming a link with no record has no link to give
-                // the record a direction; it is read nowhere.
-                None => self.adopt(id, at, Dir::Inbound, holders),
+            // An entry naming a link with no record names a link the map
+            // lacks, whose direction nothing gives. It is no inbound
+            // link of the node's, so no duplicate msg1 is answered on it,
+            // until a test puts the link in the map.
+            self.adopt(id, at, Dir::Outbound, holders);
+            self.orphans.insert(id);
+        }
+        for (id, peer, at, paths, capable) in unrecorded {
+            if self.no(&id).is_none() {
+                self.adopt(id, at, Dir::Inbound, holders);
+                if let Some(no) = self.no(&id) {
+                    self.core.hold(no, Holder::Peer(peer));
+                    self.core.resync(no, paths, capable);
+                }
+            }
+        }
+        for (id, peer, paths, capable) in held {
+            if let Some(no) = self.no(&id) {
+                self.core.resync(no, paths, capable);
+                if self.core.get(no).map(|r| r.holder) != Some(Holder::Peer(peer)) {
+                    self.core.hold(no, Holder::Peer(peer));
+                }
             }
         }
         self.rebuild();

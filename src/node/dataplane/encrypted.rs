@@ -491,9 +491,9 @@ impl Node {
         let mut heard_from = false;
         let mut roamed = None;
         let intake = self.config().node.path.enabled;
+        let msg_type = link_message.first().copied().unwrap_or(0);
         if let Some(peer) = self.peers.get_mut(node_addr) {
             present = true;
-            let msg_type = link_message.first().copied().unwrap_or(0);
             let standby = peer.standby();
             #[cfg(test)]
             let fed = peer.past_feed();
@@ -533,10 +533,14 @@ impl Node {
                 wake = peer.bundle().and_then(PeerBundle::next_wake);
                 let from = match &roam {
                     Roam::Roamed { from } => Some(from.clone()),
+                    // The mutation lane's break: the pair a standby path
+                    // left goes untold.
+                    Roam::Standby { .. } if node_fault!(StandbyRoamUnfed) => None,
                     Roam::Standby { .. } => standby,
                     Roam::Bound | Roam::Unmoved => None,
                 };
-                roamed = Some((peer.link_id(), from));
+                let standby = matches!(roam, Roam::Standby { .. });
+                roamed = Some((peer.link_id(), from, standby));
             }
             // Only a link the peer actually left loses its verification. A
             // frame the roaming rule refuses to follow (another transport, or
@@ -571,9 +575,21 @@ impl Node {
             }
         }
         self.paths.fold(wake);
-        if let Some((link, from)) = roamed {
+        if let Some((link, from, standby)) = roamed {
             let to = (frame.transport_id, frame.remote_addr.clone());
-            self.roamed(*node_addr, link, from, &to);
+            self.roamed(*node_addr, link, from, &to, standby);
+        }
+        // The shadow core hears the frame, after the roam the bundle made.
+        #[cfg(test)]
+        if present {
+            self.decide(crate::proto::settle::input::Input::Heard {
+                peer: *node_addr,
+                from: crate::proto::settle::links::Pair {
+                    transport: frame.transport_id,
+                    addr: frame.remote_addr.clone(),
+                },
+                kind: msg_type,
+            });
         }
         // A session's first authenticated frame clears its identity's
         // silent-session record: one identity has one peer entry, and a
@@ -584,7 +600,7 @@ impl Node {
         // The first authenticated frame proves the peering live, so the
         // memory of msg1s that promoted it unheard has nothing left to bound.
         if first_heard {
-            self.replayed_msg1s.forget(node_addr);
+            self.gates.heard(node_addr);
         }
         // A roam: address rotation invalidates the per-peer connect()-ed UDP
         // socket, which is still pinned to the old 5-tuple, so the executor

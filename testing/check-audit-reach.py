@@ -18,6 +18,11 @@ settlement core's link records, with a test mutator of the peer's paths. It
 is a check not made, so it is held to a ceiling: the count of pairs that wrote
 it.
 
+A node on which the shadow settlement core's comparison found its first
+difference writes `diverged <thread> <node>`; the count of pairs is printed,
+and held to nothing here, since which differences are known is settled by the
+shadow's own record.
+
 The suite must run as threads in one process (`cargo test`), where a test's
 thread is named for it; under nextest every row would carry the same thread
 name.
@@ -44,7 +49,7 @@ COUNT_FLOOR = 2300
 # the count at both multipath settings when the clause was added.
 UNMIRRORED_CEILING = 40
 
-OUTCOMES = ("audited", "planted", "unmirrored")
+OUTCOMES = ("audited", "planted", "unmirrored", "diverged")
 
 
 def main() -> int:
@@ -73,6 +78,7 @@ def main() -> int:
         return 2
     audited = {p for p, seen in pairs.items() if "audited" in seen}
     unmirrored = sum(1 for seen in pairs.values() if "unmirrored" in seen)
+    diverged = sum(1 for seen in pairs.values() if "diverged" in seen)
     threads = {t for t, _ in pairs}
     covered = {t for t, _ in audited}
     share = 100.0 * len(audited) / len(pairs)
@@ -81,7 +87,8 @@ def main() -> int:
         f"{len(audited)} audited ({share:.2f}%), "
         f"{len(pairs) - len(audited)} only planted; "
         f"{len(threads)} tests, {len(threads - covered)} with no audited node; "
-        f"links-mirror skipped {unmirrored}"
+        f"links-mirror skipped {unmirrored}; "
+        f"the shadow core diverged on {diverged}"
     )
     failed = False
     if share < SHARE_FLOOR:

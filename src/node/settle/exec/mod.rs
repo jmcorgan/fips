@@ -24,7 +24,7 @@ pub(in crate::node) use remove::Removed;
 use crate::NodeAddr;
 use crate::node::settle::table::Transition;
 use crate::node::{AddrKey, Node};
-use crate::transport::TransportId;
+use crate::transport::LinkId;
 use plan::{Effect, plan};
 use tracing::debug;
 
@@ -54,8 +54,8 @@ pub(in crate::node) struct Run {
     /// The pair the peer is on after it, for a move or a roam: a roam's site
     /// sets it, and a move reads it at its place in the plan.
     pub(in crate::node) moved: Option<AddrKey>,
-    /// The dial the transition answered or ended, by its msg2 lookup key.
-    pub(in crate::node) dial: Option<(TransportId, u32)>,
+    /// The link of the dial the transition answered or ended.
+    pub(in crate::node) dial: Option<LinkId>,
     /// What the change's own effects read.
     pub(in crate::node) facts: Facts,
 }
@@ -72,6 +72,143 @@ impl Run {
             facts: Facts::None,
         }
     }
+}
+
+/// What the node did, or the settlement core decides, in the words the two
+/// share, for the shadow's comparison (test builds only). A transition is
+/// a column of the node's transition table that the core decides, its
+/// links aside; a removal that is part of a replacement is the
+/// replacement's, so neither side names it.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::node) enum Did {
+    /// A peer installed for an identity not held.
+    Promote { peer: NodeAddr, initiator: bool },
+    /// The held peer torn down and a new one installed.
+    Replace { peer: NodeAddr, initiator: bool },
+    /// The peer moved onto this node's own completed dial.
+    Move { peer: NodeAddr },
+    /// The larger node of a crossing kept its inbound link.
+    Keep { peer: NodeAddr },
+    /// A restart found at a rekey.
+    Restarted { peer: NodeAddr },
+    /// An authenticated frame's roam moved the peer.
+    Roam { peer: NodeAddr },
+    /// The peer removed with nothing installed in its place.
+    Remove {
+        peer: NodeAddr,
+        why: crate::proto::settle::output::Why,
+    },
+    /// A reconnect to the peer noted.
+    Retry { peer: NodeAddr },
+    /// A msg1 or a completed handshake refused, with the identity it
+    /// proved, if any.
+    Reject { peer: Option<NodeAddr> },
+    /// An admitted msg1's answer asked for: the node authorizes it next.
+    Ask { peer: NodeAddr },
+    /// A msg2 sent: the one just built, or a stored one sent again.
+    Answer { stored: bool },
+    /// The held peer moved onto this node's own dial, `own` when the link
+    /// it left was this node's own dial, `unpin` when the move ends an
+    /// operator's pin.
+    Swapped {
+        peer: NodeAddr,
+        own: bool,
+        unpin: bool,
+    },
+}
+
+/// Whether a removal for `why` stands alone, rather than being part of a
+/// replacement or of the core's close (test builds only).
+#[cfg(test)]
+fn alone(why: crate::proto::settle::output::Why) -> bool {
+    use crate::proto::settle::output::Why;
+    match why {
+        Why::Ended | Why::Orphaned | Why::Disconnect | Why::Dead | Why::Admin => true,
+        Why::Restart | Why::Replacement | Why::Redial | Why::OwnRestart | Why::Closed => false,
+    }
+}
+
+/// What the node's transition `t` of the peer at `peer` did, in the words
+/// the core shares, or `None` for a transition the core does not decide:
+/// a rekey's cutover, a path's follow, switch or release (test builds
+/// only).
+#[cfg(test)]
+pub(in crate::node) fn from_node(peer: NodeAddr, t: &Transition) -> Option<Did> {
+    match t {
+        Transition::Promote { initiator, .. } => Some(Did::Promote {
+            peer,
+            initiator: *initiator,
+        }),
+        Transition::Replace { initiator, .. } => Some(Did::Replace {
+            peer,
+            initiator: *initiator,
+        }),
+        Transition::Move { .. } => Some(Did::Move { peer }),
+        Transition::Keep { .. } => Some(Did::Keep { peer }),
+        Transition::Restarted => Some(Did::Restarted { peer }),
+        Transition::Roam => Some(Did::Roam { peer }),
+        Transition::Remove { why } => alone(*why).then_some(Did::Remove { peer, why: *why }),
+        Transition::Cutover { .. }
+        | Transition::Follow
+        | Transition::Switch
+        | Transition::Release { .. } => None,
+    }
+}
+
+/// What the core's outputs `out`, one step's, decide, in the words the
+/// node shares: each reset onto the node's transition of the same column
+/// (of the node's eleven columns the core decides six, the install beside
+/// a reset saying which end started the handshake), a removal that stands
+/// alone, and the core's reconnect, refusal, ask,
+/// answer and swap. The core's legs, link retirements, closes and leases
+/// are compared as state, not here (test builds only).
+#[cfg(test)]
+pub(in crate::node) fn from_core(out: &[crate::proto::settle::output::Output]) -> Vec<Did> {
+    use crate::proto::settle::output::{Output, Transition as Core};
+    let initiator = |peer: &NodeAddr| {
+        out.iter()
+            .any(|o| matches!(o, Output::Install(i) if i.peer == *peer && i.initiator))
+    };
+    out.iter()
+        .filter_map(|o| match o {
+            Output::Reset { peer, transition } => Some(match transition {
+                Core::Promote => Did::Promote {
+                    peer: *peer,
+                    initiator: initiator(peer),
+                },
+                Core::Replace => Did::Replace {
+                    peer: *peer,
+                    initiator: initiator(peer),
+                },
+                Core::Move => Did::Move { peer: *peer },
+                Core::Keep => Did::Keep { peer: *peer },
+                Core::Restarted => Did::Restarted { peer: *peer },
+                Core::Roam => Did::Roam { peer: *peer },
+            }),
+            Output::Remove { peer, why } => alone(*why).then_some(Did::Remove {
+                peer: *peer,
+                why: *why,
+            }),
+            Output::Retry { peer } => Some(Did::Retry { peer: *peer }),
+            Output::Reject { peer, .. } => Some(Did::Reject { peer: *peer }),
+            Output::Ask { peer, .. } => Some(Did::Ask { peer: *peer }),
+            Output::Answer { stored, .. } => Some(Did::Answer { stored: *stored }),
+            Output::Swapped { peer, own, unpin } => Some(Did::Swapped {
+                peer: *peer,
+                own: *own,
+                unpin: *unpin,
+            }),
+            Output::Opened { .. }
+            | Output::Resend { .. }
+            | Output::Rekey { .. }
+            | Output::Install(_)
+            | Output::Retire { .. }
+            | Output::Release { .. }
+            | Output::Close { .. }
+            | Output::Free { .. } => None,
+        })
+        .collect()
 }
 
 /// The line a failed tree announce logs at `t`, as its sites wrote it, or
@@ -97,6 +234,10 @@ pub(in crate::node) fn announce_line(t: &Transition) -> Option<&'static str> {
 impl Node {
     /// Run `r`'s plan: each of its transition's effects, in their order.
     pub(in crate::node) async fn run(&mut self, r: &mut Run) {
+        #[cfg(test)]
+        if let Some(did) = from_node(r.peer, &r.t) {
+            self.did(did);
+        }
         // Boxed once here, so that no effect boxes anything: an effect can
         // reach the peer action executor, which can run another transition.
         Box::pin(async move {
@@ -150,8 +291,8 @@ impl Node {
             }
 
             Effect::DialForget => {
-                if let Some(key) = &r.dial {
-                    self.pending_outbound.forget(key);
+                if let Some(link) = r.dial {
+                    self.drop_leg(link);
                 }
             }
             Effect::BloomMark => self.bloom_state.mark_update_needed(r.peer),

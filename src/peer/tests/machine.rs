@@ -142,9 +142,9 @@ fn est_new_peer() -> EstablishSnapshot {
 }
 
 /// An inbound leg that has read a fresh identity's msg1, and that identity's
-/// node address. With `authorize`, the late-ACL gate also passed, so the leg
-/// holds its index and has asked for its first msg2 send.
-fn inbound_leg(alloc: &mut IndexAllocator, authorize: bool) -> (PeerMachine, NodeAddr) {
+/// node address. With `authorize`, the late-ACL gate also passed, so the
+/// shell drew the leg's index and the leg has asked for its first msg2 send.
+fn inbound_leg(authorize: bool) -> (PeerMachine, NodeAddr) {
     let peer = PeerIdentity::from_pubkey(Identity::generate().pubkey());
     let addr = *peer.node_addr();
     let link = LinkId::new(1);
@@ -156,11 +156,10 @@ fn inbound_leg(alloc: &mut IndexAllocator, authorize: bool) -> (PeerMachine, Nod
             est: est_new_peer(),
         },
         100,
-        alloc,
     );
     assert!(classified.is_empty(), "precondition: a new peer classifies");
     if authorize {
-        let first = m.step(PeerEvent::Authorized, 100, alloc);
+        let first = m.step(PeerEvent::Authorized, 100);
         assert_eq!(
             first.last(),
             Some(&PeerAction::PromoteToActive { link }),
@@ -180,9 +179,8 @@ fn received_msg1() -> PeerState {
 
 #[test]
 fn an_authorized_inbound_leg_asks_for_promotion_when_its_stored_msg2_is_resent() {
-    let mut alloc = IndexAllocator::new();
-    let (mut m, _) = inbound_leg(&mut alloc, true);
-    let actions = m.step(PeerEvent::Msg2Resent { peer_held: false }, 200, &mut alloc);
+    let (mut m, _) = inbound_leg(true);
+    let actions = m.step(PeerEvent::Msg2Resent { peer_held: false }, 200);
     assert_eq!(
         actions,
         [PeerAction::PromoteToActive {
@@ -198,18 +196,16 @@ fn an_authorized_inbound_leg_asks_for_promotion_when_its_stored_msg2_is_resent()
 
 #[test]
 fn a_resent_msg2_does_not_promote_a_leg_that_holds_no_index() {
-    let mut alloc = IndexAllocator::new();
-    let (mut m, _) = inbound_leg(&mut alloc, false);
-    let actions = m.step(PeerEvent::Msg2Resent { peer_held: false }, 200, &mut alloc);
+    let (mut m, _) = inbound_leg(false);
+    let actions = m.step(PeerEvent::Msg2Resent { peer_held: false }, 200);
     assert!(actions.is_empty(), "an unauthorized leg has sent nothing");
     assert_eq!(m.state(), received_msg1());
 }
 
 #[test]
 fn a_resent_msg2_does_not_promote_while_the_peer_is_held_on_another_link() {
-    let mut alloc = IndexAllocator::new();
-    let (mut m, _) = inbound_leg(&mut alloc, true);
-    let actions = m.step(PeerEvent::Msg2Resent { peer_held: true }, 200, &mut alloc);
+    let (mut m, _) = inbound_leg(true);
+    let actions = m.step(PeerEvent::Msg2Resent { peer_held: true }, 200);
     assert!(
         actions.is_empty(),
         "a held peer would turn the promotion into a cross-connection"
@@ -219,17 +215,15 @@ fn a_resent_msg2_does_not_promote_while_the_peer_is_held_on_another_link() {
 
 #[test]
 fn a_resent_msg2_does_not_promote_an_established_machine() {
-    let mut alloc = IndexAllocator::new();
-    let (mut m, addr) = inbound_leg(&mut alloc, true);
+    let (mut m, addr) = inbound_leg(true);
     m.step(
         PeerEvent::PromotionResolved {
             result: PromotionResult::Promoted(addr),
         },
         200,
-        &mut alloc,
     );
     assert_eq!(m.state(), PeerState::Established { addr });
-    let actions = m.step(PeerEvent::Msg2Resent { peer_held: false }, 300, &mut alloc);
+    let actions = m.step(PeerEvent::Msg2Resent { peer_held: false }, 300);
     assert!(
         actions.is_empty(),
         "an established machine is not promoted again"
@@ -237,30 +231,28 @@ fn a_resent_msg2_does_not_promote_an_established_machine() {
 }
 
 /// An inbound leg that has read a held identity's redial and been
-/// authorized as one: it holds its index and has asked only for its msg2.
-fn redial_leg(alloc: &mut IndexAllocator) -> (PeerMachine, NodeAddr, Vec<PeerAction>) {
-    let (mut m, addr) = inbound_leg(alloc, false);
-    let actions = m.step(PeerEvent::AuthorizedHeld, 100, alloc);
+/// authorized as one: the shell drew its index, and it has asked only for
+/// its msg2.
+fn redial_leg() -> (PeerMachine, NodeAddr, Vec<PeerAction>) {
+    let (mut m, addr) = inbound_leg(false);
+    let actions = m.step(PeerEvent::AuthorizedHeld, 100);
     (m, addr, actions)
 }
 
 #[test]
 fn authorized_held_sends_msg2_and_does_not_promote() {
-    let mut alloc = IndexAllocator::new();
-    let (m, _, actions) = redial_leg(&mut alloc);
+    let (m, _, actions) = redial_leg();
     assert!(
         matches!(actions.as_slice(), [PeerAction::SendHandshake { .. }]),
         "got {actions:?}"
     );
-    assert!(m.our_index().is_some(), "the leg holds its index");
     assert_eq!(m.state(), received_msg1());
 }
 
 #[test]
 fn proven_with_a_peer_held_tears_down_before_it_promotes() {
-    let mut alloc = IndexAllocator::new();
-    let (mut m, addr, _) = redial_leg(&mut alloc);
-    let actions = m.step(PeerEvent::Proven { peer_held: true }, 200, &mut alloc);
+    let (mut m, addr, _) = redial_leg();
+    let actions = m.step(PeerEvent::Proven { peer_held: true }, 200);
     assert_eq!(
         actions,
         [
@@ -278,9 +270,8 @@ fn proven_with_a_peer_held_tears_down_before_it_promotes() {
 
 #[test]
 fn proven_with_no_peer_held_only_promotes() {
-    let mut alloc = IndexAllocator::new();
-    let (mut m, _, _) = redial_leg(&mut alloc);
-    let actions = m.step(PeerEvent::Proven { peer_held: false }, 200, &mut alloc);
+    let (mut m, _, _) = redial_leg();
+    let actions = m.step(PeerEvent::Proven { peer_held: false }, 200);
     assert_eq!(
         actions,
         [PeerAction::PromoteToActive {
@@ -291,8 +282,7 @@ fn proven_with_no_peer_held_only_promotes() {
 
 #[test]
 fn proven_does_nothing_on_a_leg_that_holds_no_index() {
-    let mut alloc = IndexAllocator::new();
-    let (mut m, _) = inbound_leg(&mut alloc, false);
-    let actions = m.step(PeerEvent::Proven { peer_held: true }, 200, &mut alloc);
+    let (mut m, _) = inbound_leg(false);
+    let actions = m.step(PeerEvent::Proven { peer_held: true }, 200);
     assert!(actions.is_empty(), "got {actions:?}");
 }

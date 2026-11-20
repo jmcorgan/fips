@@ -209,8 +209,9 @@ can rebuild any state by replaying the path that reached it.
   link it dialed, a dial made before the peer was held, and a second such
   dial answered after a crossing; a msg1's answer asked for only once
   it is admitted and after any teardown, with the link of an answer the
-  shell refused retired; and the max-peers cap at a msg1, at a sent
-  answer and at a completed dial.
+  shell refused retired; the max-peers cap at a msg1, at a sent
+  answer and at a completed dial; and the test hook's reap of one leg,
+  which reaps that leg alone and only from its deadline.
 - `links.rs`: the unit tests of `../links.rs`, attached from it with
   `#[path]` (so it is that module's child, not declared in `mod.rs`): the
   derived index, the close rule's cases with a link a leg holds, a
@@ -228,7 +229,8 @@ can rebuild any state by replaying the path that reached it.
 - `join.rs`: the unit tests of `../join.rs`, attached from it with
   `#[path]`: what each rekey output and each bundle output becomes, a
   removal's outputs reaching no link, a released path going to the link
-  the peer moved off, a roam and a bind, the order of a step's outputs,
+  the peer moved off, a roam and a bind, a standby path's roam left
+  unmarked, the order of a step's outputs,
   and a rekey step allocating nothing, counted by the crate's test
   allocator; and on stub keys, a move refused for a setup of another key
   leaving both machines as they were, a removal handing back what the
