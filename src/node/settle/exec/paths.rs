@@ -296,6 +296,8 @@ pub(super) fn close_queued(node: &mut Node, r: &mut Run) {
     if cell(Row::Connection, &r.t) != Cell::QueuedDrained || node_fault!(ReleaseKeepsPairOpen) {
         return;
     }
+    #[cfg(test)]
+    node.resync();
     if let Some(f) = of(r)
         && let (Some(link), Some(to)) = (f.link, &f.to)
         && !node.in_use(to.transport, &to.addr, link)

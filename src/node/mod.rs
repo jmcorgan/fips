@@ -3232,7 +3232,9 @@ impl Node {
     /// dial's channel, down with it. On TCP the two legs of a crossing are
     /// separate sockets at different addresses, and a connectionless
     /// transport's close is a no-op, so both are unaffected.
-    pub(in crate::node) async fn close_unused(&self, link_id: LinkId) {
+    pub(in crate::node) async fn close_unused(&mut self, link_id: LinkId) {
+        #[cfg(test)]
+        self.resync();
         let Some(link) = self.links.get(&link_id) else {
             return;
         };
@@ -3254,36 +3256,54 @@ impl Node {
     /// The close rule: whether a live link other than `link_id` uses
     /// `(transport_id, addr)`, so its connection stays open. A link a peer
     /// holds uses each pair that is one of its paths, Live or acked in its
-    /// bundle, the active one among them; a link no peer holds, a handshake
-    /// leg, uses the pair it was set up at
-    /// ([`LinkTable::used`](settle::LinkTable::used)).
+    /// record, the active one among them, and the pair it was set up at
+    /// while its record holds no path; a link no peer holds, a handshake
+    /// leg, uses the pair it was set up at. Asked of the settlement core's
+    /// records of the links ([`LinkTable::used`](settle::LinkTable::used)),
+    /// which a test build resyncs first with what a test changed past the
+    /// writers.
     pub(in crate::node) fn in_use(
         &self,
         transport_id: TransportId,
         addr: &TransportAddr,
         link_id: LinkId,
     ) -> bool {
-        let proven = |peer: &ActivePeer| {
-            matches!(
-                peer.path_match(transport_id, addr),
-                crate::peer::Match::Proven { .. }
-            )
-        };
-        if node_fault!(CloseByPeerAddress) {
-            return self
-                .peers
-                .values()
-                .any(|peer| peer.link_id() != link_id && proven(peer));
+        self.links.used(&(transport_id, addr.clone()), link_id)
+    }
+
+    /// Write into the settlement core's link records what a test changed
+    /// past the writers, before the node next reads them: the paths, and
+    /// whether its bundle found it capable, of each peer a test mutator
+    /// flagged past the feed, which the flag then no longer marks, each
+    /// record held by its peer; a record for each link a test put in the
+    /// link map; and each entry it wrote in the index, in its link's record.
+    /// A test that changes a bundle and then drives the node needs no call of
+    /// its own: the node resyncs at the head of each msg1 and msg2 and before
+    /// each read of the close rule. With nothing planted or flagged it writes
+    /// nothing (test builds only).
+    #[cfg(test)]
+    pub(in crate::node) fn resync(&mut self) {
+        if node_fault!(ResyncSkipped) {
+            return;
         }
-        let holders: HashMap<LinkId, &ActivePeer> = self
+        let holders: HashMap<LinkId, NodeAddr> = self
             .peers
-            .values()
-            .map(|peer| (peer.link_id(), peer))
+            .iter()
+            .map(|(addr, peer)| (peer.link_id(), *addr))
             .collect();
-        self.links
-            .used(&(transport_id, addr.clone()), link_id, |id| {
-                holders.get(&id).map(|peer| proven(peer))
+        let held = self
+            .peers
+            .iter()
+            .filter(|(_, peer)| peer.past_feed())
+            .map(|(addr, peer)| {
+                let capable = peer.bundle().is_some_and(|b| b.capable());
+                (peer.link_id(), *addr, settle::recorded(peer), capable)
             })
+            .collect();
+        self.links.resync(held, &holders);
+        for peer in self.peers.values_mut() {
+            peer.set_fed(false);
+        }
     }
 
     /// Remove a link.

@@ -124,9 +124,13 @@ impl LinkRec {
     /// Whether this link uses the connection at `pair`.
     fn uses(&self, pair: &Pair) -> bool {
         let setup = self.setup == *pair && (self.paths.is_empty() || self.holder == Holder::Leg);
-        let path =
-            !fault!(CloseBySetupAddress) && self.paths.iter().any(|(p, s)| p == pair && s.counts());
+        let path = !fault!(CloseBySetupAddress) && self.proven(pair);
         setup || path
+    }
+
+    /// Whether this link holds a path at `pair` that counts as in use.
+    fn proven(&self, pair: &Pair) -> bool {
+        self.paths.iter().any(|(p, s)| p == pair && s.counts())
     }
 }
 
@@ -290,6 +294,19 @@ impl Links {
         }
     }
 
+    /// `link`'s bundle holds exactly `paths`, each in its state, and has
+    /// found the peer capable exactly when `capable` says, whatever its
+    /// record held: a shell's resync of a record whose bundle a test
+    /// changed past the feed.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn resync(&mut self, link: LinkNo, paths: Vec<(Pair, Proven)>, capable: bool) {
+        if let Some(r) = self.recs.get_mut(&link) {
+            r.paths = paths;
+            r.capable = capable;
+        }
+        self.reindex();
+    }
+
     /// Apply what a link's bundle reported, `input`, to the link's record:
     /// the one reading of a path's move, switch, state change and release,
     /// and of the peer turning capable, that the table and a shell's record
@@ -414,7 +431,15 @@ impl Links {
             .iter()
             .filter(|(l, _)| **l != except)
             .filter(|(_, r)| !fault!(CloseByPeerAddress) || matches!(r.holder, Holder::Peer(_)))
-            .any(|(_, r)| r.uses(pair))
+            .any(|(_, r)| match r.holder {
+                // The node's breaks, in the shapes its own close rule took
+                // them: a held link answered by its setup pair alone, and
+                // only held links' paths counted, no leg's setup pair.
+                Holder::Peer(_) if node_fault!(CloseBySetupAddress) => r.setup == *pair,
+                Holder::Peer(_) if node_fault!(CloseByPeerAddress) => r.proven(pair),
+                Holder::Leg if node_fault!(CloseByPeerAddress) => false,
+                Holder::Peer(_) | Holder::Leg => r.uses(pair),
+            })
     }
 
     /// Retire `link`: its record goes, and each of its addresses that no

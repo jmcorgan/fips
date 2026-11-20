@@ -42,8 +42,10 @@ tests.
   once its bundle turns capable through the core's join; and the live audit's
   `links-mirror` clause, which skips only a peer a test mutator changed past
   the feed, every other clause still reading it, with one row per mutator
-  that it flags its peer. The clause on real nodes is in
-  `../../tests/settle/live.rs`.
+  that it flags its peer; and the node's resync of the records, after each
+  mutator, after a msg1 or msg2 refused at its parse and after a drain with
+  nothing queued, and of a link and an index entry a test planted. The
+  clause on real nodes is in `../../tests/settle/live.rs`.
 - `plan.rs`: each transition's plan against the statements its sites ran,
   in their order, written beside each effect; that every transition but a
   cutover has a list and every effect is in one; each announcing

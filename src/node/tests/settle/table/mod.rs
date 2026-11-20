@@ -931,9 +931,13 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
                 node.links.claim(id, (spare.transport, spare.addr.clone()));
             }
         }
+        // Acked, so the link's record holds the pair the Index row claimed
+        // once the node resyncs it from the bundle, as it does before it
+        // next reads the records.
         Row::Paths => {
             if let Some(p) = node.get_peer_mut(peer) {
                 p.admit_path(spare.transport, spare.addr.clone());
+                p.ack_path(spare.transport, &spare.addr);
             }
         }
         Row::Pin => {

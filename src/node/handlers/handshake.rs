@@ -702,6 +702,8 @@ impl Node {
     /// restart traffic from an established link stops competing with
     /// stranger admission, while still being metered.
     pub(in crate::node) async fn handle_msg1(&mut self, packet: ReceivedPacket) {
+        #[cfg(test)]
+        self.resync();
         self.msg1_body(packet).await;
         self.audit_live("handle_msg1");
     }
@@ -2044,6 +2046,8 @@ impl Node {
     ///
     /// This completes an outbound handshake we initiated.
     pub(in crate::node) async fn handle_msg2(&mut self, packet: ReceivedPacket) {
+        #[cfg(test)]
+        self.resync();
         self.msg2_body(packet).await;
         self.audit_live("handle_msg2");
     }

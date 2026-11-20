@@ -27,11 +27,13 @@ field, at once.
   `(transport, address)` pair to the link at it (`open`, `close`, `forget`;
   the path driver's `follow`, `claim` and `unclaim`; `get_mut`; `index` for
   reads of the lookup, and under `cfg(test)` `raw_index`). Its doc carries
-  the warning about the lookup's key form. `used` is the node's close rule:
-  whether a live link other than the one closing uses a pair, a held link by
-  its bundle's proven paths and any other by its setup pair. `Node::in_use`
-  asks it with each held peer's bundle, and `Node::close_unused` closes a
-  link's setup pair only when it answers no. The lookup is
+  the warning about the lookup's key form. `used` is the node's close rule,
+  asked of the core's records (`Links::in_use`): whether a live link other
+  than the one closing uses a pair, a held link by the Live or acknowledged
+  paths of its record and a handshake leg by its setup pair. `Node::in_use`
+  asks it for every close site, the connect's and the drain's, and
+  `Node::close_unused` closes a link's setup pair only when it answers no.
+  The lookup is
   derived from the settlement core's record of each link (`Links`), kept
   under the core's number for it (`no`): opened and retired with the link,
   held for a promoted peer (`hold`), and fed what the link's bundle reports
@@ -41,9 +43,16 @@ field, at once.
   The table keeps it as a cache that every writer rebuilds; `derived`
   computes it afresh for the audit. Under `cfg(test)` it carries the node's
   audit count; `raw_index`, whose entries are put back at every rebuild
-  until their link closes; and `plant_entry` and `plant_path`, writes past
+  until their link closes; `plant_entry` and `plant_path`, writes past
   the table, to its lookup and to a core record, that do not mark it, for
-  the tests that the audit catches each.
+  the tests that the audit catches each; and `resync`, which writes into the
+  core's records what a test changed past the writers: a record for each
+  link a test put in the map itself, each named peer's bundle paths and
+  whether its bundle found it capable, and each index entry a test wrote at a pair no record names. `Node::resync`
+  calls it at the head of each msg1 and msg2 and before each read of the
+  close rule, so a test that changes a bundle and then drives the node needs
+  no call of its own. `recorded` gives the paths a peer's bundle holds as the
+  feed tells them, which the resync writes.
 - `maps.rs`: `MachineMap`, the per-peer control machines with their timer
   store (`add`, `ensure`, `rekey`, `drop`, `get_mut`; `timers`, `arm`,
   `cancel`), `rekey` keying a moved peer's machine under the dial's link;

@@ -541,6 +541,8 @@ impl Node {
     /// longer holds, which a move's renewal can release while the connect
     /// is out, is closed instead, unless another live link uses it.
     async fn poll_connects(&mut self) {
+        #[cfg(test)]
+        self.resync();
         for (node_addr, to) in std::mem::take(&mut self.paths.connecting) {
             let state = self
                 .transports
@@ -931,6 +933,8 @@ impl Node {
     /// between the release and the drain: a restart's teardown queues its
     /// paths' closes before the new link is promoted at one of their pairs.
     pub(in crate::node) async fn drain_closes(&mut self) {
+        #[cfg(test)]
+        self.resync();
         for job in std::mem::take(&mut self.paths.closing) {
             if !node_fault!(DrainReadsNothing) && self.in_use(job.transport, &job.addr, job.link) {
                 debug!(

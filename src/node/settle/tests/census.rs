@@ -165,9 +165,9 @@ const PATH_DRIVER: &[(&str, Held)] = &[
 /// The setters `ActivePeer` has, the last three only under `cfg(test)`. A
 /// peer's state changes by the event that changes it, not by a setter, so a
 /// new setter takes a line here only with a reason its state has no event.
-/// `set_past_feed` writes no state of the peer's: it puts back the test's
-/// mark that the live audit's `links-mirror` reads, around the frame's
-/// accounting.
+/// `set_fed` writes no state of the peer's: it sets the test's mark
+/// that the live audit's `links-mirror` and the node's resync read, put back
+/// around the frame's accounting and cleared by the resync.
 const SETTERS: &[&str] = &[
     "set_connected_udp",
     "set_handshake_msg2",
@@ -176,7 +176,7 @@ const SETTERS: &[&str] = &[
     "set_link_id",
     "set_current_addr",
     "set_remote_epoch",
-    "set_past_feed",
+    "set_fed",
 ];
 
 static NODE_SOURCE: LazyLock<String> = LazyLock::new(|| with_lf(include_str!("../../mod.rs")));

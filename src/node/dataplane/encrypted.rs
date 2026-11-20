@@ -463,11 +463,17 @@ impl Node {
     /// frame's source ([`account`](crate::peer::ActivePeer::account)),
     /// the link counters and the last-seen time are updated, a frame on the
     /// previous session is counted as one, and a frame on the current
-    /// session feeds the MMP receiver and the spin bit. Then the identity's
-    /// silent-session record is cleared on the session's first frame, a
-    /// connected UDP socket aimed at an address the peer left is dropped,
-    /// the replayed-msg1 memory is forgotten on the peering's first frame,
-    /// and the transports are told which link carries the peer.
+    /// session feeds the MMP receiver and the spin bit. Then the settlement
+    /// core's record of the link is told of a roam, the identity's
+    /// silent-session record is cleared on the session's first frame, and
+    /// the replayed-msg1 memory is forgotten on the peering's first frame.
+    /// A roam then drops the connected UDP socket aimed at the address the
+    /// peer left and takes the left link's mark at the transports; without
+    /// one, a transport that tracks peers is told which link carries the
+    /// peer. With multipath on, a pair the frame came from that the link
+    /// holds no path at and the roam did not follow is offered as a path
+    /// candidate, unless the frame is a path message; last the link message
+    /// is dispatched.
     async fn account_authentic(
         &mut self,
         node_addr: &crate::NodeAddr,
@@ -499,7 +505,7 @@ impl Node {
                 msg_type,
             );
             #[cfg(test)]
-            peer.set_past_feed(fed);
+            peer.set_fed(fed);
             let roam = account.roam;
             // An authentic frame from a pair the link holds no path at, that
             // the one-path roam did not follow, makes the pair a candidate,

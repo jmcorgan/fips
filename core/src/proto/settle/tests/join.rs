@@ -105,7 +105,7 @@ enum Want {
 
 /// Every rekey machine output this test can build, with what it should
 /// become.
-fn every_rekey_output() -> Vec<(Out, Want)> {
+fn rekey_outputs() -> Vec<(Out, Want)> {
     let t = tag();
     vec![
         (
@@ -209,7 +209,7 @@ fn every_rekey_output() -> Vec<(Out, Want)> {
 /// the shell's own, and a restart report dropped.
 #[test]
 fn each_rekey_output_routes_to_the_core_or_the_shell() {
-    for (o, want) in every_rekey_output() {
+    for (o, want) in rekey_outputs() {
         let before = format!("rekey {o:?}");
         let steps = rekeyed(vec![o]);
         assert_eq!(
@@ -253,7 +253,7 @@ fn read(p: &PathRef) -> Proven {
 }
 
 /// Every bundle output, each with the core input it stands for on `LINK`.
-fn every_bundle_output() -> Vec<(path::Output<()>, Option<In>)> {
+fn bundle_outputs() -> Vec<(path::Output<()>, Option<In>)> {
     let state = |port, next| path::Output::State {
         to: path(port),
         path_id: 1,
@@ -378,7 +378,7 @@ fn pathed(o: path::Output<()>, link: Option<LinkNo>, released: Option<LinkNo>) -
 /// swapped; a discarded path's state change mirrored.
 #[test]
 fn each_bundle_output_mirrors_to_its_input() {
-    for (o, want) in every_bundle_output() {
+    for (o, want) in bundle_outputs() {
         let before = format!("path {o:?}");
         let steps = pathed(o, Some(LINK), None);
         let got: Vec<String> = steps.iter().map(shown).collect();
@@ -392,7 +392,7 @@ fn each_bundle_output_mirrors_to_its_input() {
 /// the link's record goes with it. Break: a release routed with no link.
 #[test]
 fn a_bundle_output_at_a_removal_reaches_no_link() {
-    for (o, _) in every_bundle_output() {
+    for (o, _) in bundle_outputs() {
         let before = format!("path {o:?}");
         let got: Vec<String> = pathed(o, None, None).iter().map(shown).collect();
         assert_eq!(got, core::slice::from_ref(&before), "{before} at a removal");

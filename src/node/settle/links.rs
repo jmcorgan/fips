@@ -6,9 +6,16 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::collections::{BTreeSet, HashMap};
 
+#[cfg(test)]
+use fips_core::proto::path::PathRef;
+
 use crate::NodeAddr;
 use crate::node::AddrKey;
+#[cfg(test)]
+use crate::peer::ActivePeer;
 use crate::proto::settle::input::Input;
+#[cfg(test)]
+use crate::proto::settle::join;
 use crate::proto::settle::links::{Dir, Holder, LinkNo, Links, Pair, Proven};
 use crate::transport::{Link, LinkDirection, LinkId};
 
@@ -168,29 +175,16 @@ impl LinkTable {
         self.rebuild();
     }
 
-    /// Whether a live link other than `except` uses the connection at
-    /// `key`. A link a peer holds uses each pair its bundle has proven,
-    /// which `held` answers for it with `Some`; a link no peer holds, for
-    /// which `held` answers `None`, uses its own setup pair. That counts a
-    /// handshake leg still in flight, whose connection another leg's close
-    /// must not take.
-    pub(in crate::node) fn used(
-        &self,
-        key: &AddrKey,
-        except: LinkId,
-        held: impl Fn(LinkId) -> Option<bool>,
-    ) -> bool {
-        self.links
-            .iter()
-            .filter(|(id, _)| **id != except)
-            .any(|(id, link)| {
-                let setup = link.transport_id() == key.0 && link.remote_addr() == &key.1;
-                match held(*id) {
-                    Some(_) if node_fault!(CloseBySetupAddress) => setup,
-                    Some(proven) => proven,
-                    None => setup,
-                }
-            })
+    /// The close rule, the settlement core's over its records: whether a
+    /// live link other than `except` uses the connection at `key`, a held
+    /// link by each Live or acknowledged path of its record, and a
+    /// handshake leg, or a link whose record holds no path, by its setup
+    /// pair ([`Links::in_use`]). A leg in flight thus keeps its connection
+    /// from another leg's close.
+    pub(in crate::node) fn used(&self, key: &AddrKey, except: LinkId) -> bool {
+        // A link with no number has no record to except.
+        let except = self.no(&except).unwrap_or(LinkNo(u64::MAX));
+        self.core.in_use(&pair(key), except)
     }
 
     /// Retire the core's record of the link `id`, and drop any entry a test
@@ -273,6 +267,79 @@ impl LinkTable {
             return;
         }
         self.rebuild();
+    }
+
+    /// Write into the core's records what a test changed past the writers,
+    /// for the node's resync before it next reads them. Each link a test put
+    /// in the map itself gets a record, as a leg at its setup pair; each
+    /// peer named in `held`, by its link, address, bundle paths and whether
+    /// its bundle found it capable, has its record hold exactly those paths
+    /// and that flag and be held by it; and each entry a
+    /// test wrote in the index at a pair no record names goes in its link's
+    /// record as a Live path, or opens one there as a leg if the link has
+    /// none. A record opened here is held by the peer `holders` puts on its
+    /// link, if any. Nothing a writer set is overwritten but `held`'s paths
+    /// and holders.
+    #[cfg(test)]
+    pub(in crate::node) fn resync(
+        &mut self,
+        held: Vec<(LinkId, NodeAddr, Paths, bool)>,
+        holders: &HashMap<LinkId, NodeAddr>,
+    ) {
+        let planted: Vec<(LinkId, Pair, Dir)> = self
+            .links
+            .iter()
+            .filter(|(id, _)| !self.nos.contains_key(id))
+            .map(|(id, link)| {
+                let at = pair(&(link.transport_id(), link.remote_addr().clone()));
+                let dir = match link.direction() {
+                    LinkDirection::Inbound => Dir::Inbound,
+                    LinkDirection::Outbound => Dir::Outbound,
+                };
+                (*id, at, dir)
+            })
+            .collect();
+        for (id, at, dir) in planted {
+            self.adopt(id, at, dir, holders);
+        }
+        for (id, peer, paths, capable) in held {
+            if let Some(no) = self.no(&id) {
+                self.core.resync(no, paths, capable);
+                if self.core.get(no).map(|r| r.holder) != Some(Holder::Peer(peer)) {
+                    self.core.hold(no, Holder::Peer(peer));
+                }
+            }
+        }
+        let mut entries: Vec<(AddrKey, LinkId)> = self
+            .overlay
+            .iter()
+            .map(|(key, id)| (key.clone(), *id))
+            .collect();
+        entries.sort_by(|(a, _), (b, _)| pair(a).cmp(&pair(b)));
+        for (key, id) in entries {
+            let at = pair(&key);
+            if self.core.at(&at).next().is_some() {
+                continue;
+            }
+            match self.no(&id) {
+                Some(no) => self.core.path(no, at, Proven::Live),
+                // An entry naming a link with no record has no link to give
+                // the record a direction; it is read nowhere.
+                None => self.adopt(id, at, Dir::Inbound, holders),
+            }
+        }
+        self.rebuild();
+    }
+
+    /// Open a record for the link `id`, which has none, as a leg at `at`,
+    /// held by the peer `holders` puts on the link, if any.
+    #[cfg(test)]
+    fn adopt(&mut self, id: LinkId, at: Pair, dir: Dir, holders: &HashMap<LinkId, NodeAddr>) {
+        let no = self.core.open(at, dir, Holder::Leg);
+        self.nos.insert(id, no);
+        if let Some(peer) = holders.get(&id) {
+            self.core.hold(no, Holder::Peer(*peer));
+        }
     }
 
     /// The link, to update.
@@ -381,6 +448,33 @@ fn reduce(
         }
     }
     index
+}
+
+/// A link's paths, each with its state, as the core's record holds them.
+#[cfg(test)]
+pub(in crate::node) type Paths = Vec<(Pair, Proven)>;
+
+/// The paths `peer`'s bundle holds, each in the state the core is told of
+/// it: Live for a Live path, acknowledged for another acknowledged one,
+/// probing otherwise; none for a peer with no bundle. What its link's record
+/// holds when the feed has told it everything.
+#[cfg(test)]
+pub(in crate::node) fn recorded(peer: &ActivePeer) -> Paths {
+    peer.bundle()
+        .map(|b| {
+            b.paths()
+                .paths()
+                .iter()
+                .map(|p| {
+                    let at = PathRef {
+                        transport: p.transport_id(),
+                        addr: p.addr().clone(),
+                    };
+                    (join::pair(&at), join::proven(b, &at))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The core's pair for the index key `key`.

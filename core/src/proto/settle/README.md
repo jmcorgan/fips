@@ -16,17 +16,20 @@ release build.
 - `links.rs`: the core's link records: each link's setup address,
   direction, holder and bundle paths with their proven states, the
   transport-address index derived from them, and the one close rule over
-  links and their paths (`in_use`, `retire`, `release`). A record also
-  holds whether the bundle found the peer capable. `placement` reads, in
-  one walk, where a msg1 from a pair stands among the records, and its
-  `Placement` answers each question the node asks of a msg1's source
-  before any Diffie-Hellman: whether a link owns the pair, the identity
-  the msg1 is to prove, the answered leg it is a resend to, and whether it
-  is on a held peer's link, which `table.rs` asks. `mirror` is the one
-  reading of what a link's bundle reported (a path moved, switched to,
-  changed state or released, or the peer turned capable), which
-  `table.rs` applies and a shell's own record of its links can apply the
-  same way.
+  links and their paths (`in_use`, `retire`, `release`), which the node
+  asks of its own copy of the records for every close it makes. A record
+  also holds whether the bundle found the peer capable. `placement`
+  reads, in one walk, where a msg1 from a pair stands among the records,
+  and its `Placement` answers each question the node asks of a msg1's
+  source before any Diffie-Hellman: whether a link owns the pair, the
+  identity the msg1 is to prove, the answered leg it is a resend to, and
+  whether it is on a held peer's link, which `table.rs` asks. `mirror` is
+  the one reading of what a link's bundle reported (a path moved,
+  switched to, changed state or released, or the peer turned capable),
+  which `table.rs` applies and a shell's own record of its links can apply
+  the same way. Under the test hooks, `resync` sets a record's paths and
+  its capable flag outright, for a shell that resyncs a record whose
+  bundle a test changed past the feed.
 - `gates.rs`: the restart and replacement gates, one function
   (`Gates::gate`) that every restart source asks: a msg1 from an identity
   not held, a msg1 at a new epoch, a same-epoch replacement, a redial (a

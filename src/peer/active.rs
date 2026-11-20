@@ -983,12 +983,13 @@ impl ActivePeer {
         self.past_feed
     }
 
-    /// Put back what [`past_feed`](Self::past_feed) read before the frame's
-    /// accounting, which tells the core of the roam itself (test builds
-    /// only).
+    /// Set the mark [`past_feed`](Self::past_feed) reads: put back around a
+    /// frame's accounting, which tells the core of the roam itself, and
+    /// cleared by the node's resync once the link's record holds the bundle
+    /// (test builds only).
     #[cfg(test)]
-    pub(crate) fn set_past_feed(&mut self, was: bool) {
-        self.past_feed = was;
+    pub(crate) fn set_fed(&mut self, fed: bool) {
+        self.past_feed = fed;
     }
 
     /// Bind a peer that holds no path to (`transport_id`, `addr`), its

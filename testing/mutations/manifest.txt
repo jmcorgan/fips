@@ -264,6 +264,12 @@ CloseBySetupAddress	red	fips-mesh	node::tests::settle::crossing::a_crossing_reti
 CloseBySetupAddress	red	fips-mesh	node::tests::settle::crossing::a_released_path_at_a_pair_another_links_path_holds_stays_open_with_multipath_on
 CloseBySetupAddress	red	fips-mesh	node::tests::settle::crossing::a_tcp_peer_that_roamed_keeps_its_connection_through_a_crossing
 CloseBySetupAddress	red	fips-mesh	node::tests::settle::crossing::a_tcp_peer_that_roamed_keeps_its_connection_through_a_crossing_with_multipath_on
+ResyncSkipped	red	fips-mesh	node::settle::tests::links::a_bundle_a_test_mutator_changed_is_in_its_links_record_at_the_next_close
+ResyncSkipped	red	fips-mesh	node::settle::tests::links::a_path_acked_past_the_feed_is_in_its_links_record_after_a_refused_msg1
+ResyncSkipped	red	fips-mesh	node::settle::tests::links::a_path_acked_past_the_feed_is_in_its_links_record_after_a_refused_msg2
+ResyncSkipped	red	fips-mesh	node::settle::tests::links::a_path_acked_past_the_feed_is_in_its_links_record_after_a_drain
+ResyncSkipped	red	fips-mesh	node::settle::tests::links::a_planted_link_and_a_planted_index_entry_are_in_the_records_after_a_resync
+ResyncSkipped	red	fips-mesh	node::tests::paths::an_acked_standby_of_another_peer_keeps_a_handshake_links_connection_open	the peer's acked standby keeps the connection open
 DisconnectKeepsVerified	red	fips-mesh	node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says
 DisconnectKeepsVerified	red	fips-mesh	node::tests::settle::table::remove::disconnect_on_a_ble_link_leaves_the_mark_as_its_cell_says_with_multipath_on
 DisconnectKeepsVerified	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_disconnects	the link is still pooled but no longer verified

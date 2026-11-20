@@ -56,7 +56,10 @@ statements at its site.
   `../../handlers/path.rs` build them with. A roam's effects are shared
   ones, in `mod.rs`, and its site in `../../dataplane/encrypted.rs` runs
   them through `Node::run`. A release at the peer's removal runs the same
-  plan, and leaves the link's lookup to the removal.
+  plan, and leaves the link's lookup to the removal. A release queues its
+  pair's close only when the close rule (`Node::in_use`) finds no other
+  link using it, and a test build resyncs the core's link records first
+  (`Node::resync`), as it does before every read of the rule.
 - `remove.rs`: the one removal routine, `Node::remove`, which every way a
   peer is removed calls with its cause and which is synchronous because
   some of them cannot await; `Removed`, what it hands on; and

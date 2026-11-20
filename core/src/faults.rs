@@ -276,6 +276,11 @@ faults! {
     /// The node's close rule answers a link a peer holds by the pair it was
     /// set up at, whatever paths its bundle has proven.
     CloseBySetupAddress,
+    /// The node's test-only resync of the settlement core's link records
+    /// writes nothing, so a bundle a test changed past the feed, or a link
+    /// or index entry it planted, is missing from the records the node
+    /// reads next.
+    ResyncSkipped,
     /// A peer that sent a Disconnect is removed with the transport's mark
     /// at its pair left in place.
     DisconnectKeepsVerified,

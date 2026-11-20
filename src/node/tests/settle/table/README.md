@@ -21,6 +21,9 @@ in the `node-synthetic` group with the rest of `settle`.
   - `dirty(node, peer)` makes every row differ from a fresh peering's, but
     those `dirty_misses(on)` lists with the reason, through accessors and map
     writers and never `raw`. The peering still carries frames afterwards.
+    Its paths row admits and acks a spare path, so the link's record, which
+    the node resyncs from the bundle before it next reads the records,
+    keeps the pair the index row claimed.
   - `check_cells(before, after, &t, &others)` and `assert_cells`, the same
     failing at `defect:`, hold each row against `cell(row, &t)`. `expect`
     turns a cell into what the reading must do: kept, changed, or stated by
