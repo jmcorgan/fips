@@ -8,6 +8,7 @@ mod close;
 mod crossing;
 mod gates;
 mod redial;
+mod roam;
 
 use alloc::vec::Vec;
 
@@ -69,7 +70,7 @@ fn msg2(hs: u32, epoch: Epoch, from: Addr) -> Event {
 
 /// A frame under the session of handshake `hs`.
 fn frame(hs: u32, from: Addr) -> Event {
-    Event::Frame { hs: Hs(hs), from }
+    Event::frame(Hs(hs), from)
 }
 
 fn wait(ms: Ms) -> Event {

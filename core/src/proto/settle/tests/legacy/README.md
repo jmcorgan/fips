@@ -13,12 +13,15 @@ properties can be checked on it.
   rekey machine and its paths a real bundle, one per held peer as the node
   holds them (`../joint/machines.rs`, `../joint/route.rs`), so its messages
   are real stub IK messages, and an abstract far end's are written from
-  their names (`../joint/names.rs`). It logs every history event and what
-  it did, so the oracles compare it with the model step by step
-  (`../shadow.rs`).
+  their names (`../joint/names.rs`). It logs every history event, a
+  switch of a peer's active path and a path its bundle followed at a path
+  message among them, and what it did, so the oracles compare it with the
+  model step by step (`../shadow.rs`).
 - `maint.rs`: `MaintParty`, the deployed node's settlement pinned to the
   tag `v0.5.3`, with its own rekey rules (`Rekey`), since that node has no
-  rekey machine.
+  rekey machine. It has no path bundle either, so it tells the model of
+  each frame on no paths, and the model moves the peer to every frame's
+  source, as that node does.
 - `explore.rs` (under `slow-explorers`): a joint node (`../joint/party.rs`)
   explored against each model, on every start, the two-path starts
   included, at each pairing: a setting at the joint node with `master.rs`

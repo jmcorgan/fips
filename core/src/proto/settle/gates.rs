@@ -43,6 +43,15 @@
 //! A new epoch in a msg2 is the reply to this node's own handshake, so
 //! neither msg2 source is refused or stamps the dampener. A frame that
 //! authenticates forgets the peer's replay memory and silent sessions.
+//!
+//! The memory holds only identities with something live, as the node's
+//! replay memory, dampener and silent-session record each do: a question
+//! about an identity with no memory inserts none, and every call that
+//! takes an instant first drops each identity whose stamp, replays and
+//! silence have all lapsed. A lapsed entry decides nothing, so dropping it
+//! changes no answer; it bounds the memory by the identities whose state
+//! still counts, where a sender minting identities would otherwise grow it
+//! by one entry per msg1.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -209,7 +218,12 @@ impl<I: Instant> Gates<I> {
         now: I,
         params: &Params,
     ) -> Option<Refusal> {
-        let mem = self.peers.entry(peer).or_default();
+        self.lapse(now, params);
+        if kept() {
+            self.peers.entry(peer).or_default();
+        }
+        let none = Memory::default();
+        let mem = self.peers.get(&peer).unwrap_or(&none);
         let silenced = match ask.source {
             Source::NotHeld | Source::Replacement | Source::Redial => mem.silencing(ask.epoch, now),
             Source::Restart | Source::OwnMsg2 | Source::RekeyMsg2 => false,
@@ -231,15 +245,27 @@ impl<I: Instant> Gates<I> {
         };
         if !gated {
             if fault!(DampenerAtMsg2) {
-                mem.stamp = Some(now);
+                self.peers.entry(peer).or_default().stamp = Some(now);
             }
             return None;
         }
         let refusal = mem.judge(&ask, held, now, params);
         if (refusal.is_none() && held.heard) || (refusal.is_some() && fault!(DampenerFromRefusal)) {
-            mem.stamp = Some(now);
+            self.peers.entry(peer).or_default().stamp = Some(now);
         }
         refusal
+    }
+
+    /// Drop every identity whose stamp, replays, silence and redial memory
+    /// have all lapsed at `now`, and the lapsed replays of the rest.
+    fn lapse(&mut self, now: I, params: &Params) {
+        if kept() {
+            return;
+        }
+        self.peers.retain(|_, mem| {
+            mem.prune(now, params);
+            mem.live(now, params)
+        });
     }
 
     /// An unheard peering of `peer` was promoted from a msg1 with
@@ -251,6 +277,7 @@ impl<I: Instant> Gates<I> {
         now: I,
         params: &Params,
     ) {
+        self.lapse(now, params);
         let mem = self.peers.entry(peer).or_default();
         mem.prune(now, params);
         if !mem.replays.iter().any(|(e, _)| *e == ephemeral) {
@@ -270,6 +297,12 @@ impl<I: Instant> Gates<I> {
         if let Some(mem) = self.peers.get_mut(peer) {
             mem.replays.clear();
             mem.silence = None;
+            if mem.stamp.is_none()
+                && (mem.redials.is_empty() || fault!(RedialMemoryLapses))
+                && !kept()
+            {
+                self.peers.remove(peer);
+            }
         }
     }
 
@@ -285,6 +318,7 @@ impl<I: Instant> Gates<I> {
         now: I,
         params: &Params,
     ) -> Option<Duration> {
+        self.lapse(now, params);
         let mem = self.peers.entry(peer).or_default();
         let fresh = || Silence {
             epoch,
@@ -363,11 +397,12 @@ impl<I: Instant> Gates<I> {
     /// peer's frame: the dampener is stamped if the peering it replaced was
     /// `heard`, and the redial memory is forgotten.
     pub fn swapped(&mut self, peer: NodeAddr, heard: bool, now: I) {
-        let mem = self.peers.entry(peer).or_default();
         if heard {
-            mem.stamp = Some(now);
+            self.peers.entry(peer).or_default().stamp = Some(now);
         }
-        mem.redials.clear();
+        if let Some(mem) = self.peers.get_mut(&peer) {
+            mem.redials.clear();
+        }
     }
 
     /// When a restart or replacement of `peer` last stamped the dampener.
@@ -467,6 +502,20 @@ impl<I: Instant> Memory<I> {
     fn prune(&mut self, now: I, params: &Params) {
         self.replays.retain(|(_, at)| recent(*at, now, params));
     }
+
+    /// Whether anything here still counts at `now`: a stamp within the
+    /// interval, a replay or a redial ephemeral within it, or a
+    /// silent-session record within its horizon.
+    fn live(&self, now: I, params: &Params) -> bool {
+        self.stamp.is_some_and(|t| recent(t, now, params))
+            || self.replays.iter().any(|(_, at)| recent(*at, now, params))
+            || (!fault!(RedialMemoryLapses)
+                && self.redials.iter().any(|(_, at)| recent(*at, now, params)))
+            || self
+                .silence
+                .as_ref()
+                .is_some_and(|r| !r.expired(now, params))
+    }
 }
 
 impl<I: Instant> Silence<I> {
@@ -475,6 +524,12 @@ impl<I: Instant> Silence<I> {
         let from = self.until.unwrap_or(self.last);
         now >= deadline(from, params.horizon)
     }
+}
+
+/// Whether the memory keeps every identity that was ever asked about, as
+/// it did before it dropped what had lapsed.
+fn kept() -> bool {
+    fault!(MemoryNeverDropped) || node_fault!(MemoryNeverDropped)
 }
 
 /// Whether `at` is within the interval before `now`.

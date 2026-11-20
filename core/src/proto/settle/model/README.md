@@ -72,6 +72,37 @@ follows a named rule (`judge::LocalRule`). Each says what it decides:
   A redial's msg1 joins the record when it is answered, not when it is
   refused, and a redial no frame proves is dropped at its timeout.
 
+## Where the peer is
+
+FRC-1201 Sections 5.5 to 5.8 do not say where a held peer is. The model
+holds it where the path bundle of its link sends to it, as the node does
+(the operator's decision, 2026-11-14). The bundle moves it three ways, and
+the model follows each (multipath v1 draft, Section 5.3):
+
+- A frame roams the link's one path from a new address on that path's
+  transport, and not for a path message on a link that runs multipath.
+  This is the one move that is a transition, `Roam`. With several paths,
+  or from another transport, a frame moves nothing by itself.
+- Once the link holds more than its original path, a path message
+  attributed to a path from a new address on its transport moves that
+  path there (`Event::Follow`). The peer moves with it if it was there.
+- A switch of the active path (`Event::Switch`) moves the peer to the new
+  active path.
+
+A follow and a switch are no transition, since the session and the link
+stay; the node runs each as a column of its own (Follow and Switch), and
+the core resets nothing at either. A frame carries what the model needs
+for the roam: the paths its link held and whether it is a path message.
+A party that holds no bundle of its own builds it with `Event::frame`, one
+path and no path message. A node with no bundle at all, the deployed
+release, is told 0 paths, and its address follows every frame's source.
+
+The bundle roams only while its one path is its original path. The model
+is told a count, so a lone path that is not the original roams in the
+model and not in the bundle. No start reaches that: the only rebound in
+the world is connectionless, and every start that leaves a lone path that
+is not the original does so on TCP.
+
 One more outcome is marked `Step::open`, because it lies outside the
 model's sources: rule 4.4's simultaneous rekey is resolved only as far as
 FRC-1201 Section 5.8 states Section 7.3's outcome (the smaller node

@@ -73,6 +73,10 @@ const MODEL: &[(&str, &str)] = &[
         "model/tests/redial.rs",
         include_str!("../model/tests/redial.rs"),
     ),
+    (
+        "model/tests/roam.rs",
+        include_str!("../model/tests/roam.rs"),
+    ),
 ];
 
 /// The core's modules, which no model source may name.
@@ -483,11 +487,6 @@ const READS_CURRENT: &[(&str, &str, &str)] = &[
         "party.rs",
         "attribute",
         "attribution's judge, naming the pinned shapes where the core's rule is wider",
-    ),
-    (
-        "party.rs",
-        "to",
-        "the switch that sends by the core's record, the defect's shape",
     ),
 ];
 

@@ -98,19 +98,15 @@ crossing while capability probes are out: joint on at n1 against master on, flip
 crossing while capability probes are out: joint on at n1 against master on, flipped	OneSession	1
 crossing while capability probes are out: master off at n0 against maint, as written	ConnectionsInUse	0
 crossing while capability probes are out: master off at n0 against maint, flipped	ConnectionsInUse	0
-crossing while capability probes are out: master off at n0 against maint, flipped	Fresh	0
 crossing while capability probes are out: master off at n0 against maint, flipped	OneSession	0
 crossing while capability probes are out: master off at n1 against maint, as written	ConnectionsInUse	1
-crossing while capability probes are out: master off at n1 against maint, as written	Fresh	1
 crossing while capability probes are out: master off at n1 against maint, as written	OneSession	1
 crossing while capability probes are out: master off at n1 against maint, flipped	ConnectionsInUse	1
 crossing while capability probes are out: master off at n1 against maint, flipped	OneSession	1
 crossing while capability probes are out: master on at n0 against maint, as written	ConnectionsInUse	0
 crossing while capability probes are out: master on at n0 against maint, flipped	ConnectionsInUse	0
-crossing while capability probes are out: master on at n0 against maint, flipped	Fresh	0
 crossing while capability probes are out: master on at n0 against maint, flipped	OneSession	0
 crossing while capability probes are out: master on at n1 against maint, as written	ConnectionsInUse	1
-crossing while capability probes are out: master on at n1 against maint, as written	Fresh	1
 crossing while capability probes are out: master on at n1 against maint, as written	OneSession	1
 crossing while capability probes are out: master on at n1 against maint, flipped	ConnectionsInUse	1
 crossing while capability probes are out: master on at n1 against maint, flipped	OneSession	1
@@ -240,20 +236,16 @@ crossing, two transports: joint on at n1 against master on, flipped	OneSession	1
 crossing, two transports: master off at n0 against maint, as written	ConnectionsInUse	0
 crossing, two transports: master off at n0 against maint, as written	OneSession	0
 crossing, two transports: master off at n0 against maint, flipped	ConnectionsInUse	0
-crossing, two transports: master off at n0 against maint, flipped	Fresh	0
 crossing, two transports: master off at n0 against maint, flipped	OneSession	0
 crossing, two transports: master off at n1 against maint, as written	ConnectionsInUse	1
-crossing, two transports: master off at n1 against maint, as written	Fresh	1
 crossing, two transports: master off at n1 against maint, as written	OneSession	1
 crossing, two transports: master off at n1 against maint, flipped	ConnectionsInUse	1
 crossing, two transports: master off at n1 against maint, flipped	OneSession	1
 crossing, two transports: master on at n0 against maint, as written	ConnectionsInUse	0
 crossing, two transports: master on at n0 against maint, as written	OneSession	0
 crossing, two transports: master on at n0 against maint, flipped	ConnectionsInUse	0
-crossing, two transports: master on at n0 against maint, flipped	Fresh	0
 crossing, two transports: master on at n0 against maint, flipped	OneSession	0
 crossing, two transports: master on at n1 against maint, as written	ConnectionsInUse	1
-crossing, two transports: master on at n1 against maint, as written	Fresh	1
 crossing, two transports: master on at n1 against maint, as written	OneSession	1
 crossing, two transports: master on at n1 against maint, flipped	ConnectionsInUse	1
 crossing, two transports: master on at n1 against maint, flipped	OneSession	1
@@ -354,12 +346,10 @@ two paths: joint on at n1 against maint, as written	OneSession	1
 two paths: joint on at n1 against master off, as written	OneSession	1
 two paths: master off at n0 against maint, as written	OneSession	0
 two paths: master off at n0 against maint, flipped	ConnectionsInUse	0
-two paths: master off at n0 against maint, flipped	Fresh	0
 two paths: master off at n0 against maint, flipped	OneSession	0
 two paths: master off at n1 against maint, as written	OneSession	1
 two paths: master on at n0 against maint, as written	OneSession	0
 two paths: master on at n0 against maint, flipped	ConnectionsInUse	0
-two paths: master on at n0 against maint, flipped	Fresh	0
 two paths: master on at n0 against maint, flipped	OneSession	0
 two paths: master on at n1 against maint, as written	OneSession	1
 wall step inside the heard floor: joint off at n1 against maint, flipped	OneSession	1

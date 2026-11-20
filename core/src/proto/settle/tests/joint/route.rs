@@ -32,7 +32,7 @@ use crate::proto::rekey::{
     Abandon, Authentic, Completed, EpochTag, Msg1Read, MsgKind, Output, Reason, Record, Replayable,
     Route, Wire, allocate,
 };
-use crate::proto::settle::input::{Hello, Input as In};
+use crate::proto::settle::input::{Hello, Input as In, Read};
 use crate::proto::settle::join::{self, Joined, Step, join};
 use crate::proto::settle::links::{LinkNo, Proven};
 use crate::proto::settle::output::Output as CoreOutput;
@@ -141,9 +141,9 @@ pub fn proven(m: &Machines, p: &PathRef) -> Proven {
     join::proven(m.bundle(), p)
 }
 
-/// A msg1's answer built before the core decides on it: the completed
+/// A msg1's answer, built once the core asked for it: the completed
 /// handshake, the setup record it would note, and the index of the lease
-/// the answer's leg would hold.
+/// the answer's leg holds.
 pub type Built = (Completed<Ik>, Record, u32);
 
 /// The ephemeral digest the core keeps for a msg1, from the stub's.
@@ -153,10 +153,22 @@ fn ephemeral(tok: &Msg1) -> EphemeralDigest {
     EphemeralDigest::of_noise_msg1(&b).expect("33 bytes carry an ephemeral")
 }
 
-/// The answer to the msg1 `tok` of handshake `hs`, its bytes `bytes`, from
-/// `from`, built before the core decides on it: the `Hello` with a fresh
-/// lease, and what an install would take from it.
-pub fn answer(kit: &mut Kit, tok: &Msg1, hs: Hs, bytes: &[u8], from: Addr) -> (Hello, Built) {
+/// What the core is told of the msg1 `tok`, its bytes `bytes`, from
+/// `from`, before it decides on it.
+pub fn read(tok: &Msg1, bytes: &[u8], from: Addr) -> Read {
+    Read {
+        peer: tok.remote().addr(),
+        from: drive::pair(from),
+        bytes: bytes.to_vec(),
+        ephemeral: ephemeral(tok),
+        epoch: tok.epoch(),
+    }
+}
+
+/// The answer to the msg1 `tok` of handshake `hs` that the core asked for
+/// on `link`: the `Hello` with a fresh lease, and what an install takes
+/// from it.
+pub fn answer(kit: &mut Kit, tok: &Msg1, hs: Hs, link: LinkNo) -> (Hello, Built) {
     let lease = allocate(&mut kit.pool).expect("the node's pool has an index");
     let index = lease.index();
     kit.local.name(names::answerer(hs));
@@ -164,16 +176,20 @@ pub fn answer(kit: &mut Kit, tok: &Msg1, hs: Hs, bytes: &[u8], from: Addr) -> (H
         .answer(&kit.local, Some(lease.index()))
         .expect("the stub IK msg2 always writes");
     let record = Record::setup(tok.digest(), tok.ephemeral(), Some(msg2.clone()));
-    let hello = Hello {
-        peer: tok.remote().addr(),
-        from: drive::pair(from),
-        bytes: bytes.to_vec(),
-        ephemeral: ephemeral(tok),
-        epoch: tok.epoch(),
-        msg2,
-        lease,
-    };
+    let hello = Hello { link, msg2, lease };
     (hello, (done, record, index))
+}
+
+/// The link of the [`CoreOutput::Ask`] in `out`, if the core asked for an
+/// answer.
+pub fn asked(out: &[CoreOutput]) -> Option<LinkNo> {
+    out.iter().find_map(|o| {
+        if let CoreOutput::Ask { link, .. } = o {
+            Some(*link)
+        } else {
+            None
+        }
+    })
 }
 
 /// Give every lease in `out` back to `kit`'s pool and drop the rest.
@@ -183,6 +199,7 @@ pub fn discard(kit: &mut Kit, out: Vec<CoreOutput>) {
             CoreOutput::Free { lease } => kit.pool.free(lease.release()),
             CoreOutput::Install(i) => kit.pool.free(i.lease.release()),
             CoreOutput::Opened { .. }
+            | CoreOutput::Ask { .. }
             | CoreOutput::Answer { .. }
             | CoreOutput::Resend { .. }
             | CoreOutput::Rekey { .. }
@@ -191,6 +208,7 @@ pub fn discard(kit: &mut Kit, out: Vec<CoreOutput>) {
             | CoreOutput::Retire { .. }
             | CoreOutput::Release { .. }
             | CoreOutput::Close { .. }
+            | CoreOutput::Swapped { .. }
             | CoreOutput::Retry { .. }
             | CoreOutput::Reject { .. }
             | CoreOutput::Hold { .. }

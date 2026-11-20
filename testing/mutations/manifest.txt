@@ -270,12 +270,24 @@ DisconnectKeepsVerified	red	fips-mesh	node::tests::ble::a_verified_link_stops_be
 EndedSchedulesRetry	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say
 EndedSchedulesRetry	red	fips-mesh	node::tests::settle::table::remove::a_peer_whose_link_machine_ends_the_link_is_removed_as_its_cells_say_with_multipath_on
 EndedSchedulesRetry	red	fips-mesh	node::tests::settle::table::remove::a_test_removal_runs_no_tail
+OrphanedNoRetry	red	fips-core	proto::settle::table::tests::an_orphaned_bundles_peer_is_retried
+RestartNoRetry	red	fips-core	proto::settle::table::tests::a_restarted_or_replaced_peer_is_retried_in_each_of_the_three_ways
+RemovalClosesEveryPair	red	fips-core	proto::settle::table::tests::an_orphaned_peer_closes_its_bundles_paths_and_not_a_setup_pair_released_to_keep
+RemovalClosesEveryPair	red	fips-core	proto::settle::table::tests::an_operator_disconnect_closes_the_peers_pair_though_a_dial_uses_it
 LinksNotFed	red	fips-mesh	node::tests::settle::live::a_dialed_links_record_holds_its_original_path_live_and_one_off_its_bundle_fails	links-mirror
 LinksNotFed	red	fips-mesh	node::tests::settle::live::a_dialed_links_record_holds_its_original_path_live_and_one_off_its_bundle_fails_with_multipath_on	links-mirror
 LinksNotFed	red	fips-mesh	node::tests::settle::live::a_healthy_dial_passes_the_live_audit_at_every_entry	links-mirror
 LinksNotFed	red	fips-mesh	node::tests::settle::live::a_healthy_dial_passes_the_live_audit_at_every_entry_with_multipath_on	links-mirror
-MirrorLetsAckedOff	red	fips-mesh	node::tests::settle::live::a_switch_to_an_acked_path_is_recorded_live_and_is_let_off_with_multipath_on	let off an acknowledged path that is not active
 ReleasedSetupIndexed	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	a released pair no longer maps to the link
+CapableUnmirrored	red	fips-mesh	node::settle::tests::links::a_link_turning_capable_marks_the_nodes_record_capable
+CapableIgnored	red	fips-core	proto::settle::table::tests::a_capable_peers_bare_setup_pair_is_off_the_link_in_the_table
+AttributeByCurrent	red	fips-core	proto::settle::table::tests::a_msg1_from_the_pair_the_core_holds_the_peer_at_with_no_path_there_is_off_the_link
+AttributeBySetupOnly	red	fips-core	proto::settle::links::tests::each_attribution_question_answers_as_the_node_does
+SwitchLeavesPeer	red	fips-core	proto::settle::table::tests::a_switch_moves_the_held_record_to_the_new_active_path_in_the_table
+HeardMovesPeer	red	fips-core	proto::settle::table::tests::a_frame_from_another_transport_moves_nothing_in_the_core
+FollowResets	red	fips-core	proto::settle::table::tests::a_path_the_bundle_followed_moves_the_cores_record_and_resets_nothing
+SwitchWritesLive	red	fips-core	proto::settle::table::tests::a_switch_to_an_acknowledged_path_leaves_it_acknowledged
+SwitchWritesLive	red	fips-mesh	node::tests::settle::live::a_switch_to_an_acked_path_is_recorded_acked_and_the_mirror_holds_with_multipath_on	a switch to an acknowledged path is recorded Live
 # A crossed dial from another address or transport retires a link that is
 # named at no pair by the time it closes, so this break has nothing to
 # take from the held link there. Those tests' check that the held link stays
@@ -434,3 +446,20 @@ CapIgnored	red	fips-mesh	node::tests::rekey_msg2_cap::a_spray_of_forged_rekey_ms
 CapDropsOnLink	red	fips-core	proto::rekey::tests::fmp::a_reply_on_the_link_is_read_after_the_budget_is_spent
 CapDropsOnLink	red	fips-mesh	node::tests::rekey_msg2_cap::the_genuine_rekey_msg2_from_the_established_link_is_read_after_the_budget_is_spent
 CapDropsOnLink	red	fips-mesh	node::tests::rekey_msg2_cap::the_genuine_rekey_msg2_from_the_established_link_is_read_after_the_budget_is_spent_with_multipath_on
+MemoryNeverDropped	red	fips-core	proto::settle::gates::tests::gate_memory_holds_no_entry_once_an_identitys_state_has_lapsed
+UnsentStaysDue	red	fips-core	proto::settle::table::tests::an_unsent_dial_resend_is_tried_again_at_the_next_tick_and_not_before
+UnsentStaysDue	red	fips-core	proto::settle::table::tests::a_failed_dial_resend_is_due_at_the_next_poll_whatever_its_instant	not one tick on
+UnsentDueAtWake	red	fips-core	proto::settle::table::tests::a_failed_dial_resend_is_due_at_the_next_poll_whatever_its_instant	does not try it again
+UnsentPastCap	red	fips-core	proto::settle::table::tests::a_send_failure_after_a_dials_last_resend_asks_for_no_more
+BackoffDoubles	red	fips-core	proto::settle::legs::tests::a_configured_multiplier_spaces_the_resends_as_the_node_truncates_them
+BackoffDoubles	red	fips-mesh	node::settle::params::tests::a_configured_backoff_gives_the_nodes_resend_schedule
+OriginIgnored	red	fips-core	proto::settle::legs::tests::an_mdns_directed_dial_stops_at_its_resend_cap
+ConnectingUnlinked	red	fips-core	proto::settle::table::tests::a_connecting_dials_pair_is_in_use_before_its_msg1_and_a_failed_connect_retires_it_with_no_lease
+ConnectingUnlinked	red	fips-core	proto::settle::table::tests::a_dial_after_its_connect_starts_its_leg_on_the_link_the_connect_opened
+UnpinOwnOnly	red	fips-core	proto::settle::table::tests::a_move_onto_a_later_dial_to_a_peer_held_on_the_link_it_dialled_ends_the_pin
+AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_refused_msg1_asks_for_no_answer
+AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_rekey_msg1_asks_for_no_answer
+AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_restarts_teardown_comes_before_its_answer_is_asked_for
+CapNotCounted	red	fips-core	proto::settle::table::tests::a_msg1_from_a_new_identity_at_the_peer_cap_is_refused_before_any_answer
+CapNotCounted	red	fips-core	proto::settle::table::tests::an_answer_sent_to_a_new_identity_once_the_peer_cap_filled_is_not_installed
+CapNotCounted	red	fips-core	proto::settle::table::tests::a_dial_completing_to_a_new_identity_at_the_peer_cap_is_not_installed

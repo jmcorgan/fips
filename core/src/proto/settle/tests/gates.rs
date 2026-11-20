@@ -305,6 +305,71 @@ fn each_further_silent_session_doubles_the_refusal_up_to_its_cap() {
     assert_eq!(got, want);
 }
 
+/// Identity `n` of a population, none of them [`peer`].
+fn identity(n: u32) -> NodeAddr {
+    let mut b = [0u8; 16];
+    b[..4].copy_from_slice(&n.to_be_bytes());
+    b[15] = 1;
+    NodeAddr::from_bytes(b)
+}
+
+#[test]
+fn gate_memory_holds_no_entry_once_an_identitys_state_has_lapsed() {
+    // As the node's replay memory has it: a query that finds no memory
+    // inserts none, and an entry whose stamp, replays and silence have
+    // all lapsed is dropped.
+    let p = Params::default();
+    let mut g: Gates<TestInstant> = Gates::new();
+    for i in 0..10_000u32 {
+        let ask = Ask {
+            source: Source::NotHeld,
+            held: None,
+            ephemeral: Some(eph(i)),
+            epoch: epoch(1),
+        };
+        assert_eq!(
+            g.gate(identity(i), ask, t(u64::from(i)), &p),
+            None,
+            "precondition: a msg1 from identity {i} not held is accepted"
+        );
+    }
+    // A hundred more identities with live state: a promotion's replay
+    // entry, three silent sessions that start a refusal, and an accepted
+    // restart of a heard peering, which stamps the dampener.
+    for i in 20_000..20_100u32 {
+        let at = t(20_000);
+        g.promoted(identity(i), eph(i), at, &p);
+        for hs in 0..3 {
+            let _ = g.ended(identity(i), epoch(1), Some(eph(i * 4 + hs)), at, &p);
+        }
+        let restart = Ask {
+            epoch: epoch(2),
+            ..msg1(Source::Restart, Some(heard(0, Some(0))), i)
+        };
+        assert_eq!(
+            g.gate(identity(i), restart, at, &p),
+            None,
+            "precondition: identity {i}'s restart is accepted"
+        );
+    }
+    let live = g.peers.len();
+    assert!(
+        live >= 100,
+        "precondition: every identity with live state keeps its entry, {live} held"
+    );
+    // An hour later every stamp, replay and silence has lapsed; one more
+    // msg1 from an identity not held.
+    let ask = msg1(Source::NotHeld, None, 1);
+    let _ = g.gate(identity(30_000), ask, t(3_600_000), &p);
+    assert_eq!(
+        g.peers.len(),
+        0,
+        "defect: gate memory holds {} entries an hour after the last state, \
+         where the node's memory holds none",
+        g.peers.len()
+    );
+}
+
 #[test]
 fn the_default_intervals_are_the_frcs() {
     let model = m::Params::default();
@@ -334,6 +399,7 @@ impl Beside {
     /// Runs `history`, failing at the first disagreement.
     fn run(&mut self, name: &str, history: &[Event]) {
         let p = Params::default();
+        let interval = u64::try_from(p.interval.as_millis()).expect("the interval fits");
         for (i, ev) in history.iter().enumerate() {
             let step = self.judge.step(*ev);
             let now = t(self.judge.now);
@@ -398,6 +464,8 @@ impl Beside {
                 | Event::Dial { .. }
                 | Event::Msg2Sent { .. }
                 | Event::Timeout { .. }
+                | Event::Switch { .. }
+                | Event::Follow { .. }
                 | Event::RekeyStart { .. }
                 | Event::RekeyMsg2 { .. }
                 | Event::RekeyCutover
@@ -412,9 +480,19 @@ impl Beside {
                     "{name}, event {i} ({ev:?}): the refusal"
                 );
             }
-            let stamp = self.gates.stamp(&peer()).map(|s| s.0);
+            // The stamp while it still counts: the gates drop an identity
+            // whose stamp, replays and silence have all lapsed, where the
+            // model keeps its last stamp for good, and a stamp past the
+            // interval refuses nothing on either side.
+            let counts = |s: u64| self.judge.now.saturating_sub(s) < interval;
+            let stamp = self
+                .gates
+                .stamp(&peer())
+                .map(|s| s.0)
+                .filter(|s| counts(*s));
             assert_eq!(
-                stamp, self.judge.stamp,
+                stamp,
+                self.judge.stamp.filter(|s| counts(*s)),
                 "{name}, event {i} ({ev:?}): the dampener's stamp"
             );
         }
@@ -476,10 +554,7 @@ fn repl(hs: u32) -> Event {
 }
 
 fn frame(hs: u32) -> Event {
-    Event::Frame {
-        hs: Hs(hs),
-        from: at(9),
-    }
+    Event::frame(Hs(hs), at(9))
 }
 
 fn wait(ms: u64) -> Event {
@@ -668,5 +743,26 @@ fn the_swap_stamps_the_dampener_only_for_a_heard_peering_and_clears_the_redial_m
             56_000
         ),
         None
+    );
+}
+
+#[test]
+fn the_redial_memory_outlives_a_frame_and_the_lapse_of_the_rest_of_the_identitys_memory() {
+    // The node forgets an identity's redial memory only at its swap: a
+    // frame of the held peering, which forgets the replays and the silent
+    // sessions, leaves it, and an identity with no stamp, replays or
+    // silence is kept while it holds a live redial ephemeral.
+    let params = Params::default();
+    let mut g = Gates::new();
+    g.redialed(peer(), eph(2), t(40_000), &params);
+    g.heard(&peer());
+    assert_eq!(
+        gate(
+            &mut g,
+            msg1(Source::Redial, Some(heard(0, Some(40_500))), 2),
+            41_000
+        ),
+        Some(Refusal::Redialed),
+        "defect: the redial memory went with the frame or the lapse"
     );
 }

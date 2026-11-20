@@ -280,6 +280,7 @@ fn every_bundle_output() -> Vec<(path::Output<()>, Option<In>)> {
                 link: LINK,
                 from: pair(&path(1)),
                 to: pair(&path(3)),
+                roam: false,
             }),
         ),
         (
@@ -311,7 +312,7 @@ fn every_bundle_output() -> Vec<(path::Output<()>, Option<In>)> {
             }),
         ),
         (state(6, None), None),
-        (path::Output::Capable, None),
+        (path::Output::Capable, Some(In::Capable { link: LINK })),
         (path::Output::NotCapable, None),
         (
             path::Output::Refused {
@@ -329,17 +330,19 @@ fn every_bundle_output() -> Vec<(path::Output<()>, Option<In>)> {
             Some(In::Switched {
                 link: LINK,
                 to: pair(&path(5)),
+                proven: Proven::Live,
             }),
         ),
         (
             path::Output::Switched {
                 from: None,
-                to: path(5),
+                to: path(2),
                 why: Switch::Handover,
             },
             Some(In::Switched {
                 link: LINK,
-                to: pair(&path(5)),
+                to: pair(&path(2)),
+                proven: Proven::Acked,
             }),
         ),
         (path::Output::Orphaned, Some(In::Orphaned { peer: peer() })),
@@ -367,9 +370,11 @@ fn pathed(o: path::Output<()>, link: Option<LinkNo>, released: Option<LinkNo>) -
 /// Each bundle output comes back as itself, followed by the core input it
 /// stands for, if any: a state change with the path's proven state read
 /// from the bundle after the step, a move, a switch (with the old active
-/// path kept or discarded), a release and an orphaning.
-/// A discarded path's state change, the capability reports, a refusal, a
-/// send and a connect stand for none. Breaks: a move's `from` and `to`
+/// path kept or discarded, and the state of the path switched to read from
+/// the bundle the same way, a handover's acknowledged one too), the peer
+/// turning capable, a release and an orphaning. A discarded path's state
+/// change, the report that the peer is not capable yet, a refusal, a send,
+/// a connect and a proven size stand for none. Breaks: a move's `from` and `to`
 /// swapped; a discarded path's state change mirrored.
 #[test]
 fn each_bundle_output_mirrors_to_its_input() {
@@ -443,9 +448,10 @@ fn a_released_path_goes_to_the_link_moved_off() {
     );
 }
 
-/// A one-path roam is the path moved to the frame's pair, and a bind of a
-/// bundle holding no path is a Live path there: one core input each, and
-/// nothing else. Break: the two swapped.
+/// A one-path roam is the path moved to the frame's pair, marked a roam
+/// (a path the bundle moved itself is not, `a_steps_outputs_come_back_in_order`),
+/// and a bind of a bundle holding no path is a Live path there: one core
+/// input each, and nothing else. Break: the two swapped.
 #[test]
 fn a_roam_is_moved_and_a_bind_is_a_live_path() {
     let (from, to) = (pair(&path(1)), pair(&path(2)));
@@ -461,6 +467,7 @@ fn a_roam_is_moved_and_a_bind_is_a_live_path() {
         link: LINK,
         from,
         to: to.clone(),
+        roam: true,
     };
     assert_eq!(roam, [format!("core {moved:?}")], "a roam is a move");
     let bind: Vec<String> = joined(Event::Roam {
@@ -516,9 +523,11 @@ fn a_steps_outputs_come_back_in_order() {
                 link: LINK,
                 from: pair(&path(1)),
                 to: pair(&path(3)),
+                roam: false,
             }
         ),
         format!("path {:?}", out[1]),
+        format!("core {:?}", In::Capable { link: LINK }),
         format!("path {:?}", out[2]),
         format!("core {:?}", In::Orphaned { peer: peer() }),
     ];

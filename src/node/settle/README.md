@@ -59,6 +59,12 @@ field, at once.
   link promoted. The `redial-leg` clause holds each entry to a leg still at
   `Handshaking{ReceivedMsg1}` for that identity and index, an index no peer
   is bound to, on an open link.
+- `params.rs`: `settle_params`, the settlement core's parameters for a
+  node's configuration: the core's defaults with the handshake timeout,
+  the msg1 resend interval, multiplier and count, and the cap on answers
+  in flight taken from the configuration, and nothing else, so the gate
+  constants stay the core's. Nothing in the node steps the core yet, so
+  outside tests nothing calls it.
 - `audit.rs`: the coherence of the maps, one function per clause, each
   naming what breaks it, and `live`, which runs every clause and panics on
   the first that fails, naming the node entry and the clause. Compiled in
@@ -70,11 +76,11 @@ field, at once.
   (`testing/check-audit-reach.py`). The `index-cache` clause, after the
   other index clauses, holds the link table's cached lookup to the one its
   records give now. The last clause, `links-mirror`, holds
-  each held peer's core link record to its bundle, letting off only the
-  active path a switch recorded Live while the bundle holds it
-  acknowledged; it skips a peer a test mutator of the peer's paths changed
-  past the feed (`ActivePeer::past_feed`, test builds only), and records
-  each skip and let-off in the reach file, where the check holds them to a
+  each held peer's core link record to its bundle, capable when the bundle
+  is and holding its paths, each in the state the bundle holds it, a
+  switched-to path too; it skips a peer a test mutator of the peer's paths
+  changed past the feed (`ActivePeer::past_feed`, test builds only), and
+  records each skip in the reach file, where the check holds them to a
   ceiling.
 - `table.rs`: `Transition`, each thing the code does to a held peer; `Row`,
   each piece of what the node holds per peer, with `DataRow` for the peer's

@@ -281,16 +281,58 @@ faults! {
     DisconnectKeepsVerified,
     /// A link its rekey machine ended schedules a reconnect to the peer.
     EndedSchedulesRetry,
+    /// The settlement core removes a peer whose bundle was orphaned with no
+    /// reconnect, though the node notes that loss for one as it does a dead
+    /// link.
+    OrphanedNoRetry,
+    /// The settlement core removes a peer for a restart, a replacement or
+    /// an own-dial restart with no reconnect, though the peer's control
+    /// machine reports each loss for one before the new session is
+    /// promoted.
+    RestartNoRetry,
+    /// The settlement core's removal of an orphaned or disconnected peer
+    /// closes every pair of its link no other link uses, a setup pair the
+    /// bundle released to keep included, and leaves the pair a
+    /// disconnected peer was held at open while another link uses it.
+    RemovalClosesEveryPair,
     /// The core's record of a link is never told a path's state, so a new
     /// bundle's original path and every later change of a path's state are
     /// missing from it.
     LinksNotFed,
-    /// The live audit lets off any acknowledged path the core records Live,
-    /// not only the active path a switch made Live.
-    MirrorLetsAckedOff,
     /// A link's setup address stays in the index derived from the link
     /// records after its bundle released the path there.
     ReleasedSetupIndexed,
+    /// The peer's bundle turning capable never reaches the core's record of
+    /// its link, so the record holds the link not capable for life.
+    CapableUnmirrored,
+    /// The settlement core counts a msg1 from a held link's setup pair as on
+    /// the link whether or not the peer is capable, where the node counts a
+    /// capable peer's pair that its bundle holds no path at as off it.
+    CapableIgnored,
+    /// The settlement core counts a msg1 from the pair its record of the
+    /// peer is at as on the link, and a msg1 from the setup pair whatever
+    /// the state of the path there, where the node counts only the proven
+    /// paths, and the index at a pair the bundle holds no path at.
+    AttributeByCurrent,
+    /// The settlement core counts a msg1 as on a held peer's link only from
+    /// the link's setup pair, as a post-move msg1 classified by the old
+    /// setup address would be.
+    AttributeBySetupOnly,
+    /// The settlement core leaves its record of where a peer is at the
+    /// path its bundle switched away from.
+    SwitchLeavesPeer,
+    /// The settlement core moves its record of where a peer is to the
+    /// source of each frame, wherever the frame came from, and not when the
+    /// bundle moves the path the peer is at.
+    HeardMovesPeer,
+    /// The settlement core resets a peer's data as a roam when the bundle
+    /// moves the path the peer is at at a path message, which the node runs
+    /// as a move of that path and no roam.
+    FollowResets,
+    /// A switch records the path switched to Live in the link's record,
+    /// the settlement core's and the node's, whatever state the bundle holds
+    /// it in.
+    SwitchWritesLive,
     /// Closing a link takes the index's entry at each pair it was named at
     /// from any other link that uses the pair, as the written index did.
     ShadowLosesEntry,
@@ -461,6 +503,48 @@ faults! {
     /// keeps the peer's genuine msg2 from completing the rekey. The node
     /// half of the rekey machine's switch of the same name.
     CapDropsOnLink,
+    /// The settlement core's restart gates keep a memory entry for every
+    /// identity they were ever asked about and never drop one, however
+    /// long its stamp, replays and silence have lapsed.
+    MemoryNeverDropped,
+    /// A settlement core dial resend whose send failed stays due at the
+    /// instant it was missed, so the core's next wake stays in the past and
+    /// every poll until the dial's deadline asks for it again.
+    UnsentStaysDue,
+    /// A settlement core dial resend whose send failed is due only at the
+    /// wake it reports, one tick on, not at the next poll, so a poll that
+    /// falls before that instant does not try it again.
+    UnsentDueAtWake,
+    /// A settlement core dial whose last resend was sent takes a failed
+    /// send reported after it as one more resend to try again.
+    UnsentPastCap,
+    /// The settlement core's msg1 resend waits double from the first
+    /// interval, whatever multiplier the node is configured with, so a node
+    /// configured with another multiplier would resend on another schedule
+    /// than the one it runs today.
+    BackoffDoubles,
+    /// The settlement core ignores a dial's own resend cap, so a dial an
+    /// mDNS advert directs at a node not configured to dial resends the
+    /// configured count, where the node stops it at its discovery cap.
+    OriginIgnored,
+    /// The settlement core opens no link record for a dial on a connection
+    /// still to be opened until its msg1, so the connection being opened is
+    /// in no index and in use by nothing, where the node's link and index
+    /// entry exist from the dial.
+    ConnectingUnlinked,
+    /// The settlement core says a move onto this node's own dial ends an
+    /// operator's pin of the peer's path only when the link it left was
+    /// this node's dial, where the node also ends it when the dial was made
+    /// while the peer was held on that link (`own_dial || later_dial`).
+    UnpinOwnOnly,
+    /// The settlement core asks for a msg1's answer before it classifies
+    /// the msg1, so a refused or rekey msg1 would cost a msg2 write and an
+    /// index draw, as the answer built before the decision did.
+    AnswerBeforeAdmit,
+    /// The settlement core's max-peers cap counts no peer, so at the cap a
+    /// msg1 from a new identity is answered and a dial to one installed,
+    /// where the node drops the msg1 and refuses the promotion.
+    CapNotCounted,
 }
 
 impl Fault {

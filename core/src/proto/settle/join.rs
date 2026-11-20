@@ -6,7 +6,8 @@
 //! move and closed at a removal, and the one rule for what each machine's
 //! outputs tell the core: a restart report, a teardown, a replacement
 //! request and a redial request from the rekey machine, and every path change the bundle
-//! reports, its one-path roams and binds besides. It holds no state and
+//! reports, its one-path roams and binds besides, and the peer turning
+//! capable. It holds no state and
 //! performs no I/O. It takes the machines' slots where the shell keeps
 //! them, makes the machine calls in their order, and returns [`Joined`],
 //! which says front to back what the shell is to carry out: a core input
@@ -318,7 +319,12 @@ where
         }
         Event::Roam { link, from, to } => {
             let input = match from {
-                Some(from) => In::Moved { link, from, to },
+                Some(from) => In::Moved {
+                    link,
+                    from,
+                    to,
+                    roam: true,
+                },
                 None => In::State {
                     link,
                     pair: to,
@@ -493,10 +499,12 @@ fn mirrored<D>(
             link: link?,
             from: pair(from),
             to: pair(to),
+            roam: false,
         }),
         path::Output::Switched { to, .. } => Some(In::Switched {
             link: link?,
             to: pair(to),
+            proven: read(to),
         }),
         path::Output::Released { to, keep, .. } => Some(In::Released {
             link: released.or(link)?,
@@ -504,8 +512,8 @@ fn mirrored<D>(
             keep: *keep,
         }),
         path::Output::Orphaned => link.map(|_| In::Orphaned { peer }),
-        path::Output::Capable
-        | path::Output::NotCapable
+        path::Output::Capable => Some(In::Capable { link: link? }),
+        path::Output::NotCapable
         | path::Output::Refused { .. }
         | path::Output::Send { .. }
         | path::Output::Connect { .. }

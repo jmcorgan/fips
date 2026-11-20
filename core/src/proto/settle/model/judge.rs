@@ -124,7 +124,8 @@ pub enum Transition {
     RekeyCutover,
     /// A restart revealed in a rekey msg2, the link kept.
     Restarted,
-    /// An authenticated frame moved the peer's current address.
+    /// An authenticated frame roamed the one path of the peer's link to a
+    /// new address on its transport, and the peer with it.
     Roam,
     /// The peer removed.
     Remove,
@@ -425,7 +426,14 @@ impl Judge {
             Event::Msg2Sent { hs } => self.sent(hs),
             Event::Msg2 { hs, epoch, from } => self.msg2(hs, epoch, from),
             Event::Timeout { hs } => self.timeout(hs),
-            Event::Frame { hs, from } => self.frame(hs, from),
+            Event::Frame {
+                hs,
+                from,
+                paths,
+                message,
+            } => self.frame(hs, from, paths, message),
+            Event::Switch { to } => self.switch(to),
+            Event::Follow { from, to } => self.follow(from, to),
             Event::RekeyStart { hs } => {
                 if self.peering.is_some() {
                     self.rekey = Some(hs);
@@ -840,8 +848,9 @@ impl Judge {
         Step::default()
     }
 
-    /// An authenticated frame from the peer.
-    fn frame(&mut self, hs: Hs, from: Addr) -> Step {
+    /// An authenticated frame from the peer, on a link whose bundle held
+    /// `paths` paths, a path message if `message`.
+    fn frame(&mut self, hs: Hs, from: Addr, paths: u8, message: bool) -> Step {
         if self.redial.is_some_and(|r| r.leg.hs == hs) {
             return self.swapped(from);
         }
@@ -879,11 +888,44 @@ impl Judge {
         let p = self.peering.as_mut().expect("held above");
         p.heard = true;
         p.last = Some(now);
-        if p.current != from && step.change.is_none() {
+        // Where the peer is follows the bundle (README): a frame roams its
+        // one path inside that path's transport, a path message on a link
+        // that runs multipath roams nothing, and with several paths no frame
+        // moves an address by itself (the bundle's own move is a `Follow`).
+        // A node with no bundle follows every frame's source.
+        let roams = match paths {
+            0 => true,
+            1 => !message && from.transport == p.current.transport,
+            _ => false,
+        };
+        if p.current != from && step.change.is_none() && roams {
             p.current = from;
             step.change = Some(Transition::Roam);
         }
         step
+    }
+
+    /// The bundle of the peer's link switched its active path to `to`: the
+    /// peer is there now, where the bundle and the node send to it. The
+    /// session and the link stay, so this is no transition.
+    fn switch(&mut self, to: Addr) -> Step {
+        if let Some(p) = self.peering.as_mut() {
+            p.current = to; // where the peer is follows the bundle (README)
+        }
+        Step::default()
+    }
+
+    /// The bundle of the peer's link moved its path at `from` to `to`: if
+    /// the peer was there it is at `to` now, where the bundle and the node
+    /// send to it. As at a switch the session and the link stay, so this
+    /// is no transition.
+    fn follow(&mut self, from: Addr, to: Addr) -> Step {
+        if let Some(p) = self.peering.as_mut()
+            && p.current == from
+        {
+            p.current = to; // where the peer is follows the bundle (README)
+        }
+        Step::default()
     }
 
     /// The msg2 of this node's own rekey.

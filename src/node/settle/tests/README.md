@@ -31,8 +31,15 @@ tests.
   default configuration, at each multipath setting, against the ones
   `fips_core::proto::settle::parity` states for the schedules a real node
   and the joint world both run, so the two run alike.
+- `params.rs`: the settlement core's parameters a node's configuration
+  gives, against the core's defaults at the default configuration, and
+  against the node's own resend schedule (`Fmp::poll_resends` from the
+  first resend one interval after the dial) at four multipliers. It is a
+  child module of `../params.rs`, declared there with `#[path]`, as
+  `node::settle::params::tests`.
 - `links.rs`: the settlement core's link records the link table keeps, from
-  a link's open to its close or a dial's forget; and the live audit's
+  a link's open to its close or a dial's forget, and holding a link capable
+  once its bundle turns capable through the core's join; and the live audit's
   `links-mirror` clause, which skips only a peer a test mutator changed past
   the feed, every other clause still reading it, with one row per mutator
   that it flags its peer. The clause on real nodes is in

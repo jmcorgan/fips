@@ -914,6 +914,14 @@ impl Machines {
         &self.bundle
     }
 
+    /// What the model is told of a frame of link message type `kind` on
+    /// this link (`Event::Frame`): how many paths the bundle holds, and
+    /// whether the frame is a path message on a bundle that runs multipath.
+    pub fn told(&self, kind: u8) -> (u8, bool) {
+        let paths = u8::try_from(self.bundle.paths().paths().len()).unwrap_or(u8::MAX);
+        (paths, messaged(kind) && self.mode == Mode::On)
+    }
+
     /// Write the explorer's key of both machines at `now` to `out`: every
     /// field of the rekey machine that can change (`Rekey::state`, which
     /// its own explorer keys on), every field of the bundle (its `Debug`),

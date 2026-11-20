@@ -43,11 +43,11 @@ use crate::identity::NodeAddr;
 use crate::proto::path::{Input as PathInput, PathState, Source};
 use crate::proto::rekey::tests::stub::{Hs as Attempt, Ik, Kid, Msg1, hint, kid, read_msg1};
 use crate::proto::rekey::{
-    self, Authentic, Completed, CycleView, EpochTag, Msg1Read, Profile, Record, RecordStore,
-    Replayable, Role as Side, Route, allocate, leaked,
+    self, Completed, CycleView, EpochTag, Msg1Read, Profile, Record, RecordStore, Role as Side,
+    Route, allocate, leaked,
 };
 use crate::proto::settle::faults::{Candidate, candidate};
-use crate::proto::settle::input::{Dial as Dialed, Hello, Input as In};
+use crate::proto::settle::input::{Dial as Dialed, Input as In};
 use crate::proto::settle::links::{Dir as LinkDir, Holder, LinkNo, Proven};
 use crate::proto::settle::output::{Build, Install, Output, Why};
 use crate::proto::settle::params::Params;
@@ -60,7 +60,7 @@ use super::super::drive::{addr, change, class, pair, refusal};
 use super::super::explore::THIRD;
 use super::super::oracle::Oracle;
 use super::super::party::{Configured, binding};
-use super::super::shadow::{Entry, Rec, Refusal};
+use super::super::shadow::{self, Entry, Rec, Refusal};
 use super::super::starts::{A, B, C};
 use super::super::world::{
     Dir, HANDSHAKE, HEARTBEAT, Input, Kind, Ms, Net, Party, PathEv, PeerView, Pkt, RETRY,
@@ -447,10 +447,6 @@ impl JointParty {
     /// The peer's address as this node sends to it: the bundle's active
     /// path; `None` while no path is active.
     fn to(&self, peer: Node) -> Option<Addr> {
-        if fault!(SendsByHeld) {
-            // The defect's shape: the core's record of where the peer is.
-            return self.s.table.held(&key(peer)).map(|h| addr(&h.current));
-        }
         self.s.peers.get(&peer.0).and_then(|p| p.machines.active())
     }
 
@@ -654,6 +650,26 @@ impl JointParty {
             } else {
                 None
             };
+            // What the model is told of the bundle's own moves of where the
+            // peer is: a switch, and a path followed at a path message.
+            let bundled = if let In::Switched { link, to, .. } = &i {
+                self.holder(*link)
+                    .map(|n| (n, Event::Switch { to: addr(to) }))
+            } else if let In::Moved {
+                link,
+                from,
+                to,
+                roam: false,
+            } = &i
+            {
+                let ev = Event::Follow {
+                    from: addr(from),
+                    to: addr(to),
+                };
+                self.holder(*link).map(|n| (n, ev))
+            } else {
+                None
+            };
             let out = self.core(i, TestInstant(net.now));
             if let Some(n) = restarted
                 && let Some(p) = self.s.peers.get_mut(&n.0)
@@ -669,7 +685,20 @@ impl JointParty {
                 });
             }
             self.effects(net, out, fx);
+            if let Some((peer, ev)) = bundled {
+                // The model holds the peer where the bundle sends to it.
+                self.note(net.now, peer, ev, Rec::default());
+            }
         }
+    }
+
+    /// The peer the core holds on `link`, if any.
+    fn holder(&self, link: LinkNo) -> Option<Node> {
+        self.s
+            .peers
+            .keys()
+            .map(|&k| Node(k))
+            .find(|n| self.s.table.held(&key(*n)).is_some_and(|h| h.link == link))
     }
 
     /// Carry out the sends of `peer`'s machines: an own msg1 or a reply to
@@ -915,6 +944,9 @@ impl JointParty {
         for o in out {
             match o {
                 Output::Opened { link } => fx.opened.push(link),
+                // The answer was asked for and given where the msg1 was
+                // taken, before these outputs are carried out.
+                Output::Ask { .. } => {}
                 Output::Answer { link, stored, msg2 } => fx.answers.push((link, stored, msg2)),
                 Output::Resend { link, bytes } => fx.resends.push((link, bytes)),
                 Output::Rekey { arrival, .. } => fx.arrival = Some(arrival),
@@ -974,6 +1006,8 @@ impl JointParty {
                         self.s.kit.pool.free(lease.release());
                     }
                 }
+                // The joint party keeps no operator pin of a path.
+                Output::Swapped { .. } => {}
                 Output::Retry { peer } => {
                     if let Some(n) = who(&peer)
                         && self.s.configured.iter().any(|c| c.peer == n)
@@ -1262,9 +1296,21 @@ impl JointParty {
         self.cut(net, peer, r, fx);
     }
 
-    /// A msg1's answer, built before the core decides on it.
-    fn hello(&mut self, tok: &Msg1, hs: Hs, bytes: &[u8], from: Addr) -> (Hello, Built) {
-        route::answer(&mut self.s.kit, tok, hs, bytes, from)
+    /// The answer to the msg1 `tok` of handshake `hs`, if the core's
+    /// outputs `out` ask for one: built as the node builds it once its late
+    /// check passes, which this party's never refuses, and handed to the
+    /// core, whose outputs join `out`.
+    fn answered(
+        &mut self,
+        out: &mut Vec<Output>,
+        tok: &Msg1,
+        hs: Hs,
+        at: TestInstant,
+    ) -> Option<Built> {
+        let link = route::asked(out)?;
+        let (hello, built) = route::answer(&mut self.s.kit, tok, hs, link);
+        out.extend(self.core(In::Hello(hello), at));
+        Some(built)
     }
 
     fn dial(&mut self, net: &mut Net, peer: Node, to: Addr, from: Option<Addr>) {
@@ -1301,6 +1347,8 @@ impl JointParty {
             to: pair(to),
             msg1: msg1.clone(),
             lease,
+            resends: None,
+            link: None,
         };
         let out = self.core(In::Dial(d), TestInstant(net.now));
         let mut fx = Fx::default();
@@ -1392,10 +1440,9 @@ impl JointParty {
         });
         let stale = self.addrs(id);
         let reachable = self.reachable(net, id);
-        let (hello, built) = self.hello(tok.get(), hs, &bytes, src);
-        let mut built = Some(built);
+        let read = route::read(tok.get(), &bytes, src);
         let mut noted = None;
-        let mut out = self.core(In::Msg1 { hello, reachable }, at);
+        let mut out = self.core(In::Msg1 { read, reachable }, at);
         if let Some(on) = out.iter().find_map(|o| {
             if let Output::Rekey { arrival, .. } = o {
                 Some(arrival.on_link)
@@ -1409,6 +1456,7 @@ impl JointParty {
             proven,
             ..Fx::default()
         };
+        let mut built;
         if out.iter().any(|o| matches!(o, Output::Rekey { .. })) {
             self.effects(net, out, &mut fx);
             let arrival = fx.arrival.expect("a rekey output carries its arrival");
@@ -1457,14 +1505,14 @@ impl JointParty {
             self.inputs(net, inputs, &mut fx);
             match (replace, redial) {
                 (Some(tok), _) => {
-                    let (hello, b2) = self.replacement(&tok, hs, &bytes, src);
-                    built = Some(b2);
-                    out = self.core(In::Replace(hello), at);
+                    let read = route::read(tok.get(), &bytes, src);
+                    out = self.core(In::Replace(read), at);
+                    built = self.answered(&mut out, tok.get(), hs, at);
                 }
                 (None, Some((tok, ephemeral))) => {
-                    let (hello, b2) = self.replacement(&tok, hs, &bytes, src);
-                    built = Some(b2);
-                    out = self.core(In::Redial(hello), at);
+                    let read = route::read(tok.get(), &bytes, src);
+                    out = self.core(In::Redial(read), at);
+                    built = self.answered(&mut out, tok.get(), hs, at);
                     noted = Some(ephemeral);
                 }
                 (None, None) => {
@@ -1472,6 +1520,8 @@ impl JointParty {
                     return;
                 }
             }
+        } else {
+            built = self.answered(&mut out, tok.get(), hs, at);
         }
         self.effects(net, out, &mut fx);
         // A redial the core answered is armed: the held link's machine
@@ -1554,7 +1604,8 @@ impl JointParty {
     /// from `from` is on its link against the node's rule: on a pair the
     /// bundle holds a path at, whether the path is Live or acknowledged; on
     /// a pair it holds none at, whether the peer is not capable and the
-    /// index names the link. A difference is recorded, as pinned where the
+    /// index names the link, the newest link it names at the pair, as the
+    /// node's index does. A difference is recorded, as pinned where the
     /// core's rule is known to be wider than the node's.
     fn attribute(&mut self, peer: Node, from: Addr, on: bool) {
         let s = &mut self.s;
@@ -1567,7 +1618,7 @@ impl JointParty {
         let proven = route::proven(&p.machines, &q) != Proven::Probing;
         let links = s.table.links();
         let at = pair(from);
-        let indexed = links.at(&at).any(|l| l == h.link);
+        let indexed = links.at(&at).max() == Some(h.link);
         let capable = bundle.capable();
         let node = if held { proven } else { !capable && indexed };
         if node == on {
@@ -1617,18 +1668,6 @@ impl JointParty {
             self.cut(net, peer, r, &mut fx);
             self.closes(now, &fx.closes);
         }
-    }
-
-    /// The fresh answer the core's gates take at a replacement the machine
-    /// asked for.
-    fn replacement(
-        &mut self,
-        tok: &Authentic<Msg1, Replayable>,
-        hs: Hs,
-        bytes: &[u8],
-        from: Addr,
-    ) -> (Hello, Built) {
-        self.hello(tok.get(), hs, bytes, from)
     }
 
     /// The link of `peer`'s pending redial, if the core holds one answering
@@ -1983,9 +2022,11 @@ impl JointParty {
             return;
         };
         p.heard = now;
+        let (paths, message) = p.machines.told(kind);
         let (roamed, unpathed) =
             p.machines
                 .account(&mut self.s.kit, now, src, local, bytes.len(), kind);
+        let mark = self.log.len();
         if !held {
             let out = self.core(
                 In::Heard {
@@ -2017,7 +2058,15 @@ impl JointParty {
             change: fx.change,
             ..Rec::default()
         };
-        self.note(now, id, Event::Frame { hs, from: src }, rec);
+        let ev = Event::Frame {
+            hs,
+            from: src,
+            paths,
+            message,
+        };
+        let later = shadow::bundled(&mut self.log, mark);
+        self.note(now, id, ev, rec);
+        self.log.extend(later);
         self.closes(now, &fx.closes);
         self.changed(net, id, fx.change);
     }
@@ -3092,8 +3141,8 @@ fn after_a_frame_from_another_transport_sends_stay_on_the_active_path() {
     arrive(&mut w, 0, off, pkt);
     assert_eq!(
         peer(&w, 0, 1).current,
-        off,
-        "precondition: the core's record of the peer followed the frame to the other transport"
+        active,
+        "precondition: the core's record of the peer stays at the active path, as the bundle does"
     );
     apply(&mut w, Act::Frame(0));
     assert!(w.parties[0].rekeyable(B), "precondition: past both floors");
@@ -3236,6 +3285,8 @@ fn hearing(w: &World, x: usize, y: usize) -> (Option<Ms>, Option<Ms>) {
                 | Event::RekeyMsg2 { .. }
                 | Event::RekeyCutover
                 | Event::Timeout { .. }
+                | Event::Switch { .. }
+                | Event::Follow { .. }
                 | Event::Close { .. }
                 | Event::Restart => {}
             }

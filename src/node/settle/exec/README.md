@@ -72,7 +72,8 @@ statements at its site.
   `../../handlers/path.rs`; `Node::roamed`, which tells the join of a
   one-path roam or a bind, which the bundle reports in no output, for the
   frame's accounting in `../../dataplane/encrypted.rs`; and `Node::feed`,
-  which applies a path's state, move, switch or release to the record. A
+  which applies a path's state, move, switch or release, or the peer
+  turning capable, to the record. A
   promotion, in `install.rs`, holds the record for its peer and records the
   new bundle's original path. Nothing reads the records to decide anything
   yet.

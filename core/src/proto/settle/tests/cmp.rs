@@ -93,7 +93,7 @@ fn msg2(hs: u32, epoch: Epoch, from: Addr) -> Event {
 }
 
 fn frame(hs: u32, from: Addr) -> Event {
-    Event::Frame { hs: Hs(hs), from }
+    Event::frame(Hs(hs), from)
 }
 
 fn wait(ms: Ms) -> Event {
@@ -611,7 +611,7 @@ fn run(mode: Mode, me: Node, peer: Node, history: &[Event]) -> Ran {
             let named = match did.refused {
                 Some(Refusal::Replay) => Some(Named::Replay),
                 Some(Refusal::Silent) => Some(Named::Silent),
-                Some(Refusal::Gate(_) | Refusal::Full) | None => None,
+                Some(Refusal::Gate(_) | Refusal::Full | Refusal::Cap) | None => None,
             };
             if let Some(n) = named {
                 ran.named.push((i, n));

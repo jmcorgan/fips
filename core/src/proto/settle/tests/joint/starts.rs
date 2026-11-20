@@ -21,8 +21,9 @@ use alloc::vec::Vec;
 use crate::proto::path::Source;
 use crate::proto::settle::links::Proven;
 
-use super::super::super::model::history::{Addr, Node};
+use super::super::super::model::history::{Addr, Event, Node};
 use super::super::explore::{Act, SMALL};
+use super::super::shadow::Entry;
 use super::super::starts::{
     A, B, BLE, Build, Do, Maker, Start, TCP, UDP, Want, at, dial_home, home, pair, run, second,
     settle, starts as named,
@@ -58,6 +59,7 @@ const OFF: &[(&str, usize)] = &[
     ("carrier loss of the active path", 300),
     ("the only path's transport removed", 200),
     ("a NAT rebound of the second path", 200),
+    ("a NAT rebound of the active path", 200),
     ("a path removed at the peer", 200),
     (
         "a dial's leg reaped beside a dial sharing its BLE connection",
@@ -94,6 +96,7 @@ const ON: &[(&str, usize)] = &[
     ("carrier loss of the active path", 1_100),
     ("the only path's transport removed", 800),
     ("a NAT rebound of the second path", 400),
+    ("a NAT rebound of the active path", 400),
     ("a path removed at the peer", 900),
     (
         "a dial's leg reaped beside a dial sharing its BLE connection",
@@ -131,6 +134,7 @@ const ON_OFF: &[(&str, usize)] = &[
     ("carrier loss of the active path", 300),
     ("the only path's transport removed", 300),
     ("a NAT rebound of the second path", 200),
+    ("a NAT rebound of the active path", 200),
     ("a path removed at the peer", 300),
     (
         "a dial's leg reaped beside a dial sharing its BLE connection",
@@ -168,6 +172,7 @@ const OFF_ON: &[(&str, usize)] = &[
     ("carrier loss of the active path", 300),
     ("the only path's transport removed", 200),
     ("a NAT rebound of the second path", 200),
+    ("a NAT rebound of the active path", 200),
     ("a path removed at the peer", 200),
     (
         "a dial's leg reaped beside a dial sharing its BLE connection",
@@ -314,10 +319,17 @@ fn added() -> Vec<Start> {
             released_script,
             3
         ),
+        s(
+            25,
+            "a NAT rebound of the active path",
+            rehomed,
+            rebound_script,
+            3
+        ),
     ]
 }
 
-/// The cold start's number: after every named start's.
+/// The cold start's number, which no named start takes.
 pub const COLD: u8 = 24;
 
 /// The depth a cold start is explored to, dials included.
@@ -651,8 +663,27 @@ fn rebound(mk: Maker) -> World {
     w
 }
 
-/// The address a NAT rebinds node 1's second address to.
+/// The address a NAT rebinds node 1's second address to, or its home.
 pub const NAT: u16 = 22;
+
+/// Start 25: start 22's link, but the NAT in front of node 1 rebinds node
+/// 1's home, the address of node 0's active path. Node 0's link holds two
+/// paths, so no frame roams one; its bundle follows the next path message
+/// node 1 sends on that path to the new address, and the peer with it.
+fn rehomed(mk: Maker) -> World {
+    let mut w = linked(mk, A);
+    exchange(&mut w, 0, second(1, UDP), Some(second(0, UDP)), &[]);
+    w.paths = alloc::vec![(
+        1,
+        PathEv::Rebound {
+            from: home(1, UDP),
+            to: at(UDP, NAT),
+        }
+    )];
+    w.used = alloc::vec![false; w.paths.len()];
+    super::super::explore::apply(&mut w, Act::Path(0));
+    w
+}
 
 fn rebound_script(w: &mut World) -> Vec<Act> {
     let a = onward(w);
@@ -850,6 +881,41 @@ fn a_nat_rebound_of_the_second_path_moves_it_in_the_link_record() {
     assert!(
         paths.contains(&at(UDP, NAT)) && !paths.contains(&second(1, UDP)),
         "node 0's bundle moved its second path to the address the NAT rebound node 1's to: {paths:?}"
+    );
+}
+
+#[test]
+fn a_nat_rebound_of_the_active_path_moves_the_peer_with_it() {
+    let st = on_start(25);
+    let w = replay(&st, &[]);
+    assert!(doubled(&w), "precondition: both ends hold two Live paths");
+    assert_eq!(
+        shell(&w, 0).active,
+        Some(home(1, UDP)),
+        "precondition: node 0's active path is at node 1's home"
+    );
+    let (after, found) = scripted(&st);
+    assert!(
+        found.is_empty(),
+        "both ends stay mirrored, and each core agrees with the model, through the rebound and the heal: {found:?}"
+    );
+    assert_eq!(
+        shell(&after, 0).active,
+        Some(at(UDP, NAT)),
+        "node 0's bundle followed its active path to the address the NAT rebound node 1's home to"
+    );
+    let told = after.parties[0].view().log.into_iter().any(|e| {
+        matches!(
+            e,
+            Entry::Ev {
+                ev: Event::Follow { from, to },
+                ..
+            } if from == home(1, UDP) && to == at(UDP, NAT)
+        )
+    });
+    assert!(
+        told,
+        "node 0 told the model that its bundle moved the path the peer is at"
     );
 }
 

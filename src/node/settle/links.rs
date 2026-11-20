@@ -135,10 +135,20 @@ impl LinkTable {
         self.rebuild();
     }
 
-    /// The link switched to a path at `to`, which its record holds Live.
+    /// The link switched to a path at `to`. A record that lacks the path
+    /// gains it acknowledged, the least a switch's target holds; a path it
+    /// holds keeps its state, which the feed of the switch that follows in
+    /// the same step sets to the bundle's.
     pub(in crate::node) fn claim(&mut self, id: LinkId, to: AddrKey) {
         if let Some(no) = self.no(&id) {
-            self.core.path(no, pair(&to), Proven::Live);
+            let at = pair(&to);
+            let held = self
+                .core
+                .get(no)
+                .is_some_and(|r| r.paths.iter().any(|(p, _)| *p == at));
+            if !held {
+                self.core.path(no, at, Proven::Acked);
+            }
         }
         #[cfg(test)]
         self.taken.remove(&to);

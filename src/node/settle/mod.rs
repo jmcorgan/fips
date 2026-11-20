@@ -58,6 +58,7 @@ pub(in crate::node) mod audit;
 pub(in crate::node) mod exec;
 mod links;
 mod maps;
+mod params;
 pub(crate) mod table;
 #[cfg(test)]
 mod tests;

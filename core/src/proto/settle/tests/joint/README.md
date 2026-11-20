@@ -130,10 +130,15 @@ builds, and changes no line of the core, the machine or the bundle.
   kept until the peer is removed, across a move, as the node keeps it);
   offers the bundles their candidates and decides a dial of a held peer
   as `feeds.rs` says; logs each msg1 with whether it came from a pair
-  the bundle holds proven, for the shadow's comparison;
+  the bundle holds proven, and each frame with how many paths the bundle
+  held and whether it is a path message at multipath on, for the shadow's
+  comparison;
   polls the machines at their wakes, fires an
   own rekey through the machine's time trigger, and logs every history
-  event with the class the machine's outputs give it, for the shadow.
+  event with the class the machine's outputs give it, for the shadow,
+  a switch of a held peer's active path and a path its bundle followed at
+  a path message among them, so the model holds the peer where the bundle
+  sends to it.
   A frame that names an index no machine binds is dropped as the node
   drops it, and a frame refused as a replay is not a broken promise:
   both are frames sealed under an earlier answer of the same handshake,
@@ -188,7 +193,11 @@ builds, and changes no line of the core, the machine or the bundle.
   at its dial's pair (switch `MoveKeepsOldPair`), a crossing settling on
   one session (`MoveNoReset`, `IndexStale`), a rekey cutting over at both
   ends and draining (by hand), sends staying on the active path after a
-  frame from another transport (`SendsByHeld`), a restart revealed at a
+  frame from another transport (by hand, with `HeardMovesPeer`, since the
+  core's record of where the peer is now follows the bundle and sending
+  by it changes nothing alone; the send rule, `to` reading the bundle's
+  active path, has no switch of its own, a coverage gap), a restart
+  revealed at a
   rekey reaching the core (`RestartDropped`), a fresh msg1 on a young
   link reaching the gates (`ReplaceDropped`), a one-path roam reaching
   the link record (`PathsUnmirrored`), a peer silent for the link-dead
@@ -210,8 +219,9 @@ builds, and changes no line of the core, the machine or the bundle.
   and no orphan machine (machines for every peer the core holds and for no
   other). Its tests show each on a schedule that reaches it: a restart
   found at a rekey and a restart replacement (switches `RestartDropped`,
-  `ReplaceKeepsMachine`), a move (`MoveBuildsStale`), a rekey msg1 whose
-  answer's lease the core hands back (`LeaseForgotten`) and a removal
+  `ReplaceKeepsMachine`), a move (`MoveBuildsStale`), a crossing whose
+  larger node's dial lease the core hands back (`LeaseForgotten`) and a
+  removal
   (`CloseSkipped`), and that one view fires on each planted disagreement.
   It also checks the paths mirrored (each held link's paths in the core
   are its bundle's, with the state the shell reports, and the index is
@@ -220,17 +230,20 @@ builds, and changes no line of the core, the machine or the bundle.
   a bundle reached the core in its step, by the shell's per-step
   `Ledger`, and nothing else fed those inputs) and attribution (each held
   peer's msg1 is on the link to the core exactly where the node's rule
-  puts it, judged by the shell when the core decides). Three clauses are
-  pinned, not asserted, since the core parts there from the bundle or the
-  node in code a later step owns: the core's record of where the peer is
-  against the bundle's active path, the active path a switch records Live
-  where the bundle holds it acknowledged, and the shapes of attribution
-  where the core's rule is wider (a capable peer's setup pair with no
-  path, the pair the core's record of the peer followed a frame to with
-  no index entry and no proven path, a setup pair whose path is
-  probing). `pinned_in` lists them,
+  puts it, the index naming the newest link at a pair as the node's does,
+  judged by the shell when the core decides). Two clauses are
+  pinned, not asserted, since the core parted there from the bundle or
+  the node: the core's record of where the peer is against the bundle's
+  active path, which the core now moves only where the bundle moves the
+  peer, at a roam of its one path, a follow of the path the peer is at, or
+  a switch; and the shapes of
+  attribution where the core's rule was wider (a capable peer's setup
+  pair with no path, a pair no index entry and no proven path holds, a
+  setup pair whose path is probing), which the core's rule no longer
+  shows. The mirror of the paths is asserted whole, a switched-to path in
+  the state its bundle holds it. `pinned_in` lists the pinned clauses,
   each sweep counts the explored states showing each, and `pins.rs` holds
-  a failing test of each. Its tests show the mirror at a roam and at a
+  a test of each shape. Its tests show the mirror at a roam and at a
   second path (`PathsUnmirrored`, `StateIgnored`), delivery of a
   replacement request, an orphaned bundle and a restart found at a rekey
   (`ReplaceDropped`, `OrphanKept`, `RestartDropped`), and attribution of
@@ -270,9 +283,12 @@ builds, and changes no line of the core, the machine or the bundle.
   start 21, the only path's transport removed, the link orphaned and the
   peer redialled on the other; start 22, on one transport with each
   node's second address the source of a second path, a NAT rebinding that
-  path's address at the peer; and start 23, the peer's transport of the
+  path's address at the peer; start 23, the peer's transport of the
   second path removed, so its bundle releases the path and tells this
-  node. A two-path start runs the capability exchange in its build
+  node; and start 25, start 22's link with the NAT rebinding the peer's
+  home instead, the address of the active path, which the bundle follows
+  at the peer's next path message on it, moving where the peer is with no
+  roam. A two-path start runs the capability exchange in its build
   (`walk`, `exchange`), which turns both ends capable within a few wakes
   at On with On and leaves the link its one path at any other pairing, so
   each start runs at all four. Its tests show the crossing with the probes
@@ -280,7 +296,9 @@ builds, and changes no line of the core, the machine or the bundle.
   (`RenewSkipped`), the carrier loss and switch mirrored
   (`StateIgnored`), the orphaned link removed and the redial settling
   (`OrphanKept`, `OrphanedIgnored`), the rebound path moved in the link
-  record (`PathMoveIgnored`), the released path leaving it
+  record (`PathMoveIgnored`), the rebound active path moving the peer
+  with no reset, and the model told of it (`FollowResets`), the released
+  path leaving it
   (`ReleaseKeepsPair`), and the reaped dial's retire keeping the
   connection the dial still out uses, read at that step
   (`CloseByPeerAddress`).
@@ -338,9 +356,11 @@ builds, and changes no line of the core, the machine or the bundle.
   never reach it. The exemption test shows it spares that path's two
   breaches and nothing else on it (by hand: sparing nothing reds the
   explorer on start 2).
-- `pins.rs`: known-defect pins of what the joint world found, each
+- `pins.rs`: pins of what the joint world found. A known-defect pin is
   ignored, listed in `testing/ignored-tests.txt` and run by the
-  known-defect lane, which reds when one passes. Today eight. A crossing
+  known-defect lane, which reds when one passes; the fix that turns one
+  green un-ignores it in the same change, and it then runs in every
+  build. Ignored today, two. A crossing
   in which the smaller node's own dial is answered over the larger node's
   dial connection, from the larger node's second address (the named
   start with two paths as `../starts.rs` writes it, its nodes joint
@@ -353,23 +373,31 @@ builds, and changes no line of the core, the machine or the bundle.
   acknowledged with no connection until its Dead grace ends, and the link
   counts a pair it cannot reach (start 2 at On with On). And one for each
   pinned clause of the joint world's
-  oracles, in the unwired core: a frame from another transport moves the
-  core's record of where the peer is off the active path (start 2 at
-  Off); a switch leaves that record at the old active path (two paths at
-  On, carrier lost on the active one); a capable peer's msg1 from the
-  setup pair, whose path its transport's removal took, is on the link to
-  the core; a switch to an acknowledged Suspect path records it Live (the
-  carrier lost on one path and the other's transport removed); and a msg1
-  from the pair a frame from another transport came from is on the link
-  to the core (start 2 at Off), as is one from the pair a frame moved that
-  record to while the bundle's path there is still probing (start 2 at On
-  with On, found by its sweep).
+  oracles, in the unwired core, each now met by the core and run in every
+  build: a frame from another transport leaves the core's record of where
+  the peer is at the active path (start 2 at Off; `HeardMovesPeer`); a
+  switch moves that record to the new active path (two paths at On,
+  carrier lost on the active one; `SwitchLeavesPeer`); a switch to an
+  acknowledged Suspect path leaves it acknowledged (the carrier lost on
+  one path and the other's transport removed; `SwitchWritesLive`); a
+  capable peer's msg1 from the setup pair,
+  whose path its transport's removal took, is off the link to the core,
+  as it is to the node, since the transport's removal released the path
+  there and took the pair out of the index, a shape that now needs
+  `SwitchLeavesPeer` and `AttributeByCurrent` both, so it is
+  characterisation; and a msg1 from the pair a frame
+  from another transport came from is off the link to the core (start 2
+  at Off), as is one from a pair whose path the bundle still holds
+  probing (start 2 at On with On, found by its sweep), shapes that now
+  need `HeardMovesPeer` and `AttributeByCurrent` both, so they are
+  characterisation too.
 - `runs.rs`: the per-start runs the switches' rows name, each the
   cheapest test that shows a guard can fail in a world of joint nodes:
   every start's script with its heal at On with On (its twin at Off with
-  Off is `party.rs`'s), which reds thirteen of the core's switches at
-  both settings; the reach of the wall step start alone at each of the
-  four pairings, the cheapest run that shows the reach check can fail
+  Off is `party.rs`'s), which reds fourteen of the core's switches at
+  both settings and `HeardMovesPeer` at On with On alone; the reach of
+  the wall step start alone at each of the four pairings, the cheapest
+  run that shows the reach check can fail
   (`ReachOneMore`); the sweeps at Off with Off of the wall step start, the
   drain start and the stored answer's start alone, each the start with
   the fewest states whose sweep reds a switch the scripts do not
@@ -410,8 +438,9 @@ builds, and changes no line of the core, the machine or the bundle.
   plaintext); it keeps the node's index map as `Bind` and `Unbind` say,
   and holds no party state. An orphaned bundle becomes `Orphaned` (switch
   `OrphanKept` drops it). Beside it are what the driver (`../drive.rs`)
-  shares with a joint node: a msg1's answer built before the core decides
-  (`answer`), a msg1's class in the model's names from what its call routed
+  shares with a joint node: what the core is told of a msg1 (`read`), its
+  answer, built only once the core asks for it (`asked`, `answer`), a
+  msg1's class in the model's names from what its call routed
   (`class`, which the model of `master` reads too), and the leases of
   outputs nobody carries out (`discard`).
 
@@ -438,8 +467,8 @@ builds, and changes no line of the core, the machine or the bundle.
   a machine's or the core's outputs names every arm), and the core's
   record of where a held peer is, read through the name `h` the shell
   binds the core's `Held` to, is read only in the functions the scan
-  lists (the view, the joint oracles' facts, attribution's judge and the
-  site of switch `SendsByHeld`). A new reader goes on that list with its
+  lists (the view, the joint oracles' facts and attribution's judge). A
+  new reader goes on that list with its
   reason, or reads the bundle's active path instead.
 - The core's record of a link's paths is written only by the bundle's
   outputs and the roam, through `route`.

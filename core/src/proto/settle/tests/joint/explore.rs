@@ -563,6 +563,7 @@ pub const DOUBLED: &[&str] = &[
     "the only path's transport removed",
     "a NAT rebound of the second path",
     "a path removed at the peer",
+    "a NAT rebound of the active path",
 ];
 
 /// The start named `name` at On with On, alone.

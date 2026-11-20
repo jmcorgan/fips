@@ -26,7 +26,10 @@
 //! A row names the cheapest tests its switch was shown to red. The core
 //! explorer reds most of the core's switches, at 20 to 50 s a run, so it is
 //! named only where it is the closest observation of the defect a switch
-//! stands for; the commit records list every test each switch reds.
+//! stands for; the commit records list every test each switch reds. A row
+//! whose switch the joint world reaches names a joint test or scripted
+//! start it reds there, and a row whose switch no joint test, scripted
+//! start or sweep reds says why in a comment above it.
 //!
 //! A second table, [`REKEY`], names switches of the rekey machine
 //! (`../../rekey/faults.rs`) by their variants' names, with the settlement
@@ -59,6 +62,7 @@ const SIM: &str = "proto::settle::tests::sim::";
 const WORLD: &str = "proto::settle::tests::world::checks::";
 const JOINT_MACHINES: &str = "proto::settle::tests::joint::machines::";
 const JOINT_PARTY: &str = "proto::settle::tests::joint::party::";
+const JOINT_PINS: &str = "proto::settle::tests::joint::pins::";
 const JOINT_EXPLORE: &str = "proto::settle::tests::joint::explore::";
 const JOINT_FEEDS: &str = "proto::settle::tests::joint::feeds::";
 const JOINT_ORACLE: &str = "proto::settle::tests::joint::oracle::";
@@ -285,6 +289,19 @@ pub const ROWS: &[Row] = &[
             "a_released_setup_address_leaves_the_index_and_a_roamed_one_stays",
         )],
     ),
+    // Not in the joint world alone. Its one shape there, a capable peer's
+    // msg1 from a setup pair whose path its transport's removal took, never
+    // asks this guard: the removal released the path and took the pair out of
+    // the index. The joint pin of that shape needs `SwitchLeavesPeer` with
+    // `AttributeByCurrent` (`CHARACTERISATION`), and no joint test, scripted
+    // start or sweep reds this switch alone.
+    (
+        Fault::CapableIgnored,
+        &[(
+            TABLE,
+            "a_capable_peers_bare_setup_pair_is_off_the_link_in_the_table",
+        )],
+    ),
     (
         Fault::UnheardInclusive,
         &[
@@ -383,6 +400,17 @@ pub const ROWS: &[Row] = &[
             "a_frame_forgets_the_replay_memory_and_the_silent_sessions",
         )],
     ),
+    // Not in the joint world: what the switch keeps is an identity whose
+    // stamp, replays and silence have all lapsed, and each gate reads those
+    // against its own interval or horizon, so no verdict changes. Only the
+    // memory's size shows the defect, which the gates test reads.
+    (
+        Fault::MemoryNeverDropped,
+        &[(
+            GATES,
+            "gate_memory_holds_no_entry_once_an_identitys_state_has_lapsed",
+        )],
+    ),
     (
         Fault::SilentEarly,
         &[
@@ -463,6 +491,36 @@ pub const ROWS: &[Row] = &[
             SWEPT_WALL,
         ],
     ),
+    // Not in the joint world, nor the two switches below: a world's send is
+    // never refused, so the joint party reports every msg1 resend as sent
+    // (`In::Sent` at its poll) and no dial resend fails to send.
+    (
+        Fault::UnsentStaysDue,
+        &[
+            (
+                TABLE,
+                "an_unsent_dial_resend_is_tried_again_at_the_next_tick_and_not_before",
+            ),
+            (
+                TABLE,
+                "a_failed_dial_resend_is_due_at_the_next_poll_whatever_its_instant",
+            ),
+        ],
+    ),
+    (
+        Fault::UnsentDueAtWake,
+        &[(
+            TABLE,
+            "a_failed_dial_resend_is_due_at_the_next_poll_whatever_its_instant",
+        )],
+    ),
+    (
+        Fault::UnsentPastCap,
+        &[(
+            TABLE,
+            "a_send_failure_after_a_dials_last_resend_asks_for_no_more",
+        )],
+    ),
     (
         Fault::MoveKeepsOldPair,
         &[
@@ -470,10 +528,6 @@ pub const ROWS: &[Row] = &[
             (
                 JOINT_PARTY,
                 "a_crossing_on_a_connection_oriented_transport_leaves_the_smaller_node_at_its_dials_pair_on_real_machines",
-            ),
-            (
-                REGRESS,
-                "a_crossing_over_two_transports_settles_on_one_session",
             ),
             (
                 SIM,
@@ -615,6 +669,13 @@ pub const ROWS: &[Row] = &[
         ],
     ),
     (
+        Fault::RedialMemoryLapses,
+        &[(
+            GATES,
+            "the_redial_memory_outlives_a_frame_and_the_lapse_of_the_rest_of_the_identitys_memory",
+        )],
+    ),
+    (
         Fault::RedialCompared,
         &[(
             SHADOW,
@@ -641,11 +702,34 @@ pub const ROWS: &[Row] = &[
     (
         Fault::AttributeBySetupOnly,
         &[
+            (LINKS, "each_attribution_question_answers_as_the_node_does"),
             (TABLE, "a_msg1_from_a_proven_path_is_on_the_link"),
             AGREES,
             (
                 JOINT_ORACLE,
                 "attributed_reads_a_roamed_link_as_the_node_does",
+            ),
+        ],
+    ),
+    // Not in the joint world alone: the core's record of the peer follows the
+    // bundle there, and each of the three joint pins of a msg1 counted by
+    // that record needs a second break that moves it off the active path
+    // (`HeardMovesPeer` or `SwitchLeavesPeer`; `CHARACTERISATION`). No joint
+    // test, scripted start or sweep reds this switch alone.
+    (
+        Fault::AttributeByCurrent,
+        &[
+            (
+                TABLE,
+                "a_msg1_from_the_pair_the_core_holds_the_peer_at_with_no_path_there_is_off_the_link",
+            ),
+            (
+                TABLE,
+                "a_msg1_from_a_pair_whose_path_is_probing_is_off_the_link",
+            ),
+            (
+                TABLE,
+                "a_msg1_from_a_setup_pair_the_index_names_another_link_at_is_off_the_link",
             ),
         ],
     ),
@@ -661,6 +745,10 @@ pub const ROWS: &[Row] = &[
                 JOINT_STARTS,
                 "a_nat_rebound_of_the_second_path_moves_it_in_the_link_record",
             ),
+            (
+                TABLE,
+                "a_one_path_roam_moves_the_cores_record_and_resets_once",
+            ),
         ],
     ),
     (
@@ -668,6 +756,59 @@ pub const ROWS: &[Row] = &[
         &[
             (TABLE, "a_path_switched_adds_the_new_pair_to_the_index"),
             MIRROR,
+        ],
+    ),
+    (
+        Fault::SwitchLeavesPeer,
+        &[
+            (
+                TABLE,
+                "a_switch_moves_the_held_record_to_the_new_active_path_in_the_table",
+            ),
+            (
+                JOINT_PINS,
+                "a_switch_moves_the_cores_record_of_the_peer_to_the_new_active_path",
+            ),
+        ],
+    ),
+    (
+        Fault::HeardMovesPeer,
+        &[
+            (
+                TABLE,
+                "a_frame_from_another_transport_moves_nothing_in_the_core",
+            ),
+            (
+                JOINT_PINS,
+                "a_frame_from_another_transport_leaves_the_cores_record_of_the_peer_at_the_active_path",
+            ),
+            SCRIPTED_ON,
+        ],
+    ),
+    (
+        Fault::FollowResets,
+        &[
+            (
+                TABLE,
+                "a_path_the_bundle_followed_moves_the_cores_record_and_resets_nothing",
+            ),
+            (
+                JOINT_STARTS,
+                "a_nat_rebound_of_the_active_path_moves_the_peer_with_it",
+            ),
+        ],
+    ),
+    (
+        Fault::SwitchWritesLive,
+        &[
+            (
+                TABLE,
+                "a_switch_to_an_acknowledged_path_leaves_it_acknowledged",
+            ),
+            (
+                JOINT_PINS,
+                "a_switch_to_a_path_that_is_not_live_leaves_it_acknowledged_in_the_core",
+            ),
         ],
     ),
     (
@@ -735,12 +876,76 @@ pub const ROWS: &[Row] = &[
             JOINT_ORPHANED,
         ],
     ),
+    // Not in the joint world, nor the next switch: the joint party redials a
+    // configured peer at every removal (`Output::Remove` in `joint/party.rs`),
+    // so a removal with no `Retry` changes nothing the world does.
+    (
+        Fault::OrphanedNoRetry,
+        &[(TABLE, "an_orphaned_bundles_peer_is_retried")],
+    ),
+    (
+        Fault::RestartNoRetry,
+        &[(
+            TABLE,
+            "a_restarted_or_replaced_peer_is_retried_in_each_of_the_three_ways",
+        )],
+    ),
+    // Not in the joint world: no joint node is told of an operator
+    // disconnect, and at the one orphaning, the start whose only path's
+    // transport is removed, the one more pair this switch closes changes
+    // nothing an oracle reads; no joint test, scripted start or sweep reds it.
+    (
+        Fault::RemovalClosesEveryPair,
+        &[
+            (
+                TABLE,
+                "an_orphaned_peer_closes_its_bundles_paths_and_not_a_setup_pair_released_to_keep",
+            ),
+            (
+                TABLE,
+                "an_operator_disconnect_closes_the_peers_pair_though_a_dial_uses_it",
+            ),
+        ],
+    ),
     (
         Fault::CapLifted,
         &[(
             TABLE,
             "a_msg1_past_the_admission_cap_is_rejected_and_holds_no_leg",
         )],
+    ),
+    // Not in the joint world: every joint node's table takes
+    // `Params::default`, whose max-peers cap is 128, and a joint world has at
+    // most three nodes.
+    (
+        Fault::CapNotCounted,
+        &[
+            (
+                TABLE,
+                "a_msg1_from_a_new_identity_at_the_peer_cap_is_refused_before_any_answer",
+            ),
+            (
+                TABLE,
+                "an_answer_sent_to_a_new_identity_once_the_peer_cap_filled_is_not_installed",
+            ),
+            (
+                TABLE,
+                "a_dial_completing_to_a_new_identity_at_the_peer_cap_is_not_installed",
+            ),
+        ],
+    ),
+    (
+        Fault::AnswerBeforeAdmit,
+        &[
+            (TABLE, "a_refused_msg1_asks_for_no_answer"),
+            (TABLE, "a_rekey_msg1_asks_for_no_answer"),
+            (
+                TABLE,
+                "a_restarts_teardown_comes_before_its_answer_is_asked_for",
+            ),
+            SCRIPTED_OFF,
+            SCRIPTED_ON,
+        ],
     ),
     (
         Fault::ReachOneMore,
@@ -991,7 +1196,6 @@ pub const ROWS: &[Row] = &[
                 "a_crossing_while_capability_probes_are_out_renews_the_bundle_and_keeps_both_ends_mirrored",
             ),
             PARITY_MODEL,
-            PARITY_JOINT,
         ],
     ),
     (
@@ -1035,13 +1239,6 @@ pub const ROWS: &[Row] = &[
             JOINT_DELIVERED,
         ],
     ),
-    (
-        Fault::SendsByHeld,
-        &[(
-            JOINT_PARTY,
-            "after_a_frame_from_another_transport_sends_stay_on_the_active_path",
-        )],
-    ),
     (Fault::KeyFromView, &[JOINT_KEYED]),
     (Fault::KeyOmitsBundle, &[JOINT_KEYED]),
     (
@@ -1080,6 +1277,49 @@ pub const ROWS: &[Row] = &[
         &[(JOINT_ORACLE, "no_orphan_fires_on_a_machine_past_its_peer")],
     ),
     (Fault::OrphanKept, &[JOINT_DELIVERED, JOINT_ORPHANED]),
+    // Not in the joint world: every joint node's table takes
+    // `Params::default`, whose multiplier is 2, so a wait doubled from the
+    // first interval is the configured one. Only another multiplier shows the
+    // defect, which the legs test sets.
+    (
+        Fault::BackoffDoubles,
+        &[(
+            LEGS,
+            "a_configured_multiplier_spaces_the_resends_as_the_node_truncates_them",
+        )],
+    ),
+    // Not in the joint world: no joint dial carries a resend cap of its own
+    // (the joint party's `Dialed` has `resends: None`), as an mDNS-directed
+    // dial does.
+    (
+        Fault::OriginIgnored,
+        &[(LEGS, "an_mdns_directed_dial_stops_at_its_resend_cap")],
+    ),
+    // Not in the joint world: the joint party opens a dial's connection and
+    // hands the core its dial in one step, and tells it of no `Connecting`, so
+    // no dial waits on a connection still to be opened.
+    (
+        Fault::ConnectingUnlinked,
+        &[
+            (
+                TABLE,
+                "a_connecting_dials_pair_is_in_use_before_its_msg1_and_a_failed_connect_retires_it_with_no_lease",
+            ),
+            (
+                TABLE,
+                "a_dial_after_its_connect_starts_its_leg_on_the_link_the_connect_opened",
+            ),
+        ],
+    ),
+    // Not in the joint world: the joint party keeps no operator pin of a
+    // path (it carries out `Output::Swapped` as nothing).
+    (
+        Fault::UnpinOwnOnly,
+        &[(
+            TABLE,
+            "a_move_onto_a_later_dial_to_a_peer_held_on_the_link_it_dialled_ends_the_pin",
+        )],
+    ),
 ];
 
 /// The rekey machine's switches that a joint node's tests red, each by its
@@ -1138,6 +1378,19 @@ const COLD: &str = "the cold start's reach at its stated depth, through the reac
 const HAND: &str =
     "its break is a scratch edit with no switch of its own, run by hand and logged with the commit";
 
+/// Why the capable peer's attribution pin, whose shape needs the core to
+/// keep the peer at a path its bundle switched away from, is
+/// characterisation.
+const SWITCH_BREAKS: &str = "its shape needs two breaks at once: the core keeping the peer at the path switched away from (SwitchLeavesPeer) and attribution reading where the core holds the peer (AttributeByCurrent); either alone leaves the msg1 off the link, so no one switch reds it, and both together red it, run by hand and logged with the commit";
+
+/// Why an attribution pin whose shape needs the core to follow a frame
+/// is characterisation.
+const TWO_BREAKS: &str = "its shape needs two breaks at once: the core following a frame to its source (HeardMovesPeer) and attribution reading where the core holds the peer (AttributeByCurrent); either alone leaves the msg1 off the link, so no one switch reds it, and both together red it, run by hand and logged with the commit";
+
+/// Why a test whose break showed only while the core followed every
+/// frame is characterisation.
+const FRAME_BREAKS: &str = "its break shows only together with HeardMovesPeer, the core following a frame to its source: with the core's record of where the peer is following the bundle, the other break alone changes nothing the test sees, so no one switch reds it, and the two together red it, run by hand and logged with the commit";
+
 /// Why a test of the join function, whose break no switch makes, is
 /// characterisation; its doc comment names its break.
 const JOIN_HAND: &str = "its break is a scratch edit of the join function where no switch sits; run by hand and logged with the commit";
@@ -1146,8 +1399,45 @@ const JOIN_HAND: &str = "its break is a scratch edit of the join function where 
 /// one on `IgnoreOwnDial`'s row is characterisation.
 const LEGACY_RUN: &str = "the same oracles and list as the run on `IgnoreOwnDial`'s row, a whole set of sweeps past a row's cost; the list's own check is run by hand and logged";
 
+/// Why a guard of the unpin a move reports is characterisation.
+const UNPIN_HAND: &str = "a guard of the pin a move ends where `UnpinOwnOnly` changes nothing, the link left being this node's dial or the dial made before the peer was held; its breaks, `unpin` true at every move and `unpin` without the link left being this node's dial, are scratch edits run by hand and logged with the commit";
+
 /// The tests that characterise behaviour no switch breaks, each with why.
 pub const CHARACTERISATION: &[(&str, &str)] = &[
+    (
+        "a_msg1_from_a_capable_peers_setup_pair_with_no_path_is_off_the_link",
+        SWITCH_BREAKS,
+    ),
+    (
+        "a_msg1_from_the_pair_a_frame_from_another_transport_came_from_is_off_the_link",
+        TWO_BREAKS,
+    ),
+    (
+        "a_msg1_from_the_pair_a_frame_moved_the_cores_record_to_whose_path_is_probing_is_off_the_link",
+        TWO_BREAKS,
+    ),
+    (
+        "a_crossing_over_two_transports_settles_on_one_session",
+        FRAME_BREAKS,
+    ),
+    (
+        "after_a_frame_from_another_transport_sends_stay_on_the_active_path",
+        FRAME_BREAKS,
+    ),
+    (
+        "a_move_onto_a_dial_made_before_the_peer_was_held_keeps_the_pin",
+        UNPIN_HAND,
+    ),
+    (
+        "a_second_dial_made_before_the_peer_was_held_and_answered_after_a_crossing_ends_the_pin",
+        UNPIN_HAND,
+    ),
+    (
+        "an_abandoned_answer_frees_its_link_and_takes_no_lease",
+        HAND,
+    ),
+    ("a_held_identity_at_the_peer_cap_restarts_as_before", HAND),
+    ("a_zero_peer_cap_admits_any_number", HAND),
     (
         "each_rekey_output_routes_to_the_core_or_the_shell",
         JOIN_HAND,
@@ -1371,30 +1661,6 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     (
         "each_breach_the_pins_hold_is_exempted_by_its_own_cause_and_a_settled_pair_by_none",
         HAND,
-    ),
-    (
-        "a_frame_from_another_transport_leaves_the_cores_record_of_the_peer_at_the_active_path",
-        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
-    ),
-    (
-        "a_switch_moves_the_cores_record_of_the_peer_to_the_new_active_path",
-        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
-    ),
-    (
-        "a_msg1_from_a_capable_peers_setup_pair_with_no_path_is_off_the_link",
-        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
-    ),
-    (
-        "a_switch_to_a_path_that_is_not_live_leaves_it_acknowledged_in_the_core",
-        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
-    ),
-    (
-        "a_msg1_from_the_pair_a_frame_from_another_transport_came_from_is_off_the_link",
-        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
-    ),
-    (
-        "a_msg1_from_the_pair_a_frame_moved_the_cores_record_to_whose_path_is_probing_is_off_the_link",
-        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
     ),
     (
         "the_dialer_settle_candidate_explored_shows_exactly_the_breaches_recorded_for_it",

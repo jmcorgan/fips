@@ -40,6 +40,9 @@ pub(crate) enum Fault {
     KeepIgnored,
     /// A setup address whose path the bundle released stays in the index.
     ReleasedSetupIndexed,
+    /// A msg1 from a capable peer's setup pair, at which the bundle holds
+    /// no path, counts as on the link.
+    CapableIgnored,
     /// The unheard floor refuses at exactly its age as well.
     UnheardInclusive,
     /// The heard floor counts from the peering's installation only.
@@ -61,6 +64,9 @@ pub(crate) enum Fault {
     ReplaySeenIgnored,
     /// A frame forgets neither the replay memory nor the silent sessions.
     HeardKeepsMemory,
+    /// The gates keep a memory entry for every identity they were asked
+    /// about, and never drop one whose state has lapsed.
+    MemoryNeverDropped,
     /// The silent-session refusal starts one session early.
     SilentEarly,
     /// The silent-session refusal does not double.
@@ -79,6 +85,15 @@ pub(crate) enum Fault {
     DeadlineWraps,
     /// Closing the legs keeps one leg's lease.
     LeaseKept,
+    /// A dial resend whose send failed stays due at the instant it was
+    /// missed, so the next wake stays in the past.
+    UnsentStaysDue,
+    /// A dial resend whose send failed is due only at the wake it reports,
+    /// one tick on, not at the next poll.
+    UnsentDueAtWake,
+    /// A dial whose last resend was sent takes a failed send reported
+    /// after it as one more resend to try again.
+    UnsentPastCap,
     /// A move keeps the peer's address where it was.
     MoveKeepsOldPair,
     /// A move retires nothing, so the link it leaves stays.
@@ -110,12 +125,32 @@ pub(crate) enum Fault {
     /// A redial's mark outlives its leg: reaped, or installed at its send
     /// once its peer is gone.
     RedialLegKept,
+    /// The redial memory keeps no identity of its own: a frame of the held
+    /// peering, or the lapse of the identity's other memory, drops the
+    /// ephemerals that armed a redial of it.
+    RedialMemoryLapses,
     /// A msg1 counts as on the link only from the link's setup address.
     AttributeBySetupOnly,
+    /// A msg1 from the pair the core's record of the peer is at counts as
+    /// on the link, and one from the setup pair whatever its path's state.
+    AttributeByCurrent,
     /// A path's move leaves its pair where it was.
     PathMoveIgnored,
     /// A switch to a new path adds nothing.
     SwitchIgnored,
+    /// A switch leaves the core's record of where the peer is at the path
+    /// switched away from.
+    SwitchLeavesPeer,
+    /// A frame moves the core's record of where the peer is to its
+    /// source, wherever it came from, and a path's move leaves that record
+    /// where it was.
+    HeardMovesPeer,
+    /// A path the bundle moved at a path message, where the peer is held,
+    /// resets the peer's data as a one-path roam does.
+    FollowResets,
+    /// A switch records the path switched to Live, whatever state the
+    /// bundle holds it in.
+    SwitchWritesLive,
     /// A released path's pair stays in the link's record.
     ReleaseKeepsPair,
     /// A path's state change is ignored.
@@ -126,8 +161,22 @@ pub(crate) enum Fault {
     SendFailedDropsLeg,
     /// An orphaned bundle removes nothing.
     OrphanedIgnored,
+    /// An orphaned bundle's peer is removed with no reconnect.
+    OrphanedNoRetry,
+    /// A peer removed for a restart, a replacement or an own-dial restart
+    /// is removed with no reconnect.
+    RestartNoRetry,
+    /// An orphaned or disconnected peer's removal closes every pair of its
+    /// link no other link uses, and a disconnect guards the peer's pair.
+    RemovalClosesEveryPair,
     /// The admission cap is lifted.
     CapLifted,
+    /// A msg1's answer is asked for before the msg1 is classified, so a
+    /// refused or rekey msg1 costs an answer too.
+    AnswerBeforeAdmit,
+    /// The max-peers cap counts no peer, so a new identity is admitted
+    /// and installed past it.
+    CapNotCounted,
     /// Every start's state cap is set one depth below what it explores.
     ReachOneMore,
     /// The world keeps its flight in hash-map order.
@@ -233,10 +282,6 @@ pub(crate) enum Fault {
     /// A joint node does not tell the core of a restart its rekey machine
     /// found at its own rekey's msg2.
     RestartDropped,
-    /// A joint node sends to the peer, and counts its link's use, at the
-    /// core's record of where the peer is, in place of the bundle's active
-    /// path.
-    SendsByHeld,
     /// A joint node's state key holds what its machines show (`view` and
     /// `bindings`) in place of every field that can change.
     KeyFromView,
@@ -277,6 +322,19 @@ pub(crate) enum Fault {
     /// A joint node does not tell the core that a peer's bundle was
     /// orphaned, so the core keeps a peer the node would remove.
     OrphanKept,
+    /// A dial's resend waits double from the first interval, whatever
+    /// multiplier the node is configured with.
+    BackoffDoubles,
+    /// A dial's own resend cap is ignored, so a dial an mDNS advert directs
+    /// at a node not configured to dial resends the configured count.
+    OriginIgnored,
+    /// A dial on a connection still to be opened has no link record until
+    /// its msg1, so its address is in no index and in use by nothing.
+    ConnectingUnlinked,
+    /// A move onto this node's own dial ends an operator's pin of the
+    /// peer's path only when the link it left was this node's dial, not
+    /// when the dial was made while the peer was held on that link.
+    UnpinOwnOnly,
 }
 
 impl Fault {
@@ -288,6 +346,7 @@ impl Fault {
         Self::ProbingCounts,
         Self::KeepIgnored,
         Self::ReleasedSetupIndexed,
+        Self::CapableIgnored,
         Self::UnheardInclusive,
         Self::HeardFromInstall,
         Self::HeardNeedsFrame,
@@ -297,6 +356,7 @@ impl Fault {
         Self::ReplayUnbounded,
         Self::ReplaySeenIgnored,
         Self::HeardKeepsMemory,
+        Self::MemoryNeverDropped,
         Self::SilentEarly,
         Self::SilentFlat,
         Self::IntervalTen,
@@ -306,6 +366,9 @@ impl Fault {
         Self::PollAhead,
         Self::DeadlineWraps,
         Self::LeaseKept,
+        Self::UnsentStaysDue,
+        Self::UnsentDueAtWake,
+        Self::UnsentPastCap,
         Self::MoveKeepsOldPair,
         Self::MoveKeepsInboundLink,
         Self::MoveNoReset,
@@ -319,15 +382,26 @@ impl Fault {
         Self::RedialHeardFloored,
         Self::RedialSlotIgnored,
         Self::RedialLegKept,
+        Self::RedialMemoryLapses,
         Self::AttributeBySetupOnly,
+        Self::AttributeByCurrent,
         Self::PathMoveIgnored,
         Self::SwitchIgnored,
+        Self::SwitchLeavesPeer,
+        Self::HeardMovesPeer,
+        Self::FollowResets,
+        Self::SwitchWritesLive,
         Self::ReleaseKeepsPair,
         Self::StateIgnored,
         Self::PunchedDropped,
         Self::SendFailedDropsLeg,
         Self::OrphanedIgnored,
+        Self::OrphanedNoRetry,
+        Self::RestartNoRetry,
+        Self::RemovalClosesEveryPair,
         Self::CapLifted,
+        Self::AnswerBeforeAdmit,
+        Self::CapNotCounted,
         Self::ReachOneMore,
         Self::FlightByHash,
         Self::FrameOpensAny,
@@ -370,7 +444,6 @@ impl Fault {
         Self::ReplaceDropped,
         Self::PathsUnmirrored,
         Self::RestartDropped,
-        Self::SendsByHeld,
         Self::KeyFromView,
         Self::KeyOmitsBundle,
         Self::HeardFeedDropped,
@@ -384,6 +457,10 @@ impl Fault {
         Self::LeaseForgotten,
         Self::CloseSkipped,
         Self::OrphanKept,
+        Self::BackoffDoubles,
+        Self::OriginIgnored,
+        Self::ConnectingUnlinked,
+        Self::UnpinOwnOnly,
     ];
 
     /// The switch whose variant name is `name`.

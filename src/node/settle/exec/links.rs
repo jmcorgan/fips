@@ -57,7 +57,8 @@ pub(in crate::node) fn pathed(
 
 impl Node {
     /// Apply the core input `input` to the core's record of the link it
-    /// names: a path's state, move, switch or release. Every other input
+    /// names: a path's state, move, switch or release, or the peer turning
+    /// capable. Every other input
     /// changes no record, and the node acts on it, if at all, where the join
     /// gave it.
     pub(in crate::node) fn feed(&mut self, input: &Input) {
@@ -65,11 +66,16 @@ impl Node {
             // The mutation lane's break: a path's state never reaches the
             // record.
             Input::State { .. } if node_fault!(LinksNotFed) => {}
+            // The mutation lane's break: the peer turning capable never
+            // reaches the record.
+            Input::Capable { .. } if node_fault!(CapableUnmirrored) => {}
             Input::State { .. }
             | Input::Moved { .. }
             | Input::Switched { .. }
+            | Input::Capable { .. }
             | Input::Released { .. } => self.links.mirror(input),
             Input::Dial(_)
+            | Input::Connecting { .. }
             | Input::Punched(_)
             | Input::ConnectFailed { .. }
             | Input::Arrived { .. }
@@ -77,6 +83,8 @@ impl Node {
             | Input::Replace(_)
             | Input::Redial(_)
             | Input::LegHeard { .. }
+            | Input::Hello(_)
+            | Input::Abandon { .. }
             | Input::Msg2 { .. }
             | Input::Restarted { .. }
             | Input::Ended { .. }

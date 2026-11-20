@@ -406,13 +406,12 @@ async fn a_roam_keeps_the_records_mirror_with_multipath_on() {
 
 /// A link of two Live paths, p (t1) active and q (t2): p's carrier goes, so
 /// p turns Suspect, still acknowledged, and the link switches to q. The core
-/// records p acknowledged, as its bundle holds it, and `links-mirror` lets
-/// no acknowledged path off but the active one: the same record with p Live
-/// fails. Then q's transport goes, and the link switches back to p: the core
-/// records p Live, as a switch does, where the bundle holds it acknowledged,
-/// and `links-mirror` lets that one difference off, naming the peer.
+/// records p acknowledged, as its bundle holds it, and `links-mirror` fails
+/// the same record with p Live. Then q's transport goes, and the link
+/// switches back to p: the core records p acknowledged, the state its bundle
+/// holds it in, and `links-mirror` finds nothing.
 #[tokio::test]
-async fn a_switch_to_an_acked_path_is_recorded_live_and_is_let_off_with_multipath_on() {
+async fn a_switch_to_an_acked_path_is_recorded_acked_and_the_mirror_holds_with_multipath_on() {
     use super::super::paths::{active_of, carrier, state_at, t2, two_transports};
     use crate::proto::settle::links::Proven;
     let (mut nodes, b, _, b2) = two_transports(1280).await;
@@ -454,7 +453,7 @@ async fn a_switch_to_an_acked_path_is_recorded_live_and_is_let_off_with_multipat
     assert_eq!(
         standby_live.bad.len(),
         1,
-        "defect: links-mirror let off an acknowledged path that is not active: {:?}",
+        "defect: links-mirror passed a record holding Live a path its bundle holds acknowledged: {:?}",
         standby_live.bad
     );
     assert_eq!(
@@ -469,13 +468,8 @@ async fn a_switch_to_an_acked_path_is_recorded_live_and_is_let_off_with_multipat
     );
     assert_eq!(
         switched,
-        vec![(t1, b1, Proven::Live)],
-        "defect: a switch to an acknowledged path is not recorded Live"
+        vec![(t1, b1, Proven::Acked)],
+        "defect: a switch to an acknowledged path is recorded Live, not as its bundle holds it"
     );
     assert!(found.bad.is_empty(), "defect: {:?}", found.bad);
-    assert_eq!(
-        found.letoff,
-        vec![b],
-        "defect: links-mirror did not let the switched path off"
-    );
 }

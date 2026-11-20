@@ -3,13 +3,20 @@
 //!
 //! A link record names the address the link was set up at (the address
 //! dialed, or the msg1's source), its direction, who holds it (a
-//! handshake leg still in flight, or a peer), and the paths its bundle
-//! holds with each path's proven state. The index from transport and
+//! handshake leg still in flight, or a peer), the paths its bundle holds
+//! with each path's proven state, and whether the bundle found the peer
+//! capable of multipath. The index from transport and
 //! address to link is never written directly: every method that changes a
 //! record recomputes it, from each live link's setup address and its
 //! proven paths, so it cannot drift from the records. A setup address
 //! whose path the bundle released leaves the index; one the path roamed
 //! away from stays, since the link was set up there.
+//!
+//! Where a msg1 from a pair stands among the records ([`Placement`]) is
+//! read in one walk, and answers each question the node asks of a msg1's
+//! source before any Diffie-Hellman: whether a link owns the pair, which
+//! identity the msg1 is to prove, whether it is a resend to an answered
+//! msg1's leg, and whether it is on a held peer's link.
 //!
 //! The close rule (FRC-1201 Section 5.6, and the multipath draft's release
 //! rule): a connection at a transport and address is in use while some
@@ -107,6 +114,10 @@ pub struct LinkRec {
     /// Whether the bundle released its path at the setup address, which
     /// then leaves the index.
     pub released: bool,
+    /// Whether the bundle found the peer capable of multipath. A capable
+    /// peer's msg1 from a pair the bundle holds no path at is off the link
+    /// (multipath draft Section 5.10).
+    pub capable: bool,
 }
 
 impl LinkRec {
@@ -116,6 +127,89 @@ impl LinkRec {
         let path =
             !fault!(CloseBySetupAddress) && self.paths.iter().any(|(p, s)| p == pair && s.counts());
         setup || path
+    }
+}
+
+/// The link the index names at a pair, as [`Placement`] keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Named {
+    link: LinkNo,
+    dir: Dir,
+    holder: Holder,
+    capable: bool,
+    /// The identity the leg holding the link expects, if a leg holds it.
+    expects: Option<NodeAddr>,
+}
+
+/// Where a msg1 from one pair stands among the link records, from one walk
+/// over them ([`Links::placement`]). Each method answers one of the
+/// questions the node asks of a msg1's source before any Diffie-Hellman, as
+/// the node answers it: the index there names the newest link it names at
+/// the pair, and a path counts when it is Live or acknowledged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placement {
+    /// The link the index names at the pair.
+    named: Option<Named>,
+    /// Each link holding a path at the pair: its number, its holder, and
+    /// whether the path counts.
+    paths: Vec<(LinkNo, Holder, bool)>,
+    /// The links set up at the pair.
+    setups: Vec<LinkNo>,
+}
+
+impl Placement {
+    /// Whether some link owns the pair, the msg1 rate limiter's class and
+    /// the pre-handshake admission of a transport that accepts no new
+    /// handshakes: the index names a link there, or a held peer's path
+    /// there counts.
+    pub fn established(&self) -> bool {
+        self.named.is_some()
+            || self
+                .paths
+                .iter()
+                .any(|(_, h, counts)| *counts && matches!(h, Holder::Peer(_)))
+    }
+
+    /// The identity a msg1 from the pair is to prove, where a transport
+    /// that accepts no new handshakes admitted it: the peer holding the
+    /// link the index names there, or the identity the leg holding it
+    /// expects; failing both, a held peer whose path there counts.
+    pub fn expected(&self) -> Option<NodeAddr> {
+        let named = self.named.and_then(|n| match n.holder {
+            Holder::Peer(peer) => Some(peer),
+            Holder::Leg => n.expects,
+        });
+        named.or_else(|| {
+            self.paths.iter().find_map(|(_, h, counts)| match h {
+                Holder::Peer(peer) if *counts => Some(*peer),
+                Holder::Peer(_) | Holder::Leg => None,
+            })
+        })
+    }
+
+    /// The link of an answered msg1's leg the pair's msg1 is a resend to:
+    /// the link the index names there, when a leg the peer dialled holds
+    /// it.
+    pub fn unanswered(&self) -> Option<LinkNo> {
+        self.named
+            .filter(|n| n.dir == Dir::Inbound && n.holder == Holder::Leg)
+            .map(|n| n.link)
+    }
+
+    /// Whether a msg1 from the pair is on `link`, the link of a held peer:
+    /// where the link holds a path at the pair, whether the path is Live or
+    /// acknowledged; elsewhere, whether the peer is not capable and the
+    /// index names the link there (multipath draft Section 5.10).
+    pub fn on_link(&self, link: LinkNo) -> bool {
+        if fault!(AttributeBySetupOnly) || node_fault!(AttributeBySetupOnly) {
+            return self.setups.contains(&link);
+        }
+        if let Some((_, _, counts)) = self.paths.iter().find(|(l, _, _)| *l == link) {
+            return *counts;
+        }
+        let ignored = fault!(CapableIgnored) || node_fault!(CapableIgnored);
+        self.named
+            .is_some_and(|n| n.link == link && (!n.capable || ignored))
     }
 }
 
@@ -145,6 +239,7 @@ impl Links {
                 holder,
                 paths: Vec::new(),
                 released: false,
+                capable: false,
             },
         );
         self.reindex();
@@ -188,17 +283,36 @@ impl Links {
         self.reindex();
     }
 
+    /// `link`'s bundle found the peer capable.
+    pub fn capable(&mut self, link: LinkNo) {
+        if let Some(r) = self.recs.get_mut(&link) {
+            r.capable = true;
+        }
+    }
+
     /// Apply what a link's bundle reported, `input`, to the link's record:
-    /// the one reading of a path's move, switch, state change and release
-    /// that the table and a shell's record share. Returns the connections a
-    /// released path leaves to close; any other input changes nothing.
+    /// the one reading of a path's move, switch, state change and release,
+    /// and of the peer turning capable, that the table and a shell's record
+    /// share. A switch records the path in the state the bundle holds it,
+    /// which for a handover to an acknowledged path that is not Live is
+    /// acknowledged. Returns the connections a released path leaves to
+    /// close; any other input changes nothing.
     pub fn mirror(&mut self, input: &Input) -> Vec<Pair> {
         match input {
-            Input::Moved { link, from, to } => self.moved(*link, from, to.clone()),
-            Input::Switched { link, to, .. } => self.path(*link, to.clone(), Proven::Live),
+            Input::Moved { link, from, to, .. } => self.moved(*link, from, to.clone()),
+            Input::Switched { link, to, proven } => {
+                let state = if fault!(SwitchWritesLive) || node_fault!(SwitchWritesLive) {
+                    Proven::Live
+                } else {
+                    *proven
+                };
+                self.path(*link, to.clone(), state);
+            }
             Input::State { link, pair, proven } => self.path(*link, pair.clone(), *proven),
+            Input::Capable { link } => self.capable(*link),
             Input::Released { link, pair, keep } => return self.release(*link, pair, *keep),
             Input::Dial(_)
+            | Input::Connecting { .. }
             | Input::Punched(_)
             | Input::ConnectFailed { .. }
             | Input::Arrived { .. }
@@ -206,6 +320,8 @@ impl Links {
             | Input::Replace(_)
             | Input::Redial(_)
             | Input::LegHeard { .. }
+            | Input::Hello(_)
+            | Input::Abandon { .. }
             | Input::Msg2 { .. }
             | Input::Restarted { .. }
             | Input::Ended { .. }
@@ -220,6 +336,39 @@ impl Links {
             Input::HeldFrame { .. } | Input::HoldLost { .. } => {}
         }
         Vec::new()
+    }
+
+    /// Where a msg1 from `pair` stands among the records, from one walk
+    /// over them; `leg` gives the identity the leg holding a link expects.
+    pub fn placement(&self, pair: &Pair, leg: impl Fn(LinkNo) -> Option<NodeAddr>) -> Placement {
+        let mut paths = Vec::new();
+        let mut setups = Vec::new();
+        for (l, r) in &self.recs {
+            if r.setup == *pair {
+                setups.push(*l);
+            }
+            if let Some((_, s)) = r.paths.iter().find(|(p, _)| p == pair) {
+                paths.push((*l, r.holder, s.counts()));
+            }
+        }
+        let named = self.at(pair).max().and_then(|link| {
+            let r = self.recs.get(&link)?;
+            Some(Named {
+                link,
+                dir: r.dir,
+                holder: r.holder,
+                capable: r.capable,
+                expects: match r.holder {
+                    Holder::Leg => leg(link),
+                    Holder::Peer(_) => None,
+                },
+            })
+        });
+        Placement {
+            named,
+            paths,
+            setups,
+        }
     }
 
     /// The index: each live link's setup address and proven paths.

@@ -5,8 +5,9 @@
 //! node's own bounds and handshake timers as the current node has them.
 //! Each is repeated here with the line it comes from. The handshake
 //! handler's constants are private to it, and its copies go once the node
-//! calls the core; the handshake timers are configuration defaults, which
-//! the node will pass in.
+//! calls the core; the handshake timers and the admission cap are
+//! configuration defaults, which the node passes in from its own
+//! configuration (`src/node/settle/params.rs`).
 
 use crate::time::{Duration, Instant};
 
@@ -40,14 +41,29 @@ pub struct Params {
     /// How long a handshake leg may take before it is reaped (30 s;
     /// `src/config/node.rs:147`).
     pub handshake: Duration,
-    /// The first msg1 resend's delay; each later one doubles it (1 s and a
-    /// factor of 2; `node.rs:148-149`).
+    /// The first msg1 resend's delay (1 s; `node.rs:148`). Each later wait
+    /// is this times [`Params::backoff`] to the power of the resends made
+    /// ([`Params::wait`]).
     pub resend: Duration,
-    /// The most msg1 resends of one dial (5; `node.rs:150`).
+    /// The resend wait's multiplier, as the bits of an `f64`
+    /// (`f64::to_bits`), so that the parameters stay `Eq` (2.0;
+    /// `node.rs:149`). [`Params::multiplier`] reads it.
+    pub backoff: u64,
+    /// The most msg1 resends of one dial (5; `node.rs:150`). A dial may
+    /// carry a lower cap of its own (`legs::Start::resends`), as the node
+    /// caps an mDNS-directed dial.
     pub resends: u32,
+    /// The node's timer cadence, one tick (1 s; `TICK`,
+    /// `src/node/mod.rs:64`). A dial resend whose send failed is tried
+    /// again at the next poll, as the node re-arms one for its next tick,
+    /// and this is how far on the wake the core reports for it lies.
+    pub retry: Duration,
     /// The most answers in flight to msg1s not yet installed, the
     /// admission cap (1000, `max_pending_inbound`; `node.rs:54`).
     pub pending: usize,
+    /// The most peers held at once, the max-peers cap; 0 holds any number
+    /// (128, `max_peers`; `node.rs:52`).
+    pub peers: usize,
 }
 
 impl Default for Params {
@@ -65,9 +81,32 @@ impl Default for Params {
             counted: 8,
             handshake: Duration::from_secs(30),
             resend: Duration::from_secs(1),
+            backoff: 2.0_f64.to_bits(),
             resends: 5,
+            retry: Duration::from_secs(1),
             pending: 1000,
+            peers: 128,
         }
+    }
+}
+
+impl Params {
+    /// The resend wait's multiplier, [`Params::backoff`] read back.
+    pub fn multiplier(&self) -> f64 {
+        f64::from_bits(self.backoff)
+    }
+
+    /// The wait before a dial's next msg1 resend once it has made `sent`
+    /// resends: the first resend interval times the multiplier to the
+    /// power of `sent`, truncated to the millisecond, as the node's
+    /// `next_resend_at_ms` computes it (`core/src/proto/fmp/core.rs`).
+    pub fn wait(&self, sent: u32) -> Duration {
+        if fault!(BackoffDoubles) || node_fault!(BackoffDoubles) {
+            return backoff(sent, self.resend, Duration::MAX);
+        }
+        let base = u64::try_from(self.resend.as_millis()).unwrap_or(u64::MAX);
+        let factor = crate::proto::math::powi(self.multiplier(), sent);
+        Duration::from_millis((base as f64 * factor) as u64)
     }
 }
 

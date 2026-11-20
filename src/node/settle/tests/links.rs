@@ -70,6 +70,62 @@ fn the_core_records_a_link_from_its_open_to_its_close_or_its_forget() {
     );
 }
 
+/// A held peer's bundle turns capable: the join gives the core the input
+/// it stands for, the node feeds it, and the core's record of the peer's
+/// link holds it capable, as the bundle does from then on. Every other
+/// record stays not capable.
+#[test]
+fn a_link_turning_capable_marks_the_nodes_record_capable() {
+    use crate::node::settle::exec::pathed;
+    use crate::proto::settle::join::Step;
+    use fips_core::proto::path::Output;
+
+    let mut node = crate::node::tests::make_node();
+    let remote = Identity::generate();
+    let (one, two) = (LinkId::new(1), LinkId::new(2));
+    node.links.open(link(1, "127.0.0.1:1"));
+    node.links.open(link(2, "127.0.0.1:2"));
+    let peer = keyed_peer(&node, &remote, one, 0);
+    let addr = *peer.node_addr();
+    node.peers.install(addr, peer);
+    node.links.hold(&one, addr);
+    let no = node
+        .links
+        .no(&one)
+        .expect("precondition: the link has a number");
+    let capable = |node: &crate::node::Node, id: &LinkId| {
+        node.links
+            .no(id)
+            .and_then(|no| node.links.core().get(no))
+            .is_some_and(|r| r.capable)
+    };
+    assert!(
+        !capable(&node, &one),
+        "precondition: a new link's record is not capable"
+    );
+
+    let bundle = node.peers.get(&addr).and_then(|p| p.bundle());
+    let steps = pathed(addr, vec![Output::Capable], bundle, Some(no), None)
+        .expect("precondition: the join takes the bundle's step");
+    let inputs: Vec<_> = steps
+        .filter_map(|step| match step {
+            Step::Core(input) => Some(input),
+            Step::Path(_) | Step::Rekey(_) | Step::Replace(_) | Step::Redial { .. } => None,
+        })
+        .collect();
+    for input in &inputs {
+        node.feed(input);
+    }
+    assert!(
+        capable(&node, &one),
+        "defect: the peer's link turned capable and its record does not hold it so: {inputs:?}"
+    );
+    assert!(
+        !capable(&node, &two),
+        "defect: another link's record turned capable"
+    );
+}
+
 /// A dial to the pair of a link a peer is held on is abandoned: the pair
 /// names the dial's link, the newest there, while the dial lives, and the
 /// held link again once it is forgotten. The written index dropped the entry

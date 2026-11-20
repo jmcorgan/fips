@@ -5,7 +5,9 @@
 //! `testing/ignored-tests.txt`, and run by the known-defect lane, which
 //! reds when one passes, so the fix removes both. A pin's preconditions
 //! state the shape it needs and fail as `precondition:`, which the lane
-//! counts as the pin no longer showing its defect.
+//! counts as the pin no longer showing its defect. A pin whose defect is
+//! fixed stays here as a test, no longer ignored, named on the row of the
+//! switch that puts the defect back.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -182,7 +184,6 @@ fn rekey_msg1(w: &mut World) -> super::super::world::Pkt {
 }
 
 #[test]
-#[ignore = "known defect in the unwired core: a frame from a pair other than the active path moves the core's record of where the peer is there, where the bundle and the node keep the peer at the active path"]
 fn a_frame_from_another_transport_leaves_the_cores_record_of_the_peer_at_the_active_path() {
     // The crossing over two transports at Off with Off: node 0 holds node
     // 1 over UDP, and a heartbeat of node 1's arrives from the TCP address
@@ -203,7 +204,6 @@ fn a_frame_from_another_transport_leaves_the_cores_record_of_the_peer_at_the_act
 }
 
 #[test]
-#[ignore = "known defect in the unwired core: a switch of the active path updates the path's state only, so the core's record of where the peer is stays at the old active path"]
 fn a_switch_moves_the_cores_record_of_the_peer_to_the_new_active_path() {
     // Two Live paths at On with On, UDP active; node 0's UDP transport
     // loses carrier, and its bundle switches to the TCP path.
@@ -235,7 +235,6 @@ fn a_switch_moves_the_cores_record_of_the_peer_to_the_new_active_path() {
 }
 
 #[test]
-#[ignore = "known defect in the unwired core: the core counts a held link's setup pair as on the link for life, where the node counts a capable peer's pair that no path holds as off it"]
 fn a_msg1_from_a_capable_peers_setup_pair_with_no_path_is_off_the_link() {
     // Two Live paths at On with On; node 0's UDP transport goes, taking
     // the setup pair's path, and the link lives on over TCP. Node 1's
@@ -259,7 +258,6 @@ fn a_msg1_from_a_capable_peers_setup_pair_with_no_path_is_off_the_link() {
 }
 
 #[test]
-#[ignore = "known defect in the unwired core: a switch records the path switched to as Live whatever its state, where the bundle holds an acknowledged path that is not Live"]
 fn a_switch_to_a_path_that_is_not_live_leaves_it_acknowledged_in_the_core() {
     // Two Live paths at On with On, UDP active: node 0's TCP transport
     // loses carrier, so the TCP path goes Suspect, and then its UDP
@@ -281,35 +279,32 @@ fn a_switch_to_a_path_that_is_not_live_leaves_it_acknowledged_in_the_core() {
         s.active == Some(home(1, TCP)) && s.paths.contains(&(home(1, TCP), Proven::Acked)),
         "precondition: node 0's bundle handed over to its TCP path, acknowledged and not Live: {s:?}"
     );
-    let wrong = shown(&w, 0, super::oracle::Pin::SwitchedLive);
+    let core = w.parties[0]
+        .joint()
+        .and_then(|f| f.peers.into_iter().next())
+        .map(|p| p.paths)
+        .unwrap_or_default();
     assert!(
-        wrong.is_empty(),
-        "defect: the core records the path switched to as Live: {wrong:?}"
+        core.contains(&(home(1, TCP), Proven::Acked)),
+        "defect: the core records the path switched to as Live: {core:?}"
     );
 }
 
 #[test]
-#[ignore = "known defect in the unwired core: the core counts the pair its record of the peer followed a frame to as on the link, where the node counts a pair no path or index entry holds as off it"]
 fn a_msg1_from_the_pair_a_frame_from_another_transport_came_from_is_off_the_link() {
-    // As the frame's pin: node 0's core has followed node 1's heartbeat to
-    // the TCP address of the link the crossing left. Node 1's rekey msg1
-    // then arrives from there.
+    // As the frame's pin: node 1's heartbeat reached node 0 from the TCP
+    // address of the link the crossing left, where node 0's bundle holds no
+    // path. Node 1's rekey msg1 then arrives from there. A core that
+    // followed the frame there took the msg1 as on the link.
     let mut w = crossed_off();
     let off = super::super::super::model::history::Addr {
         transport: super::super::starts::TCP,
         at: 1001,
     };
-    let id = w.ids[1];
-    let current = w.parties[0]
-        .view()
-        .peers
-        .into_iter()
-        .find(|p| p.peer == id)
-        .map(|p| p.current);
-    assert_eq!(
-        current,
-        Some(off),
-        "precondition: node 0's core has node 1 at the frame's source"
+    let s = shell(&w, 0);
+    assert!(
+        s.paths.iter().all(|(a, _)| *a != off),
+        "precondition: node 0's bundle holds no path at the frame's source: {s:?}"
     );
     let msg1 = rekey_msg1(&mut w);
     super::feeds::arrive(&mut w, 0, off, msg1);
@@ -321,13 +316,13 @@ fn a_msg1_from_the_pair_a_frame_from_another_transport_came_from_is_off_the_link
 }
 
 #[test]
-#[ignore = "known defect in the unwired core: the core counts the pair its record of the peer followed a frame to as on the link, where the node counts a pair whose path is still probing as off it"]
 fn a_msg1_from_the_pair_a_frame_moved_the_cores_record_to_whose_path_is_probing_is_off_the_link() {
     // Found by the sweep of the crossing over two transports at On with
     // On. Node 1 holds node 0 on its own TCP dial's link; a frame of node
-    // 0's from its UDP home moves node 1's core's record of node 0 there,
-    // and node 1's bundle holds a probing path at that pair. Node 0's dial
-    // msg1, resent from the UDP home during the heal, then reaches node 1.
+    // 0's arrives from its UDP home, where node 1's bundle holds a probing
+    // path, which a core that followed frames moved its record of node 0
+    // to. Node 0's dial msg1, resent from the UDP home during the heal,
+    // then reaches node 1.
     use super::super::explore::Act::{Connect, Deliver};
     use super::super::starts::{UDP, home};
     use crate::proto::settle::links::Proven;
@@ -344,17 +339,10 @@ fn a_msg1_from_the_pair_a_frame_moved_the_cores_record_to_whose_path_is_probing_
             Deliver(8),
         ],
     );
-    let id = w.ids[0];
-    let current = w.parties[1]
-        .view()
-        .peers
-        .into_iter()
-        .find(|p| p.peer == id)
-        .map(|p| p.current);
     let s = shell(&w, 1);
     assert!(
-        current == Some(home(0, UDP)) && s.paths.contains(&(home(0, UDP), Proven::Probing)),
-        "precondition: node 1's core has node 0 at its UDP home, where node 1's bundle holds a probing path: {current:?}, {s:?}"
+        s.paths.contains(&(home(0, UDP), Proven::Probing)),
+        "precondition: node 1's bundle holds a probing path at node 0's UDP home: {s:?}"
     );
     heal(&mut w);
     let wrong = shown(&w, 1, super::oracle::Pin::Attribution);

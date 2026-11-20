@@ -16,10 +16,17 @@ release build.
 - `links.rs`: the core's link records: each link's setup address,
   direction, holder and bundle paths with their proven states, the
   transport-address index derived from them, and the one close rule over
-  links and their paths (`in_use`, `retire`, `release`). `mirror` is the
-  one reading of what a link's bundle reported (a path moved, switched to,
-  changed state or released), which `table.rs` applies and a shell's own
-  record of its links can apply the same way.
+  links and their paths (`in_use`, `retire`, `release`). A record also
+  holds whether the bundle found the peer capable. `placement` reads, in
+  one walk, where a msg1 from a pair stands among the records, and its
+  `Placement` answers each question the node asks of a msg1's source
+  before any Diffie-Hellman: whether a link owns the pair, the identity
+  the msg1 is to prove, the answered leg it is a resend to, and whether it
+  is on a held peer's link, which `table.rs` asks. `mirror` is the one
+  reading of what a link's bundle reported (a path moved, switched to,
+  changed state or released, or the peer turned capable), which
+  `table.rs` applies and a shell's own record of its links can apply the
+  same way.
 - `gates.rs`: the restart and replacement gates, one function
   (`Gates::gate`) that every restart source asks: a msg1 from an identity
   not held, a msg1 at a new epoch, a same-epoch replacement, a redial (a
@@ -28,29 +35,52 @@ release build.
   own msg2 or a rekey msg2. It holds the memory per identity the gates
   read (the dampener's stamp, the replay memory, the ephemerals that armed
   a redial and the silent-session record), and judges as the current node
-  does.
+  does. The memory holds only identities with something live: a question
+  about an identity with no memory inserts none, and an identity whose
+  stamp, replays, silence and redial memory have all lapsed is dropped.
 - `legs.rs`: the handshake legs in flight, by link: a dial leg with its
-  msg1, its resend schedule (one interval after the dial, then doubling,
-  up to the configured count) and its deadline; a responder leg with the
+  msg1, its resend schedule (one interval after the dial, then growing by
+  the configured multiplier as the node computes it, up to the configured
+  count or the dial's own lower cap, as the node caps an mDNS-directed
+  dial) and its deadline; a responder leg with the
   msg1 it answered and its stored msg2; each holding its session index
-  lease. A stored msg2 not yet sent answers any msg1 from its address
+  lease, and a dial the link its peer was held on when the dial's link
+  opened, which decides whether a move onto it ends an operator's pin. A
+  stored msg2 not yet sent answers any msg1 from its address
   (FRC-1201 Section 5.8); once sent, only its own msg1, byte for byte. A poll returns the resends due and the legs reaped, and
-  `close` returns every lease.
+  `close` returns every lease. A dial resend whose send failed is tried
+  again at the next poll, as the node retries one at its next tick, and
+  the wake reported meanwhile is one tick on (`Params::retry`).
 - `table.rs`: the judgements. `Table` holds the links, the legs, the peer
   held for each identity and the gates; `step` takes one input and
   returns the outputs, `poll` runs the legs' timers and `close` gives
   everything back. It judges a msg1 from an identity not held or at a new
-  epoch through the gate, hands a same-epoch msg1 to the peer's rekey
-  machine with where it arrived (on the link from its setup address, the
-  peer's current address or a proven path), takes the machine's
+  epoch through the gate, refuses an identity not held at the max-peers
+  cap, and asks the shell for an admitted msg1's answer only after that
+  and any teardown it causes, hands a same-epoch msg1 to the peer's rekey
+  machine with where it arrived (on the link from a path that is Live or
+  acknowledged, or, from a pair the link holds no path at, when the peer
+  is not capable and the index names the link there), takes the machine's
   replacement request back through the gate, answers its redial request
   by a leg beside the held peer (one per identity) that the first frame
-  under it (`LegHeard`) installs in the peer's place, completes this
-  node's own dials (install, restart, the own-dial move and the
-  crossing's tie-break), removes peers, and applies the path bundle's
-  events to the link records.
+  under it (`LegHeard`) installs in the peer's place, opens a dial's link
+  when the node starts it (before its msg1 for a dial on a connection
+  still to be opened), completes this node's own dials (install, restart,
+  the own-dial move and the crossing's tie-break), removes peers, and
+  applies the path bundle's events to the link records and to where the
+  peer held on the link is: a move of the path it is at, a one-path roam
+  among them, or a switch of the active path moves it, and a frame alone
+  never does. Only a one-path roam resets the peer's data, as a roam; a
+  path the bundle moved at a path message, which the node runs as its own
+  Follow, resets nothing, as a switch does not.
 - `input.rs`: what the shell tells the core, each built after any Noise
-  read, carrying the msg2 the shell built and its lease.
+  read. A msg1 comes in two steps: what the shell read, which the core
+  classifies, and then, only for a msg1 the core admitted, the msg2 the
+  shell built and its lease (`Hello`), or the shell's refusal
+  (`Abandon`), so a refused or rekey msg1 costs no msg2 and draws no
+  index. A dial on a connection still to be opened comes in two inputs,
+  `Connecting` when the node starts it, which opens its link, and `Dial`
+  with its msg1, naming that link.
 - `join.rs`: the one function (`join`) that joins a peer's rekey machine
   and path bundle to the core, generic over the rekey profile, the clock,
   the entropy source and the driver slot. It builds both machines for a
@@ -63,22 +93,28 @@ release build.
   replacement or redial request goes to the core's gates, every bundle
   output is the shell's own and is followed by the core input it stands
   for, and a one-path roam or bind, which the bundle reports in no output,
-  is a move or a Live path. Rekey outputs are converted as they are taken,
-  so a frame through it allocates nothing. The order is the machine calls'
-  and the routing's; a shell's loop that carries the steps (a node's sends
+  is a move marked a roam or a Live path. Rekey outputs are converted as
+  they are taken, so a frame through it allocates nothing. The order is
+  the machine calls' and the routing's; a shell's loop that carries the steps (a node's sends
   between steps, a test shell's sends first) stays the shell's own. One
   switch sits in it, `MoveBuildsFresh`, which builds the moved machine as
   a new link's; outside the core's tests it is the literal `false`. The
   joint world's shell (`tests/joint/`) calls it for every machine build,
   move and close and for every output it routes. The node runs each step
   of a link's rekey machine through it.
-- `output.rs`: what the core asks of the shell, run front to back:
-  answers, resends, the hand-off to the rekey machine, installs, the
-  per-peer data's transition, removals, retired links with their closes,
-  released paths, freed leases, reconnects and refusals.
+- `output.rs`: what the core asks of the shell, run front to back: the
+  ask for an admitted msg1's answer, answers, resends, the hand-off to
+  the rekey machine, installs, the per-peer data's transition, whether a
+  move onto this node's own dial ends an operator's pin of the peer's
+  path (`Swapped`), removals, retired links with their closes, released
+  paths, freed leases, reconnects and refusals.
 - `params.rs`: the intervals and bounds the core reads, with the current
-  node's values and the line each is taken from, and the deadline and
-  back-off arithmetic its timers share.
+  node's values and the line each is taken from (the node's one-second
+  tick among them, the wake of a failed resend), the resend wait the node
+  computes (`Params::wait`, the multiplier held as `f64` bits so the
+  parameters stay `Eq`), and the deadline and back-off arithmetic its
+  timers share. The node maps its configuration onto these in
+  `src/node/settle/params.rs`.
 - `model/`: the reference model, written from FRC-1201 Sections 5.5 to
   5.8 and the operator's decisions, without reference to the code. See its
   README.
@@ -133,6 +169,16 @@ to the model, and nothing in `model/` refers to a core item; the scans in
   node does; only an operator disconnect, an orphaned bundle and `close`
   apply the close rule to a held peer's link. A crossing's losing link and
   the link a late second dial moves off are retired by the close rule.
+- An orphaned bundle and an operator disconnect close what the node's
+  removal closes: the paths the bundle still holds that no other link
+  uses, never a setup pair whose path the bundle released first (that
+  release closed it or kept it); a disconnect also closes the pair the
+  peer was held at, whether or not another link uses it.
+- A removal asks for a reconnect (`Output::Retry`) where the node notes
+  the loss for one: a dead link, a `Disconnect` and an orphaned bundle,
+  which the node removes through its link-dead path, and a restart, a
+  replacement and an own-dial restart, whose loss the peer's control
+  machine reports before the new session is promoted.
 - A move sets the peering heard, as FRC-1201 Section 5.5 counts a
   peering this node set up as initiator, and as the node does.
 - Every deadline comes from `params::deadline`, which saturates at the
@@ -148,6 +194,10 @@ to the model, and nothing in `model/` refers to a core item; the scans in
 - A new guard gets a switch in `faults.rs` and a row in
   `tests/faults.rs`, and a new test is named by a row or listed there as
   self-checked or characterisation; the scans fail otherwise.
+- A guard whose break the root crate's tests and the mutation lane must
+  reach too, since `fault!` is this crate's test build alone, is read as
+  `fault!(X) || node_fault!(X)`: declared in `faults.rs` with its row and
+  in `core/src/faults.rs` with a line in `testing/mutations/manifest.txt`.
 - `parity.txt` says what the node does, read against FRC-1201 and the
   model of the node, never copied from one side's output alone, since a
   trace taken from code passes that code. A change to it goes in a commit

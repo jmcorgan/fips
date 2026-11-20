@@ -65,17 +65,17 @@
 //! world does not have, and its worker rule needs a decrypt worker, which
 //! no joint node runs.
 //!
-//! Three clauses are pinned, not asserted, because the core is known to
-//! part there from the bundle or the node, in code a later step owns: each
-//! is counted ([`Pin`], [`pinned_in`]) and printed by a sweep, and a test
-//! in `pins.rs` fails on it. (c) of the mirror, since the core follows
-//! every frame's source and does not follow a switch; in (a), the active
-//! path the bundle holds acknowledged and not Live, which the core records
-//! Live after a switch to it; and in attribution, the three shapes where
-//! the core's rule is wider than the node's (a capable peer's setup pair
-//! with no path; the pair the core's record of the peer followed a frame
-//! to, which no index entry holds and no path proves; and a setup pair
-//! whose path is still probing).
+//! Two clauses are pinned, not asserted, because the core was known to
+//! part there from the bundle or the node: each is counted ([`Pin`],
+//! [`pinned_in`]) and printed by a sweep, and a test in `pins.rs` holds
+//! it. (c) of the mirror, where the core's record of where the peer is
+//! followed every frame's source and no switch, and now moves only where
+//! the bundle moves the peer, at a roam of its one path or a switch; and
+//! in attribution, the three shapes where the core's rule was wider than
+//! the node's (a capable peer's setup pair with no path; a pair no index
+//! entry holds and no path proves; and a setup pair whose path is still
+//! probing). (a) is asserted whole: a switch records the path in the state
+//! the bundle holds it, an acknowledged one too.
 
 use alloc::format;
 use alloc::string::String;
@@ -99,9 +99,6 @@ pub enum Pin {
     /// The core's record of where the peer is is not the bundle's active
     /// path.
     Current,
-    /// The core records Live an active path the bundle holds acknowledged
-    /// and not Live, as a switch to it writes it.
-    SwitchedLive,
     /// The core took a msg1 as on the peer's link in a shape where the
     /// node's rule is narrower.
     Attribution,
@@ -430,28 +427,13 @@ fn mirrored(f: &Facts, out: &mut Vec<(Oracle, String)>, pins: &mut Vec<(Pin, Str
         let Some(s) = &p.shell else { continue };
         let (core, bundle) = (sorted(&p.paths), sorted(&s.paths));
         if core != bundle {
-            // The bundle's active path, acknowledged and not Live, which
-            // a switch to it records Live in the core.
-            let switched: Vec<(Addr, Proven)> = s
-                .paths
-                .iter()
-                .map(|&(a, q)| {
-                    if Some(a) == s.active && q == Proven::Acked {
-                        (a, Proven::Live)
-                    } else {
-                        (a, q)
-                    }
-                })
-                .collect();
-            let what = format!(
-                "{:?}: the core records the paths {core:?}, the bundle holds {bundle:?}",
-                p.peer
-            );
-            if sorted(&switched) == core {
-                pins.push((Pin::SwitchedLive, what));
-            } else {
-                out.push((Oracle::Mirrored, what));
-            }
+            out.push((
+                Oracle::Mirrored,
+                format!(
+                    "{:?}: the core records the paths {core:?}, the bundle holds {bundle:?}",
+                    p.peer
+                ),
+            ));
         }
         if Some(p.current) != s.active {
             pins.push((
@@ -804,25 +786,22 @@ fn one_view_fires_on_a_planted_identity() {
 
 #[test]
 fn leases_fire_on_a_free_the_shell_lost() {
-    // A rekey msg1 of a held peer: the core hands the answer's lease back,
-    // and the shell returns its index to the pool.
-    let mut w = world_of(super::off, &[A, B], &[&[(1, UDP)], &[]]);
+    // A crossing of two dials: the larger node keeps its inbound handshake,
+    // the core hands its own dial's lease back, and the shell returns its
+    // index to the pool. (A rekey msg1 takes no lease to hand back: its
+    // answer is asked for only once a msg1 is admitted.)
+    let mut w = world_of(super::off, &[A, B], &[&[(1, UDP)], &[(0, UDP)]]);
     dial_home(&mut w, 0, 1, UDP);
-    settle(&mut w);
-    age(&mut w, 40_000);
-    assert!(w.parties[0].rekeyable(B), "precondition: node 0 may rekey");
-    let mut found = watched(&mut w, &[Act::Rekey(0, 1)]);
-    settle(&mut w);
-    found.extend(every_step(&w));
+    dial_home(&mut w, 1, 0, UDP);
+    let found = flushed(&mut w);
     let wrong = of(&found, Oracle::Leases);
     assert!(
         wrong.is_empty(),
         "every index is held by a leg or a machine: {wrong:?}"
     );
-    let pending = w.parties[1].view().peers.first().and_then(|p| p.pending);
     assert!(
-        pending.is_some(),
-        "precondition: node 1 took node 0's rekey through its machine"
+        changed(&w, 1, M::Keep),
+        "precondition: node 1, the larger, kept its inbound handshake and gave its dial up"
     );
 }
 
