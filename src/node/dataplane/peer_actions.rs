@@ -303,7 +303,10 @@ impl Node {
                                 Installed::Yes(_) => {}
                                 Installed::No => queue
                                     .retain(|a| !matches!(a, PeerAction::PromoteToActive { .. })),
-                                Installed::Refused => return,
+                                Installed::Refused(closes) => {
+                                    self.close_each(closes).await;
+                                    return;
+                                }
                             }
                         }
                     } else {

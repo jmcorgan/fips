@@ -70,14 +70,15 @@ struct Msg1Seen {
 }
 
 /// What the core decided when an answer's msg2 went out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::node) enum Installed {
     /// It installs the leg, whose session index is this one.
     Yes(SessionIndex),
     /// It installs nothing: the peer is held through another link.
     No,
-    /// It refused the install at the max-peers cap.
-    Refused,
+    /// It refused the install at the max-peers cap, retiring the leg's
+    /// link: the connections that retirement leaves unused, to close.
+    Refused(Vec<Pair>),
 }
 
 /// A msg1 classified as a redial, with what arming it needs: the leg's
@@ -1267,7 +1268,8 @@ impl Node {
                 peer = %self.peer_display_name(&peer),
                 "Resent msg2 for a pending link whose peer is held on another link, not promoting"
             ),
-            Installed::No | Installed::Refused => {}
+            Installed::No => {}
+            Installed::Refused(closes) => self.close_each(closes).await,
         }
     }
 
@@ -1282,6 +1284,9 @@ impl Node {
         ambient: &PeerActionCtx,
     ) -> Installed {
         let mut installed = Installed::No;
+        let no = self.links.no(&link);
+        let mut refused = false;
+        let mut closes = Vec::new();
         for o in out {
             match o {
                 Output::Install(i) => {
@@ -1300,7 +1305,8 @@ impl Node {
                 } => {
                     // The promotion refused at the max-peers cap: the link
                     // and the machine go, and the core hands the lease back.
-                    // Nothing is closed.
+                    // The link's connection closes by the close rule, when
+                    // no other live link uses it, as one the ACL refuses.
                     warn!(
                         target: "fips::node::handlers::handshake",
                         link_id = %link,
@@ -1313,14 +1319,18 @@ impl Node {
                     self.remove_peer_machine(link);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                    installed = Installed::Refused;
+                    refused = true;
                 }
                 Output::Free { lease } => self.free_lease(lease),
+                Output::Retire { link: l, closes: c } if Some(l) == no => closes = c,
                 Output::Reset { .. } | Output::Retire { .. } => {}
                 other => debug_assert!(false, "a sent answer gave {other:?}"),
             }
         }
         let _ = ambient;
+        if refused {
+            installed = Installed::Refused(closes);
+        }
         installed
     }
 
@@ -2045,9 +2055,10 @@ impl Node {
         }
         if capped {
             // The install refused at the max-peers cap (peers filled between
-            // the dial and its msg2). The core hands the lease back; the
-            // dead link is left for the stale-connection sweep, and nothing
-            // is closed.
+            // the dial and its msg2). The core hands the lease back and
+            // retires the dial's link, which goes with its machine; its
+            // connection closes by the close rule, when no other live link
+            // uses it, as one the ACL refuses.
             warn!(
                 target: "fips::node::handlers::handshake",
                 link_id = %link_id,
@@ -2058,7 +2069,9 @@ impl Node {
             );
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+            self.close_each(closes).await;
             self.remove_peer_machine(link_id);
+            self.remove_link(&link_id);
             return;
         }
 

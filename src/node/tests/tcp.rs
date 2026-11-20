@@ -4,7 +4,8 @@
 //! handshake, spanning tree convergence, mixed-transport routing,
 //! MMP link-dead detection, reconnection after link death, a TCP
 //! path joining a multipath link made on loopback, the close of a
-//! connection whose msg1 is refused after the answer was asked for, and a
+//! connection whose msg1 is refused after the answer was asked for or whose
+//! dial is refused at the peer cap, and a
 //! pending redial's connection kept for the later redial that replaces it
 //! there.
 //! All tests use 127.0.0.1:0 (ephemeral ports) and need no privileges.
@@ -1105,6 +1106,53 @@ async fn a_late_acl_refusal_of_a_fresh_inbound_tcp_msg1_closes_its_connection_at
     assert!(
         end.is_ok(),
         "defect: the refused msg1's connection did not close within a second: {end:?}"
+    );
+}
+
+/// A node at a peer cap of one dials two nodes over TCP and both answer:
+/// the first answer read installs its peer, and the second, refused at the
+/// cap, closes the dial's connection at once, since no other link uses it,
+/// as a connection refused by the ACL is closed.
+#[tokio::test]
+async fn a_dial_refused_at_the_peer_cap_closes_its_tcp_connection_at_once() {
+    let mut config = Config::new();
+    config.node.limits.max_peers = 1;
+    let mut nodes = vec![
+        make_test_node_tcp_with(config).await,
+        make_test_node_tcp().await,
+        make_test_node_tcp().await,
+    ];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    initiate_handshake(&mut nodes, 0, 2).await;
+    let dialled = [1, 2].map(|j| pooled(&nodes[0], &nodes[j].addr.clone()).0);
+    // Each responder answers, and the dialer reads both answers.
+    for _ in 0..200 {
+        if nodes[0].node.legs().iter().next().is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    let settled = nodes[0].node.legs().iter().next().is_none();
+    let held = nodes[0].node.peer_count();
+    let refused = [1, 2]
+        .into_iter()
+        .find(|&j| nodes[0].node.get_peer(nodes[j].node.node_addr()).is_none());
+    let after = refused.map(|j| pooled(&nodes[0], &nodes[j].addr.clone()).0);
+    cleanup_nodes(&mut nodes).await;
+
+    assert_eq!(
+        dialled,
+        [ConnectionState::Connected, ConnectionState::Connected],
+        "precondition: both dials hold a connection"
+    );
+    assert!(settled, "precondition: the dialer read both answers");
+    assert_eq!(held, 1, "precondition: the cap holds one peer");
+    assert!(refused.is_some(), "precondition: one dial was refused");
+    assert_eq!(
+        after,
+        Some(ConnectionState::None),
+        "defect: the dial refused at the peer cap left its connection open"
     );
 }
 
