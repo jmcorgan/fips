@@ -86,11 +86,11 @@ pub(in crate::node) fn held_cache(node: &Node) -> Vec<(crate::NodeAddr, &'static
         .collect()
 }
 
-/// `link-named`: every link is named by a peer, a handshake machine or a
+/// `link-named`: every link is named by a peer, a handshake entry or a
 /// handshake leg. The links no one names.
 pub(in crate::node) fn link_named(node: &Node) -> Vec<LinkId> {
     let mut named: HashSet<LinkId> = node.peers.values().map(|p| p.link_id()).collect();
-    named.extend(node.peer_machines.keys().copied());
+    named.extend(node.handshakes.keys().copied());
     named.extend(
         node.legs()
             .iter()
@@ -178,8 +178,8 @@ pub(in crate::node) fn held_entry(node: &Node) -> Vec<LinkId> {
 /// that pair names another live link. The legs' links that break it.
 pub(in crate::node) fn leg_entry(node: &Node) -> Vec<LinkId> {
     let mut bad = Vec::new();
-    for (link, machine) in node.peer_machines.iter() {
-        if machine.leg().is_none() {
+    for (link, entry) in node.handshakes.iter() {
+        if entry.leg().is_none() {
             continue;
         }
         let Some(at) = node.links.get(link) else {
@@ -200,12 +200,12 @@ pub(in crate::node) fn leg_entry(node: &Node) -> Vec<LinkId> {
 
 /// `redial-leg`: each pending redial the settlement core marks names a leg:
 /// the answer's leg in the core's legs on that link, for that peer, holding
-/// an index no peer is bound to, on a link that is open, with a registered
-/// machine on it, still at `Handshaking{ReceivedMsg1}`, whose identity is
-/// the redial's peer; and the node's cache of the redials holds that link
-/// and index for the peer. The identities whose mark breaks it.
+/// an index no peer is bound to, on a link that is open, with a handshake
+/// entry on it that still holds its crypto, for a msg1 this node answered,
+/// whose identity is the redial's peer; and the node's cache of the redials
+/// holds that link and index for the peer. The identities whose mark breaks
+/// it.
 pub(in crate::node) fn redial_leg(node: &Node) -> Vec<crate::NodeAddr> {
-    use crate::peer::machine::{HandshakePhase, PeerState};
     let mut bad = Vec::new();
     for (peer, no) in node.core.redials() {
         let leg = node.core.legs().get(no).filter(|leg| {
@@ -215,14 +215,10 @@ pub(in crate::node) fn redial_leg(node: &Node) -> Vec<crate::NodeAddr> {
         let link = node.links.id(no);
         let ok = match (leg, link) {
             (Some(leg), Some(link)) => {
-                node.peer_machines.get(&link).is_some_and(|m| {
-                    matches!(
-                        m.state(),
-                        PeerState::Handshaking {
-                            phase: HandshakePhase::ReceivedMsg1,
-                            ..
-                        }
-                    ) && m.conn_expected_identity().map(|id| *id.node_addr()) == Some(*peer)
+                node.handshakes.get(&link).is_some_and(|e| {
+                    e.leg().is_some()
+                        && e.conn_is_inbound()
+                        && e.conn_expected_identity().map(|id| *id.node_addr()) == Some(*peer)
                 }) && node.peers_by_index.get(&leg.index()).is_none()
                     && node.links.contains_key(&link)
                     && node
@@ -284,9 +280,9 @@ pub(in crate::node) fn index(node: &Node, step: &str) {
         leased += peer.link_bindings().len();
     }
     leased += node
-        .peer_machines
+        .handshakes
         .values()
-        .filter(|machine| machine.our_index().is_some())
+        .filter(|entry| entry.our_index().is_some())
         .count();
     leased += node.legs().iter().count();
     let mapped: HashMap<_, _> = node
@@ -314,15 +310,16 @@ pub(in crate::node) fn index(node: &Node, step: &str) {
     let _ = onworker;
 }
 
-/// `carrier`: every handshake machine has a live carrier, its own pending
-/// connection, an active peer on its link, or a pending connect still
-/// resolving toward it. A machine with none is unreachable by every teardown
-/// path and has leaked. The links of the machines that break it.
+/// `carrier`: every handshake entry has a live carrier, its own pending
+/// connection, an active peer on its link whose promotion has not yet
+/// dropped it, or a pending connect still resolving toward it. An entry with
+/// none is unreachable by every teardown path and has leaked. The links of
+/// the entries that break it.
 pub(in crate::node) fn carrier(node: &Node) -> Vec<LinkId> {
-    node.peer_machines
+    node.handshakes
         .iter()
-        .filter(|(link, machine)| {
-            machine.leg().is_none()
+        .filter(|(link, entry)| {
+            entry.leg().is_none()
                 && !node.peers.values().any(|peer| peer.link_id() == **link)
                 && !node
                     .peering

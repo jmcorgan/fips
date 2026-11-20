@@ -3,10 +3,13 @@
 Peer settlement: how two nodes that dial each other, restart or rekey end
 up holding one session on one link, and which connections each link still
 needs. The module is declared in `../mod.rs` and hidden from the docs.
-The settlement core is compiled in every build and called by nothing
-yet; the reference model is declared in `mod.rs` under
-`#[cfg(any(test, feature = "test-hooks"))]`, so it reaches no normal or
-release build.
+The settlement core is compiled in every build, and the node decides
+every handshake and removal through it: `src/node/settle/decide.rs` steps
+the node's one copy of `Table` and is, with two path feeds, the only
+caller of `Table::step`, `poll`, `reap_leg` and `close`, which a root
+scan (`src/node/settle/tests/scans.rs`) holds. The reference model is
+declared in `mod.rs` under `#[cfg(any(test, feature = "test-hooks"))]`,
+so it reaches no normal or release build.
 
 ## Files
 
@@ -84,8 +87,9 @@ release build.
   reaping.
 - `table.rs`: the judgements. `Table` holds the links, the legs, the peer
   held for each identity and the gates; `step` takes one input and
-  returns the outputs, `poll` runs the legs' timers and `close` gives
-  everything back. `gates` lends the gates' memory for a shell's reads;
+  returns the outputs, `poll` runs the legs' timers, `reap_leg` reaps one
+  leg alone and `close` gives everything back. `gates` lends the gates'
+  memory for a shell's reads;
   hidden from the docs, `count_refused` and `take_refused` keep a shell's
   count of the msg1s a silent-session back-off refused, for its log,
   `drop_leg` ends a leg for a cause the table has no input for, with the
@@ -237,8 +241,8 @@ to the model, and nothing in `model/` refers to a core item; the scans in
 - A removal asks for a reconnect (`Output::Retry`) where the node notes
   the loss for one: a dead link, a `Disconnect` and an orphaned bundle,
   which the node removes through its link-dead path, and a restart, a
-  replacement and an own-dial restart, whose loss the peer's control
-  machine reports before the new session is promoted.
+  replacement and an own-dial restart, whose loss the node notes before
+  the new session is promoted.
 - A move sets the peering heard, as FRC-1201 Section 5.5 counts a
   peering this node set up as initiator, and as the node does. A move
   that makes an unheard peering heard forgets the identity's replay
@@ -253,6 +257,12 @@ to the model, and nothing in `model/` refers to a core item; the scans in
   install, counts when it ends before the peer's first frame.
 - Every deadline comes from `params::deadline`, which saturates at the
   end of the instant type's range rather than overflowing.
+- The gate constants are `Params::default`'s, and the node takes them as
+  they are: it moves only the handshake timers and the two caps from its
+  configuration (`src/node/settle/params.rs`). The root crate's
+  decision-input scan (`src/node/settle/tests/scans.rs`) holds every
+  other appearance of them, of the rekey machine's parameters and of the
+  node-address ordering to an exempt list with reasons.
 - Only an accepted restart or replacement that tears down a heard
   peering stamps the dampener; a refusal never does, so a sustained
   replay cannot keep a genuine restart out.

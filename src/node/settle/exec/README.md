@@ -25,26 +25,26 @@ statements at its site.
   statements its sites ran.
 - `install.rs`: a promotion's effects, and the promotion a replacement
   ends with, with their `Facts`; `Node::install`, the part of a promotion a
-  test may run alone through `promote_connection`, which builds the peer's
-  machines and puts it in the node's maps; and `Run::promotion`, the run the
-  peer action executor's promotion arm builds once `promote_connection`
-  succeeded, a replacement's where the step says why it removed the held
-  peer. What the leg's control machine returns for the outcome goes back to
-  that arm's worklist, after the plan. A replacement is not one step: the
-  ACL check and the index allocation between its removal and its promotion
-  may stop it with the removal done. So the executor's removal arm runs the
-  removal's part of its plan, through `Run::replacement` and
-  `Node::run_removal`, and the promotion arm the rest, through
-  `Node::run_promotion`, which runs a promotion's whole plan.
+  test may run alone through `install_handshake`, which builds the peer's
+  machines and puts it in the node's maps; `Ambient`, the facts of the
+  handshake step that installs the peer; and `Run::promotion`, the run the
+  handshake handlers' promotion (`Node::promote`) builds once
+  `install_handshake` succeeded, a replacement's where the step says why
+  it removed the held peer. A replacement is not one step: the ACL check
+  and the index allocation between its removal and its promotion may stop
+  it with the removal done. So its site runs the removal's part of its
+  plan, through `Run::replacement` and `Node::run_removal`, and the
+  promotion the rest, through `Node::run_promotion`, which runs a
+  promotion's whole plan.
 - `cross.rs`: a crossing's effects, moved onto this node's dial or kept on
   the peer's inbound session, with their `Facts`, which the site in
   `handle_msg2` fills through `Run::crossing`, since this file's module is
-  private to `exec/`. The move itself, `move_session`, stays at the site,
+  private to `exec/`. The move itself, `adopt_dial`, stays at the site,
   and so does the decision between a move and a keep, which passes through
   `Run::swaps` for the mutation lane's break of it. A move that rebuilt the
-  machine holds the peer on the dial's link: `move_session` sets the
+  machine holds the peer on the dial's link: `adopt_dial` sets the
   peer's link id, and `HoldDial` holds the core's record of that link and
-  keys the control machine, its timers and the carrier readings under it.
+  keys the carrier readings under it.
   `Facts.loser` names the link torn down, the one the move left or, at a
   refused move and a keep, the dial's, which `LoserClose` and
   `LoserRemoved` close by the close rule (`Node::close_unused`) and
@@ -105,7 +105,7 @@ statements at its site.
 - A peer's machines are built and closed here, through the active peer's
   `with_session` and `stop`, which alone ask the settlement core's join for
   those changes; a crossing's move is the one change its site asks for,
-  through `move_session`, before running the rest here. No code outside the
+  through `adopt_dial`, before running the rest here. No code outside the
   join calls a machine to build, renew or close it but the exemptions
   `../tests/scans.rs` lists with their reasons, and that scan reds on any
   other.

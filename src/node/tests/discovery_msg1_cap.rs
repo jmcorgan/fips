@@ -124,7 +124,7 @@ async fn a_configured_peer_dialled_at_an_mdns_address_keeps_the_configured_resen
 /// advert starts toward a configured peer is not.
 #[tokio::test]
 async fn an_mdns_dial_to_an_unconfigured_node_is_marked_as_such_and_a_configured_one_is_not() {
-    use crate::peer::machine::DialOrigin;
+    use crate::peer::handshake::DialOrigin;
 
     let stranger = make_peer_identity();
     let friend = make_peer_identity();

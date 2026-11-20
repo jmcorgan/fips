@@ -352,8 +352,8 @@ async fn a_lan_candidate_is_dialled_before_it_expires_while_a_claim_is_kept_in_f
 async fn origins_across_the_hand_off(
     nodes: &mut [TestNode],
 ) -> (
-    crate::peer::machine::DialOrigin,
-    crate::peer::machine::DialOrigin,
+    crate::peer::handshake::DialOrigin,
+    crate::peer::handshake::DialOrigin,
 ) {
     let n0 = *nodes[0].node.node_addr();
     assert!(until(|| !nodes[1].node.peering.pending_connects.is_empty()).await);
@@ -361,7 +361,7 @@ async fn origins_across_the_hand_off(
     assert_eq!(pending.len(), 1, "one dial to node 0");
     let at_connect = pending[0].origin;
     assert_eq!(
-        nodes[1].node.peer_machines[&pending[0].link_id].dial_origin(),
+        nodes[1].node.handshakes[&pending[0].link_id].dial_origin(),
         at_connect,
         "the pending connect carries its machine's origin"
     );
@@ -390,7 +390,7 @@ async fn origins_across_the_hand_off(
 /// pending BLE connect through to its handshake leg.
 #[tokio::test]
 async fn a_claim_dial_keeps_its_origin_from_pending_connect_to_handshake_leg() {
-    use crate::peer::machine::DialOrigin;
+    use crate::peer::handshake::DialOrigin;
     let mut nodes = claim_pair().await;
     let key_0 = nodes[0].node.identity().pubkey().serialize();
     let at = ble_addr(20).to_transport_addr();
@@ -411,7 +411,7 @@ async fn a_claim_dial_keeps_its_origin_from_pending_connect_to_handshake_leg() {
 #[tokio::test]
 async fn a_configured_dial_is_not_marked_as_a_claim() {
     use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
-    use crate::peer::machine::DialOrigin;
+    use crate::peer::handshake::DialOrigin;
     let mut nodes = claim_pair().await;
     let key_0 = nodes[0].node.identity().pubkey().serialize();
     let at = ble_addr(20).to_transport_addr();
@@ -447,7 +447,7 @@ async fn a_configured_dial_is_not_marked_as_a_claim() {
 #[tokio::test]
 async fn an_honest_peer_reached_by_a_claim_leg_and_an_addressed_leg_ends_as_one_peer() {
     use super::spanning_tree::{add_loopback_alias, drain_all_packets, make_test_node};
-    use crate::peer::machine::DialOrigin;
+    use crate::peer::handshake::DialOrigin;
     let mut nodes = vec![make_test_node().await, make_test_node().await];
     let tid = nodes[1].transport_id;
     let n0 = *nodes[0].node.node_addr();

@@ -3,17 +3,14 @@
 //! The pure, runtime-agnostic bookkeeping for an in-progress FMP peer
 //! connection — link/direction identity, learned peer identity and epoch,
 //! index/transport/address tracking, handshake-resend scheduling, and link
-//! statistics — extracted out of the async node shell. The handshake phase
-//! itself lives solely on the per-peer control machine
-//! (`PeerMachine`), not here.
+//! statistics — extracted out of the async node shell.
 //!
 //! [`ConnectionState`] owns every **pure** field of the handshake-phase
 //! connection. The Noise crypto handles (`noise::HandshakeState`,
-//! `NoiseSession`) stay shell-owned in the per-peer control machine's
-//! handshake carrier, which the machine drives alongside its own
-//! `ConnectionState`. The machine's transition methods drive the Noise
-//! objects, then write learned results back through the pure setters here
-//! (`set_expected_identity`,
+//! `NoiseSession`) stay shell-owned in the crypto carrier of the node's
+//! entry for the handshake, beside its own `ConnectionState`. The entry's
+//! handshake operations drive the Noise objects, then write learned results
+//! back through the pure setters here (`set_expected_identity`,
 //! `set_remote_epoch`, `touch`).
 //!
 //! This state is `no_std`+`alloc`-clean: the identifier/address/statistics
@@ -62,9 +59,10 @@ impl LegStamp {
 /// Pure, runtime-agnostic bookkeeping for a connection in the handshake phase.
 ///
 /// Owns every non-crypto field of the handshake-phase connection. The Noise
-/// crypto handles live beside it on the per-peer control machine; this struct
-/// is written only as plain data — the machine extracts learned identity and
-/// epoch out of the crypto objects and sets them here through the setters.
+/// crypto handles live beside it on the node's entry for the handshake; this
+/// struct is written only as plain data — the entry extracts learned
+/// identity and epoch out of the crypto objects and sets them here through
+/// the setters.
 #[derive(Debug)]
 pub struct ConnectionState {
     // === Link Reference ===
@@ -391,9 +389,9 @@ impl ConnectionState {
 
     // === Activity / Timeout ===
 
-    /// Overwrite the connection-start timestamp. Used when the surviving
-    /// control-machine carrier adopts the leg's start provenance instead of the
-    /// machine-construction default.
+    /// Overwrite the connection-start timestamp. Used when the handshake's
+    /// entry adopts the leg's start provenance instead of its construction
+    /// default.
     pub fn set_started_at(&mut self, started_at_ms: u64) {
         self.started_at = started_at_ms;
     }

@@ -628,7 +628,7 @@ CMDS = {
         ["FIPS_TEST_PRIVILEGED=1", "transport::ethernet transport::sockbuf",
          "test result: ok\\. [1-9][0-9]* passed;"],
     ("test-release", "Compile the library tests in release mode and run the leg-slot residue test"):
-        ["RESIDUE_TEST=peer::machine::tests::take_leg_leaves_no_session_keys_in_the_slot_it_empties",
+        ["RESIDUE_TEST=peer::handshake::tests::take_leg_leaves_no_session_keys_in_the_slot_it_empties",
          "cargo test --profile integration --lib -- --exact",
          "test result: ok\\. 1 passed;"],
     ("test-musl", "Create an address-less interface for the presence probe"):

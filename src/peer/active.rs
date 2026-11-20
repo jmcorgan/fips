@@ -765,7 +765,7 @@ impl ActivePeer {
     /// original path ([`PeerBundle::renew`]); `caps.path` gives the facts it
     /// reads.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn move_session(
+    pub(crate) fn adopt_dial(
         &mut self,
         session: NoiseSession,
         ours: IndexLease,
@@ -788,7 +788,7 @@ impl ActivePeer {
         (out, paths)
     }
 
-    /// The machine part of [`move_session`](Self::move_session), through the
+    /// The machine part of [`adopt_dial`](Self::adopt_dial), through the
     /// settlement core's join: close the rekey machine, build it again on
     /// `session` from what it carried, and renew the bundle at `to`. Returns
     /// the outputs, the path outputs, and whether the machine was rebuilt;

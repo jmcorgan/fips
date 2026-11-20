@@ -125,7 +125,7 @@ struct Attempt {
 }
 
 fn attempt(node: &Node, link: LinkId) -> Attempt {
-    let machine = node.peer_machines.get(&link).expect("the dial's machine");
+    let machine = node.handshakes.get(&link).expect("the dial's machine");
     let leg = node.leg(link);
     Attempt {
         link,
@@ -185,7 +185,7 @@ async fn a_forged_initial_msg2_leaves_the_resend_schedule_as_it_was() {
     nodes[0].node.check_timeouts().await;
 
     assert!(
-        nodes[0].node.peer_machines.contains_key(&link),
+        nodes[0].node.handshakes.contains_key(&link),
         "the forged msg2 must not end the attempt"
     );
     assert_eq!(
@@ -219,7 +219,7 @@ async fn a_forged_initial_msg2_leaves_the_resend_schedule_as_it_was() {
 /// any forgery, on the interval clock the timeout reads.
 async fn alive_at_and_after_deadline(forge: bool) -> (bool, bool) {
     let (mut nodes, link, _msg1, observed) = dial_unanswered().await;
-    let last_activity = nodes[0].node.peer_machines[&link].conn_active_at();
+    let last_activity = nodes[0].node.handshakes[&link].conn_active_at();
     let timeout_ms = nodes[0]
         .node
         .config()
@@ -239,12 +239,12 @@ async fn alive_at_and_after_deadline(forge: bool) -> (bool, bool) {
         .node
         .drive_peer_timers(last_activity + timeout_ms)
         .await;
-    let at = nodes[0].node.peer_machines.contains_key(&link);
+    let at = nodes[0].node.handshakes.contains_key(&link);
     nodes[0]
         .node
         .drive_peer_timers(last_activity + timeout_ms + 1)
         .await;
-    let after = nodes[0].node.peer_machines.contains_key(&link);
+    let after = nodes[0].node.handshakes.contains_key(&link);
     cleanup_nodes(&mut nodes).await;
     (at, after)
 }

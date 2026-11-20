@@ -149,7 +149,7 @@ async fn replay_expires(mp: Multipath, age_secs: u64, workers: bool) {
             && !b.index_allocator.is_allocated(pending.index)
             && b.links.get(&pending.link).is_none()
             && !b.links.index().values().any(|link| *link == pending.link)
-            && b.peer_machines.get(&pending.link).is_none(),
+            && b.handshakes.get(&pending.link).is_none(),
         "defect: msg2s {} redials {:?} gone at {gone_at:?}",
         tap.msg2s.len(),
         r
@@ -657,7 +657,7 @@ async fn a_redial_more_than_1_s_after_an_unproven_one_replaces_it_and_frees_its_
     let b = &pair.nodes[1].node;
     let freed = !b.index_allocator.is_allocated(old.index)
         && b.links.get(&old.link).is_none()
-        && b.peer_machines.get(&old.link).is_none();
+        && b.handshakes.get(&old.link).is_none();
     let msg2 = tap.msg2s.pop();
     if let Some(msg2) = msg2 {
         second.answered(&msg2);

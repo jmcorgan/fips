@@ -3,27 +3,25 @@
 //! peer a replacement starts with.
 //!
 //! [`Node::install`] is the part a promotion runs before its plan, which a
-//! test may call alone through `promote_connection`: it builds the peer's
-//! machines and puts the peer in the node's maps. The peer action executor's
-//! promotion arm then runs the plan of a [`Run::promotion`], whose effects
-//! here read the [`Facts`] it holds.
+//! test may call alone through `install_handshake`: it builds the peer's
+//! machines and puts the peer in the node's maps. The handshake handlers'
+//! promotion (`Node::promote`) then runs the plan of a [`Run::promotion`],
+//! whose effects here read the [`Facts`] it holds.
 //!
 //! A replacement is not one step. Its plan is the removal's effects, then
-//! the promotion's, and between the two the old peer's control machine notes
-//! the loss and the site checks the ACL and allocates the new index, either
-//! of which may stop the replacement with the removal done. So the executor's
-//! removal arm runs the first part, through [`Run::replacement`] and
-//! [`Node::run_removal`], and the promotion arm the second, through
-//! [`Node::run_promotion`]; a promotion's plan is all of the second kind.
+//! the promotion's, and between the two the site checks the ACL and
+//! allocates the new index, either of which may stop the replacement with
+//! the removal done. So the site runs the first part, through
+//! [`Run::replacement`] and [`Node::run_removal`], and the promotion the
+//! second, through [`Node::run_promotion`]; a promotion's plan is all of the
+//! second kind.
 
 use super::plan::{Effect, plan};
 use super::{Removed, Run};
 use crate::PeerIdentity;
-use crate::node::dataplane::PeerActionCtx;
 use crate::node::handlers::path::NodeFacts;
 use crate::node::settle::table::Transition;
 use crate::node::{AddrKey, Node, NodeError};
-use crate::peer::machine::{PeerAction, PeerEvent};
 use crate::peer::{ActivePeer, LinkCaps, LinkOutputs, PathCaps};
 use crate::proto::fmp::wire::Msg1Header;
 use crate::proto::fmp::{EphemeralDigest, PromotionResult};
@@ -34,19 +32,39 @@ use crate::utils::index::SessionIndex;
 use fips_core::proto::rekey::IndexLease;
 use tracing::info;
 
+/// The facts of the handshake step that installs a new peer, which its
+/// promotion's run reads: the verified identity, the pair, our session
+/// index, the wire stamp, the direction, and why a held peer was removed.
+pub(in crate::node) struct Ambient {
+    /// The authenticated peer identity, which the promotion installs.
+    pub(in crate::node) verified_identity: PeerIdentity,
+    /// The transport the exchange is happening over (the msg2 send target).
+    pub(in crate::node) transport_id: TransportId,
+    /// The peer's wire address (the msg2 send target).
+    pub(in crate::node) remote_addr: TransportAddr,
+    /// Our session index for this exchange (the msg2's sender index).
+    pub(in crate::node) our_index: Option<SessionIndex>,
+    /// The wire timestamp driving this step (the promotion's stamp), Unix
+    /// milliseconds.
+    pub(in crate::node) now_ms: u64,
+    /// Establish direction for this exchange: `true` for this node's dial,
+    /// answered by its msg2, and `false` for a msg1 this node answered. A
+    /// refused promotion's cleanup differs between the two.
+    pub(in crate::node) is_outbound: bool,
+    /// Why the peer this step removes is removed: a handshake that replaces
+    /// the held peer says how, which the replacement's promotion reads too.
+    /// `None` where the step removes no peer.
+    pub(in crate::node) why: Option<Why>,
+}
+
 /// What a promotion's effects read beyond the transition.
 #[derive(Debug, Default)]
 pub(in crate::node) struct Facts {
-    /// The promotion's outcome, which the leg's control machine is told.
+    /// The promotion's outcome.
     result: Option<PromotionResult>,
-    /// The interval clock's reading the control machine steps at.
-    interval_ms: u64,
     /// The pair the promoted link runs on, which the transport marks for a
     /// dial of this node's.
     at: Option<AddrKey>,
-    /// What the control machine returned for the outcome, for the worklist
-    /// of the step that promoted.
-    follow: Vec<PeerAction>,
     /// The removal a replacement starts with, which its removal's effects
     /// read; `None` in the run of a promotion.
     removed: Option<Removed>,
@@ -65,7 +83,7 @@ impl Facts {
 }
 
 impl Run {
-    /// The run of a promotion of `link` that `promote_connection` answered
+    /// The run of a promotion of `link` that `install_handshake` answered
     /// with `result`, by a step whose facts are `ambient`: of this node's
     /// dial, answered by its msg2, when the step is outbound, and of a msg1
     /// this node answered otherwise. Where `ambient` says the step replaced
@@ -73,7 +91,7 @@ impl Run {
     pub(in crate::node) fn promotion(
         link: LinkId,
         result: PromotionResult,
-        ambient: &PeerActionCtx,
+        ambient: &Ambient,
     ) -> Self {
         let initiator = ambient.is_outbound;
         // A dial's msg2 found its leg by the transport its msg1 went out on
@@ -87,9 +105,7 @@ impl Run {
             dial,
             facts: super::Facts::Install(Facts {
                 result: Some(result),
-                interval_ms: ambient.interval_ms,
                 at: Some((ambient.transport_id, ambient.remote_addr.clone())),
-                follow: Vec::new(),
                 removed: None,
             }),
         }
@@ -98,11 +114,7 @@ impl Run {
     /// The run of the replacement whose removal of the held peer, by a step
     /// whose facts are `ambient`, gave `removed`, and whose new peer is to be
     /// promoted on `link`.
-    pub(in crate::node) fn replacement(
-        link: LinkId,
-        removed: Removed,
-        ambient: &PeerActionCtx,
-    ) -> Self {
+    pub(in crate::node) fn replacement(link: LinkId, removed: Removed, ambient: &Ambient) -> Self {
         let t = transition(link, ambient);
         debug_assert!(
             matches!(t, Transition::Replace { .. }),
@@ -114,14 +126,6 @@ impl Run {
             ..Facts::default()
         });
         r
-    }
-
-    /// Take what the leg's control machine returned for the promotion's
-    /// outcome, which the step that promoted runs after the plan.
-    pub(in crate::node) fn follow(&mut self) -> Vec<PeerAction> {
-        facts(self)
-            .map(|f| std::mem::take(&mut f.follow))
-            .unwrap_or_default()
     }
 }
 
@@ -137,7 +141,7 @@ fn facts(r: &mut Run) -> Option<&mut Facts> {
 /// The transition of a step whose facts are `ambient` that installs a new
 /// peer on `link`: a replacement where the step says why it removed the
 /// held one, and a promotion otherwise.
-fn transition(link: LinkId, ambient: &PeerActionCtx) -> Transition {
+fn transition(link: LinkId, ambient: &Ambient) -> Transition {
     let initiator = ambient.is_outbound;
     match ambient.why {
         Some(why @ (Why::Restart | Why::Replacement | Why::Redial | Why::OwnRestart)) => {
@@ -356,23 +360,6 @@ impl Node {
     }
 }
 
-/// Feed the promotion's outcome to the leg's control machine, keeping what
-/// it returns for the step's worklist.
-pub(super) async fn machine_resolved(node: &mut Node, r: &mut Run) {
-    let link = link(&r.t);
-    let Some(f) = facts(r) else {
-        return;
-    };
-    let Some(result) = f.result else {
-        return;
-    };
-    // Disjoint field borrow: the machine's map and the index allocator.
-    f.follow = match link.and_then(|link| node.peer_machines.get_mut(&link)) {
-        Some(machine) => machine.step(PeerEvent::PromotionResolved { result }, f.interval_ms),
-        None => Vec::new(),
-    };
-}
-
 /// Tell the transport which link the new peer uses. Only the initiator's
 /// promotion does: it follows msg2, which answers this node's own fresh
 /// ephemeral key, whereas a responder promotes on msg1 alone, and a captured
@@ -400,15 +387,15 @@ pub(super) async fn promoted_note(node: &mut Node, r: &mut Run) {
 }
 
 /// Store on the peer the msg2 that answered the link's setup msg1, kept on
-/// the leg's control machine for resends, so a duplicate msg1 is answered
-/// with it; record that msg1 itself, since a copy of it after the session
-/// can rekey is not a rekey and must not arm a pending; and its ephemeral.
+/// the handshake's entry for resends, so a duplicate msg1 is answered with
+/// it; record that msg1 itself, since a copy of it after the session can
+/// rekey is not a rekey and must not arm a pending; and its ephemeral.
 pub(super) async fn setup_note(node: &mut Node, r: &mut Run) {
-    let Some(machine) = link(&r.t).and_then(|link| node.peer_machines.get_mut(&link)) else {
+    let Some(entry) = link(&r.t).and_then(|link| node.handshakes.get_mut(&link)) else {
         return;
     };
-    let msg1 = machine.take_msg1().unwrap_or_default();
-    let msg2 = machine
+    let msg1 = entry.take_msg1().unwrap_or_default();
+    let msg2 = entry
         .conn_handshake_msg2()
         .map(<[u8]>::to_vec)
         .unwrap_or_default();

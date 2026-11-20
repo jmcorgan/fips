@@ -94,7 +94,7 @@ fn ephemeral_of(msg1: &[u8]) -> Option<EphemeralDigest> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn stored_msg2(tn: &TestNode) -> Vec<u8> {
     tn.node
-        .peer_machines
+        .handshakes
         .values()
         .find_map(|m| m.conn_handshake_msg2())
         .map(<[u8]>::to_vec)

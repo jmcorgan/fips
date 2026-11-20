@@ -103,7 +103,7 @@ async fn outbound_denied_at_msg2(
     let our_index_a_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
     let our_index_a = crate::utils::index::SessionIndex::new(our_index_a_lease.index());
     node_a
-        .seed_handshake_machine(
+        .seed_handshake(
             HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
                 .with_our_index(our_index_a_lease)
                 .with_transport_id(transport_id)
@@ -113,7 +113,7 @@ async fn outbound_denied_at_msg2(
     let keypair_a = node_a.identity().keypair();
     let epoch_a = node_a.startup_epoch();
     let noise_msg1 = node_a
-        .peer_machines
+        .handshakes
         .get_mut(&link_id_a)
         .unwrap()
         .start_handshake(keypair_a, epoch_a, LegStamp::at(1000))
@@ -256,9 +256,9 @@ async fn test_outbound_connect_not_denied_by_allowlist_miss() {
 
 /// The ACL-rejected arm of the same property the Noise-failure arm pins in
 /// `unit.rs`: a msg1 that is admitted by the crypto but denied by the ACL
-/// still leaves nothing behind. The control machine is built above the crypto
-/// so it can drive the handshake, but it stays a local until a promote tail
-/// inserts it, so a denial drops it.
+/// still leaves nothing behind. The handshake's entry is built above the
+/// crypto so it can hold the handshake, but it stays a local until the
+/// answer inserts it, so a denial drops it.
 #[tokio::test]
 async fn test_acl_rejected_msg1_leaves_no_registry_trace() {
     let (dir, mut node_b) = make_acl_node();
@@ -287,8 +287,8 @@ async fn test_acl_rejected_msg1_leaves_no_registry_trace() {
     node_b.handle_msg1(packet).await;
 
     assert!(
-        node_b.peer_machines.is_empty(),
-        "an ACL-denied msg1 must leave no control machine behind"
+        node_b.handshakes.is_empty(),
+        "an ACL-denied msg1 must leave no handshake entry behind"
     );
     assert_eq!(node_b.connection_count(), 0);
     assert_eq!(node_b.peer_count(), 0);

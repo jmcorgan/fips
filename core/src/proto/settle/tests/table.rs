@@ -770,8 +770,8 @@ fn an_orphaned_bundle_removes_the_peer_and_retires_its_link() {
     assert!(table.links().get(link).is_none(), "its link is retired");
 }
 
-/// The node routes an orphaned bundle through its link-dead path, whose
-/// control machine notes the loss for a reconnect, as it does a dead link.
+/// The node routes an orphaned bundle through its link-dead path, which
+/// notes the loss for a reconnect, as it does for a dead link.
 #[test]
 fn an_orphaned_bundles_peer_is_retried() {
     let (mut table, _) = dialer(1);
@@ -785,8 +785,8 @@ fn an_orphaned_bundles_peer_is_retried() {
 /// A peer held at epoch 1 torn down, past the unheard floor, in each of
 /// the three ways a new session replaces it: a msg1 at a new epoch, the
 /// rekey machine's replacement request, and this node's own dial answered
-/// at a new epoch. The node's control machine reports each loss for a
-/// reconnect before the new session is promoted, as at a dead link.
+/// at a new epoch. The node notes each loss for a reconnect before the new
+/// session is promoted, as at a dead link.
 #[test]
 fn a_restarted_or_replaced_peer_is_retried_in_each_of_the_three_ways() {
     const LATER: Epoch = [2; 8];
@@ -2559,9 +2559,8 @@ fn a_redial_abandoned_after_its_acl_passed_is_noted_in_the_redial_memory() {
 
 #[test]
 fn a_peer_a_redials_swap_replaces_is_retried() {
-    // The node's control machine reports the held peering's loss before it
-    // promotes the redial's leg, and the node notes a reconnect for it, as
-    // for a replacement.
+    // The node notes the held peering's loss for a reconnect before it
+    // promotes the redial's leg, as for a replacement.
     let mut table = held_heard();
     let link = redialed(&mut table, 2, 8, 40_100);
     let out = go(

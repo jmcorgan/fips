@@ -1,98 +1,57 @@
-//! The per-peer maps other than the link table: the handshake machines with
-//! their timers, the active peers and the session-index map. The handshake
-//! legs are the settlement core's (`Node::legs`).
+//! The per-peer maps other than the link table: the handshakes in flight,
+//! the active peers and the session-index map. The handshake legs are the
+//! settlement core's (`Node.core`'s legs).
 
 use std::collections::HashMap;
 
 use crate::NodeAddr;
 use crate::peer::ActivePeer;
-use crate::peer::machine::{PeerMachine, TimerKind};
+use crate::peer::handshake::Handshake;
 use crate::transport::LinkId;
 use crate::utils::index::SessionIndex;
 
-/// The per-peer control machines, keyed by the `LinkId` that spans a peer's
-/// handshake and active life, with each machine's timer store.
+/// The node's entries for the handshakes in flight, keyed by the `LinkId` of
+/// each handshake's link: what the settlement core's leg for the link does
+/// not hold (the Noise crypto, the bookkeeping the promotion and the control
+/// API read, the dial's origin).
 ///
-/// The two share a lifetime: a machine's timers are dropped with it, so no
-/// armed timer outlives its machine. The machines are reached by `Deref` for
-/// reads, and by `get_mut` for a change to a machine that leaves the map as it
-/// is.
+/// An entry is added at a dial or at the answer of a msg1, and dropped when
+/// its handshake is promoted, given up or reaped. Entries are reached by
+/// `Deref` for reads, and by `get_mut` for a change to an entry that leaves
+/// the map as it is.
 #[derive(Default)]
-pub(in crate::node) struct MachineMap {
-    machines: HashMap<LinkId, PeerMachine>,
-    timers: HashMap<LinkId, HashMap<TimerKind, u64>>,
+pub(in crate::node) struct HandshakeMap {
+    entries: HashMap<LinkId, Handshake>,
     #[cfg(test)]
     planted: bool,
 }
 
-reads!(MachineMap, machines, HashMap<LinkId, PeerMachine>);
+reads!(HandshakeMap, entries, HashMap<LinkId, Handshake>);
 
-impl MachineMap {
-    /// A machine born at a dial or an inbound msg1, replacing any machine
+impl HandshakeMap {
+    /// A handshake begun at a dial or an answered msg1, replacing any entry
     /// the link had.
-    pub(in crate::node) fn add(&mut self, link: LinkId, machine: PeerMachine) {
-        self.machines.insert(link, machine);
+    pub(in crate::node) fn add(&mut self, link: LinkId, entry: Handshake) {
+        self.entries.insert(link, entry);
     }
 
-    /// The link's machine, made by `make` if the link has none.
+    /// The link's entry, made by `make` if the link has none.
     pub(in crate::node) fn ensure(
         &mut self,
         link: LinkId,
-        make: impl FnOnce() -> PeerMachine,
-    ) -> &mut PeerMachine {
-        self.machines.entry(link).or_insert_with(make)
+        make: impl FnOnce() -> Handshake,
+    ) -> &mut Handshake {
+        self.entries.entry(link).or_insert_with(make)
     }
 
-    /// The machine of the link `from` now controls the link `to`, onto which
-    /// its peer moved: the machine and its timers are keyed under `to`.
-    pub(in crate::node) fn rekey(&mut self, from: LinkId, to: LinkId) {
-        if let Some(mut machine) = self.machines.remove(&from) {
-            machine.relink(to);
-            self.machines.insert(to, machine);
-        }
-        if let Some(timers) = self.timers.remove(&from) {
-            self.timers.insert(to, timers);
-        }
-    }
-
-    /// Drop the link's machine and its timers.
+    /// Drop the link's entry.
     pub(in crate::node) fn drop(&mut self, link: LinkId) {
-        self.machines.remove(&link);
-        self.timers.remove(&link);
+        self.entries.remove(&link);
     }
 
-    /// The link's machine, to step or update.
-    pub(in crate::node) fn get_mut(&mut self, link: &LinkId) -> Option<&mut PeerMachine> {
-        self.machines.get_mut(link)
-    }
-
-    /// The timer store: each link's armed timers and their deadlines (ms),
-    /// which the tests read.
-    #[cfg(test)]
-    pub(in crate::node) fn timers(&self) -> &HashMap<LinkId, HashMap<TimerKind, u64>> {
-        &self.timers
-    }
-
-    /// Arm the link's timer of `kind` for `at` (ms), replacing its deadline
-    /// if it was armed.
-    pub(in crate::node) fn arm(&mut self, link: LinkId, kind: TimerKind, at: u64) {
-        self.timers.entry(link).or_default().insert(kind, at);
-    }
-
-    /// Disarm the link's timer of `kind`. The link keeps its store, empty or
-    /// not.
-    pub(in crate::node) fn cancel(&mut self, link: LinkId, kind: TimerKind) {
-        if let Some(timers) = self.timers.get_mut(&link) {
-            timers.remove(&kind);
-        }
-    }
-
-    /// The timer store, for a test that writes it itself. Marks the map
-    /// planted.
-    #[cfg(test)]
-    pub(in crate::node) fn raw_timers(&mut self) -> &mut HashMap<LinkId, HashMap<TimerKind, u64>> {
-        self.planted = true;
-        &mut self.timers
+    /// The link's entry, to update.
+    pub(in crate::node) fn get_mut(&mut self, link: &LinkId) -> Option<&mut Handshake> {
+        self.entries.get_mut(link)
     }
 }
 

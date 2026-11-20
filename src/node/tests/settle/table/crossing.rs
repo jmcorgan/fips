@@ -84,8 +84,8 @@ fn move_outcomes(s: MoveScript) -> Vec<(Row, Outcome)> {
         (Row::RekeyMachine, Outcome::Changed),
         // The rebuilt machine carries the record.
         (Row::SetupRecord, Outcome::Kept),
-        // The dial's machine is removed.
-        (Row::ControlMachine, Outcome::Changed),
+        // The dial's entry is dropped.
+        (Row::Handshake, Outcome::Changed),
         (Row::Connection, by(s.closed)),
         (Row::BleMark, by(s.moved)),
         // The answered dial is forgotten.
@@ -119,7 +119,7 @@ fn keep_outcomes(closed: bool, shared: bool) -> Vec<(Row, Outcome)> {
         // The dial's index is freed in the allocator, which no reading
         // holds; the peer's machine and its bound indices stay.
         (Row::RekeyMachine, Outcome::Kept),
-        (Row::ControlMachine, Outcome::Changed),
+        (Row::Handshake, Outcome::Changed),
         (Row::Connection, by(closed)),
         (Row::Dials, Outcome::Changed),
         (Row::FilterSend, Outcome::Changed),

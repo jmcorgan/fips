@@ -506,7 +506,7 @@ pub(super) fn pending_inbound(node: &mut Node, tid: TransportId, addr: &Transpor
     node.links.raw_index().insert((tid, addr.clone()), link_id);
     // The index the node drew for the answer before it wrote the msg2.
     let lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
-    node.seed_handshake_machine(
+    node.seed_handshake(
         HandshakeSeed::inbound(link_id, 1000)
             .with_our_index(lease)
             .with_transport_id(tid)
@@ -642,7 +642,7 @@ async fn dial(from: &mut Side, to: &Side) -> (Vec<u8>, SessionIndex) {
         fips_core::proto::rekey::allocate(&mut from.node.index_allocator).unwrap();
     let our_index = crate::utils::index::SessionIndex::new(our_index_lease.index());
     from.node
-        .seed_handshake_machine(
+        .seed_handshake(
             HandshakeSeed::outbound(link_id, target, 1000)
                 .with_our_index(our_index_lease)
                 .with_transport_id(tid)
@@ -651,7 +651,7 @@ async fn dial(from: &mut Side, to: &Side) -> (Vec<u8>, SessionIndex) {
         .unwrap();
     let keypair = from.node.identity().keypair();
     let epoch = from.node.startup_epoch();
-    let machine = from.node.peer_machines.get_mut(&link_id).unwrap();
+    let machine = from.node.handshakes.get_mut(&link_id).unwrap();
     let noise_msg1 = machine
         .start_handshake(keypair, epoch, LegStamp::at(1000))
         .unwrap();

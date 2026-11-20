@@ -79,15 +79,12 @@ faults! {
     /// tears down the dial's link, instead of holding the link it dialed
     /// and tearing down the one it left.
     MoveKeepsInboundLink,
-    /// A move onto the dial's link leaves the peer's control machine and
-    /// its timers under the link the peer left.
-    MachineLeftBehind,
     /// A move onto the dial's link leaves the peer's carrier readings under
     /// the link the peer left.
     CarrierLeftBehind,
-    /// The FMP decision for an outbound handshake completing beside an
-    /// existing peer ignores that the dial was this node's own, so only
-    /// the tie-break decides between swapping and keeping.
+    /// The settlement core's decision for a msg2 completing beside a held
+    /// peer ignores that the link the peer is held on was this node's own
+    /// dial, so only the tie-break decides between moving and keeping.
     IgnoreOwnDial,
     /// The smaller node of a crossed dial keeps the peer on its inbound
     /// session and closes its own dial, as the larger node does, where the
@@ -288,13 +285,12 @@ faults! {
     /// link.
     OrphanedNoRetry,
     /// The settlement core removes a peer for a restart, a replacement or
-    /// an own-dial restart with no reconnect, though the peer's control
-    /// machine reports each loss for one before the new session is
-    /// promoted.
+    /// an own-dial restart with no reconnect, though the node notes each
+    /// loss for one before the new session is promoted.
     RestartNoRetry,
     /// The settlement core removes a peer a redial's swap replaces with no
-    /// reconnect, though the peer's control machine reports the loss for
-    /// one before the redial's leg is promoted.
+    /// reconnect, though the node notes the loss for one before the
+    /// redial's leg is promoted.
     RedialNoRetry,
     /// The settlement core installs the peer a redial's swap promotes
     /// heard at the swap, forgetting its replay memory and silent sessions

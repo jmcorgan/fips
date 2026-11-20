@@ -4,13 +4,13 @@ Unit tests for the FMP link layer, declared from `fmp/mod.rs` as
 `#[cfg(test)] mod tests;`, with one exception noted below.
 
 - `mod.rs`: declares the test files.
-- `util.rs`: shared fixtures, among them a handshake outcome with a
-  fresh key.
-- `core.rs`: the `poll_*` decisions and the inbound msg1 classification;
-  the rules a held peer's same-epoch msg1 meets are its link machine's,
-  tested with the machine.
+- `util.rs`: shared fixtures: a stale connection's snapshot.
+- `core.rs`: the `poll_timeouts` decision and the cross-connection
+  tie-break; each handshake's classification is the settlement core's,
+  tested with it.
 - `limits.rs`: the retry backoff.
-- `silent.rs`: `SilentSessions` and the refusals it starts.
+- `silent.rs`: the msg1 ephemeral digest, by which the settlement core's
+  restart gates count silent sessions.
 - `state.rs`: `ConnectionState`.
 - `wire.rs`: the framing codec, through its public interface.
 - `wire_private.rs`: tests of `wire.rs` that need its private items.

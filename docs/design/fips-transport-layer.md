@@ -413,7 +413,7 @@ authority for peer death.
 ### Connection Deduplication
 
 Simultaneous outbound connections from both sides are resolved by the
-existing cross-connection tie-breaker in `promote_connection`. The losing
+existing cross-connection tie-breaker in the settlement core. The losing
 TCP connection is closed via `Transport::close_connection(addr)`, which
 removes it from the pool and aborts its receive task.
 

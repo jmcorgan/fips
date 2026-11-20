@@ -3,7 +3,7 @@
 //! peer's inbound session with the dial closed.
 //!
 //! The site, `handle_msg2`'s crossing arm, makes a move itself with
-//! `move_session`, which also settles the peer's record, then fills the
+//! `adopt_dial`, which also settles the peer's record, then fills the
 //! run's [`Facts`] with what the move returned and what it read before it,
 //! and the executor runs the rest of the crossing from here.
 
@@ -12,7 +12,6 @@ use crate::ipv6tun::link::PeerKey;
 use crate::node::Node;
 use crate::node::diag::{self, OrNone, Tag4};
 use crate::node::settle::table::Transition;
-use crate::peer::machine::CrossConnOutcome;
 use crate::peer::{LinkOutputs, UdpSlot};
 use crate::proto::fmp::Msg1Digest;
 use crate::proto::settle::links::Pair;
@@ -47,8 +46,6 @@ pub(in crate::node) struct Facts {
     pub(in crate::node) epoch: Option<Tag4>,
     /// The digest of the msg1 this node sent on the dial.
     pub(in crate::node) msg1: Option<Msg1Digest>,
-    /// How the crossing resolved, for the peer's control machine.
-    pub(in crate::node) outcome: Option<CrossConnOutcome>,
     /// The session index of the dial a kept crossing closes, freed when
     /// run.
     pub(in crate::node) lease: Option<IndexLease>,
@@ -153,18 +150,14 @@ pub(super) async fn renewed(node: &mut Node, r: &mut Run) {
 }
 
 /// Hold the peer on the dial's link, if the move left another: the core's
-/// record of the dial's link is the peer's, and the control machine, its
-/// timers and the carrier readings are keyed under the dial's link, which
-/// every later read of the peer's link names.
+/// record of the dial's link is the peer's, and the carrier readings are
+/// keyed under the dial's link, which every later read of the peer's link
+/// names.
 pub(super) async fn hold_dial(node: &mut Node, r: &mut Run) {
     let (Some(left), Some((dial, _))) = (left(r), dial(&r.t)) else {
         return;
     };
     node.links.held(&mut node.core, &dial, r.peer);
-    // The mutation lane's break: the machine stays under the link left.
-    if !node_fault!(MachineLeftBehind) {
-        node.peer_machines.rekey(left, dial);
-    }
     // The mutation lane's break: the readings stay under the link left.
     if !node_fault!(CarrierLeftBehind) {
         node.rekey_carrier(left, dial);
@@ -231,14 +224,6 @@ pub(super) async fn move_note(node: &mut Node, r: &mut Run) {
             "Cross-connection: swapped to outbound session (our outbound wins)"
         }
     );
-}
-
-/// Tell the peer's control machine how the crossing resolved, so its shadow
-/// session indices track the move (updated) or the keep (unchanged).
-pub(super) async fn machine_crossed(node: &mut Node, r: &mut Run) {
-    if let Some(outcome) = r.crossing().outcome {
-        node.observe_cross_conn_resolved(&r.peer, outcome);
-    }
 }
 
 /// Close what the core's close rule closes at once as the crossing retires

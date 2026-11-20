@@ -18,6 +18,7 @@ mod paths;
 pub(in crate::node) mod plan;
 mod remove;
 
+pub(in crate::node) use install::Ambient;
 pub(in crate::node) use links::{PathSteps, pathed};
 pub(in crate::node) use remove::{By, Removed};
 
@@ -164,7 +165,6 @@ impl Node {
                 }
             }
 
-            Effect::MachineResolved => install::machine_resolved(self, r).await,
             Effect::RelinkInitiator => install::relink_initiator(self, r).await,
             Effect::PromotedNote => install::promoted_note(self, r).await,
             Effect::SetupNote => install::setup_note(self, r).await,
@@ -176,7 +176,6 @@ impl Node {
             Effect::SeedMtuIfMoved => cross::seed_mtu(self, r).await,
             Effect::UnpinIfOwn => cross::unpin_own(self, r).await,
             Effect::MoveNote => cross::move_note(self, r).await,
-            Effect::MachineCrossed => cross::machine_crossed(self, r).await,
             Effect::LoserClose => cross::loser_close(self, r).await,
             Effect::LoserRemoved => cross::loser_removed(self, r).await,
             Effect::KeepNote => cross::keep_note(self, r).await,

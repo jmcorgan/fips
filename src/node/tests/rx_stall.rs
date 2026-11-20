@@ -29,7 +29,7 @@
 
 use super::*;
 use crate::config::{TcpConfig, UdpConfig};
-use crate::peer::machine::{PeerEvent, PeerMachine};
+use crate::peer::handshake::Handshake;
 use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG1, PHASE_MSG2, build_msg1};
 use crate::proto::link::LinkMessageType;
 use crate::testutil::Blackhole;
@@ -254,7 +254,7 @@ async fn timed_fire(node: &mut Node, trigger: Trigger) -> Reply {
         }
         Trigger::PeerTimers(now_ms) => node.drive_peer_timers(now_ms).await,
         Trigger::StoredMsg1(link, addr) => {
-            node.send_stored_msg1(link, TransportId::new(TCP_ID), &addr, Node::interval_ms())
+            node.send_stored_msg1(link, TransportId::new(TCP_ID), &addr)
                 .await
         }
         Trigger::LinkMessage(peer) => {
@@ -462,23 +462,17 @@ fn dial_leg(node: &mut Node, addr: &TransportAddr, now_ms: u64, due_ms: u64) -> 
     node.links
         .raw_index()
         .insert((tcp_id, addr.clone()), link_id);
-    let mut machine = PeerMachine::new_outbound(link_id, target, LegStamp::at(now_ms));
-    let _ = machine.step(
-        PeerEvent::Dial {
-            transport_id: tcp_id,
-            remote_addr: addr.clone(),
-            peer_identity: target,
-            connection_oriented: false,
-        },
-        now_ms,
-    );
+    let mut machine = Handshake::new_outbound(link_id, target, LegStamp::at(now_ms));
     machine.set_conn_handshake_msg1(wire.clone());
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(tcp_id);
     machine.set_conn_source_addr(addr.clone());
     machine.set_leg(leg.take_leg().unwrap());
-    assert!(machine.is_handshaking_sent_msg1());
-    node.peer_machines.raw().insert(link_id, machine);
+    assert!(
+        machine.leg().is_some(),
+        "precondition: the planted dial carries its handshake"
+    );
+    node.handshakes.raw().insert(link_id, machine);
     node.plant_dial_at((tcp_id, our_index.as_u32()), link_id, Some(due_ms));
     (link_id, wire)
 }
@@ -1048,7 +1042,7 @@ async fn arm_site(row: ReplySite, bh: &Blackhole) -> (Node, std::net::TcpStream,
             // The index the node drew for the answer before it wrote the
             // msg2.
             let lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
-            node.seed_handshake_machine(
+            node.seed_handshake(
                 HandshakeSeed::inbound(link_id, 1000)
                     .with_our_index(lease)
                     .with_transport_id(tcp_id)

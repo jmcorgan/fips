@@ -147,10 +147,10 @@ reach:
   dropped. Each of those moves leaves behind, in a stack frame that is
   no longer in use, a copy of the node's long-term private key and,
   once the handshake has started, of its ephemeral key and chaining
-  key. Three moves out of the slots on a connection's control machine
+  key. Three moves out of the slots on a connection's handshake entry
   are cleared: when a completed handshake leaves the slot that held it,
   when a session is taken out of its slot for a rekey, and when the
-  whole handshake state leaves the machine because the connection is
+  whole handshake state leaves the entry because the connection is
   promoted to an active peer, resolved as one side of a
   cross-connection, or reaped as stale. In each case the slot is
   overwritten as the value leaves. Other moves are not.

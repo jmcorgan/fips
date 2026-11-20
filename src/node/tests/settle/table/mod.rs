@@ -199,11 +199,7 @@ pub(super) fn expect(cell: Cell) -> Expect {
         | Cell::KeptBindingsFollow
         | Cell::StoredIfEstablished
         | Cell::Carried
-        | Cell::LegSurvives
-        | Cell::OldRemovedLegSurvives
-        | Cell::DialRemovedPeerStepped
-        | Cell::DialRemovedPeerRekeyed
-        | Cell::SteppedThenRemoved
+        | Cell::EntryDropped
         | Cell::UnkeptQueued
         | Cell::UnkeptQueuedCurrentClosed
         | Cell::DialClosedUnlessProven
@@ -541,22 +537,12 @@ fn read(
             "{:?}",
             held.map(|p| (*p.node_addr(), p.npub_str().to_string()))
         ),
-        Row::ControlMachine => {
-            let machines: Vec<_> = covered(node, held)
+        Row::Handshake => {
+            let entries: Vec<_> = covered(node, held)
                 .into_iter()
-                .filter(|id| node.peer_machines.contains_key(id))
-                .map(|id| {
-                    let mut timers: Vec<String> = node
-                        .peer_machines
-                        .timers()
-                        .get(&id)
-                        .map(|t| t.iter().map(|(k, at)| format!("{k:?}@{at}")).collect())
-                        .unwrap_or_default();
-                    timers.sort();
-                    (id, timers)
-                })
+                .filter(|id| node.handshakes.contains_key(id))
                 .collect();
-            format!("{machines:?}")
+            format!("{entries:?}")
         }
         Row::Connection => {
             let seen: Vec<String> = pairs
@@ -916,6 +902,10 @@ pub(super) fn dirty_misses(on: bool) -> Vec<(Row, &'static str)> {
             Row::Link,
             "a link record no machine or peer names breaches the live audit, and the peer's own is the one a transition acts on",
         ),
+        (
+            Row::Handshake,
+            "a held peer has no handshake entry: its promotion dropped it",
+        ),
     ];
     if !on {
         misses.push((
@@ -983,12 +973,9 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
                 p.note_setup(&msg1(), &[0xd2; 48]);
             }
         }
-        Row::ControlMachine => {
-            if let Some(id) = node.get_peer(peer).map(ActivePeer::link_id) {
-                node.peer_machines
-                    .arm(id, crate::peer::machine::TimerKind::Liveness, u64::MAX / 2);
-            }
-        }
+        // A held peer has no handshake entry to write: its promotion
+        // dropped it.
+        Row::Handshake => {}
         Row::Connection => {
             // Only a loopback transport records a close without closing a
             // connection the peering needs.
@@ -1286,6 +1273,22 @@ async fn plant(node: &mut Node, peer: &NodeAddr, row: Row) -> bool {
         }
         Row::RekeyMachine => {
             node.peers_by_index.raw().insert(0x0dd_b1d, *peer);
+            true
+        }
+        // A held peer has no handshake entry, so one on its link is planted
+        // past the writers.
+        Row::Handshake => {
+            let id = node
+                .get_peer(peer)
+                .map(ActivePeer::link_id)
+                .expect("precondition: the peer is held");
+            node.handshakes.raw().insert(
+                id,
+                crate::peer::handshake::Handshake::new_inbound(
+                    id,
+                    crate::proto::fmp::LegStamp::at(0),
+                ),
+            );
             true
         }
         Row::Link => {

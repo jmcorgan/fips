@@ -44,13 +44,11 @@
 use crate::NodeAddr;
 use crate::node::Node;
 use crate::node::acl::PeerAclContext;
-use crate::node::dataplane::PeerActionCtx;
 use crate::node::diag::{self, HsLine};
 use crate::node::handlers::handshake::Armed;
 use crate::node::reject::{DataplaneReject, HandshakeReject, RejectReason};
 use crate::node::settle::Redial;
-use crate::node::settle::exec::{By, Removed, Run};
-use crate::peer::machine::{PeerAction, PeerEvent, PeerState};
+use crate::node::settle::exec::{Ambient, By, Removed, Run};
 use crate::proto::bloom::BloomFilter;
 use crate::proto::fmp::wire::{EncryptedHeader, build_msg2};
 use crate::proto::fmp::{ActiveBackoff, WireOutcome};
@@ -93,7 +91,7 @@ impl Node {
         silent: Option<ActiveBackoff>,
     ) {
         let Armed {
-            mut machine,
+            mut entry,
             link,
             peer,
             identity,
@@ -134,7 +132,6 @@ impl Node {
                 )
                 .is_err()
         {
-            let _ = machine.step(PeerEvent::Rejected, interval_ms);
             // The refused redial's connection closes now, unless a live link
             // uses it, rather than at the transport's idle deadline.
             self.unasked(no, false).await;
@@ -155,14 +152,12 @@ impl Node {
         // promotion takes it, and send its msg2; nothing is promoted.
         let Some(our_lease) = allocate(&mut self.index_allocator) else {
             warn!("Failed to allocate session index for a redial");
-            let _ = machine.step(PeerEvent::Rejected, interval_ms);
             self.unasked(no, true).await;
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         };
         let our_index = SessionIndex::new(our_lease.index());
-        let actions = machine.step(PeerEvent::AuthorizedHeld, interval_ms);
         let their_index = wire.their_index;
         let opened = Link::connectionless(
             link,
@@ -210,8 +205,8 @@ impl Node {
         if !answered {
             return;
         }
-        machine.set_conn_handshake_msg2(wire_msg2);
-        self.peer_machines.add(link, machine);
+        entry.set_conn_handshake_msg2(wire_msg2.clone());
+        self.handshakes.add(link, entry);
         self.stats_mut().handshake.redials += 1;
         debug!(
             peer = %self.peer_display_name(&peer),
@@ -221,19 +216,19 @@ impl Node {
             remote_addr = %packet.remote_addr,
             "Same-epoch msg1 off the established link, answered into a pending redial"
         );
-        let ambient = PeerActionCtx {
+        let ambient = Ambient {
             verified_identity: identity,
             transport_id: packet.transport_id,
             remote_addr: packet.remote_addr.clone(),
             our_index: Some(our_index),
-            their_index: Some(their_index),
             now_ms: packet.timestamp_ms,
-            interval_ms,
             is_outbound: false,
             why: None,
         };
         let swapping = Swapping::of(self, &peer);
-        self.execute_peer_actions(link, &ambient, actions).await;
+        // The msg2 goes out and the core is told; nothing is promoted here,
+        // whatever it decided at the send.
+        let _ = self.send_answer(link, &ambient, &wire_msg2).await;
         let from = Pair {
             transport: packet.transport_id,
             addr: packet.remote_addr.clone(),
@@ -294,13 +289,13 @@ impl Node {
 
     /// The handshake leg on `link`, which the core retired with the
     /// connections `closes` its retirement leaves unused, is gone: its
-    /// machine and link go, and those connections are closed.
+    /// handshake entry and link go, and those connections are closed.
     pub(in crate::node) async fn retired_leg(&mut self, link: LinkId, closes: Vec<Pair>) {
-        let transport_id = self.peer_machines.get_mut(&link).and_then(|machine| {
-            let _detached = machine.take_leg();
-            machine.conn_transport_id()
+        let transport_id = self.handshakes.get_mut(&link).and_then(|entry| {
+            let _detached = entry.take_leg();
+            entry.conn_transport_id()
         });
-        self.remove_peer_machine(link);
+        self.remove_handshake(link);
         self.close_each(closes).await;
         self.remove_link(&link);
         if let Some(transport_id) = transport_id {
@@ -321,9 +316,9 @@ impl Node {
         packet: &ReceivedPacket,
     ) -> bool {
         let opened = self
-            .peer_machines
+            .handshakes
             .get(&redial.link)
-            .and_then(|m| m.leg())
+            .and_then(|e| e.leg())
             .and_then(|leg| leg.noise_session.as_ref())
             .is_some_and(|session| {
                 session.check_replay(header.counter).is_ok()
@@ -369,11 +364,11 @@ impl Node {
             return;
         };
         let Some((identity, transport_id, remote_addr)) =
-            self.peer_machines.get(&link).and_then(|m| {
+            self.handshakes.get(&link).and_then(|e| {
                 Some((
-                    *m.conn_expected_identity()?,
-                    m.conn_transport_id()?,
-                    m.conn_source_addr()?.clone(),
+                    *e.conn_expected_identity()?,
+                    e.conn_transport_id()?,
+                    e.conn_source_addr()?.clone(),
                 ))
             })
         else {
@@ -417,13 +412,15 @@ impl Node {
         swapping: Swapping,
         now_ms: u64,
     ) {
-        let Some((identity, theirs, transport_id, remote_addr)) =
-            self.peer_machines.get(&link).and_then(|m| {
+        let Some((identity, transport_id, remote_addr)) = self
+            .handshakes
+            .get(&link)
+            .filter(|e| e.conn_their_index().is_some())
+            .and_then(|e| {
                 Some((
-                    *m.conn_expected_identity()?,
-                    m.conn_their_index()?,
-                    m.conn_transport_id()?,
-                    m.conn_source_addr()?.clone(),
+                    *e.conn_expected_identity()?,
+                    e.conn_transport_id()?,
+                    e.conn_source_addr()?.clone(),
                 ))
             })
         else {
@@ -435,15 +432,12 @@ impl Node {
             ended,
             silent,
         } = swapping;
-        let interval_ms = Self::interval_ms();
-        let ctx = |our_index, why| PeerActionCtx {
+        let ctx = |our_index, why| Ambient {
             verified_identity: identity,
             transport_id,
             remote_addr: remote_addr.clone(),
             our_index,
-            their_index: Some(theirs),
             now_ms,
-            interval_ms,
             is_outbound: false,
             why,
         };
@@ -477,9 +471,9 @@ impl Node {
                 Output::Install(i) => {
                     ours = Some(SessionIndex::new(i.lease.index()));
                     if let Some(old) = self
-                        .peer_machines
+                        .handshakes
                         .get_mut(&link)
-                        .and_then(|m| m.set_conn_our_index(i.lease))
+                        .and_then(|e| e.set_conn_our_index(i.lease))
                     {
                         let _ = self.index_allocator.free(SessionIndex::new(old.release()));
                     }
@@ -495,12 +489,7 @@ impl Node {
             return;
         };
         let ambient = ctx(Some(ours), held.as_ref().map(|_| Why::Redial));
-        self.execute_peer_actions(link, &ambient, vec![PeerAction::PromoteToActive { link }])
-            .await;
-        if !matches!(
-            self.peer_machines.get(&link).map(|m| m.state()),
-            Some(PeerState::Established { .. })
-        ) {
+        if !self.promote(link, &ambient).await {
             return;
         }
         if !ended.is_empty() {

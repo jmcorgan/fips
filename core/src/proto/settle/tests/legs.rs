@@ -204,8 +204,8 @@ fn a_dials_first_resend_comes_a_second_after_its_msg1_whatever_the_configured_in
 fn an_mdns_directed_dial_stops_at_its_resend_cap() {
     // Configured for eight resends, with a deadline past all of them. The
     // node caps a dial an mDNS advert directs at an unconfigured node at
-    // five (`DialOrigin::resend_limit`), which never raises the configured
-    // count.
+    // five (`DISCOVERY_RESENDS`, as `Start.resends`), which never raises
+    // the configured count.
     let p = Params {
         handshake: Duration::from_secs(600),
         resends: 8,

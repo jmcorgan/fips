@@ -176,7 +176,6 @@ fn common(on: bool) -> Vec<(Row, Outcome)> {
         (Row::Paths, Outcome::Changed),
         (Row::RekeyMachine, Outcome::Changed),
         (Row::Identity, Outcome::Kept),
-        (Row::ControlMachine, Outcome::Changed),
         (Row::PathMtu, Outcome::Changed),
         (Row::FilterSend, Outcome::Changed),
         (Row::Tree, Outcome::Changed),
@@ -227,6 +226,9 @@ async fn restart(on: bool) {
         why: Why::Restart,
     };
     let mut others = common(on);
+    // The answered msg1's entry never reaches the map before the msg1 and
+    // is dropped by its promotion; the held peer had none.
+    others.push((Row::Handshake, Outcome::Kept));
     others.extend([
         // A capability is new with the bundle; with multipath on the old one
         // held what it learned and [`dirty`]'s candidate.
@@ -352,6 +354,9 @@ async fn replacement(on: bool) {
         why: Why::Replacement,
     };
     let mut others = common(on);
+    // The answered msg1's entry never reaches the map before the msg1 and
+    // is dropped by its promotion; the held peer had none.
+    others.push((Row::Handshake, Outcome::Kept));
     others.extend([
         // No frame reached the peering, so no link is capable at either
         // setting; with multipath on the old bundle held [`dirty`]'s
@@ -447,6 +452,9 @@ async fn own_restart(on: bool) {
         why: Why::OwnRestart,
     };
     let mut others = common(on);
+    // The dial's entry, on its link before the msg2, is dropped by its
+    // promotion.
+    others.push((Row::Handshake, Outcome::Changed));
     others.extend([
         (Row::Capability, changed_if(on)),
         // An initiator's new machine stores no setup record; the old one held
@@ -646,6 +654,9 @@ async fn ble_restart(on: bool) {
         why: Why::Restart,
     };
     let mut others = common(on);
+    // The answered msg1's entry never reaches the map before the msg1 and
+    // is dropped by its promotion; the held peer had none.
+    others.push((Row::Handshake, Outcome::Kept));
     others.extend([
         // With multipath on the old bundle held [`dirty`]'s candidate.
         (Row::Capability, changed_if(on)),

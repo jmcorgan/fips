@@ -40,8 +40,10 @@ fn others(initiator: bool, on: bool) -> Vec<(Row, Outcome)> {
         (Row::RekeyMachine, Outcome::Changed),
         (Row::SetupRecord, Outcome::Changed),
         (Row::Identity, Outcome::Changed),
-        // The dial's machine survives as the peer's, at the same link.
-        (Row::ControlMachine, changed_if(!initiator)),
+        // The dial's entry, on its link before the msg2, is dropped by its
+        // promotion; a responder's never reaches the map before the msg1,
+        // and is dropped by its promotion too.
+        (Row::Handshake, changed_if(initiator)),
         // The initiator marks its link; the responder's is marked by the
         // initiator's first frame, after the site.
         (Row::BleMark, changed_if(initiator)),

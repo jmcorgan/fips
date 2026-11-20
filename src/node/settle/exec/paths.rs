@@ -139,7 +139,6 @@ impl Node {
                 | Effect::PathsRenewed
                 | Effect::ClearUdpIfMoved
                 | Effect::RelinkIfMoved
-                | Effect::MachineResolved
                 | Effect::RelinkInitiator
                 | Effect::PromotedNote
                 | Effect::SetupNote
@@ -150,7 +149,6 @@ impl Node {
                 | Effect::SeedMtuIfMoved
                 | Effect::UnpinIfOwn
                 | Effect::MoveNote
-                | Effect::MachineCrossed
                 | Effect::LoserClose
                 | Effect::LoserRemoved
                 | Effect::KeepNote

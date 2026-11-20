@@ -5,7 +5,7 @@ use crate::NodeAddr;
 use crate::node::Node;
 use crate::node::handlers::path_intake::Feed;
 use crate::node::session::SessionInstant;
-use crate::peer::machine::DialOrigin;
+use crate::peer::handshake::DialOrigin;
 use crate::proto::fmp::{ConnAction, ConnSnapshot, LifecycleView};
 use crate::proto::settle::input::Input as Settle;
 use crate::proto::settle::links::LinkNo;
@@ -25,18 +25,18 @@ impl LifecycleView for Node {
         // dial's leg is reaped by the core's poll at its deadline
         // (`drive_peer_timers`), and an answer's by the core's reap above,
         // so excluding them here avoids a double reap.
-        self.peer_machines
+        self.handshakes
             .iter()
-            .filter(|(_, machine)| machine.leg().is_some())
-            .filter(|(link_id, machine)| {
-                machine.is_failed()
-                    || (machine.conn_is_timed_out(interval_now, timeout_ms)
+            .filter(|(_, entry)| entry.leg().is_some())
+            .filter(|(link_id, entry)| {
+                entry.is_failed()
+                    || (entry.conn_is_timed_out(interval_now, timeout_ms)
                         && self.leg(**link_id).is_none())
             })
-            .map(|(link_id, machine)| ConnSnapshot {
+            .map(|(link_id, entry)| ConnSnapshot {
                 link: *link_id,
-                is_outbound: machine.conn_is_outbound(),
-                retry_addr: machine.conn_expected_identity().map(|id| *id.node_addr()),
+                is_outbound: entry.conn_is_outbound(),
+                retry_addr: entry.conn_expected_identity().map(|id| *id.node_addr()),
             })
             .collect()
     }
@@ -88,19 +88,19 @@ impl Node {
                     self.note_handshake_timeout(peer, peering_now)
                 }
                 ConnAction::Teardown { link } => {
-                    // Log before cleanup (needs live connection state). The
-                    // failure signal is now read from the control machine; the
-                    // leg still carries direction/idle for the log fields.
+                    // Log before cleanup (needs live connection state): the
+                    // handshake entry carries the failure signal, the
+                    // direction and the idle time for the log fields.
                     let is_failed = self
-                        .peer_machines
+                        .handshakes
                         .get(&link)
-                        .is_some_and(|machine| machine.is_failed());
-                    if let Some(machine) = self
-                        .peer_machines
+                        .is_some_and(|entry| entry.is_failed());
+                    if let Some(entry) = self
+                        .handshakes
                         .get(&link)
-                        .filter(|machine| machine.leg().is_some())
+                        .filter(|entry| entry.leg().is_some())
                     {
-                        let direction = machine.conn_direction();
+                        let direction = entry.conn_direction();
                         if is_failed {
                             debug!(
                                 link_id = %link,
@@ -170,7 +170,7 @@ impl Node {
     /// Remove a handshake connection and all associated state.
     ///
     /// Gives the leg up for the settlement core first, then frees the
-    /// session index, the dial's leg's or else the machine's, closes the
+    /// session index, the dial's leg's or else the handshake entry's, closes the
     /// underlying transport connections the core's close rule closed as it
     /// gave the leg up, and cleans up the link and address mapping. Does not
     /// log — callers provide context-appropriate log messages.
@@ -180,33 +180,31 @@ impl Node {
         _now_ms: u64,
     ) {
         let closes = self.give_up(link_id);
-        // Take the connection off its machine BEFORE disposing the machine
-        // (the machine owns it), keeping it readable for the index/link
-        // cleanup below. The machine shares the connection's `link_id` and
-        // lifetime; dropping it here means a reaped handshake leg leaves no
-        // dangling machine. A no-op for promoted peers — `promote_connection`
-        // already consumed their connection, so this reaper never runs for
-        // them.
+        // Take the connection off its entry BEFORE dropping the entry (the
+        // entry owns it), keeping it readable for the index/link cleanup
+        // below. The entry shares the connection's `link_id` and lifetime;
+        // dropping it here means a reaped handshake leaves no dangling entry.
+        // A no-op for promoted peers — `install_handshake` already consumed
+        // their connection, so this reaper never runs for them.
         let _detached_leg = match self
-            .peer_machines
+            .handshakes
             .get_mut(&link_id)
-            .and_then(|machine| machine.take_leg())
+            .and_then(|entry| entry.take_leg())
         {
             Some(c) => c,
             None => return,
         };
-        // Read the transport ID off the surviving carrier, and the session
-        // index from the dial's leg or else the carrier, before disposing the
-        // machine (the leg no longer projects them).
+        // Read the transport ID off the entry, and the session index from
+        // the dial's leg or else the entry, before dropping the entry.
         let leased = self.take_leg(link_id);
-        let (transport_id, our_index) = match self.peer_machines.get_mut(&link_id) {
-            Some(machine) => (
-                machine.conn_transport_id(),
-                leased.or_else(|| machine.take_our_index()),
+        let (transport_id, our_index) = match self.handshakes.get_mut(&link_id) {
+            Some(entry) => (
+                entry.conn_transport_id(),
+                leased.or_else(|| entry.take_our_index()),
             ),
             None => (None, leased),
         };
-        self.remove_peer_machine(link_id);
+        self.remove_handshake(link_id);
 
         // Free the session index if allocated
         if let Some(lease) = our_index {
@@ -241,15 +239,8 @@ impl Node {
         }
     }
 
-    /// Act on the per-peer machine timers this tick.
-    ///
-    /// The sans-IO machine arms `SetTimer`/`CancelTimer` actions into the
-    /// timer store on [`peer_machines`](Node::peer_machines); this is the
-    /// shell driver that acts on them: timeout reaps idle-timed-out outbound legs, retransmit resends the
-    /// due msg1s. Handshake-TIMEOUT is driven before handshake-RETRANSMIT so a
-    /// timed-out leg is reaped rather than resent on the same tick. The
-    /// rekey/liveness kinds keep their own shell drivers, so only the two
-    /// handshake kinds are driven here.
+    /// Act on the handshake legs' timers this tick: a dial's leg past its
+    /// deadline is reaped, and the due msg1s resent.
     ///
     /// `interval_now` is a reading of the interval clock
     /// (`Node::interval_ms`), which the timers' deadlines and the legs'
@@ -432,7 +423,7 @@ impl Node {
     /// dial of `retry`, the outbound retry reflex and the dial's address
     /// kept as a path candidate where it applies, and for an answer the
     /// stale-connection line; then the link and its
-    /// machine go, the lease's index returns to the allocator, and the
+    /// handshake entry go, the lease's index returns to the allocator, and the
     /// connections its retirement left unused, `closes`, are closed.
     async fn reap_leg(
         &mut self,
@@ -451,10 +442,10 @@ impl Node {
             self.note_handshake_timeout(peer, Self::peering_now());
         }
         let candidate = retry.and_then(|peer| self.dial_candidate(link, peer));
-        match (retry, self.peer_machines.get(&link)) {
-            (None, Some(machine)) => debug!(
+        match (retry, self.handshakes.get(&link)) {
+            (None, Some(entry)) => debug!(
                 link_id = %link,
-                direction = %machine.conn_direction(),
+                direction = %entry.conn_direction(),
                 idle_secs =
                     Self::now_ms().saturating_sub(self.connection_last_activity(link)) / 1000,
                 "Stale handshake connection timed out"
@@ -462,14 +453,14 @@ impl Node {
             _ => debug!(link_id = %link, "Handshake connection timed out"),
         }
         let transport_id = self
-            .peer_machines
+            .handshakes
             .get_mut(&link)
-            .map(|machine| {
-                let _detached = machine.take_leg();
-                machine.conn_transport_id()
+            .map(|entry| {
+                let _detached = entry.take_leg();
+                entry.conn_transport_id()
             })
             .unwrap_or(None);
-        self.remove_peer_machine(link);
+        self.remove_handshake(link);
         for pair in closes {
             if let Some(transport) = self.transports.get(&pair.transport) {
                 transport.close_connection(&pair.addr).await;
@@ -493,8 +484,8 @@ impl Node {
         link: LinkId,
         peer: NodeAddr,
     ) -> Option<(NodeAddr, TransportId, TransportAddr, Source)> {
-        let machine = self.peer_machines.get(&link)?;
-        let source = match machine.dial_origin() {
+        let entry = self.handshakes.get(&link)?;
+        let source = match entry.dial_origin() {
             DialOrigin::Addressed => Source::Request,
             DialOrigin::MdnsAdvert => Source::Discovery,
             DialOrigin::NeighbourClaim => return None,

@@ -81,7 +81,7 @@ pub(super) fn promoted_peer_with_the_far_side_session(
     let peer_identity = PeerIdentity::from_pubkey_full(peer_identity_full.pubkey_full());
 
     let our_index_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
-    node.seed_handshake_machine(
+    node.seed_handshake(
         HandshakeSeed::outbound(link_id, peer_identity, 1_000)
             .with_our_index(our_index_lease)
             .with_their_index(SessionIndex::new(42))
@@ -93,7 +93,7 @@ pub(super) fn promoted_peer_with_the_far_side_session(
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let msg1 = node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, LegStamp::at(1_000))
@@ -111,7 +111,7 @@ pub(super) fn promoted_peer_with_the_far_side_session(
         )
         .unwrap();
 
-    node.peer_machines
+    node.handshakes
         .get_mut(&link_id)
         .unwrap()
         .complete_handshake(&msg2, LegStamp::at(1_000))
@@ -121,7 +121,7 @@ pub(super) fn promoted_peer_with_the_far_side_session(
         .take_session()
         .expect("the responder holds a session once it has written msg2");
 
-    node.promote_connection(link_id, peer_identity, 2_000)
+    node.install_handshake(link_id, peer_identity, 2_000)
         .unwrap();
     let node_addr = *peer_identity.node_addr();
     let our_index = node

@@ -12,24 +12,16 @@ it out. Handshake message bytes are opaque here.
 ## Files
 
 - `mod.rs`: declares the files and re-exports their public items.
-- `core.rs`: the `EstablishView` and `LifecycleView` traits through
-  which the root crate's `Node` shows its connections, the `ConnAction`
-  vocabulary, the snapshot types, the msg1 digests (`Msg1Digest` of the
+- `core.rs`: the `LifecycleView` trait through which the root crate's
+  `Node` shows its connections, the `ConnAction` vocabulary, the
+  snapshot type, the msg1 digests (`Msg1Digest` of the
   whole wire message, which recognises resends, and `EphemeralDigest` of
   the ephemeral the msg1's AEAD binds, which recognises a copy whatever
-  its header says), the `poll_*` decisions (handshake timeout and link
-  setup msg1 resend), the inbound msg1 classification (FRC-1201 rules 1
-  and 2 and the restart gates of a replacement; a held peer's same-epoch
-  msg1 goes to its link's rekey machine, which owns rules 3 and 4; a
-  fresh msg1 the machine finds off the established link of a peering
-  heard from is a redial, which, unless the silent-session refusal holds
-  it, the node answers into a pending redial and installs only at the
-  peer's first frame under its session) and the outbound msg2
-  classification (a restart when the msg2's epoch differs from the held
-  peer's; a move to this dial's session when the held peer came from an
-  earlier dial of this node's, whose session the peer's answer to this
-  one supersedes (a replacement on a link too young to rekey, a rekey on
-  an older one); else the cross-connection tie-break).
+  its header says), the `poll_timeouts` decision (handshake timeout),
+  the outcome of the shell's Noise read of a msg1 (`WireOutcome`), the
+  refusals a msg1 is counted under (`InboundReject`), the promotion's
+  result and the cross-connection tie-break. Each handshake msg1 and
+  msg2 is classified by the settlement core (`proto::settle`).
 - `state.rs`: `ConnectionState`, the bookkeeping of a connection in its
   handshake phase, which holds this node's index for the handshake as an
   `IndexLease` from the rekey machine's `lease::allocate`, so promotion
@@ -37,13 +29,11 @@ it out. Handshake message bytes are opaque here.
   `LegStamp`: a wall-clock reading for the start and idle times operators
   are shown, and the caller's interval-clock reading, which the handshake
   timeout reads; and `Fmp`, the stateless lifecycle anchor `Node` holds.
-- `silent.rs`: `SilentSessions`, the record of link sessions that ended
-  without an authenticated frame, and the msg1 refusal it drives, and
-  `ActiveBackoff`, the refusal in force as the inbound snapshot carries
-  it. The node keeps its record in the settlement core's restart gates
-  (`proto::settle::gates`) and fills the snapshot's refusal from them.
-  Under the test hooks `known` names the identities it holds a record
-  for, for a shell's comparison with another memory.
+- `silent.rs`: `ActiveBackoff`, the refusal in force for an identity
+  whose link sessions ended without an authenticated frame, as the msg1
+  refusal's log reads it. The node keeps the record of those sessions in
+  the settlement core's restart gates (`proto::settle::gates`) and fills
+  the refusal from them.
 - `limits.rs`: the connection-retry backoff arithmetic.
 - `rekey/`: the link's profile of the shared rekey machine
   (`proto::rekey`) over Noise IK, the node-level read of a peer's msg1,
@@ -59,11 +49,6 @@ it out. Handshake message bytes are opaque here.
 
 ## Invariants
 
-- **The silent-session records are an ordered map on purpose.** They are
-  keyed by peer identity, which a remote party chooses. A B-tree needs
-  no hash seed, so a target without the standard library's random seed
-  cannot be made to collide, and its worst case stays logarithmic. The
-  map is never iterated, so its order is not observable.
 - **Handshake sizes come from `crate::noise`.** `wire.rs` checks msg1
   and msg2 lengths against the constants there; it does not restate
   them.

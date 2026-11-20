@@ -30,7 +30,7 @@ pub(in crate::node) struct Removed {
     /// removal.
     pub(in crate::node) held: Option<AddrKey>,
     /// Whether the loss is noted for a reconnect by whoever decided the
-    /// removal: the peer's control machine, as its next action, or the
+    /// removal: the site that ran the settlement core's `Retry`, or the
     /// Disconnect handler, which cannot await. A cell that notes it then
     /// runs nothing here.
     pub(in crate::node) noted: bool,
@@ -232,15 +232,9 @@ impl Node {
         if !node_fault!(RemoveKeepsLink) {
             self.remove_link(&link_id);
         }
-        // Bound `peer_machines`: drop this peer's machine
-        // entry, keyed by the `link_id` derived above BEFORE the `peers` removal.
-        // This cleans up the OLD peer's machine on an inbound restart and prevents
-        // unbounded growth on the establish success path. NEUTRAL: nothing on the
-        // live path reads `peer_machines` except the establish executor, which only
-        // ever touches the in-flight establish's (distinct) `link_id`; no reader
-        // depends on a stale entry, so removal changes no behavior — it only bounds
-        // the map.
-        self.remove_peer_machine(link_id);
+        // A handshake entry left on the removed peer's link goes with it,
+        // keyed by the `link_id` derived above BEFORE the `peers` removal.
+        self.remove_handshake(link_id);
         if let Some(transport_id) = transport_id {
             self.cleanup_bootstrap_transport_if_unused(transport_id);
         }
@@ -487,7 +481,7 @@ pub(super) async fn reconnect(node: &mut Node, r: &mut Run) {
     if c == Cell::NotedDeadThenRemoved {
         debug_assert!(
             removed.noted,
-            "a replacement's loss is noted by the old peer's control machine"
+            "a replacement's loss is noted by the site that removed the old peer"
         );
     } else if c == Cell::NotedDead {
         if !removed.noted {

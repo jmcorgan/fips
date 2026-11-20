@@ -178,7 +178,7 @@ async fn an_admin_disconnect_of_the_held_peer_drops_its_pending_redial_and_a_lat
     let b = &pair.nodes[1].node;
     assert!(
         b.redials.of(&a).is_none()
-            && b.peer_machines.get(&pending.link).is_none()
+            && b.handshakes.get(&pending.link).is_none()
             && b.links.get(&pending.link).is_none()
             && !b.index_allocator.is_allocated(pending.index),
         "defect: the pending redial outlived the disconnect"

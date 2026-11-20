@@ -57,7 +57,7 @@ async fn test_two_node_handshake_udp() {
     let our_index_a = crate::utils::index::SessionIndex::new(our_index_a_lease.index());
 
     node_a
-        .seed_handshake_machine(
+        .seed_handshake(
             HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
                 .with_our_index(our_index_a_lease)
                 .with_transport_id(transport_id_a)
@@ -69,7 +69,7 @@ async fn test_two_node_handshake_udp() {
     let our_keypair_a = node_a.identity().keypair();
     let startup_epoch_a = node_a.startup_epoch();
     let noise_msg1 = node_a
-        .peer_machines
+        .handshakes
         .get_mut(&link_id_a)
         .unwrap()
         .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
@@ -285,7 +285,7 @@ async fn test_run_rx_loop_handshake() {
     let our_index_a_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
     let our_index_a = crate::utils::index::SessionIndex::new(our_index_a_lease.index());
     node_a
-        .seed_handshake_machine(
+        .seed_handshake(
             HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
                 .with_our_index(our_index_a_lease)
                 .with_transport_id(transport_id_a)
@@ -295,7 +295,7 @@ async fn test_run_rx_loop_handshake() {
     let our_keypair_a = node_a.identity().keypair();
     let startup_epoch_a = node_a.startup_epoch();
     let noise_msg1 = node_a
-        .peer_machines
+        .handshakes
         .get_mut(&link_id_a)
         .unwrap()
         .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
@@ -475,7 +475,7 @@ async fn test_cross_connection_both_initiate() {
     let our_index_a_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
     let our_index_a = crate::utils::index::SessionIndex::new(our_index_a_lease.index());
     node_a
-        .seed_handshake_machine(
+        .seed_handshake(
             HandshakeSeed::outbound(link_id_a_out, peer_b_identity, 1000)
                 .with_our_index(our_index_a_lease)
                 .with_transport_id(transport_id_a)
@@ -485,7 +485,7 @@ async fn test_cross_connection_both_initiate() {
     let our_keypair_a = node_a.identity().keypair();
     let startup_epoch_a = node_a.startup_epoch();
     let noise_msg1_a = node_a
-        .peer_machines
+        .handshakes
         .get_mut(&link_id_a_out)
         .unwrap()
         .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
@@ -512,7 +512,7 @@ async fn test_cross_connection_both_initiate() {
     let our_index_b_lease = fips_core::proto::rekey::allocate(&mut node_b.index_allocator).unwrap();
     let our_index_b = crate::utils::index::SessionIndex::new(our_index_b_lease.index());
     node_b
-        .seed_handshake_machine(
+        .seed_handshake(
             HandshakeSeed::outbound(link_id_b_out, peer_a_identity, 1000)
                 .with_our_index(our_index_b_lease)
                 .with_transport_id(transport_id_b)
@@ -522,7 +522,7 @@ async fn test_cross_connection_both_initiate() {
     let our_keypair_b = node_b.identity().keypair();
     let startup_epoch_b = node_b.startup_epoch();
     let noise_msg1_b = node_b
-        .peer_machines
+        .handshakes
         .get_mut(&link_id_b_out)
         .unwrap()
         .start_handshake(our_keypair_b, startup_epoch_b, LegStamp::at(1000))
@@ -673,7 +673,7 @@ async fn test_stale_connection_cleanup() {
     // Allocate session index and set transport info
     let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
     let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
-    node.seed_handshake_machine(
+    node.seed_handshake(
         HandshakeSeed::outbound(link_id, peer_identity, past_time_ms)
             .with_our_index(our_lease)
             .with_transport_id(transport_id)
@@ -683,7 +683,7 @@ async fn test_stale_connection_cleanup() {
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let _noise_msg1 = node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, Node::leg_stamp())
@@ -765,7 +765,7 @@ async fn test_failed_connection_cleanup() {
 
     let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
     let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
-    node.seed_handshake_machine(
+    node.seed_handshake(
         HandshakeSeed::outbound(link_id, peer_identity, now_ms)
             .with_our_index(our_lease)
             .with_transport_id(transport_id)
@@ -775,7 +775,7 @@ async fn test_failed_connection_cleanup() {
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let _noise_msg1 = node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, Node::leg_stamp())
@@ -794,20 +794,15 @@ async fn test_failed_connection_cleanup() {
         .insert((transport_id, remote_addr.clone()), link_id);
     node.plant_dial_at((transport_id, our_index.as_u32()), link_id, None);
 
-    // Simulate a stored-handshake send failure through the control machine —
-    // the failure carrier the stale-connection sweep now reads (the leg no
-    // longer carries a failed phase of its own).
+    // Simulate a stored-handshake send failure on the handshake's entry —
+    // the failure carrier the stale-connection sweep reads.
     {
-        let machine = node
-            .peer_machines
+        let entry = node
+            .handshakes
             .get_mut(&link_id)
-            .expect("machine seeded by the handshake seeder");
-        let actions = machine.step(
-            crate::peer::machine::PeerEvent::HandshakeSendFailed,
-            Node::interval_ms(),
-        );
-        assert!(actions.is_empty());
-        assert!(machine.is_failed());
+            .expect("entry seeded by the handshake seeder");
+        entry.fail();
+        assert!(entry.is_failed());
     }
 
     assert_eq!(node.connection_count(), 1);
@@ -901,30 +896,20 @@ async fn test_resend_scheduling() {
         .insert((transport_id, remote_addr.clone()), link_id);
 
     // The msg1-resend counter and its due time live on the dial's leg; the
-    // per-peer machine carries the pending connection. Dial it to `SentMsg1`
-    // (connectionless: no connect step) and give its leg a resend at
-    // now + 1000ms, mirroring what a real dial schedules.
-    let mut machine = crate::peer::machine::PeerMachine::new_outbound(
+    // handshake's entry carries the pending connection. Give its leg a
+    // resend at now + 1000ms, mirroring what a real dial schedules.
+    let mut machine = crate::peer::handshake::Handshake::new_outbound(
         link_id,
         peer_identity,
         LegStamp::at(now_ms),
     );
-    let _ = machine.step(
-        crate::peer::machine::PeerEvent::Dial {
-            transport_id,
-            remote_addr: remote_addr.clone(),
-            peer_identity,
-            connection_oriented: false,
-        },
-        now_ms,
-    );
-    // The msg1 wire lives on the machine's carrier (the retransmit driver's
+    // The msg1 wire lives on the entry's carrier (the retransmit driver's
     // resend source), mirroring `prepare_outbound_msg1`.
     machine.set_conn_handshake_msg1(wire_msg1);
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
-    node.peer_machines.raw().insert(link_id, machine);
+    node.handshakes.raw().insert(link_id, machine);
     node.plant_dial_at(
         (transport_id, our_index.as_u32()),
         link_id,
@@ -984,26 +969,17 @@ async fn test_handshake_timeout_drive() {
         .raw_index()
         .insert((transport_id, remote_addr.clone()), link_id);
 
-    // Machine in SentMsg1, carrying the pending connection, with its
-    // dial's leg due to time out at dial + 30s.
-    let mut machine = crate::peer::machine::PeerMachine::new_outbound(
+    // The dial's entry, carrying the pending connection, with its dial's
+    // leg due to time out at dial + 30s.
+    let mut machine = crate::peer::handshake::Handshake::new_outbound(
         link_id,
         peer_identity,
         LegStamp::at(dial_ms),
     );
-    let _ = machine.step(
-        crate::peer::machine::PeerEvent::Dial {
-            transport_id,
-            remote_addr: remote_addr.clone(),
-            peer_identity,
-            connection_oriented: false,
-        },
-        dial_ms,
-    );
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
-    node.peer_machines.raw().insert(link_id, machine);
+    node.handshakes.raw().insert(link_id, machine);
     node.plant_dial_at((transport_id, our_index.as_u32()), link_id, None);
 
     assert_eq!(node.connection_count(), 1);
@@ -1018,8 +994,8 @@ async fn test_handshake_timeout_drive() {
     );
     assert_eq!(node.index_allocator.count(), 0, "Session index freed");
     assert!(
-        !node.peer_machines.contains_key(&link_id),
-        "Control machine dropped with the reaped connection"
+        !node.handshakes.contains_key(&link_id),
+        "Handshake entry dropped with the reaped connection"
     );
     assert!(
         node.leg(link_id).is_none(),
@@ -1027,11 +1003,11 @@ async fn test_handshake_timeout_drive() {
     );
 }
 
-/// Test that msg2 is stored on the control machine's carrier for responder resend.
+/// Test that msg2 is stored on the handshake entry's carrier for responder resend.
 #[test]
 fn test_msg2_stored_on_connection() {
     let mut machine =
-        crate::peer::machine::PeerMachine::new_inbound(LinkId::new(1), LegStamp::at(1000));
+        crate::peer::handshake::Handshake::new_inbound(LinkId::new(1), LegStamp::at(1000));
 
     assert!(machine.conn_handshake_msg2().is_none());
 
@@ -1300,7 +1276,7 @@ fn node_with_promoted_peer(transport_id: TransportId) -> (Node, NodeAddr, Sessio
     let link_id = LinkId::new(1);
     let identity = seed_completed_connection(&mut node, link_id, transport_id, 1_000);
     let node_addr = *identity.node_addr();
-    node.promote_connection(link_id, identity, 2_000).unwrap();
+    node.install_handshake(link_id, identity, 2_000).unwrap();
     let our_index = node
         .get_peer(&node_addr)
         .and_then(|p| p.our_index())
@@ -1742,7 +1718,7 @@ async fn a_crossing_msg1_in_the_connection_oriented_dial_window_is_rejected() {
         transport_id,
         remote_addr: addr.clone(),
         peer_identity,
-        origin: crate::peer::machine::DialOrigin::Addressed,
+        origin: crate::peer::handshake::DialOrigin::Addressed,
     });
 
     let bad_state_before = node.stats().handshake.bad_state;
@@ -1878,7 +1854,7 @@ async fn msg1_waiver_classifies_all_three_outcomes() {
     let carrier_link = node.allocate_link_id();
     let dialled = make_peer_identity();
     let dialled_node_addr = *dialled.node_addr();
-    node.seed_handshake_machine(HandshakeSeed::outbound(carrier_link, dialled, 1_000))
+    node.seed_handshake(HandshakeSeed::outbound(carrier_link, dialled, 1_000))
         .unwrap();
     node.links
         .raw_index()
@@ -2130,9 +2106,8 @@ async fn a_second_epoch_change_inside_the_dampening_interval_leaves_the_peering_
 /// the ordering directly: after an accepted change stamps the dampener,
 /// repeated refused msg1s must leave that stamp byte-identical.
 ///
-/// Discriminator: moving the three stamp lines above the gate in
-/// `InboundDecision::RestartThenPromote` reds this and nothing else in the
-/// module.
+/// Discriminator: stamping the dampener at a refusal as well, in the
+/// settlement core's `Gates::gate`, reds this.
 #[tokio::test]
 async fn a_refused_epoch_change_does_not_slide_the_dampening_window() {
     let transport_id = TransportId::new(1);
@@ -2463,12 +2438,9 @@ async fn a_transient_msg2_failure_keeps_the_link_for_the_retry() {
 ///
 /// The epoch-mismatch restart arm tears the stale peering down in Phase 1 and
 /// then sends msg2 for the fresh leg. When the interface under the transport is
-/// absent, that send is deferred rather than failed, so `PromoteToActive` never
-/// runs and the machine stays registered at `Handshaking{ReceivedMsg1}` — a
-/// third outcome the arm's post-promote `debug_assert!` did not admit. Without
-/// that assertion widened, this test panics at the assertion in any build with
-/// debug assertions on, which is every `cargo test` and every `cargo build`
-/// without `--release`.
+/// absent, that send is deferred rather than failed, so the promotion never
+/// runs and the handshake's entry stays registered with its handshake
+/// pending: a third outcome beside a promoted and a failed leg.
 ///
 /// It also pins the deferral's own contract on this arm: the half-built link
 /// survives for the initiator's msg1 resend, and a local interface flap is not
@@ -2477,7 +2449,6 @@ async fn a_transient_msg2_failure_keeps_the_link_for_the_retry() {
 #[tokio::test]
 async fn a_transient_msg2_failure_on_the_restart_path_leaves_the_fresh_leg_pending() {
     use crate::config::EthernetConfig;
-    use crate::peer::machine::{HandshakePhase, PeerState};
     use crate::transport::TransportHandle;
     use crate::transport::ethernet::EthernetTransport;
 
@@ -2540,18 +2511,14 @@ async fn a_transient_msg2_failure_on_the_restart_path_leaves_the_fresh_leg_pendi
         "the restart must have replaced the stale link, not kept it"
     );
     assert!(
-        matches!(
-            node.peer_machines.get(&fresh_link).map(|m| m.state()),
-            Some(PeerState::Handshaking {
-                phase: HandshakePhase::ReceivedMsg1,
-                ..
-            })
-        ),
-        "a deferred msg2 must leave the machine pending, not promoted and not gone"
+        node.handshakes
+            .get(&fresh_link)
+            .is_some_and(|e| e.leg().is_some() && e.shown_state() == "received_msg1"),
+        "a deferred msg2 must leave the entry pending, not promoted and not gone"
     );
     assert!(
         node.get_peer(&initiator_addr).is_none(),
-        "no promotion can have happened: PromoteToActive never ran"
+        "no promotion can have happened: the promotion never ran"
     );
     assert_eq!(
         node.stats().handshake.snapshot().bad_state,
@@ -2615,7 +2582,7 @@ mod dead_encrypt_worker {
         let our_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
         let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
         node_a
-            .seed_handshake_machine(
+            .seed_handshake(
                 HandshakeSeed::outbound(link_id, peer_b_identity, 1000)
                     .with_our_index(our_lease)
                     .with_transport_id(tid)
@@ -2625,7 +2592,7 @@ mod dead_encrypt_worker {
         let keypair = node_a.identity().keypair();
         let epoch = node_a.startup_epoch();
         let msg1 = node_a
-            .peer_machines
+            .handshakes
             .get_mut(&link_id)
             .unwrap()
             .start_handshake(keypair, epoch, LegStamp::at(1000))

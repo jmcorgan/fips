@@ -101,7 +101,7 @@ fn every_remove_path_runs_one_routine() {
     // node's tests out.
     for want in [
         "node/dataplane/dispatch.rs",
-        "node/dataplane/peer_actions.rs",
+        "node/handlers/handshake.rs",
         "node/handlers/mmp.rs",
         "node/handlers/rekey.rs",
         "node/lifecycle/mod.rs",

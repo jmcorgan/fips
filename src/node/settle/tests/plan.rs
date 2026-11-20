@@ -51,13 +51,9 @@ const REMOVE: &[(Effect, &str)] = &[
     ),
 ];
 
-/// The tail of a promotion of this node's own dial, `handle_msg2`'s and the
-/// executor's `PromoteToActive` arm's.
+/// The tail of a promotion of this node's own dial, `handle_msg2`'s
+/// promotion's.
 const PROMOTE_OUT: &[(Effect, &str)] = &[
-    (
-        Effect::MachineResolved,
-        "machine.step(PeerEvent::PromotionResolved { result }, ..); queue.extend(follow)",
-    ),
     (
         Effect::RelinkInitiator,
         "self.relink(&node_addr, None, Some(link)).await",
@@ -82,13 +78,9 @@ const PROMOTE_OUT: &[(Effect, &str)] = &[
     (Effect::BackoffReset, "self.reset_lookup_backoff()"),
 ];
 
-/// The tail of a promotion of a msg1 this node answered, the executor's
-/// `PromoteToActive` arm's and `finish_inbound`'s.
+/// The tail of a promotion of a msg1 this node answered, the handshake
+/// handlers' promotion's.
 const PROMOTE_IN: &[(Effect, &str)] = &[
-    (
-        Effect::MachineResolved,
-        "machine.step(PeerEvent::PromotionResolved { result }, ..); queue.extend(follow)",
-    ),
     (
         Effect::PathsRenewed,
         "Box::pin(self.paths_renewed(&node_addr)).await",
@@ -109,7 +101,7 @@ const PROMOTE_IN: &[(Effect, &str)] = &[
 ];
 
 /// The tail of `handle_msg2`'s crossing arm when the peer moves onto the
-/// dial's session, after `move_session`.
+/// dial's session, after `adopt_dial`.
 const MOVE: &[(Effect, &str)] = &[
     (
         Effect::RunLinkOutputs,
@@ -121,7 +113,7 @@ const MOVE: &[(Effect, &str)] = &[
     ),
     (
         Effect::HoldDial,
-        "if left: self.links.hold(&link_id, peer_node_addr); self.peer_machines.rekey(left, link_id); self.rekey_carrier(left, link_id)",
+        "if left: self.links.hold(&link_id, peer_node_addr); self.rekey_carrier(left, link_id)",
     ),
     (
         Effect::PathsRenewed,
@@ -150,10 +142,6 @@ const MOVE: &[(Effect, &str)] = &[
     (
         Effect::MoveNote,
         "debug!(.., \"Suppressed replay detections during link transition\"); debug!(.., the swap line)",
-    ),
-    (
-        Effect::MachineCrossed,
-        "self.observe_cross_conn_resolved(&peer_node_addr, outcome)",
     ),
     (Effect::DialForget, "self.drop_leg(link_id)"),
     (
@@ -186,10 +174,6 @@ const KEEP: &[(Effect, &str)] = &[
     (
         Effect::LeaseFreed,
         "self.index_allocator.free(SessionIndex::new(lease.release()))",
-    ),
-    (
-        Effect::MachineCrossed,
-        "self.observe_cross_conn_resolved(&peer_node_addr, outcome)",
     ),
     (Effect::DialForget, "self.drop_leg(link_id)"),
     (

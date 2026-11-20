@@ -6,7 +6,7 @@
 
 use super::{Config, LookupConfig};
 use crate::node::REKEY_HANDSHAKE;
-use crate::peer::machine::DISCOVERY_RESENDS;
+use crate::peer::handshake::DISCOVERY_RESENDS;
 use crate::proto::bloom::ACCEPT_FPR_CAP;
 use crate::proto::mmp::{MAX_OWD_WINDOW_SIZE, MIN_OWD_WINDOW_SIZE};
 use std::fmt::Display;

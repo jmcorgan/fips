@@ -60,8 +60,6 @@ MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_
 MoveKeepsInboundLink	pass	fips-mesh	node::tests::link_setup_diag::a_simultaneous_dial_tags_the_surviving_session_on_both_ends
 MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_settles_both_ends_on_the_smaller_nodes_dial_at_its_first_frame	link-cache
 MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_tcp_crossing_with_one_msg1_inside_the_others_connect_window_settles_both_ends_on_the_smaller_nodes_dial_at_its_first_frame_with_multipath_on	link-cache
-MachineLeftBehind	red	fips-mesh	node::tests::settle::crossing::a_moved_peers_control_machine_moves_with_it	peer machine present for the promoted cross-connection peer
-MachineLeftBehind	red	fips-mesh	node::tests::settle::crossing::a_moved_peers_control_machine_moves_with_it_with_multipath_on	peer machine present for the promoted cross-connection peer
 CarrierLeftBehind	red	fips-mesh	node::tests::settle::readings::a_no_carrier_reading_stays_across_a_move_and_goes_with_the_peer
 IgnoreOwnDial	red	fips-mesh	node::tests::handshake::heard::a_second_msg1_after_the_replaceable_age_from_the_larger_address_leaves_a_working_peering	the responder must have decrypted the dialer's frames on the peering that replaced the first
 IgnoreOwnDial	red	fips-core	proto::settle::table::tests::a_second_dial_to_a_peer_held_on_this_nodes_own_dial_moves_the_peer_onto_it

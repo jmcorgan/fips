@@ -152,7 +152,7 @@ async fn test_adopted_traversal_skips_already_connected_peer() {
     let link_id = LinkId::new(1);
     let peer_identity = seed_completed_connection(&mut node, link_id, transport_id, 1_000);
     let peer_node_addr = *peer_identity.node_addr();
-    node.promote_connection(link_id, peer_identity, 2_000)
+    node.install_handshake(link_id, peer_identity, 2_000)
         .unwrap();
 
     let link_count = node.link_count();
@@ -534,7 +534,7 @@ async fn the_peering_tick_pushes_configured_and_linked_npubs_to_the_advert_cache
 
     let link_id = LinkId::new(1);
     let linked = seed_completed_connection(&mut node, link_id, TransportId::new(1), 1000);
-    node.promote_connection(link_id, linked, 2000).unwrap();
+    node.install_handshake(link_id, linked, 2000).unwrap();
 
     let engine = std::sync::Arc::new(crate::nostr::NostrRendezvous::new_for_test());
     node.supervisor.nostr_rendezvous.set_engine(engine.clone());
@@ -856,7 +856,7 @@ async fn a_connected_peers_other_lan_addresses_are_dropped_on_a_tick_without_adv
     let mut node = lan_node().await;
     let link_id = LinkId::new(1);
     let peer = seed_completed_connection(&mut node, link_id, TransportId::new(1), 1000);
-    node.promote_connection(link_id, peer, 2000).unwrap();
+    node.install_handshake(link_id, peer, 2000).unwrap();
     let mut rng = rand::rng();
     let none = std::collections::HashSet::new();
     for port in [9u16, 10] {
@@ -986,7 +986,7 @@ async fn a_mismatch_from_the_traversed_address_after_the_link_is_up_sets_no_cool
     let mut node = make_node();
     let link_id = LinkId::new(1);
     let peer = seed_completed_connection(&mut node, link_id, TransportId::new(7), 1000);
-    node.promote_connection(link_id, peer, 2000).unwrap();
+    node.install_handshake(link_id, peer, 2000).unwrap();
     let engine = std::sync::Arc::new(crate::nostr::NostrRendezvous::new_for_test());
     node.supervisor.nostr_rendezvous.set_engine(engine.clone());
     node.supervisor.nostr_rendezvous.insert_bootstrap_transport(

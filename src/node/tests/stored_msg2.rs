@@ -623,7 +623,7 @@ async fn after_our_initiator_cutover_an_off_path_msg1_arms_only_a_redial_and_an_
     let redial = nodes[b].node.redials.of(&a_addr);
     assert!(
         nodes[b].node.connection_count() == 1
-            && redial.is_some_and(|r| nodes[b].node.peer_machines.get(&r.link).is_some()),
+            && redial.is_some_and(|r| nodes[b].node.handshakes.get(&r.link).is_some()),
         "defect: the msg1s must leave no connection behind at B but the off-path one's redial leg"
     );
 

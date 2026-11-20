@@ -50,9 +50,6 @@ listed! {
         /// one it is on, if the pair moved.
         RelinkIfMoved,
 
-        /// Feed the outcome of the promotion back to the leg's control
-        /// machine and run what it returns.
-        MachineResolved,
         /// Mark the link a dial of this node's promoted, at the transport.
         RelinkInitiator,
         /// Log the promotion of a dial of this node's.
@@ -64,8 +61,8 @@ listed! {
         RunLinkOutputs,
         /// Run the path machine's outputs from its renewal.
         RunRenewed,
-        /// Hold the peer's link record, its control machine and its carrier
-        /// readings on the dial's link, if the move left another.
+        /// Hold the peer's link record and its carrier readings on the
+        /// dial's link, if the move left another.
         HoldDial,
         /// Read the pair the peer is on after the move.
         MovedRead,
@@ -76,8 +73,6 @@ listed! {
         UnpinIfOwn,
         /// Log the replays suppressed during the move and the move itself.
         MoveNote,
-        /// Tell the peer's control machine how the crossing resolved.
-        MachineCrossed,
         /// Close the losing link's connection unless a live link uses it:
         /// the link a move left, or the dial's.
         LoserClose,
@@ -130,7 +125,6 @@ const REMOVE: &[Effect] = &[Effect::UnmarkHeld, Effect::CloseHeld, Effect::Recon
 
 /// The promotion of a dial of this node's, answered by its msg2.
 const PROMOTE_OUT: &[Effect] = &[
-    Effect::MachineResolved,
     Effect::RelinkInitiator,
     Effect::PathsRenewed,
     Effect::DialForget,
@@ -142,7 +136,6 @@ const PROMOTE_OUT: &[Effect] = &[
 
 /// The promotion of a msg1 this node answered.
 const PROMOTE_IN: &[Effect] = &[
-    Effect::MachineResolved,
     Effect::PathsRenewed,
     Effect::SetupNote,
     Effect::TreeAnnounce,
@@ -156,7 +149,6 @@ const REPLACE_OUT: &[Effect] = &[
     Effect::UnmarkHeld,
     Effect::CloseHeld,
     Effect::Reconnect,
-    Effect::MachineResolved,
     Effect::RelinkInitiator,
     Effect::PathsRenewed,
     Effect::DialForget,
@@ -172,7 +164,6 @@ const REPLACE_IN: &[Effect] = &[
     Effect::UnmarkHeld,
     Effect::CloseHeld,
     Effect::Reconnect,
-    Effect::MachineResolved,
     Effect::PathsRenewed,
     Effect::SetupNote,
     Effect::TreeAnnounce,
@@ -211,7 +202,6 @@ pub(in crate::node) fn plan(t: &Transition) -> &'static [Effect] {
             Effect::RelinkIfMoved,
             Effect::UnpinIfOwn,
             Effect::MoveNote,
-            Effect::MachineCrossed,
             Effect::DialForget,
             Effect::LoserClose,
             Effect::LoserRemoved,
@@ -223,7 +213,6 @@ pub(in crate::node) fn plan(t: &Transition) -> &'static [Effect] {
         Transition::Keep { .. } => &[
             Effect::KeepNote,
             Effect::LeaseFreed,
-            Effect::MachineCrossed,
             Effect::DialForget,
             Effect::LoserClose,
             Effect::LoserRemoved,

@@ -1,13 +1,13 @@
 //! Peer Management
 //!
 //! Two-phase peer lifecycle:
-//! 1. **PeerMachine** with a handshake carrier attached - handshake phase,
-//!    before identity is verified
+//! 1. **Handshake** - the node's entry for a handshake in flight, before
+//!    the peer's identity is verified
 //! 2. **ActivePeer** - Authenticated phase, after successful Noise handshake
 
 mod active;
 mod data;
-pub(crate) mod machine;
+pub(crate) mod handshake;
 mod udp_slot;
 
 pub use active::{ActivePeer, ConnectivityState};

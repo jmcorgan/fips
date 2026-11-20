@@ -4,13 +4,12 @@
 //! connection lifecycle, migrated out of the async node shell. The async I/O
 //! adapters remain in `node::handlers::{timeout,rekey}`.
 //!
-//! This covers the two tick-poll maintain/teardown drivers (handshake
-//! timeout/teardown and msg1 resend) plus the inbound-msg1 classification
-//! decision ([`Fmp::establish_inbound`]); link rekeys are decided by each
-//! link's rekey machine on the `rekey/` profile. Handshake message bytes are opaque blobs
-//! throughout — the Noise wire construction and `promote_connection` effects,
-//! the outbound `handle_msg2` classification, and the born-on-next
-//! `handle_msg3` leaf stay in `node/`.
+//! This covers the tick-poll maintain/teardown driver (handshake
+//! timeout/teardown); each handshake is classified by the settlement core
+//! (`proto::settle`), and link rekeys are decided by each link's rekey
+//! machine on the `rekey/` profile. Handshake message bytes are opaque blobs
+//! throughout — the Noise wire construction and the promotion's effects stay
+//! in `node/`.
 //!
 //! - `core.rs` — the [`LifecycleView`] read-seam trait, the [`ConnAction`]
 //!   effect vocabulary, the snapshot types, the pure `poll_*` decisions, and
@@ -18,14 +17,13 @@
 //! - `limits.rs` — the pure connection-retry backoff math.
 //! - `rekey/` — the link profile of the shared rekey machine (Noise IK) and
 //!   the node-level msg1 read; hidden from the docs.
-//! - `silent.rs` — [`SilentSessions`], the per-identity record of link
-//!   sessions that ended without an authenticated frame, and the msg1
-//!   refusal it drives.
+//! - `silent.rs` — [`ActiveBackoff`], the refusal in force for an identity
+//!   whose link sessions ended without an authenticated frame, as the msg1
+//!   refusal's log reads it.
 //! - `state.rs` — [`ConnectionState`], the pure handshake-phase connection
-//!   bookkeeping (owned by the per-peer control machine beside its Noise
-//!   crypto carrier), its two-clock activity stamp [`LegStamp`], plus
+//!   bookkeeping (held by the node's entry for the handshake beside its
+//!   Noise crypto carrier), its two-clock activity stamp [`LegStamp`], plus
 //!   [`Fmp`], the (stateless) lifecycle anchor owned by `Node`.
-//!   The handshake phase itself lives on the per-peer control machine.
 //! - `wire.rs` — the FMP link-framing codec: handshake message types,
 //!   disconnect reasons, and the orderly disconnect message. Also carries the
 //!   FMP link wire framing relocated from `node/wire.rs` — the common prefix,
@@ -43,12 +41,12 @@ pub mod wire;
 mod tests;
 
 pub use core::{
-    ConnAction, ConnSnapshot, EphemeralDigest, EstablishSnapshot, EstablishView, InboundDecision,
-    InboundReject, LifecycleView, Msg1Digest, OutboundDecision, OutboundSnapshot, WireOutcome,
+    ConnAction, ConnSnapshot, EphemeralDigest, InboundReject, LifecycleView, Msg1Digest,
+    WireOutcome,
 };
 pub use core::{PromotionResult, cross_connection_winner};
 pub use limits::backoff_ms;
-pub use silent::{ActiveBackoff, SilentSessions};
+pub use silent::ActiveBackoff;
 pub use state::{ConnectionState, Fmp, LegStamp};
 pub use wire::HandshakeMessageType;
 pub use wire::{Disconnect, DisconnectReason};

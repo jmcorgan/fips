@@ -1,6 +1,6 @@
 use super::*;
 use crate::PeerIdentity;
-use crate::peer::machine::HandshakeCrypto;
+use crate::peer::handshake::HandshakeCrypto;
 use crate::proto::fmp::LegStamp;
 use crate::transport::{LinkDirection, ReceivedPacket, TransportAddr, packet_channel};
 use crate::utils::index::SessionIndex;
@@ -261,8 +261,8 @@ pub(super) fn make_peer_identity() -> PeerIdentity {
     PeerIdentity::from_pubkey(identity.pubkey())
 }
 
-/// A control machine carrying a fresh outbound connection, for tests that
-/// drive one end of a handshake without a whole node behind it. The machine
+/// A handshake entry carrying a fresh outbound connection, for tests that
+/// drive one end of a handshake without a whole node behind it. The entry
 /// owns the handshake operations, so it is what the crypto runs on.
 /// A peer for `remote` with a live link session: the node's half of an IK
 /// handshake it completed toward `remote`, under our index 1 and their index
@@ -325,25 +325,25 @@ pub(super) fn outbound_leg(
     link_id: LinkId,
     expected_identity: PeerIdentity,
     current_time_ms: u64,
-) -> PeerMachine {
+) -> Handshake {
     let mut machine =
-        PeerMachine::new_outbound(link_id, expected_identity, LegStamp::at(current_time_ms));
+        Handshake::new_outbound(link_id, expected_identity, LegStamp::at(current_time_ms));
     machine.set_leg(HandshakeCrypto::new());
     machine
 }
 
 /// The responder twin of [`outbound_leg`].
-pub(super) fn inbound_leg(link_id: LinkId, current_time_ms: u64) -> PeerMachine {
-    let mut machine = PeerMachine::new_inbound(link_id, LegStamp::at(current_time_ms));
+pub(super) fn inbound_leg(link_id: LinkId, current_time_ms: u64) -> Handshake {
+    let mut machine = Handshake::new_inbound(link_id, LegStamp::at(current_time_ms));
     machine.set_leg(HandshakeCrypto::new());
     machine
 }
 
-/// Seed a control machine whose leg carries a completed Noise IK handshake.
+/// Seed a handshake entry whose leg carries a completed Noise IK handshake.
 ///
 /// Returns the peer identity. The leg is outbound, in Complete state, with
 /// session, indices, and transport info set, and is installed on the node
-/// through [`Node::seed_handshake_machine`].
+/// through [`Node::seed_handshake`].
 pub(super) fn seed_completed_connection(
     node: &mut Node,
     link_id: LinkId,
@@ -392,7 +392,7 @@ pub(super) fn seed_completed_connection_from(
     // Must use from_pubkey_full to preserve parity for ECDH
     let peer_identity = PeerIdentity::from_pubkey_full(peer_identity_full.pubkey_full());
 
-    node.seed_handshake_machine(shape(HandshakeSeed::outbound(
+    node.seed_handshake(shape(HandshakeSeed::outbound(
         link_id,
         peer_identity,
         current_time_ms,
@@ -403,7 +403,7 @@ pub(super) fn seed_completed_connection_from(
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let msg1 = node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, LegStamp::at(current_time_ms))
@@ -424,7 +424,7 @@ pub(super) fn seed_completed_connection_from(
         .unwrap();
 
     // Complete initiator handshake
-    node.peer_machines
+    node.handshakes
         .get_mut(&link_id)
         .unwrap()
         .complete_handshake(&msg2, LegStamp::at(current_time_ms))

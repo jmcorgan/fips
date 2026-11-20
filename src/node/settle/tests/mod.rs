@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::peer::ActivePeer;
-use crate::peer::machine::{PeerMachine, TimerKind};
+use crate::peer::handshake::Handshake;
 use crate::proto::fmp::LegStamp;
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId};
 use crate::{Identity, NodeAddr, PeerIdentity};
@@ -17,66 +17,31 @@ mod plan;
 mod remove;
 mod scans;
 
-/// An inbound machine for `link`, with no handshake started.
-fn machine(link: LinkId) -> PeerMachine {
-    PeerMachine::new_inbound(link, LegStamp::at(1000))
+/// The peer's handshake entry for `link`, with no handshake started.
+fn entry(link: LinkId) -> Handshake {
+    Handshake::new_inbound(link, LegStamp::at(1000))
 }
 
 #[test]
-fn dropping_a_machine_drops_its_timers_and_leaves_other_links() {
+fn dropping_a_handshake_entry_leaves_other_links() {
     let (one, two) = (LinkId::new(1), LinkId::new(2));
-    let mut map = MachineMap::default();
-    map.add(one, machine(one));
-    map.add(two, machine(two));
-    map.arm(one, TimerKind::Liveness, 5000);
-    map.arm(two, TimerKind::Liveness, 6000);
+    let mut map = HandshakeMap::default();
+    map.add(one, entry(one));
+    map.add(two, entry(two));
 
     map.drop(one);
 
-    assert!(!map.contains_key(&one), "the machine is dropped");
-    assert!(
-        !map.timers().contains_key(&one),
-        "its timers are dropped with it"
-    );
-    assert!(map.contains_key(&two), "another link keeps its machine");
-    assert_eq!(
-        map.timers()[&two].get(&TimerKind::Liveness),
-        Some(&6000),
-        "another link keeps its timers"
-    );
+    assert!(!map.contains_key(&one), "the entry is dropped");
+    assert!(map.contains_key(&two), "another link keeps its entry");
 }
 
 #[test]
-fn arming_a_timer_again_replaces_its_deadline_and_cancelling_keeps_the_links_store() {
+fn ensuring_a_handshake_entry_keeps_the_one_the_link_has_and_makes_one_otherwise() {
     let link = LinkId::new(1);
-    let mut map = MachineMap::default();
-    map.arm(link, TimerKind::Liveness, 1000);
-    map.arm(link, TimerKind::Liveness, 2000);
-    assert_eq!(
-        map.timers()[&link].get(&TimerKind::Liveness),
-        Some(&2000),
-        "the second arm replaces the deadline"
-    );
-
-    map.cancel(link, TimerKind::Liveness);
-    assert!(
-        map.timers()[&link].is_empty(),
-        "the link keeps an empty store, as the timer sites left it"
-    );
-    map.cancel(LinkId::new(2), TimerKind::Liveness);
-    assert!(
-        !map.timers().contains_key(&LinkId::new(2)),
-        "cancelling on a link with no store makes none"
-    );
-}
-
-#[test]
-fn ensuring_a_machine_keeps_the_one_the_link_has_and_makes_one_otherwise() {
-    let link = LinkId::new(1);
-    let mut map = MachineMap::default();
-    map.ensure(link, || machine(link));
-    assert!(map.contains_key(&link), "a link with none gets a machine");
-    map.ensure(link, || panic!("the link already has a machine"));
+    let mut map = HandshakeMap::default();
+    map.ensure(link, || entry(link));
+    assert!(map.contains_key(&link), "a link with none gets an entry");
+    map.ensure(link, || panic!("the link already has an entry"));
     assert_eq!(map.len(), 1);
 }
 
@@ -332,12 +297,10 @@ fn an_unclaimed_pair_loses_only_an_entry_naming_the_link() {
 #[test]
 fn only_the_ways_past_the_writers_mark_a_map_planted() {
     let link = LinkId::new(1);
-    let mut machines = MachineMap::default();
-    machines.add(link, machine(link));
-    machines.arm(link, TimerKind::Liveness, 1);
-    machines.cancel(link, TimerKind::Liveness);
-    machines.ensure(link, || machine(link));
-    machines.drop(link);
+    let mut handshakes = HandshakeMap::default();
+    handshakes.add(link, entry(link));
+    handshakes.ensure(link, || entry(link));
+    handshakes.drop(link);
     let mut peers = PeerMap::default();
     let (addr, held) = peer(link);
     peers.install(addr, held);
@@ -364,22 +327,19 @@ fn only_the_ways_past_the_writers_mark_a_map_planted() {
     links.open(&mut core, self::link(1, "10.0.0.1:2121"));
     links.forget(&mut core, &link, &key("10.0.0.1:2121"));
     assert!(
-        !machines.planted() && !peers.planted() && !indices.planted() && !links.planted(),
+        !handshakes.planted() && !peers.planted() && !indices.planted() && !links.planted(),
         "no writer marks its map"
     );
 
-    machines.raw();
+    handshakes.raw();
     peers.raw();
     indices.raw();
-    let mut timers = MachineMap::default();
-    timers.raw_timers();
     links.raw();
     let mut index = LinkTable::default();
     index.raw_index();
-    assert!(machines.planted(), "raw marks the machines");
+    assert!(handshakes.planted(), "raw marks the handshake entries");
     assert!(peers.planted(), "raw marks the peers");
     assert!(indices.planted(), "raw marks the indices");
-    assert!(timers.planted(), "raw_timers marks the machines");
     assert!(links.planted(), "raw marks the link table");
     assert!(index.planted(), "raw_index marks the link table");
 }
@@ -387,7 +347,7 @@ fn only_the_ways_past_the_writers_mark_a_map_planted() {
 // Each clause of the live audit against a state that breaks it alone,
 // written through the writers, so the node is not marked planted.
 
-/// A node with no links, peers, machines or dials.
+/// A node with no links, peers, handshakes or dials.
 #[cfg(debug_assertions)]
 fn bare() -> crate::node::Node {
     crate::node::tests::make_node()
@@ -406,7 +366,7 @@ fn the_live_audit_fails_a_peer_whose_link_is_not_in_the_link_map() {
 #[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "audit_live: test: link-named")]
-fn the_live_audit_fails_a_link_no_peer_machine_or_dial_names() {
+fn the_live_audit_fails_a_link_no_peer_handshake_or_dial_names() {
     let mut node = bare();
     node.links.open(&mut node.core, link(1, "10.0.0.1:2121"));
     audit::live(&node, "test");
@@ -467,7 +427,7 @@ fn the_live_audit_fails_a_handshake_leg_whose_pair_names_no_live_link() {
     let mut node = bare();
     let one = LinkId::new(1);
     let identity = PeerIdentity::from_pubkey(Identity::generate().pubkey());
-    node.seed_handshake_machine(crate::node::HandshakeSeed::outbound(one, identity, 1000))
+    node.seed_handshake(crate::node::HandshakeSeed::outbound(one, identity, 1000))
         .expect("precondition: the leg is seeded");
     node.links.open(&mut node.core, link(1, "10.0.0.1:2121"));
     node.links
@@ -488,10 +448,10 @@ fn the_live_audit_fails_a_session_index_no_link_machine_binds() {
 #[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "audit_live: test: carrier")]
-fn the_live_audit_fails_a_handshake_machine_with_no_carrier() {
+fn the_live_audit_fails_a_handshake_entry_with_no_carrier() {
     let mut node = bare();
     let one = LinkId::new(1);
-    node.peer_machines.add(one, machine(one));
+    node.handshakes.add(one, entry(one));
     audit::live(&node, "test");
 }
 

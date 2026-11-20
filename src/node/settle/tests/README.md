@@ -67,10 +67,25 @@ tests.
 - `scans.rs`: that no code of the root crate outside its tests builds,
   renews or closes a link's rekey or path machine but through the
   settlement core's join, with each exemption's reason and a check that
-  each still names a call; that only `src/peer/active.rs` asks the join for
-  a change of machines, one function for each, and that only `../exec/`
-  calls those functions in the node's code but for a crossing's move at its
-  site. Each scan finds planted lines of every shape it reads.
+  each still names a call: a `.close(` with any argument counts, but in the
+  files that close only flows and channels, and a path machine counts under
+  either name, `Bundle` or `PeerBundle`; that the settlement core's table
+  is stepped, polled, reaped and closed (`Table::step`, `poll`, `reap_leg`,
+  `close`) only from `../decide.rs` and the two path feeds of `../exec/`,
+  `pathed_core` and `release_core`, each with its reason; that only
+  `src/peer/active.rs` asks the join for a change of machines, one function
+  for each, and that only `../exec/` calls those functions in the node's
+  code but for a crossing's move at its site; and that the settlement
+  core's gate constants, the rekey machine's parameters and constants and
+  the node-address ordering (`cross_connection_winner`, and a comparison
+  or `cmp` of a node address) appear in the root crate only on its exempt
+  list, each item with its reason: the configuration mappings
+  (`../params.rs`, `link_params`, the session's `session_params`), the
+  core built and the gates' own parameters, the configuration's checks of
+  the rekey jitter and cap, compile-time assertions, the published
+  re-export, and the address comparisons of NAT traversal and the BLE
+  transport, which choose before any handshake or below the link layer.
+  Each scan finds planted lines of every shape it reads.
 
 `remove.rs` and `scans.rs` walk the source with `src/node/tests/survivors.rs`'s
 `sources`, and name each file with its `label`: the file's path below `src/`,

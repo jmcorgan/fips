@@ -1588,7 +1588,7 @@ impl<I: Instant> Table<I> {
     /// one: a dead link, a `Disconnect` and an orphaned bundle, which the
     /// node removes through its link-dead path, and a restart, a
     /// replacement, an own-dial restart and a redial's swap, whose loss the
-    /// peer's control machine reports before the new session is promoted.
+    /// node notes before the new session is promoted.
     fn remove(&mut self, peer: NodeAddr, why: Why, now: I, out: &mut Vec<Output>) {
         let Some(h) = self.held.remove(&peer) else {
             return;

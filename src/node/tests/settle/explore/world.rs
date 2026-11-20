@@ -744,7 +744,7 @@ mod ble {
 
 /// What node `from` holds of its dial to node `to` on transport 0: the link
 /// record's state, whether a pending transport connect names the link, and
-/// whether its control machine keeps its msg1 for resending. `None` when no
+/// whether its handshake entry keeps its msg1 for resending. `None` when no
 /// link of `from`'s is at `to`'s address.
 fn dial_seen(world: &World, from: usize, to: usize) -> Option<(LinkState, bool, bool)> {
     let node = &world.nodes[from].node;

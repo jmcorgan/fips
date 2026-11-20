@@ -14,8 +14,8 @@
 //!   (known defect, for both address orders, by the heartbeat check and by
 //!   the audit).
 //! - A move holds the link it dialed: at the address dialed, with the msg2's
-//!   pair a path of it; the control machine moves with the peer; and a
-//!   second dial answered after a crossing ends the pin.
+//!   pair a path of it; and a second dial answered after a crossing ends
+//!   the pin.
 //! - A TCP crossing whose one msg1 reaches the other node inside its connect
 //!   window: no move runs, and both ends keep the handshake that completed
 //!   first.
@@ -54,7 +54,6 @@ use super::super::spanning_tree::{
 };
 use super::super::*;
 use super::audit::{Breach, assert_coherent, audit};
-use super::readings::own_dial;
 use super::{
     AGED, alias, crossed_tcp, heartbeat_reaches, loopback_node, pool, pump, received,
     resolve_connect, settled, with_path,
@@ -1591,81 +1590,6 @@ async fn a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path(
 async fn a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path_with_multipath_on()
 {
     adopted_address(true).await;
-}
-
-/// The peer's control machine and its timers move with the peer onto the
-/// dial's link, so the machine controls the link the peer is on, and a
-/// link-dead, which finds the machine by the peer's link, reaches it and
-/// removes the peer with its machine.
-async fn machine_moves(on: bool) {
-    use crate::peer::machine::TimerKind;
-    use crate::proto::settle::output::Why;
-
-    let mut nodes = dialed_pair(on).await;
-    let b = *nodes[1].node.node_addr();
-    let left = nodes[0]
-        .node
-        .get_peer(&b)
-        .map(|p| p.link_id())
-        .expect("precondition: node 0 holds node 1");
-    nodes[0]
-        .node
-        .peer_machines
-        .arm(left, TimerKind::Liveness, u64::MAX / 2);
-    own_dial(&mut nodes).await;
-    let node = &nodes[0].node;
-    let held = node
-        .get_peer(&b)
-        .map(|p| p.link_id())
-        .expect("precondition: the move keeps the peer");
-    let machine = node.peer_machines.get(&held).map(|m| m.link_id());
-    let timer = node
-        .peer_machines
-        .timers()
-        .get(&held)
-        .is_some_and(|t| t.contains_key(&TimerKind::Liveness));
-    let behind =
-        node.peer_machines.contains_key(&left) || node.peer_machines.timers().contains_key(&left);
-    nodes[0]
-        .node
-        .route_link_dead(b, Node::now_ms(), Why::Dead)
-        .await;
-    let node = &nodes[0].node;
-    let after = (
-        node.get_peer(&b).is_some(),
-        node.peer_machines.contains_key(&held),
-    );
-    cleanup_nodes(&mut nodes).await;
-    assert_ne!(
-        held, left,
-        "precondition: node 0 moved onto the dial's link"
-    );
-    assert_eq!(
-        machine,
-        Some(held),
-        "defect: no machine controls the link the peer is on"
-    );
-    assert!(timer, "defect: the machine's timers did not move with it");
-    assert!(
-        !behind,
-        "defect: a machine or its timers stay under the link left"
-    );
-    assert_eq!(
-        after,
-        (false, false),
-        "defect: a link-dead did not reach the moved peer's machine"
-    );
-}
-
-#[tokio::test]
-async fn a_moved_peers_control_machine_moves_with_it() {
-    machine_moves(false).await;
-}
-
-/// [`a_moved_peers_control_machine_moves_with_it`] with multipath on.
-#[tokio::test]
-async fn a_moved_peers_control_machine_moves_with_it_with_multipath_on() {
-    machine_moves(true).await;
 }
 
 /// Two dials from the smaller node, both made before it holds the peer: a

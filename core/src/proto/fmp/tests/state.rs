@@ -1,7 +1,7 @@
 //! Unit tests for the pure FMP connection state ([`ConnectionState`]). These
 //! exercise the extracted bookkeeping directly, with no crypto involved; the
-//! crypto-driving transition behavior is covered by the shell `peer::connection`
-//! suite, and the handshake phase itself lives on the control machine.
+//! crypto-driving transition behavior is covered by the node's handshake
+//! entry's own tests (`peer::handshake`).
 
 use crate::identity::PeerIdentity;
 use crate::proto::fmp::{ConnectionState, LegStamp};

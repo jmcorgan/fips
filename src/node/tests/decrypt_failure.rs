@@ -58,13 +58,13 @@ fn reaching_the_decrypt_failure_threshold_logs_one_warning_and_keeps_the_peer() 
     let link_id = LinkId::new(1);
 
     // Build a fully-promoted active peer with our_index/transport_id set
-    // so peers_by_index is populated by promote_connection.
+    // so peers_by_index is populated by install_handshake.
     let identity = seed_completed_connection(&mut node, link_id, transport_id, 1_000);
     let node_addr = *identity.node_addr();
     // The original pair `seed_completed_connection` gives the link.
     let addr = TransportAddr::from_string("127.0.0.1:5000");
 
-    node.promote_connection(link_id, identity, 2_000).unwrap();
+    node.install_handshake(link_id, identity, 2_000).unwrap();
 
     assert_eq!(node.peer_count(), 1, "peer should be present after promote");
     let our_index = node
@@ -176,7 +176,7 @@ async fn frames_naming_unknown_or_orphaned_indices_are_counted_and_served_and_to
     let link_id = LinkId::new(1);
     let identity = seed_completed_connection(&mut node, link_id, transport_id, 1_000);
     let node_addr = *identity.node_addr();
-    node.promote_connection(link_id, identity, 2_000).unwrap();
+    node.install_handshake(link_id, identity, 2_000).unwrap();
     let our_index = node
         .get_peer(&node_addr)
         .and_then(|p| p.our_index())

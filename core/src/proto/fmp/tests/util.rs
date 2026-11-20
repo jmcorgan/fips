@@ -1,11 +1,7 @@
 //! Shared test helpers for the FMP connection-lifecycle unit tests.
 
-use crate::identity::PeerIdentity;
-use crate::proto::fmp::{ConnSnapshot, EstablishSnapshot, Msg1Digest, WireOutcome};
-use crate::testutil::make_keypair;
+use crate::proto::fmp::ConnSnapshot;
 use crate::transport::LinkId;
-use crate::utils::index::SessionIndex;
-use alloc::vec::Vec;
 
 /// Build a `ConnSnapshot` for the teardown path with the given link, direction,
 /// and retry target.
@@ -18,32 +14,5 @@ pub(super) fn stale_snapshot(
         link,
         is_outbound,
         retry_addr,
-    }
-}
-
-/// Build a quiescent `EstablishSnapshot` for a net-new inbound msg1: no existing
-/// peer, not at cap. Tests override only the fields the case exercises.
-pub(super) fn establish_snapshot() -> EstablishSnapshot {
-    EstablishSnapshot {
-        has_existing_peer: false,
-        existing_peer_epoch: None,
-        replace: false,
-        redial: false,
-        at_max_peers: false,
-        silent_backoff: None,
-    }
-}
-
-/// Build a `WireOutcome` carrying a freshly generated peer identity and the
-/// given remote epoch (empty msg2 payload, fixed sender index). Callers read the
-/// peer's NodeAddr back via `wire.peer_identity.node_addr()` when they need it
-/// for the tie-break.
-pub(super) fn wire_outcome(remote_epoch: Option<[u8; 8]>) -> WireOutcome {
-    WireOutcome {
-        peer_identity: PeerIdentity::from_pubkey_full(make_keypair().public_key()),
-        remote_epoch,
-        their_index: SessionIndex::new(0x1234),
-        msg2_payload: Vec::new(),
-        msg1_digest: Msg1Digest::of(b"msg1"),
     }
 }

@@ -4,7 +4,8 @@
 //! (`rx_loop`), transit/local datagram forwarding (`forwarding`), the
 //! link-message router (`dispatch`), the RX decrypt path including responder
 //! K-bit cutover and address-roam writes (`encrypted`), and the per-peer
-//! connected-UDP fast-path socket activation (`connected_udp`). Each module
+//! connected-UDP fast-path socket activation (`connected_udp`), and the
+//! transports' mark of the link an active peer is on (`relink`). Each module
 //! contributes `impl Node` methods driven by the run loop, except `wait`, a
 //! spawned task that reports how long such a task waits for the loop's thread.
 
@@ -13,7 +14,7 @@ pub(crate) mod connected_udp;
 mod dispatch;
 mod encrypted;
 mod forwarding;
-mod peer_actions;
+mod relink;
 mod rx_loop;
 pub(in crate::node) mod wait;
 
@@ -21,4 +22,3 @@ pub(in crate::node) mod wait;
 pub(in crate::node) use encrypted::DECRYPT_FAILURE_THRESHOLD;
 #[cfg(test)]
 pub(in crate::node) use encrypted::LinkSlot;
-pub(in crate::node) use peer_actions::PeerActionCtx;

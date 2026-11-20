@@ -102,7 +102,7 @@ pub struct Params {
     pub handshake: Duration,
     /// The first msg1 resend's delay, counted from the dial's msg1: one
     /// second whatever the configured resend interval, as the node has sent
-    /// its first resend since version 0.5.0, when its control machine
+    /// its first resend since version 0.5.0, when its handshake code
     /// stopped reading the configured interval for it. The configuration
     /// has no key for it, so the node takes this default.
     pub first: Duration,

@@ -82,17 +82,17 @@ Each subdirectory has its own README.
   than as a designed interface; trimming it is later work. Peer input is
   untrusted all the same: a malformed frame returns an error, never a
   panic.
-- **Test hooks.** Ten items are gated `#[cfg(any(test, feature =
+- **Test hooks.** Some items are gated `#[cfg(any(test, feature =
   "test-hooks"))]`: methods and re-exports that only tests use to set up
   or inspect state. The root crate's tests reach them through the
   `test-hooks` feature, which the root enables from its
   `[dev-dependencies]` only, so they reach only a build that compiles
   tests, examples or benches; a plain `cargo build`, release or not, leaves
-  them out. They are `set_interval_ms` and `len` on the address limiter in
-  `rate_limit.rs`, `set_interval_ms` on the lookup forward limiter, `len`
-  on the routing error limiter, `BloomState::last_update_sent`,
-  `TreeState::set_my_coords_for_test`, `SilentSessions::count`, and the
-  `lookup::RecentRequest`, `lookup::MIN_RECENT_PER_PEER` and
+  them out. Among them are `set_interval_ms` and `len` on the address
+  limiter in `rate_limit.rs`, `set_interval_ms` on the lookup forward
+  limiter, `len` on the routing error limiter,
+  `BloomState::last_update_sent`, `TreeState::set_my_coords_for_test`,
+  and the `lookup::RecentRequest`, `lookup::MIN_RECENT_PER_PEER` and
   `probe::StageVerdict` re-exports.
 - **Shared code lives at this level.** A primitive two subsystems need
   goes here, not in one of them, and subsystems import it downward from

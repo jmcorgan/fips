@@ -351,7 +351,7 @@ async fn reaping_a_handshake_leg_keeps_the_peer_link_it_shares() {
     let node = &mut nodes[0].node;
     let leg = node.allocate_link_id();
     let our_index_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
-    node.seed_handshake_machine(
+    node.seed_handshake(
         HandshakeSeed::outbound(leg, peer_identity, 1000)
             .with_our_index(our_index_lease)
             .with_transport_id(transport_id)

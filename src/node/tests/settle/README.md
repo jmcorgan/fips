@@ -70,8 +70,9 @@ files run off, which is what they test.
 - `clock.rs`: settlement intervals against steps of the wall clock:
   handshake timers against forward and backward steps, an inbound leg
   holding its msg2 reaped at its timeout, the shown start and idle times of
-  a pending handshake left on the wall clock, the restart gate for heard
-  and unheard peerings against a forward step with no time passing and
+  a pending handshake left on the wall clock, a pending dial's shown state,
+  expected peer and resend count on the loop and off it, the restart gate
+  for heard and unheard peerings against a forward step with no time passing and
   against monotonic time passing, the shown promotion time left on the
   wall clock, the replay memory across a forward step and its entries'
   expiry on the monotonic clock across a backward one, and the
@@ -90,7 +91,7 @@ files run off, which is what they test.
   dialer's first frame proves, the dialer left on its second dial's link, and
   with the second msg2 first, a known defect checked by heartbeat and by the
   audit); a move's link: the address dialed with the
-  msg2's pair a path of it, the control machine moved with the peer, and the
+  msg2's pair a path of it, and the
   pin a second dial ends after a crossing; a TCP crossing whose one msg1
   arrives inside the other's connect window, which reaches the larger node
   off its link as a redial and settles both ends on the smaller node's dial

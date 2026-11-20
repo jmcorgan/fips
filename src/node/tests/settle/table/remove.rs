@@ -239,11 +239,7 @@ fn stated(script: &Script, facts: &Facts) -> Vec<(Row, Outcome)> {
         (Row::Records, Outcome::Changed),
     ];
     match cause {
-        Cause::Dead => {
-            // Stepped with the link found dead, then removed.
-            out.push((Row::ControlMachine, Outcome::Changed));
-        }
-        Cause::Disconnect => {}
+        Cause::Dead | Cause::Disconnect => {}
         // The current pair's connection is closed, and on BLE its pooled
         // mark goes with it.
         Cause::Admin => out.push((Row::BleMark, Outcome::Changed)),

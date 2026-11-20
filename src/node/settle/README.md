@@ -88,10 +88,10 @@ field, at once.
   close rule, so a test that changes a bundle and then drives the node needs
   no call of its own. `recorded` gives the paths a peer's bundle holds as the
   feed tells them, which the resync writes.
-- `maps.rs`: `MachineMap`, the per-peer control machines with their timer
-  store (`add`, `ensure`, `rekey`, `drop`, `get_mut`; `arm`, `cancel`, and
-  `timers` for the tests), `rekey` keying a moved peer's machine under the
-  dial's link; `PeerMap`,
+- `maps.rs`: `HandshakeMap`, the node's entries for the handshakes in
+  flight, each one's Noise crypto and the bookkeeping the core's leg does
+  not hold (`add`, `ensure`, `drop`, `get_mut`), an entry dropped when its
+  handshake is promoted, given up or reaped; `PeerMap`,
   the authenticated peers (`install`, `take`, and `get_mut`, `values_mut`
   and `iter_mut` for a change to a peer that leaves the map as it is); and
   `BindMap`, our session indices and the peer each names (`bind`, `unbind`).
@@ -200,6 +200,19 @@ field, at once.
   Its rule states what the code does today; a cell the code does not match is
   a wrong cell or a wrong site, and a change of what a transition does changes
   the cell and its golden line in the same commit.
+- The settlement core's table is stepped, polled, reaped and closed only
+  from `decide.rs`, which hands the outputs back to the decision sites to
+  run in order (its `hear` runs none of a heard frame's outputs), and from
+  the two path feeds of `exec/`: `pathed_core`, which makes the core's link
+  record follow a path input the bundle already decided and runs none of
+  its outputs, and `release_core`, whose release names the connections the
+  close rule closes. `tests/scans.rs` holds the code to it.
+- The inputs of the settlement and rekey decisions stay in `fips-core`:
+  the core's gate constants, the rekey machine's parameters and the
+  node-address ordering. The node maps its configuration onto them
+  (`params.rs`, `link_params`, the session's `session_params`) and decides
+  nothing from them itself; `tests/scans.rs` holds the root crate to an
+  exempt list, each item with its reason, and a new item there needs one.
 - `exec/plan.rs` and `exec/mod.rs` deny wildcard arms as `table.rs` does,
   and a plan lists the statements it stands for in their old order: a
   reordering is a change of behaviour.

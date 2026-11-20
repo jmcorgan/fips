@@ -35,16 +35,17 @@ items.
   `settle` and `depart` each destructure the record naming every field the
   struct declares, with no rest pattern. The scans read `data.rs` with LF line
   endings, and a test runs both on a CRLF copy, as a Windows checkout has.
-- `machine.rs`: tests for `PeerMachine` (`src/peer/machine.rs`), declared as
-  `mod msg2_tests` because `machine.rs` already has an inline `tests` module.
-  They cover an initial (IK) dial receiving a msg2 that does not authenticate:
-  the machine refuses it and keeps the handshake, so the genuine msg2 still
-  completes the session. They also cover the promotion an inbound leg asks
-  for when a resend of its stored msg2 succeeds after a failed first send,
-  and the legs that must not ask for one (not authorized, already
-  established, or with the peer held on another link).
+- `handshake.rs`: tests for `Handshake` (`src/peer/handshake.rs`), the
+  node's entry for one handshake in flight. They cover its Noise
+  operations: a full IK handshake, the wrong direction refused, a failure
+  that drops the handshake handle, and an initial dial receiving a msg2
+  that does not authenticate, which it refuses while keeping the
+  handshake, so the genuine msg2 still completes the session; the failure
+  mark the stale-connection sweep reads; and the handshake state the
+  control API shows at each step. A release-only test checks that taking
+  the crypto carrier leaves no session keys in the slot it empties.
 
-`machine.rs` and `mod.rs` still carry older inline `mod tests` blocks. New
-tests go here rather than into those blocks; the inline blocks are not
-converted in passing. Node-level tests of peer behaviour live in
+`mod.rs` still carries an older inline `mod tests` block. New tests go
+here rather than into it; the inline block is not converted in passing.
+Node-level tests of peer behaviour live in
 `src/node/tests/`.

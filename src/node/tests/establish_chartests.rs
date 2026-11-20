@@ -211,7 +211,7 @@ async fn chartest_msg1_duplicate_pending_resends_stored_msg2() {
         .insert((transport_id, peer_addr.clone()), link_id);
     // The index the node drew for the answer before it wrote the msg2.
     let lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
-    node.seed_handshake_machine(
+    node.seed_handshake(
         HandshakeSeed::inbound(link_id, 1000)
             .with_our_index(lease)
             .with_transport_id(transport_id)
@@ -344,7 +344,7 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
     let out_addr = TransportAddr::from_string("10.0.0.9:2121");
     let out_index_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
     let out_index = crate::utils::index::SessionIndex::new(out_index_lease.index());
-    node.seed_handshake_machine(
+    node.seed_handshake(
         HandshakeSeed::outbound(out_link, sender_pid, 1000)
             .with_our_index(out_index_lease)
             .with_transport_id(transport_id)
@@ -354,7 +354,7 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let _ = node
-        .peer_machines
+        .handshakes
         .get_mut(&out_link)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, LegStamp::at(1000))
@@ -412,7 +412,7 @@ fn seed_dial(
     let out_link = node.allocate_link_id();
     let lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
     let out_index = SessionIndex::new(lease.index());
-    node.seed_handshake_machine(
+    node.seed_handshake(
         HandshakeSeed::outbound(out_link, peer, 1000)
             .with_our_index(lease)
             .with_transport_id(transport_id)
@@ -422,7 +422,7 @@ fn seed_dial(
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let _ = node
-        .peer_machines
+        .handshakes
         .get_mut(&out_link)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, LegStamp::at(1000))
@@ -680,7 +680,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
     let out_index_a_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
     let out_index_a = crate::utils::index::SessionIndex::new(out_index_a_lease.index());
     node_a
-        .seed_handshake_machine(
+        .seed_handshake(
             HandshakeSeed::outbound(link_a_out, peer_b_identity, 1000)
                 .with_our_index(out_index_a_lease)
                 .with_transport_id(transport_id_a)
@@ -690,7 +690,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
     let keypair_a = node_a.identity().keypair();
     let epoch_a = node_a.startup_epoch();
     let noise_msg1_a = node_a
-        .peer_machines
+        .handshakes
         .get_mut(&link_a_out)
         .unwrap()
         .start_handshake(keypair_a, epoch_a, LegStamp::at(1000))
@@ -717,7 +717,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
     let out_index_b_lease = fips_core::proto::rekey::allocate(&mut node_b.index_allocator).unwrap();
     let out_index_b = crate::utils::index::SessionIndex::new(out_index_b_lease.index());
     node_b
-        .seed_handshake_machine(
+        .seed_handshake(
             HandshakeSeed::outbound(link_b_out, peer_a_identity, 1000)
                 .with_our_index(out_index_b_lease)
                 .with_transport_id(transport_id_b)
@@ -727,7 +727,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
     let keypair_b = node_b.identity().keypair();
     let epoch_b = node_b.startup_epoch();
     let noise_msg1_b = node_b
-        .peer_machines
+        .handshakes
         .get_mut(&link_b_out)
         .unwrap()
         .start_handshake(keypair_b, epoch_b, LegStamp::at(1000))

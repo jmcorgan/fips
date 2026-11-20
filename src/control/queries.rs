@@ -1342,11 +1342,11 @@ pub fn show_connections(node: &Node) -> Value {
     let now = now_ms();
     let connections: Vec<Value> = node
         .connections()
-        .map(|(_, machine)| {
-            let link_id = machine.link_id();
+        .map(|(link, entry)| {
+            let link_id = *link;
             let mut conn_json = json!({
                 "link_id": link_id.as_u64(),
-                "direction": format!("{}", machine.conn_direction()),
+                "direction": format!("{}", entry.conn_direction()),
                 "handshake_state": node.connection_handshake_state(link_id),
                 "started_at_ms": node.connection_started_at(link_id),
                 "idle_ms": now.saturating_sub(node.connection_last_activity(link_id)),

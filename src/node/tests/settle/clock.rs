@@ -23,6 +23,8 @@
 //! A dial's first msg1 resend goes out a second after its msg1 on the
 //! interval clock, whatever the configured resend interval, and the later
 //! ones at waits grown from that interval.
+//! `show_connections` shows a pending dial as `"sent_msg1"`, with its
+//! expected peer and its resend count, on the loop and off it.
 //!
 //! The node's tick is reproduced as `check_timeouts()` followed by
 //! `drive_peer_timers(Node::interval_ms())`, the order the receive loop runs
@@ -420,7 +422,7 @@ async fn pending_inbound_leg_holding_its_msg2() -> (Node, LinkId) {
         .next()
         .expect("precondition: the msg1 left a pending inbound leg");
     assert!(
-        node.peer_machines[&link].conn_handshake_msg2().is_some(),
+        node.handshakes[&link].conn_handshake_msg2().is_some(),
         "precondition: the pending leg holds its msg2"
     );
     (node, link)
@@ -441,7 +443,7 @@ async fn an_inbound_leg_holding_a_stored_msg2_is_reaped_within_the_handshake_tim
     let (mut node, link) = pending_inbound_leg_holding_its_msg2().await;
     node.check_timeouts().await;
     assert!(
-        node.peer_machines.contains_key(&link),
+        node.handshakes.contains_key(&link),
         "precondition: a fresh inbound leg is not reaped"
     );
     let past = past_the_handshake_timeout(&node);
@@ -449,7 +451,7 @@ async fn an_inbound_leg_holding_a_stored_msg2_is_reaped_within_the_handshake_tim
     crate::time::advance(Duration::from_millis(past));
     node.check_timeouts().await;
     assert!(
-        !node.peer_machines.contains_key(&link),
+        !node.handshakes.contains_key(&link),
         "defect: an inbound leg idle past the handshake timeout was not reaped"
     );
 }
@@ -464,13 +466,13 @@ async fn a_stalled_inbound_handshake_is_reaped_at_its_timeout_across_a_backward_
     step_wall(-3_600_000);
     node.check_timeouts().await;
     assert!(
-        node.peer_machines.contains_key(&link),
+        node.handshakes.contains_key(&link),
         "defect: a stalled inbound handshake inside its timeout was reaped after a backward wall step"
     );
     crate::time::advance(Duration::from_millis(past_the_handshake_timeout(&node)));
     node.check_timeouts().await;
     assert!(
-        !node.peer_machines.contains_key(&link),
+        !node.handshakes.contains_key(&link),
         "defect: a stalled inbound handshake past its timeout was kept after a backward wall step"
     );
 }
@@ -500,6 +502,72 @@ async fn a_pending_handshakes_shown_start_and_idle_do_not_move_with_the_monotoni
         start == first_start && wall.abs_diff(start) < 60_000 && idle < 1000,
         "defect: the shown start {start} (first {first_start}, wall {wall}) or idle {idle} ms \
          moved with the monotonic clock"
+    );
+}
+
+/// `show_connections` and its off-loop render, idle time aside, after one
+/// tick publishes the snapshot.
+fn shown_connections(node: &mut Node) -> (serde_json::Value, serde_json::Value) {
+    node.record_stats_history();
+    let handle = node.control_read_handle();
+    let mut on = crate::control::queries::show_connections(node);
+    let mut off = crate::control::queries::show_connections_from_handle(&handle);
+    for v in [&mut on, &mut off] {
+        for c in v["connections"].as_array_mut().into_iter().flatten() {
+            c["idle_ms"] = serde_json::Value::Null;
+        }
+    }
+    (on, off)
+}
+
+/// A pending dial is shown as its handshake entry holds it, on the loop and
+/// off it alike: outbound, `"sent_msg1"`, the peer it expects, and the
+/// resend count, which its first msg1 resend, a second after the msg1 on
+/// the interval clock, raises to one.
+#[tokio::test]
+async fn a_pending_dial_is_shown_as_sent_msg1_to_its_expected_peer_with_its_resend_count() {
+    let mut tn = loopback_node(false).await;
+    let other = loopback_node(false).await;
+    let id = PeerIdentity::from_pubkey_full(other.node.identity().pubkey_full());
+    let tid = tn.transport_id;
+    let (dialled, mut tap) = tap(tid);
+    tn.node
+        .initiate_connection(tid, dialled, id)
+        .await
+        .expect("precondition: the dial starts");
+    let mut other = vec![other];
+    cleanup_nodes(&mut other).await;
+    assert_eq!(drain(&mut tap), 1, "precondition: the dial's msg1 went out");
+    let (first, first_off) = shown_connections(&mut tn.node);
+    crate::time::advance(Duration::from_millis(1_100));
+    tn.node.drive_peer_timers(Node::interval_ms()).await;
+    let resent = drain(&mut tap);
+    let (second, second_off) = shown_connections(&mut tn.node);
+    cleanup_nodes(std::slice::from_mut(&mut tn)).await;
+    assert_eq!(resent, 1, "precondition: the dial's msg1 was resent once");
+
+    for (shown, resends) in [(&first, 0), (&second, 1)] {
+        let rows = shown["connections"]
+            .as_array()
+            .expect("show_connections lists its connections");
+        assert_eq!(
+            rows.len(),
+            1,
+            "defect: the dial is not the one connection shown: {shown}"
+        );
+        let c = &rows[0];
+        assert_eq!(c["direction"], "outbound", "defect: {shown}");
+        assert_eq!(
+            c["handshake_state"], "sent_msg1",
+            "defect: a dial whose msg1 is written is not shown as sent_msg1: {shown}"
+        );
+        assert_eq!(c["expected_peer"], id.npub().as_str(), "defect: {shown}");
+        assert_eq!(c["resend_count"], resends, "defect: {shown}");
+    }
+    assert_eq!(first, first_off, "defect: the off-loop render differs");
+    assert_eq!(
+        second, second_off,
+        "defect: the off-loop render differs after the resend"
     );
 }
 

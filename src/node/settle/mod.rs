@@ -69,7 +69,7 @@ pub(in crate::node) use decide::{current, held};
 pub(in crate::node) use links::LinkTable;
 #[cfg(test)]
 pub(in crate::node) use links::recorded;
-pub(in crate::node) use maps::{BindMap, MachineMap, PeerMap, Redial, RedialMap};
+pub(in crate::node) use maps::{BindMap, HandshakeMap, PeerMap, Redial, RedialMap};
 pub(in crate::node) use params::leg_params;
 
 /// The settlement core's handshake legs as the node holds them, on the peer
@@ -131,6 +131,6 @@ impl crate::node::Node {
         self.links.planted()
             || self.peers.planted()
             || self.peers_by_index.planted()
-            || self.peer_machines.planted()
+            || self.handshakes.planted()
     }
 }

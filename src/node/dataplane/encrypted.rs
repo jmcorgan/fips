@@ -170,7 +170,7 @@ impl Node {
 
         // ── Decrypt-worker fast path (unix) ─────────────────────────
         // Once a session has been registered with a decrypt shard (at
-        // FMP-establishment in `promote_connection`, or at a cutover), the
+        // FMP-establishment in `install_handshake`, or at a cutover), the
         // worker owns its FMP recv cipher + replay window. Dispatch the
         // packet and return; the worker will run AEAD off-task and bounce
         // the plaintext back via `decrypt_fallback_tx` for rx_loop to do the

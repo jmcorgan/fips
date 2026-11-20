@@ -94,7 +94,7 @@ async fn captured_real_noise(nodes: &mut [TestNode]) -> Vec<u8> {
 fn sizes(node: &Node, others: &[NodeAddr]) -> Vec<(&'static str, usize)> {
     let mut sizes = vec![
         ("peers", node.peers.len()),
-        ("peer_machines", node.peer_machines.len()),
+        ("handshakes", node.handshakes.len()),
         ("pending_outbound", node.pending_outbound().len()),
         ("links", node.links.len()),
         ("addr_to_link", node.links.index().len()),

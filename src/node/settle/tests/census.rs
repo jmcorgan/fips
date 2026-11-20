@@ -67,7 +67,7 @@ const NODE: &[(&str, Held)] = &[
     ("child_exit_rx", Exempt(CHANNEL)),
     ("transport_presence_tx", Exempt(CHANNEL)),
     ("transport_presence_rx", Exempt(CHANNEL)),
-    ("peer_machines", Table),
+    ("handshakes", Table),
     ("peers", Table),
     ("sessions", Facets(&[Facet::Session])),
     ("identity_cache", Facets(&[Facet::Identity])),

@@ -184,8 +184,8 @@ rows! {
     SetupRecord,
     /// The peer's identity and npub.
     Identity,
-    /// The handshake leg and the control machine.
-    ControlMachine,
+    /// The handshake entry of the transition's link.
+    Handshake,
     /// The transport's connection.
     Connection,
     /// The BLE transport's verified mark.
@@ -369,17 +369,9 @@ pub(crate) enum Cell {
     /// Carried across the rebuild.
     Carried,
 
-    /// The leg's machine survives as the peer's.
-    LegSurvives,
-    /// The old peer's removed, then as [`Cell::LegSurvives`].
-    OldRemovedLegSurvives,
-    /// The dial's removed, the peer's told how the crossing resolved.
-    DialRemovedPeerStepped,
-    /// The dial's removed, the peer's keyed under the dial's link with its
-    /// timers and then told how the crossing resolved.
-    DialRemovedPeerRekeyed,
-    /// Stepped first and then removed.
-    SteppedThenRemoved,
+    /// The handshake's entry is dropped: a promoted leg's once the
+    /// promotion's work has read it, a crossed dial's at the crossing.
+    EntryDropped,
 
     /// Paths the peer is not active on queued to close, unless another peer
     /// proves the pair. A link not known capable keeps them all.
@@ -817,29 +809,19 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
             | T::Release { .. } => Cell::Keep,
             T::Remove { .. } => Cell::Dropped,
         },
-        Row::ControlMachine => match t {
-            T::Promote { .. } => Cell::LegSurvives,
-            T::Replace { .. } => Cell::OldRemovedLegSurvives,
-            T::Move { built: true, .. } => Cell::DialRemovedPeerRekeyed,
-            T::Move { built: false, .. } | T::Keep { .. } => Cell::DialRemovedPeerStepped,
+        // A held peer has no handshake entry: only the leg a promotion,
+        // a replacement or a crossing ends has one.
+        Row::Handshake => match t {
+            T::Promote { .. } | T::Replace { .. } | T::Move { .. } | T::Keep { .. } => {
+                Cell::EntryDropped
+            }
             T::Cutover { .. }
             | T::Restarted
             | T::Roam
             | T::Follow
             | T::Switch
-            | T::Release { .. } => Cell::Keep,
-            T::Remove { why } => match why {
-                Why::Dead => Cell::SteppedThenRemoved,
-                Why::Restart
-                | Why::Replacement
-                | Why::Redial
-                | Why::OwnRestart
-                | Why::Ended
-                | Why::Orphaned
-                | Why::Disconnect
-                | Why::Admin
-                | Why::Closed => Cell::Removed,
-            },
+            | T::Release { .. }
+            | T::Remove { .. } => Cell::Keep,
         },
         Row::Connection => match t {
             T::Replace { .. } => Cell::UnkeptQueued,
@@ -1152,7 +1134,7 @@ pub(crate) fn cell(row: Row, t: &Transition) -> Cell {
 pub(crate) fn owner(row: Row) -> Owner {
     match row {
         Row::Data(_) => Owner::Data,
-        Row::Link | Row::Index | Row::ControlMachine | Row::Dials => Owner::Table,
+        Row::Link | Row::Index | Row::Handshake | Row::Dials => Owner::Table,
         Row::Paths | Row::Capability | Row::Pin | Row::PathFailures | Row::ConnectedUdp => {
             Owner::Bundle
         }

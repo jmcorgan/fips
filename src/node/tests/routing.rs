@@ -31,7 +31,7 @@ fn test_routing_direct_peer() {
 
     let identity = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     let peer_addr = *identity.node_addr();
-    node.promote_connection(link_id, identity, 2000).unwrap();
+    node.install_handshake(link_id, identity, 2000).unwrap();
 
     let result = node.find_next_hop(&peer_addr);
     assert!(result.is_some());
@@ -63,12 +63,12 @@ fn test_routing_bloom_filter_hit() {
     let link_id1 = LinkId::new(1);
     let id1 = seed_completed_connection(&mut node, link_id1, transport_id, 1000);
     let peer1_addr = *id1.node_addr();
-    node.promote_connection(link_id1, id1, 2000).unwrap();
+    node.install_handshake(link_id1, id1, 2000).unwrap();
 
     let link_id2 = LinkId::new(2);
     let id2 = seed_completed_connection(&mut node, link_id2, transport_id, 1000);
     let peer2_addr = *id2.node_addr();
-    node.promote_connection(link_id2, id2, 2000).unwrap();
+    node.install_handshake(link_id2, id2, 2000).unwrap();
 
     // Set up tree: we are root, both peers are our children
     let peer1_coords = TreeCoordinate::from_addrs(vec![peer1_addr, my_addr]).unwrap();
@@ -122,7 +122,7 @@ fn test_routing_bloom_filter_multiple_hits_tiebreak() {
         let id = seed_completed_connection(&mut node, link_id, transport_id, 1000);
         let addr = *id.node_addr();
         peer_addrs.push(addr);
-        node.promote_connection(link_id, id, 2000).unwrap();
+        node.install_handshake(link_id, id, 2000).unwrap();
     }
 
     // Set up tree: we are root, all peers are our children (equidistant)
@@ -171,7 +171,7 @@ fn test_routing_tree_fallback() {
     let link_id = LinkId::new(1);
     let id = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     let peer_addr = *id.node_addr();
-    node.promote_connection(link_id, id, 2000).unwrap();
+    node.install_handshake(link_id, id, 2000).unwrap();
 
     // Set up tree state through the public API.
     // We're root, peer is our child. The peer has a subtree below it.
@@ -231,7 +231,7 @@ fn test_routing_bloom_hit_not_closer_falls_through_to_tree() {
     let tree_link = LinkId::new(1);
     let tree_id = seed_completed_connection(&mut node, tree_link, transport_id, 1000);
     let tree_peer_addr = *tree_id.node_addr();
-    node.promote_connection(tree_link, tree_id, 2000).unwrap();
+    node.install_handshake(tree_link, tree_id, 2000).unwrap();
 
     // bloom_peer: also a child of self, but with a stale/false-positive
     // bloom hit for dest. Its tree distance to dest is NOT closer than
@@ -240,7 +240,7 @@ fn test_routing_bloom_hit_not_closer_falls_through_to_tree() {
     let bloom_link = LinkId::new(2);
     let bloom_id = seed_completed_connection(&mut node, bloom_link, transport_id, 1000);
     let bloom_peer_addr = *bloom_id.node_addr();
-    node.promote_connection(bloom_link, bloom_id, 2000).unwrap();
+    node.install_handshake(bloom_link, bloom_id, 2000).unwrap();
 
     // Tree topology (we are root):
     //   self ── tree_peer ── dest
@@ -307,7 +307,7 @@ fn test_routing_tree_no_coords_in_cache() {
     // Create a peer
     let link_id = LinkId::new(1);
     let id = seed_completed_connection(&mut node, link_id, transport_id, 1000);
-    node.promote_connection(link_id, id, 2000).unwrap();
+    node.install_handshake(link_id, id, 2000).unwrap();
 
     // Destination not in bloom filters and not in coord cache
     let dest = make_node_addr(99);
@@ -326,7 +326,7 @@ fn test_routing_refreshes_coord_cache_ttl() {
     let link_id = LinkId::new(1);
     let id = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     let peer_addr = *id.node_addr();
-    node.promote_connection(link_id, id, 2000).unwrap();
+    node.install_handshake(link_id, id, 2000).unwrap();
 
     // Set up tree coordinates
     let dest = make_node_addr(99);
@@ -371,12 +371,12 @@ fn test_routing_bloom_hit_without_coords_returns_none() {
     let link_id1 = LinkId::new(1);
     let id1 = seed_completed_connection(&mut node, link_id1, transport_id, 1000);
     let peer1_addr = *id1.node_addr();
-    node.promote_connection(link_id1, id1, 2000).unwrap();
+    node.install_handshake(link_id1, id1, 2000).unwrap();
 
     let link_id2 = LinkId::new(2);
     let id2 = seed_completed_connection(&mut node, link_id2, transport_id, 1000);
     let peer2_addr = *id2.node_addr();
-    node.promote_connection(link_id2, id2, 2000).unwrap();
+    node.install_handshake(link_id2, id2, 2000).unwrap();
 
     let dest = make_node_addr(99);
 
@@ -409,7 +409,7 @@ fn test_routing_discovery_coord_cache() {
     let link_id = LinkId::new(1);
     let id = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     let peer_addr = *id.node_addr();
-    node.promote_connection(link_id, id, 2000).unwrap();
+    node.install_handshake(link_id, id, 2000).unwrap();
 
     // Set up tree: we are root, peer is our child
     let peer_coords = TreeCoordinate::from_addrs(vec![peer_addr, my_addr]).unwrap();
@@ -1501,7 +1501,7 @@ fn seam_add_peer(node: &mut Node, link_num: u64, transport_id: TransportId) -> N
     let link_id = LinkId::new(link_num);
     let identity = seed_completed_connection(node, link_id, transport_id, 1000);
     let addr = *identity.node_addr();
-    node.promote_connection(link_id, identity, 2000).unwrap();
+    node.install_handshake(link_id, identity, 2000).unwrap();
     addr
 }
 

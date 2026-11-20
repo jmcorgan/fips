@@ -16,7 +16,7 @@ use crate::proto::fmp::wire::{
 
 /// A dial of one node by another's identity, with its handshake state.
 pub(super) struct Dialer {
-    machine: PeerMachine,
+    machine: Handshake,
     /// The session the answer opened, and the responder's index for it.
     session: Option<(NoiseSession, SessionIndex)>,
 }

@@ -109,7 +109,7 @@ fn empty(sock: &std::net::UdpSocket) -> bool {
 /// The outbound handshake leg toward `target`.
 fn leg_toward(node: &Node, target: &NodeAddr) -> LinkId {
     let legs: Vec<LinkId> = node
-        .peer_machines
+        .handshakes
         .iter()
         .filter(|(_, m)| {
             m.leg().is_some()
@@ -148,7 +148,7 @@ async fn manual_connect_to_a_hostname_whose_lookup_outlasts_the_cold_wait_sends_
         .expect("api_connect should dial");
     let link = leg_toward(&node, peer_id.node_addr());
     assert!(
-        !node.peer_machines[&link].is_failed(),
+        !node.handshakes[&link].is_failed(),
         "a lookup still running must not fail the dial"
     );
 
@@ -160,7 +160,7 @@ async fn manual_connect_to_a_hostname_whose_lookup_outlasts_the_cold_wait_sends_
         .expect("the retransmit timer should be armed");
     capped(node.drive_peer_timers(at)).await;
     assert_eq!(node.connection_resend_count(link), 0);
-    assert!(!node.peer_machines[&link].is_failed());
+    assert!(!node.handshakes[&link].is_failed());
     assert!(empty(&sock), "nothing may reach the peer before the lookup");
 
     gate.notify_one();
@@ -176,7 +176,7 @@ async fn manual_connect_to_a_hostname_whose_lookup_outlasts_the_cold_wait_sends_
 
     node.check_timeouts().await;
     assert!(
-        node.peer_machines.contains_key(&link),
+        node.handshakes.contains_key(&link),
         "the leg should still be in place"
     );
     stop_all(&mut node).await;
@@ -195,7 +195,7 @@ async fn manual_connect_to_a_hostname_with_a_healthy_resolver_sends_msg1_at_once
     let (bytes, _) = recv(&sock).await;
     assert!(is_msg1(&bytes));
     let link = leg_toward(&node, peer_id.node_addr());
-    assert!(!node.peer_machines[&link].is_failed());
+    assert!(!node.handshakes[&link].is_failed());
     stop_all(&mut node).await;
 }
 
@@ -212,7 +212,7 @@ async fn manual_connect_to_a_hostname_whose_lookup_fails_fast_fails_the_leg_as_b
         .expect("api_connect should dial");
     let link = leg_toward(&node, peer_id.node_addr());
     assert!(
-        node.peer_machines[&link].is_failed(),
+        node.handshakes[&link].is_failed(),
         "a lookup that fails at once should fail the leg, as it always has"
     );
     assert!(empty(&sock));

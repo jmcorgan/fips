@@ -293,7 +293,7 @@ pub(super) async fn dial_at(
     let our_index = crate::utils::index::SessionIndex::new(our_index_lease.index());
     initiator
         .node
-        .seed_handshake_machine(
+        .seed_handshake(
             HandshakeSeed::outbound(link_id, peer_identity, 1000)
                 .with_our_index(our_index_lease)
                 .with_transport_id(transport_id)
@@ -304,7 +304,7 @@ pub(super) async fn dial_at(
     let startup_epoch = initiator.node.startup_epoch();
     let noise_msg1 = initiator
         .node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, LegStamp::at(1000))
