@@ -1,8 +1,11 @@
 //! Tests for the Tor control client in `control.rs`: reply parsing, its size
-//! caps, the connect and reply deadlines, and what a failure part-way
-//! through a reply leaves behind.
+//! caps, the connect and reply deadlines, what a failure part-way through a
+//! reply leaves behind, and what the client sends to a control port it
+//! cannot trust.
 
 use super::*;
+use crate::testutil::capture_logs_scoped;
+use crate::transport::tor::mock_control::{MockOptions, MockTorControlServer};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -44,6 +47,33 @@ fn client_reading(bytes: Vec<u8>) -> TorControlClient {
         reader: BufReader::new(Box::new(std::io::Cursor::new(bytes))),
         writer: Box::new(tokio::io::sink()),
         out_of_step: false,
+        remote_peer: None,
+    }
+}
+
+/// Write a 32-byte cookie with a recognisable pattern to a temporary file.
+fn cookie_file() -> (tempfile::TempDir, PathBuf, Vec<u8>) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("cookie");
+    let bytes: Vec<u8> = (0u8..32)
+        .map(|b| b.wrapping_mul(7).wrapping_add(3))
+        .collect();
+    std::fs::write(&path, &bytes).unwrap();
+    (dir, path, bytes)
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Assert no line a port received carries the cookie in hex, in either case.
+fn assert_cookie_absent(lines: &[String], cookie: &[u8]) {
+    let cookie_hex = lower_hex(cookie);
+    for line in lines {
+        assert!(
+            !line.to_lowercase().contains(&cookie_hex),
+            "defect: the port received the cookie: {line:?}"
+        );
     }
 }
 
@@ -303,4 +333,233 @@ async fn an_error_reply_read_in_full_leaves_the_connection_usable() {
     assert!(client.version().await.is_err());
     assert!(!client.is_out_of_step());
     assert_eq!(client.version().await.unwrap(), "0.4.9.15");
+}
+
+// === What the client sends ===
+
+#[tokio::test]
+async fn a_password_with_a_line_break_never_reaches_the_port_as_a_second_command() {
+    let (addr, h) = standin(b"515 Authentication failed\r\n").await;
+    let mut client = TorControlClient::connect(&addr).await.unwrap();
+    let result = client
+        .authenticate(&ControlAuth::Password("pw\r\nGETINFO version".into()))
+        .await;
+    drop(client);
+    let got = h.await.unwrap();
+    let lines = got.split(|b| *b == b'\n').filter(|l| !l.is_empty()).count();
+    let text = String::from_utf8_lossy(&got);
+    assert!(
+        lines <= 1 && !text.contains("GETINFO"),
+        "defect: {lines} control lines sent: {text:?}"
+    );
+    assert!(
+        result.is_err(),
+        "defect: a password with a line break authenticated"
+    );
+}
+
+#[test]
+fn a_configured_password_with_a_line_break_is_refused_without_echoing_it() {
+    for setting in ["password:pw\nsecret", "password:pw\rsecret"] {
+        let err = ControlAuth::from_config(setting, "/x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("line break"), "{err}");
+        assert!(!err.contains("secret"), "defect: password echoed: {err}");
+    }
+}
+
+#[test]
+fn an_unknown_control_auth_string_is_not_echoed_in_the_error() {
+    let err = ControlAuth::from_config("passwrd:hunter2", "/x")
+        .unwrap_err()
+        .to_string();
+    assert!(!err.contains("hunter2"), "defect: setting echoed: {err}");
+}
+
+// === SAFECOOKIE ===
+
+#[tokio::test]
+async fn a_standin_port_that_lacks_the_cookie_never_receives_it() {
+    let (_dir, path, bytes) = cookie_file();
+    let (addr, h) = standin(b"515 Authentication failed\r\n").await;
+    let mut client = TorControlClient::connect(&addr).await.unwrap();
+    let result = client.authenticate(&ControlAuth::Cookie(path)).await;
+    drop(client);
+    let got = String::from_utf8_lossy(&h.await.unwrap()).to_lowercase();
+    assert!(
+        !got.contains(&lower_hex(&bytes)),
+        "defect: the stand-in received the cookie: {got:?}"
+    );
+    assert!(result.is_err(), "defect: authenticated against a stand-in");
+}
+
+#[tokio::test]
+async fn safecookie_authenticates_against_a_port_that_holds_the_cookie() {
+    let (_dir, path, bytes) = cookie_file();
+    let mock = MockTorControlServer::start_with_options(MockOptions {
+        cookie: Some(bytes.clone().try_into().unwrap()),
+        ..Default::default()
+    })
+    .await;
+    let mut client = TorControlClient::connect(&mock.addr().to_string())
+        .await
+        .unwrap();
+    client
+        .authenticate(&ControlAuth::Cookie(path))
+        .await
+        .unwrap();
+    assert_eq!(client.version().await.unwrap(), "0.4.8.10");
+
+    let log = mock.log();
+    assert!(log[0].starts_with("AUTHCHALLENGE SAFECOOKIE "), "{log:?}");
+    assert!(log[1].starts_with("AUTHENTICATE "), "{log:?}");
+    assert_cookie_absent(&log, &bytes);
+}
+
+#[tokio::test]
+async fn safecookie_fails_against_a_port_with_the_wrong_cookie_before_sending_a_hash() {
+    let (_dir, path, bytes) = cookie_file();
+    let mock = MockTorControlServer::start_with_options(MockOptions {
+        cookie: Some([0x11; 32]),
+        ..Default::default()
+    })
+    .await;
+    let mut client = TorControlClient::connect(&mock.addr().to_string())
+        .await
+        .unwrap();
+    let result = client.authenticate(&ControlAuth::Cookie(path)).await;
+    assert!(
+        matches!(&result, Err(TorControlError::AuthFailed(msg)) if msg.contains("SERVERHASH")),
+        "{result:?}"
+    );
+    drop(client);
+
+    // The client sent its nonce and stopped: nothing derived from the cookie
+    // reached the port.
+    let log = mock.log();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(log[0].starts_with("AUTHCHALLENGE SAFECOOKIE "), "{log:?}");
+    assert_cookie_absent(&log, &bytes);
+}
+
+#[tokio::test]
+async fn a_port_that_refuses_authchallenge_gets_no_plain_cookie_fallback() {
+    let (_dir, path, bytes) = cookie_file();
+    // With no cookie, the mock answers AUTHCHALLENGE with 510 and would
+    // accept any AUTHENTICATE, so a fallback would authenticate here.
+    let mock = MockTorControlServer::start().await;
+    let mut client = TorControlClient::connect(&mock.addr().to_string())
+        .await
+        .unwrap();
+    let result = client.authenticate(&ControlAuth::Cookie(path)).await;
+    assert!(
+        matches!(&result, Err(TorControlError::AuthFailed(msg)) if msg.contains("510")),
+        "defect: no AuthFailed after a refused AUTHCHALLENGE: {result:?}"
+    );
+    drop(client);
+
+    let log = mock.log();
+    assert!(
+        log.iter().all(|line| !line.starts_with("AUTHENTICATE")),
+        "defect: the client fell back to AUTHENTICATE: {log:?}"
+    );
+    assert_cookie_absent(&log, &bytes);
+}
+
+#[tokio::test]
+async fn a_malformed_authchallenge_reply_is_an_auth_failure() {
+    let (_dir, path, _bytes) = cookie_file();
+    let (addr, _h) = standin(b"250 AUTHCHALLENGE SERVERHASH=zz SERVERNONCE=00\r\n").await;
+    let mut client = TorControlClient::connect(&addr).await.unwrap();
+    let result = client.authenticate(&ControlAuth::Cookie(path)).await;
+    assert!(
+        matches!(&result, Err(TorControlError::AuthFailed(msg)) if msg.contains("malformed")),
+        "{result:?}"
+    );
+}
+
+// === Password over a remote TCP connection ===
+
+#[test]
+fn loopback_peers_include_ipv4_mapped_loopback() {
+    for peer in [
+        "127.0.0.1:9051",
+        "127.1.2.3:9051",
+        "[::1]:9051",
+        "[::ffff:127.0.0.1]:9051",
+    ] {
+        assert!(is_loopback_peer(&peer.parse().unwrap()), "{peer}");
+    }
+    for peer in [
+        "192.0.2.10:9051",
+        "[2001:db8::1]:9051",
+        "[::ffff:192.0.2.10]:9051",
+    ] {
+        assert!(!is_loopback_peer(&peer.parse().unwrap()), "{peer}");
+    }
+}
+
+#[tokio::test]
+async fn a_loopback_tcp_connection_is_not_remote() {
+    let (addr, _h) = standin(b"250 OK\r\n").await;
+    let client = TorControlClient::connect(&addr).await.unwrap();
+    assert_eq!(client.remote_peer, None);
+}
+
+#[tokio::test]
+async fn a_tcp_connection_to_a_non_loopback_address_records_the_peer() {
+    // Learn an address of this host that is not loopback by routing a UDP
+    // socket towards a documentation address; connecting a UDP socket sends
+    // nothing. A host with no route has no such address to connect through,
+    // and that case alone is skipped.
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let local = match probe
+        .connect("192.0.2.1:9")
+        .and_then(|()| probe.local_addr())
+    {
+        Ok(addr) if !addr.ip().is_loopback() && !addr.ip().is_unspecified() => addr.ip(),
+        other => {
+            eprintln!("skipped: no non-loopback IPv4 address on this host ({other:?})");
+            return;
+        }
+    };
+    let listener = TcpListener::bind((local, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _accept = tokio::spawn(async move { listener.accept().await });
+
+    let client = TorControlClient::connect(&addr.to_string()).await.unwrap();
+    assert_eq!(
+        client.remote_peer,
+        Some(addr),
+        "defect: a connection to {addr} was not recorded as remote"
+    );
+}
+
+#[tokio::test]
+async fn a_password_sent_to_a_remote_peer_is_warned_about_once() {
+    let (capture, _guard) = capture_logs_scoped();
+    let mut client = client_reading(b"250 OK\r\n".to_vec());
+    client.remote_peer = Some("192.0.2.10:9051".parse().unwrap());
+    client
+        .authenticate(&ControlAuth::Password("pw".into()))
+        .await
+        .unwrap();
+
+    let warnings = capture.warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("in clear"), "{warnings:?}");
+    assert!(warnings[0].contains("192.0.2.10:9051"), "{warnings:?}");
+    assert!(!warnings[0].contains("pw\""), "{warnings:?}");
+}
+
+#[tokio::test]
+async fn a_password_sent_over_loopback_is_not_warned_about() {
+    let (capture, _guard) = capture_logs_scoped();
+    let mut client = client_reading(b"250 OK\r\n".to_vec());
+    client
+        .authenticate(&ControlAuth::Password("pw".into()))
+        .await
+        .unwrap();
+    assert!(capture.warnings().is_empty(), "{:?}", capture.warnings());
 }

@@ -7,17 +7,25 @@
 //! bytes under a per-line and a per-reply size cap, and every connect and
 //! every reply has a deadline, so a malformed or silent port gives an error
 //! rather than a panic or a hang.
+//!
+//! Cookie authentication uses Tor's SAFECOOKIE exchange: the port must prove
+//! it holds the cookie before the client sends anything derived from it, and
+//! the raw cookie is never sent. There is no fallback to plain COOKIE.
 
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use hmac::{Hmac, KeyInit, Mac};
 use serde::Serialize;
+use sha2::Sha256;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
-use tracing::debug;
+use tracing::{debug, warn};
+use zeroize::Zeroizing;
 
 // ============================================================================
 // Limits
@@ -34,6 +42,58 @@ const MAX_REPLY: usize = 64 * 1024;
 
 /// Most data lines kept from one reply.
 const MAX_DATA_LINES: usize = 1024;
+
+// ============================================================================
+// SAFECOOKIE
+// ============================================================================
+
+/// HMAC key for the hash the control port sends to prove it holds the cookie.
+const SAFECOOKIE_SERVER_KEY: &[u8] = b"Tor safe cookie authentication server-to-controller hash";
+
+/// HMAC key for the hash the client sends to prove it holds the cookie.
+const SAFECOOKIE_CLIENT_KEY: &[u8] = b"Tor safe cookie authentication controller-to-server hash";
+
+/// Length of the client and server nonces, in bytes.
+const SAFECOOKIE_NONCE_LEN: usize = 32;
+
+/// HMAC-SHA256 under `key` over the cookie and the two nonces, in that order.
+fn safecookie_mac(
+    key: &[u8],
+    cookie: &[u8],
+    client_nonce: &[u8],
+    server_nonce: &[u8],
+) -> Hmac<Sha256> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes a key of any length");
+    mac.update(cookie);
+    mac.update(client_nonce);
+    mac.update(server_nonce);
+    mac
+}
+
+/// Read the server hash and server nonce from an `AUTHCHALLENGE` reply's
+/// final line, `AUTHCHALLENGE SERVERHASH=<hex> SERVERNONCE=<hex>`.
+fn parse_authchallenge(message: &str) -> Result<([u8; 32], [u8; 32]), TorControlError> {
+    let malformed = || TorControlError::AuthFailed("malformed AUTHCHALLENGE reply".into());
+    let mut words = message.split(' ');
+    if words.next() != Some("AUTHCHALLENGE") {
+        return Err(malformed());
+    }
+    let decode =
+        |hex_value: &str| -> Option<[u8; 32]> { ::hex::decode(hex_value).ok()?.try_into().ok() };
+    let mut server_hash = None;
+    let mut server_nonce = None;
+    for word in words {
+        if let Some(value) = word.strip_prefix("SERVERHASH=") {
+            server_hash = Some(decode(value).ok_or_else(malformed)?);
+        } else if let Some(value) = word.strip_prefix("SERVERNONCE=") {
+            server_nonce = Some(decode(value).ok_or_else(malformed)?);
+        }
+    }
+    match (server_hash, server_nonce) {
+        (Some(hash), Some(nonce)) => Ok((hash, nonce)),
+        _ => Err(malformed()),
+    }
+}
 
 // ============================================================================
 // Error Type
@@ -78,9 +138,11 @@ impl From<std::io::Error> for TorControlError {
 /// Control port authentication method.
 #[derive(Debug, Clone)]
 pub enum ControlAuth {
-    /// Cookie authentication — reads 32-byte cookie from file, sends as hex.
+    /// Cookie authentication — reads the 32-byte cookie from a file and
+    /// proves it holds it with the SAFECOOKIE exchange.
     Cookie(PathBuf),
-    /// Password authentication — sends AUTHENTICATE "password".
+    /// Password authentication — sends AUTHENTICATE "password". The
+    /// password may not contain CR or LF.
     Password(String),
 }
 
@@ -89,20 +151,33 @@ impl ControlAuth {
     ///
     /// - `"cookie"` or `"cookie:/path/to/cookie"` → Cookie auth
     /// - `"password:secret"` → Password auth
+    ///
+    /// No error quotes the string, since it may hold a password.
     pub fn from_config(auth_str: &str, default_cookie_path: &str) -> Result<Self, TorControlError> {
         if auth_str == "cookie" {
             Ok(Self::Cookie(PathBuf::from(default_cookie_path)))
         } else if let Some(path) = auth_str.strip_prefix("cookie:") {
             Ok(Self::Cookie(PathBuf::from(path)))
         } else if let Some(password) = auth_str.strip_prefix("password:") {
+            if has_line_break(password) {
+                return Err(TorControlError::AuthFailed(
+                    "control_auth password contains a line break".into(),
+                ));
+            }
             Ok(Self::Password(password.to_string()))
         } else {
-            Err(TorControlError::AuthFailed(format!(
-                "unknown control_auth format '{}': expected 'cookie', 'cookie:/path', or 'password:secret'",
-                auth_str
-            )))
+            Err(TorControlError::AuthFailed(
+                "unknown control_auth format: expected 'cookie', 'cookie:/path', or 'password:secret'"
+                    .into(),
+            ))
         }
     }
+}
+
+/// Whether a password holds a CR or LF, which would end the AUTHENTICATE
+/// line early and let the rest run as a second control command.
+fn has_line_break(password: &str) -> bool {
+    password.contains(['\r', '\n'])
 }
 
 // ============================================================================
@@ -144,6 +219,8 @@ pub struct TorControlClient {
     /// Set when a command or reply failed part-way, so the next bytes on the
     /// connection may belong to an earlier reply.
     out_of_step: bool,
+    /// The peer's address, for a TCP connection to a non-loopback address.
+    remote_peer: Option<SocketAddr>,
 }
 
 impl fmt::Debug for TorControlClient {
@@ -191,6 +268,10 @@ impl TorControlClient {
             ))
         })?;
 
+        let remote_peer = stream
+            .peer_addr()
+            .ok()
+            .filter(|peer| !is_loopback_peer(peer));
         let (read_half, write_half) = stream.into_split();
 
         debug!(addr = %addr, transport = "tcp", "Connected to Tor control port");
@@ -199,6 +280,7 @@ impl TorControlClient {
             reader: BufReader::new(Box::new(read_half)),
             writer: Box::new(write_half),
             out_of_step: false,
+            remote_peer,
         })
     }
 
@@ -220,24 +302,86 @@ impl TorControlClient {
             reader: BufReader::new(Box::new(read_half)),
             writer: Box::new(write_half),
             out_of_step: false,
+            remote_peer: None,
         })
     }
 
     /// Authenticate with the Tor daemon.
+    ///
+    /// Cookie authentication runs the SAFECOOKIE exchange and fails if the
+    /// port refuses it or cannot prove it holds the cookie. A password with
+    /// a line break is refused before anything is sent. A password sent over
+    /// TCP to a non-loopback address is logged as crossing the network in
+    /// clear, since the control protocol has no encryption.
     pub async fn authenticate(&mut self, auth: &ControlAuth) -> Result<(), TorControlError> {
-        let command = match auth {
+        match auth {
             ControlAuth::Cookie(path) => {
                 let cookie = read_cookie_file(path)?;
-                format!("AUTHENTICATE {}\r\n", hex::encode(cookie))
+                self.authenticate_safecookie(&cookie).await
             }
             ControlAuth::Password(password) => {
+                if has_line_break(password) {
+                    return Err(TorControlError::AuthFailed(
+                        "control_auth password contains a line break".into(),
+                    ));
+                }
+                if let Some(peer) = self.remote_peer {
+                    warn!(
+                        peer = %peer,
+                        "Tor control port password sent in clear over a non-loopback TCP connection"
+                    );
+                }
                 // Escape quotes in password
                 let escaped = password.replace('\\', "\\\\").replace('"', "\\\"");
-                format!("AUTHENTICATE \"{}\"\r\n", escaped)
+                self.send_authenticate(&format!("AUTHENTICATE \"{}\"\r\n", escaped))
+                    .await
             }
-        };
+        }
+    }
 
-        self.send_command(&command).await?;
+    /// Run the SAFECOOKIE exchange: send a random client nonce, check the
+    /// server hash the port returns against the cookie, and only then send
+    /// the client hash.
+    async fn authenticate_safecookie(&mut self, cookie: &[u8]) -> Result<(), TorControlError> {
+        let mut client_nonce = [0u8; SAFECOOKIE_NONCE_LEN];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut client_nonce);
+
+        self.send_command(&format!(
+            "AUTHCHALLENGE SAFECOOKIE {}\r\n",
+            hex::encode(client_nonce.to_vec())
+        ))
+        .await?;
+        let response = self.read_response().await?;
+        if response.code != 250 {
+            return Err(TorControlError::AuthFailed(format!(
+                "AUTHCHALLENGE SAFECOOKIE refused: {} {}",
+                response.code, response.message
+            )));
+        }
+
+        let (server_hash, server_nonce) = parse_authchallenge(&response.message)?;
+        safecookie_mac(SAFECOOKIE_SERVER_KEY, cookie, &client_nonce, &server_nonce)
+            .verify_slice(&server_hash)
+            .map_err(|_| {
+                TorControlError::AuthFailed(
+                    "control port did not prove it holds the cookie (SERVERHASH mismatch)".into(),
+                )
+            })?;
+
+        let client_hash =
+            safecookie_mac(SAFECOOKIE_CLIENT_KEY, cookie, &client_nonce, &server_nonce)
+                .finalize()
+                .into_bytes();
+        self.send_authenticate(&format!(
+            "AUTHENTICATE {}\r\n",
+            hex::encode(client_hash.to_vec())
+        ))
+        .await
+    }
+
+    /// Send an AUTHENTICATE command and require a 250 reply.
+    async fn send_authenticate(&mut self, command: &str) -> Result<(), TorControlError> {
+        self.send_command(command).await?;
         let response = self.read_response().await?;
 
         if response.code != 250 {
@@ -606,14 +750,14 @@ struct ControlResponse {
 // ============================================================================
 
 /// Read a Tor control cookie file (32 bytes of raw binary).
-fn read_cookie_file(path: &Path) -> Result<Vec<u8>, TorControlError> {
-    let data = std::fs::read(path).map_err(|e| {
+fn read_cookie_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, TorControlError> {
+    let data = Zeroizing::new(std::fs::read(path).map_err(|e| {
         TorControlError::AuthFailed(format!(
             "failed to read cookie file '{}': {}",
             path.display(),
             e
         ))
-    })?;
+    })?);
 
     if data.len() != 32 {
         return Err(TorControlError::AuthFailed(format!(
@@ -624,6 +768,12 @@ fn read_cookie_file(path: &Path) -> Result<Vec<u8>, TorControlError> {
     }
 
     Ok(data)
+}
+
+/// Whether a TCP peer is on this host's loopback, counting an IPv4 loopback
+/// address carried in an IPv4-mapped IPv6 address.
+fn is_loopback_peer(peer: &SocketAddr) -> bool {
+    peer.ip().to_canonical().is_loopback()
 }
 
 // ============================================================================
@@ -778,7 +928,7 @@ mod tests {
         std::fs::write(&path, &cookie_data).unwrap();
 
         let loaded = read_cookie_file(&path).unwrap();
-        assert_eq!(loaded, cookie_data);
+        assert_eq!(*loaded, cookie_data);
     }
 
     #[test]
@@ -810,7 +960,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_authenticate_cookie() {
-        let mock = MockTorControlServer::start().await;
+        let mock = MockTorControlServer::start_with_options(mock_control::MockOptions {
+            cookie: Some([0xAA; 32]),
+            ..Default::default()
+        })
+        .await;
 
         // Create a cookie file
         let dir = TempDir::new().unwrap();
@@ -842,6 +996,7 @@ mod tests {
     async fn test_auth_failure() {
         let mock = MockTorControlServer::start_with_options(mock_control::MockOptions {
             reject_auth: true,
+            ..Default::default()
         })
         .await;
         let mut client = TorControlClient::connect(&mock.addr().to_string())

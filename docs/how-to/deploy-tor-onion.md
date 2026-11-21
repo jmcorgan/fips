@@ -139,6 +139,13 @@ Optional monitoring knobs: `control_addr` and `control_auth` (e.g.
 `/run/tor/control` and `cookie`) let the daemon read Tor's status
 through the control port even in `directory` mode. They are
 non-fatal on failure — the onion service still works without them.
+With `cookie`, the daemon authenticates with Tor's SAFECOOKIE
+exchange and never sends the cookie itself, so a process standing in
+for Tor on the control address cannot learn it. Keep the control port
+on the Unix socket or on loopback: over a TCP connection that crosses
+a network, an active on-path attacker can still relay the exchange and
+use the unencrypted session, and a `password:` setting is sent in
+clear (the daemon warns about this at start).
 See [../reference/configuration.md](../reference/configuration.md)
 for the full key list and examples.
 

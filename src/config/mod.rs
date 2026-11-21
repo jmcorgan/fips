@@ -1922,8 +1922,33 @@ impl Config {
         self.peers.iter().filter(|p| p.is_auto_connect())
     }
 
+    /// Refuse a Tor `control_auth` password holding CR or LF. Sent to the
+    /// control port, the line break would end the AUTHENTICATE command early
+    /// and the rest of the password would run as a second command. The error
+    /// names the transport, never the password.
+    fn validate_tor_auth(&self) -> Result<(), ConfigError> {
+        for (name, cfg) in self.transports.tor.iter() {
+            let password = cfg
+                .control_auth
+                .as_deref()
+                .and_then(|auth| auth.strip_prefix("password:"));
+            if password.is_some_and(|p| p.contains(['\r', '\n'])) {
+                let key = match name {
+                    Some(name) => format!("transports.tor.{name}.control_auth"),
+                    None => "transports.tor.control_auth".to_string(),
+                };
+                return Err(ConfigError::Validation(format!(
+                    "{key}: the password contains a line break"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate cross-field configuration invariants.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_tor_auth()?;
+
         let nostr = &self.node.rendezvous.nostr;
 
         let any_transport_advertises_on_nostr = self
@@ -2221,6 +2246,10 @@ impl Config {
 #[cfg(test)]
 #[path = "tests/native_flows.rs"]
 mod native_flows;
+
+#[cfg(test)]
+#[path = "tests/tor_auth.rs"]
+mod tor_auth;
 
 #[cfg(test)]
 mod tests {

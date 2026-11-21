@@ -33,10 +33,21 @@ can reach its private items.
   measured on tokio's paused clock so the tests do not wait in real time.
   After a reply fails part-way, here over the line cap, every later query
   fails as out of step rather than reading the rest of that reply as its
-  answer, while an error reply read in full leaves the client usable. Most
-  tests read a canned reply through a client built over an in-memory
-  buffer; the rest talk to a stand-in port on loopback that records what it
-  is sent.
+  answer, while an error reply read in full leaves the client usable. On
+  the sending side: a password with a line break never reaches the port as
+  a second command, and is refused by `ControlAuth::from_config` without
+  being echoed, as is an unknown `control_auth` string. Cookie
+  authentication runs SAFECOOKIE: it succeeds against a port holding the
+  cookie; against a port with the wrong cookie it stops after sending its
+  nonce; against a port that refuses `AUTHCHALLENGE` it fails with no plain
+  `AUTHENTICATE` fallback; and no port, stand-in or mock, ever receives the
+  cookie's hex. A password sent to a non-loopback TCP peer logs one
+  warning, and one sent over loopback logs none. A TCP connection to one of
+  the host's own non-loopback addresses is recorded as remote; that test is
+  skipped, with a message, on a host with no route and so no such address.
+  Most parsing tests read a canned reply through a client built over an
+  in-memory buffer; the rest talk to a stand-in port that records what it
+  is sent, or to the SAFECOOKIE-capable mock in `mock_control.rs`.
   Declared from `control.rs` as
   `#[cfg(test)] #[path = "tests/control.rs"] mod control_tests;`.
 

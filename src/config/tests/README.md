@@ -21,3 +21,9 @@ source file and can reach that file's private items.
   `Config::validate`, declared from `mod.rs` as `mod native_flows`. A
   `node.native_api.max_flows` of 0 is refused at load, naming the key, and 1,
   the smallest working ceiling, is accepted.
+- `tor_auth.rs`: tests for `Config::validate_tor_auth`, called first in
+  `Config::validate`, declared from `mod.rs` as `mod tor_auth`. A Tor
+  `control_auth` password holding a line feed, or a carriage return in a
+  named instance's password, is refused at load, naming the instance's key
+  and not echoing the password. An ordinary password, quotes included, and
+  both cookie forms are accepted.

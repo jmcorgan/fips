@@ -682,7 +682,7 @@ Requires an external Tor daemon providing a SOCKS5 proxy. Three modes:
 | `transports.tor.connect_timeout_ms` | u64 | `120000` | Connect timeout in milliseconds. Tor circuits take 10–60s. |
 | `transports.tor.mtu` | u16 | `1400` | Default MTU |
 | `transports.tor.control_addr` | string | `"/run/tor/control"` | Tor control port address: Unix socket path or host:port. Used in `control_port` mode; optional in `directory` mode for monitoring. |
-| `transports.tor.control_auth` | string | `"cookie"` | Control port authentication: `"cookie"`, `"cookie:/path/to/cookie"`, or `"password:<secret>"`. |
+| `transports.tor.control_auth` | string | `"cookie"` | Control port authentication: `"cookie"`, `"cookie:/path/to/cookie"`, or `"password:<secret>"`. Cookie authentication uses Tor's SAFECOOKIE exchange. A password may not contain a line break; such a config is refused at load. |
 | `transports.tor.cookie_path` | string | `"/var/run/tor/control.authcookie"` | Path to Tor control cookie file. Used when `control_auth` is `"cookie"`. |
 | `transports.tor.max_inbound_connections` | usize | `64` | Maximum inbound connections via onion service. |
 | `transports.tor.directory_service.hostname_file` | string | `"/var/lib/tor/fips_onion_service/hostname"` | Path to Tor-managed hostname file containing the `.onion` address. |
@@ -714,6 +714,24 @@ transport at start, so the node starts DEGRADED without it; in
 up, a monitoring query that fails this way clears the cached Tor
 status, and the next monitoring round reconnects and authenticates
 again before querying.
+
+With cookie authentication the client never sends the cookie. It runs
+Tor's SAFECOOKIE exchange: it sends a random nonce, the control port
+must answer with a hash that proves it holds the cookie, and only then
+does the client send its own hash. A port that refuses the exchange or
+answers with the wrong hash fails authentication; there is no fallback
+to sending the cookie itself. This keeps the cookie from a process
+standing in for Tor on the control address and from anyone passively
+watching a TCP control connection. It does not protect a TCP control
+connection that crosses a network from an active on-path attacker,
+who can relay the exchange to the real Tor and then use the
+authenticated session, which stays unencrypted: the Tor control
+protocol has no encryption. Prefer the Unix socket, or a loopback TCP
+address.
+
+Password authentication sends the password in clear. When
+`control_addr` is a TCP address that is not loopback, the daemon logs
+a warning at start that the password crosses the network in clear.
 
 ### UDP + Tor Bridge Example
 
