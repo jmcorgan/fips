@@ -1222,6 +1222,7 @@ dependencies = [
  "fips-core",
  "futures",
  "hex",
+ "hmac 0.13.0",
  "if-addrs",
  "libc",
  "mdns-sd",

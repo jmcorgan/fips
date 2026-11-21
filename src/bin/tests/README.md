@@ -36,6 +36,16 @@ The tests run with `cargo test -p fips-mesh --bins`.
   npub rather than looked up as a host name (`resolve_peer`), its mesh
   address is its owner's (`mesh_address`), and a public key file holding it
   gives the same address (`address_from_file`).
+- `fipsctl_socket.rs` tests `../fipsctl.rs` as module `socket_tests`: the
+  control socket client (`send_request`). A listener in a temporary
+  directory answers one request. A reply message carrying terminal escapes
+  comes back with each control character replaced by U+FFFD, as does every
+  other string in a reply, object keys included. A server running as the
+  test's own user is talked to, and an honest reply comes back unchanged. A
+  refusal needs a server running under another uid, which needs root to set
+  up, so nothing here checks that the peer check runs before the request is
+  written. Like `fipsctl.rs` it opens Unix domain sockets, so it is Unix
+  only.
 
 ## Rules
 

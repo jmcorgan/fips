@@ -17,7 +17,6 @@ services:
     ports:
       - "127.0.0.1:5354:5354/udp"
       - "127.0.0.1:5354:5354/tcp"
-      - "2222:22/tcp"
       - "51820:51820/udp"
     volumes:
       - ./fips.yaml:/etc/fips/fips.yaml:ro

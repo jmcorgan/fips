@@ -45,8 +45,10 @@ for what `fips` group membership grants once the API is on.
 ## Socket path
 
 `node.native_api.socket_path` has a default resolved at startup rather than a
-fixed string. The resolver takes the first of these that applies and appends
-`api.sock`:
+fixed string. A daemon running as root always takes `/run/fips/api.sock`, or
+`/var/run/fips/api.sock` on FreeBSD and macOS when `/run/fips` is absent, and
+creates the directory at bind. Otherwise the resolver takes the first of these
+that applies and appends `api.sock`:
 
 1. `/run/fips/api.sock`, when `/run/fips` exists as a directory. This is the
    packaged Linux convention, and the constant the shipped Rust client compiles

@@ -16,7 +16,7 @@ fi
 
 # Wait for client public key (written by fips-on.sh)
 echo "Waiting for WireGuard client key..."
-for i in $(seq 1 60); do
+for _ in $(seq 1 60); do
     if [ -f "$WG_DIR/client.pub" ]; then
         break
     fi
@@ -64,7 +64,6 @@ fi
 
 # ── Start background services ──────────────────────────────────
 dnsmasq
-/usr/sbin/sshd
 
 # ── Start FIPS ─────────────────────────────────────────────────
 exec fips --config "$CONFIG"

@@ -1243,3 +1243,277 @@ fn an_unmeasured_candidate_never_wins_a_cost_based_switch() {
         ParentEval::None
     ));
 }
+
+// ===== Unconfirmed parent: two nodes picking each other across a silent link =====
+//
+// n05 sits under n02 and n04 under root n01. The link between n04 and n05
+// then carries nothing, while each still holds the other's coordinate from
+// before: n05 sees n04 at [4, 1], n04 sees n05 at [5, 2, 1], both at a cheap
+// frozen cost, and the links to n02 and n01 have degraded. Each switches to
+// the other and the two become each other's parent.
+
+const B_COSTS: [(u8, f64); 2] = [(2, 3.0), (4, 1.0)];
+const A_COSTS: [(u8, f64); 2] = [(1, 5.0), (5, 1.0)];
+
+fn parent_of(state: &TreeState) -> crate::identity::NodeAddr {
+    *state.my_declaration().parent_id()
+}
+
+fn add_root_peer(state: &mut TreeState, addr: u8) {
+    let peer = make_node_addr(addr);
+    state.update_peer(
+        ParentDeclaration::self_root(peer, 1, 1000),
+        make_coords(&[addr]),
+    );
+}
+
+/// n04 (`a`) and n05 (`b`) before the silence, with the given hold-down.
+fn silent_link_pair(hold_down_secs: u64) -> (TreeState, TreeState) {
+    let mut b = TreeState::new(make_node_addr(5), 1000);
+    b.set_parent_hysteresis(0.2);
+    b.set_hold_down(hold_down_secs);
+    add_peer(&mut b, 2, &[2, 1]);
+    add_peer(&mut b, 4, &[4, 1]);
+    b.set_parent(make_node_addr(2), 2, 1000, 1000);
+    b.recompute_coords();
+    b.heard_from(&make_node_addr(2), 1001);
+
+    let mut a = TreeState::new(make_node_addr(4), 1000);
+    a.set_parent_hysteresis(0.2);
+    a.set_hold_down(hold_down_secs);
+    add_root_peer(&mut a, 1);
+    add_peer(&mut a, 5, &[5, 2, 1]);
+    a.set_parent(make_node_addr(1), 2, 1000, 1000);
+    a.recompute_coords();
+    a.heard_from(&make_node_addr(1), 1001);
+    (a, b)
+}
+
+/// Run one periodic evaluation at `now_ms` and take a switch if it yields one.
+fn tick(state: &mut TreeState, costs: &[(u8, f64)], now_ms: u64) -> bool {
+    let decision = Stp::classify_periodic(
+        state,
+        &make_costs(costs),
+        &BTreeSet::new(),
+        state.is_switch_suppressed(now_ms),
+    );
+    if let TreeDecision::Switch {
+        new_parent,
+        new_seq,
+    } = decision
+    {
+        state.set_parent(new_parent, new_seq, 2000, now_ms);
+        state.recompute_coords();
+        return true;
+    }
+    false
+}
+
+fn looped(a: &TreeState, b: &TreeState) -> bool {
+    parent_of(a) == make_node_addr(5) && parent_of(b) == make_node_addr(4)
+}
+
+/// Form the loop: n05 switches at 100 s, n04 at 101 s.
+fn form_loop(a: &mut TreeState, b: &mut TreeState) {
+    assert!(tick(b, &B_COSTS, 100_000));
+    assert!(tick(a, &A_COSTS, 101_000));
+    assert!(
+        looped(a, b),
+        "precondition: the two are each other's parent"
+    );
+}
+
+/// As `form_loop`, except n02 follows n05 over its live link first, so n05
+/// holds n02 below itself and has no other candidate.
+fn form_loop_with_n02_below_n05(a: &mut TreeState, b: &mut TreeState) {
+    assert!(tick(b, &B_COSTS, 100_000));
+    b.update_peer(
+        ParentDeclaration::new(make_node_addr(2), make_node_addr(5), 2, 1001),
+        make_coords(&[2, 5, 4, 1]),
+    );
+    assert!(tick(a, &A_COSTS, 101_000));
+    assert!(
+        looped(a, b),
+        "precondition: the two are each other's parent"
+    );
+}
+
+fn abandon(state: &mut TreeState, costs: &[(u8, f64)], now_ms: u64) -> bool {
+    state
+        .abandon_unconfirmed(&make_costs(costs), &BTreeSet::new(), 3000, now_ms)
+        .is_some()
+}
+
+#[test]
+fn a_parent_change_leaves_the_new_parent_unconfirmed_until_a_later_frame() {
+    let (mut a, mut b) = silent_link_pair(0);
+    form_loop(&mut a, &mut b);
+    assert_eq!(a.unconfirmed_parent(), Some((make_node_addr(5), 101_000)));
+
+    // A frame no later than the switch is the stale view itself.
+    a.heard_from(&make_node_addr(5), 101_000);
+    assert!(a.unconfirmed_parent().is_some());
+    // A frame from another peer confirms nothing.
+    a.heard_from(&make_node_addr(1), 102_000);
+    assert!(a.unconfirmed_parent().is_some());
+
+    a.heard_from(&make_node_addr(5), 101_001);
+    assert_eq!(a.unconfirmed_parent(), None);
+}
+
+#[test]
+fn an_unconfirmed_parent_is_dropped_for_another_candidate_at_the_deadline() {
+    let (mut a, mut b) = silent_link_pair(0);
+    form_loop(&mut a, &mut b);
+
+    assert!(abandon(&mut a, &A_COSTS, 116_000));
+    assert_eq!(parent_of(&a), make_node_addr(1));
+    assert!(a.is_shunned(&make_node_addr(5)));
+    assert!(!a.my_coords().contains(&make_node_addr(5)));
+    // The replacement must itself be heard from.
+    assert_eq!(a.unconfirmed_parent(), Some((make_node_addr(1), 116_000)));
+
+    assert!(abandon(&mut b, &B_COSTS, 115_000));
+    assert_eq!(parent_of(&b), make_node_addr(2));
+    assert!(!looped(&a, &b));
+}
+
+#[test]
+fn an_unconfirmed_parent_with_no_other_candidate_is_kept() {
+    let (mut a, mut b) = silent_link_pair(0);
+    form_loop_with_n02_below_n05(&mut a, &mut b);
+    let seq = b.my_declaration().sequence();
+
+    assert!(!abandon(&mut b, &B_COSTS, 115_000));
+    assert_eq!(parent_of(&b), make_node_addr(4));
+    assert_eq!(b.my_declaration().sequence(), seq);
+    assert!(!b.is_root());
+    assert!(!b.is_shunned(&make_node_addr(4)));
+    assert_eq!(b.unconfirmed_parent(), Some((make_node_addr(4), 100_000)));
+}
+
+#[test]
+fn an_unconfirmed_parent_is_kept_when_the_only_other_peers_were_dropped_before() {
+    let (mut a, mut b) = silent_link_pair(0);
+    form_loop(&mut a, &mut b);
+    assert!(abandon(&mut a, &A_COSTS, 116_000));
+    assert_eq!(parent_of(&a), make_node_addr(1));
+
+    // n01 goes silent too: n05 is the only other peer, and nothing has been
+    // heard from it since it was dropped, so moving back gains nothing.
+    assert!(!abandon(&mut a, &A_COSTS, 131_000));
+    assert_eq!(parent_of(&a), make_node_addr(1));
+}
+
+#[test]
+fn a_parent_heard_from_before_the_deadline_is_never_dropped() {
+    let (mut a, mut b) = silent_link_pair(0);
+    form_loop(&mut a, &mut b);
+    a.heard_from(&make_node_addr(5), 105_000);
+
+    assert!(!abandon(&mut a, &A_COSTS, 116_000));
+    assert!(!abandon(&mut a, &A_COSTS, 200_000));
+    assert_eq!(parent_of(&a), make_node_addr(5));
+    assert!(!a.is_shunned(&make_node_addr(5)));
+}
+
+#[test]
+fn the_undo_is_taken_under_an_active_hold_down() {
+    let (mut a, mut b) = silent_link_pair(30);
+    form_loop(&mut a, &mut b);
+    assert!(
+        a.is_switch_suppressed(116_000),
+        "precondition: hold-down active"
+    );
+
+    assert!(abandon(&mut a, &A_COSTS, 116_000));
+    assert_eq!(parent_of(&a), make_node_addr(1));
+}
+
+#[test]
+fn an_abandoned_parent_is_not_taken_back_at_later_evaluations_while_silent() {
+    for hold_down in [0, 5, 30] {
+        // Both nodes hold another candidate.
+        let (mut a, mut b) = silent_link_pair(hold_down);
+        form_loop(&mut a, &mut b);
+        assert!(abandon(&mut b, &B_COSTS, 115_000));
+        assert!(abandon(&mut a, &A_COSTS, 116_000));
+        for t in (117_000u64..=200_000).step_by(1000) {
+            assert!(
+                !tick(&mut b, &B_COSTS, t),
+                "hold-down {hold_down}: n05 switched at {t} ms"
+            );
+            assert!(
+                !tick(&mut a, &A_COSTS, t),
+                "hold-down {hold_down}: n04 switched at {t} ms"
+            );
+            assert!(
+                !looped(&a, &b),
+                "hold-down {hold_down}: loop re-formed at {t} ms"
+            );
+        }
+
+        // n05 has no other candidate and keeps n04; n04 moves to n01.
+        let (mut a, mut b) = silent_link_pair(hold_down);
+        form_loop_with_n02_below_n05(&mut a, &mut b);
+        assert!(!abandon(&mut b, &B_COSTS, 115_000));
+        assert!(abandon(&mut a, &A_COSTS, 116_000));
+        for t in (117_000u64..=200_000).step_by(1000) {
+            tick(&mut a, &A_COSTS, t);
+            tick(&mut b, &B_COSTS, t);
+            assert_eq!(
+                parent_of(&a),
+                make_node_addr(1),
+                "hold-down {hold_down}: n04 left n01 at {t} ms"
+            );
+            assert!(
+                !looped(&a, &b),
+                "hold-down {hold_down}: loop re-formed at {t} ms"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_abandoned_parent_competes_again_once_heard_from() {
+    let (mut a, mut b) = silent_link_pair(0);
+    form_loop(&mut a, &mut b);
+    assert!(abandon(&mut a, &A_COSTS, 116_000));
+
+    // A frame no later than the switch to it, the stale view itself, does
+    // not lift it.
+    a.heard_from(&make_node_addr(5), 101_000);
+    assert!(a.is_shunned(&make_node_addr(5)));
+    assert!(!tick(&mut a, &A_COSTS, 117_000));
+
+    a.heard_from(&make_node_addr(5), 117_500);
+    assert!(!a.is_shunned(&make_node_addr(5)));
+    assert!(tick(&mut a, &A_COSTS, 118_000));
+    assert_eq!(parent_of(&a), make_node_addr(5));
+}
+
+#[test]
+fn a_removed_peer_leaves_no_confirmation_state_behind() {
+    let (mut a, mut b) = silent_link_pair(0);
+    form_loop(&mut a, &mut b);
+    assert!(abandon(&mut a, &A_COSTS, 116_000));
+    a.remove_peer(&make_node_addr(5));
+    assert!(!a.is_shunned(&make_node_addr(5)));
+    a.remove_peer(&make_node_addr(1));
+    assert_eq!(a.unconfirmed_parent(), None);
+    assert_eq!(a.awaiting_frames().count(), 0);
+}
+
+#[test]
+fn a_node_whose_only_remaining_peer_is_abandoned_takes_it_rather_than_becoming_root() {
+    let (mut a, mut b) = silent_link_pair(0);
+    form_loop(&mut a, &mut b);
+    assert!(abandon(&mut a, &A_COSTS, 116_000));
+    assert!(a.is_shunned(&make_node_addr(5)));
+
+    a.remove_peer(&make_node_addr(1));
+    assert!(a.handle_parent_lost(&make_costs(&[(5, 1.0)]), 3000, 120_000));
+    assert!(!a.is_root(), "became root while holding an eligible peer");
+    assert_eq!(parent_of(&a), make_node_addr(5));
+    assert!(!a.is_shunned(&make_node_addr(5)));
+}

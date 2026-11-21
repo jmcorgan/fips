@@ -83,12 +83,16 @@ impl ControlClient {
         Ok(response.get("data").cloned().unwrap_or(Value::Null))
     }
 
+    /// Connect, then refuse a server run by any account other than root,
+    /// this user or the fips account before anything is sent.
     #[cfg(unix)]
     async fn connect(&self) -> Result<tokio::net::UnixStream, String> {
-        timeout(IO_TIMEOUT, tokio::net::UnixStream::connect(&self.address))
+        let stream = timeout(IO_TIMEOUT, tokio::net::UnixStream::connect(&self.address))
             .await
             .map_err(|_| "connection timed out".to_string())?
-            .map_err(|e| format!("connect: {e}"))
+            .map_err(|e| format!("connect: {e}"))?;
+        fips::utils::sockpeer::check_stream(std::path::Path::new(&self.address), &stream)?;
+        Ok(stream)
     }
 
     #[cfg(windows)]

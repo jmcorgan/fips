@@ -96,9 +96,12 @@ test-hooks = ["fips-core/test-hooks"]
 [dependencies]
 ratatui = "0.30"
 secp256k1 = { version = "0.30", features = ["rand", "global-context"] }
-# `zeroize` clears SHA-256 states on drop. No root code hashes a secret now;
-# `fips-core` enables the feature too, so it is on in every root build.
+# `zeroize` clears the SHA-256 and HMAC states on drop. The one root code that
+# hashes a secret is the Tor control client's SAFECOOKIE exchange
+# (`transport::tor::control`), which keys an HMAC with the cookie. `fips-core`
+# enables both features too, so they are on in every root build.
 sha2 = { version = "0.11", features = ["zeroize"] }
+hmac = { version = "0.13", features = ["zeroize"] }
 ring = "0.17"
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
 rand = "0.10.1"

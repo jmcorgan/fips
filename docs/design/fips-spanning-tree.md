@@ -137,6 +137,21 @@ When a node changes its parent:
    or ancestry change) or sit under another root (becoming root); both on
    parent loss or loop detection. Other cached entries are kept.
 
+A new parent then stays unconfirmed until a frame from it arrives. A
+switch made on a peer's coordinate from before its link went silent can
+leave two nodes each other's parent across that link, and no announce
+crosses the link to show either of them the loop. If nothing arrives from
+the new parent within one heartbeat interval plus the longest MMP report
+interval (15s at defaults), the node switches to another candidate,
+chosen as on parent loss and taken as a mandatory switch, and keeps the
+silent peer out of parent candidacy until a frame from it arrives or the
+peer is removed. With no other candidate the node keeps the parent. A
+peer kept out is still taken when no other candidate reaches the smallest
+root the node sees, so a node never becomes root because of it. If the
+silent peer is the only way to that root, the drop moves the node to a
+larger root and its next evaluation takes the peer back, once per
+deadline, until the peer is heard from or removed.
+
 ## Coordinate Computation
 
 A node's coordinate is its full ancestry path from itself to the root:

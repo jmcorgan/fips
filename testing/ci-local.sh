@@ -1185,16 +1185,14 @@ BUILD_GATE=1
 run_build() {
     stage "Stage 1: Build"
 
-    info "sudo nft -c -f packaging/common/fips.nft (nftables ruleset syntax check)"
-    if command -v nft &>/dev/null; then
-        if sudo nft -c -f packaging/common/fips.nft 2>&1; then
-            record "nft-syntax" 0
-        else
-            record "nft-syntax" 1
-            return 1
-        fi
+    # Exit 1 is nft refusing the ruleset or a file it includes; exit 2 is a
+    # check that could not run (no nft, or neither an unprivileged user
+    # namespace nor passwordless sudo to run it as root). Both are red: a check
+    # that did not run is not a pass.
+    info "check-nft-syntax.sh packaging/common/fips.nft (nftables ruleset syntax check)"
+    if bash "$SCRIPT_DIR/check-nft-syntax.sh" packaging/common/fips.nft 2>&1; then
+        record "nft-syntax" 0
     else
-        info "nftables not installed; install with 'apt install nftables' to validate fips.nft"
         record "nft-syntax" 1
         return 1
     fi

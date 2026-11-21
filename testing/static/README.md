@@ -380,7 +380,7 @@ Each container runs the following services alongside FIPS:
 
 | Service | Port | Description                                   |
 | ------- | ---- | --------------------------------------------- |
-| SSH     | 22   | Root login with no password (test only)       |
+| SSH     | 22   | Keys only; no key is installed, so no login   |
 | iperf3  | 5201 | Bandwidth testing server (`-s -D`)            |
 | HTTP    | 80 | Python HTTP server serving `/root/index.html` |
 
@@ -390,9 +390,6 @@ using `<npub>.fips` hostnames:
 ```bash
 # HTTP over FIPS
 docker exec fips-node-b curl http://$NPUB_A.fips
-
-# SSH over FIPS
-docker exec fips-node-b ssh $NPUB_A.fips
 
 # iperf3 over FIPS
 docker exec fips-node-b iperf3 -c $NPUB_A.fips

@@ -60,6 +60,20 @@ Child modules of `mod.rs`:
   session id for as long as its offer can still be fresh, through as many
   other offers as the signal gate (`signal_gate.rs`) admits meanwhile. The
   test derives that fill from the gate's rate and burst constants.
+- `signal_bounds.rs`: a peer's traversal offer or overlay advert carrying
+  an oversized string or list is refused before anything from it is kept.
+  The incoming-offer handler in `runtime.rs` refuses an offer whose session
+  id or nonce is over 128 bytes as `oversized-offer`, logged at warn, so a
+  second copy is not a replay; `parse_overlay_advert_event` refuses an
+  advert whose content is over 8 KiB, or whose `endpoints`, `signalRelays`
+  or `stunServers` list has more than 32 entries, including the shape a
+  byte bound alone lets through (about 2000 one-character relays). Each
+  bound is tested at its value and one past it. The content bound is
+  checked before decoding, and the entry bound before unusable endpoints
+  are dropped. The advert published from
+  the default configuration is inside every bound, and one from a
+  configuration with 33 entries in each list is cut to the first 32, in
+  order, and accepted by a peer.
 - `signal_lag.rs`: a traversal answer delivered ahead of a flood of
   advertisements twice the relay pool's notification channel size still
   reaches the traversal waiting for it, through the relay client's

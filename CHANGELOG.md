@@ -1897,6 +1897,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local candidates only in its socket's address family, and reaches a STUN
   server at an address of that family; before, an IPv4 socket offered IPv6
   interface addresses and could try an IPv6 server address first.
+- Two nodes that pick each other as parent across a link that has gone
+  silent, each on the other's coordinates from before the silence, no
+  longer hold that loop, with the nodes below them cut off from the root,
+  until the link carries frames again or is declared dead. A new parent
+  now has to send a frame within one heartbeat interval plus the longest
+  MMP report interval of the switch (15 s at defaults). If it does not, the
+  node switches to another candidate, chosen as on parent loss and not
+  held back by the parent switch hold-down or flap dampening, and keeps the
+  silent peer out of parent candidacy until a frame from it arrives or it
+  is removed. A node with no other candidate keeps its parent, and a peer
+  kept out is still taken when no other candidate reaches the smallest
+  root the node sees, so no node becomes root because of it.
 
 #### Transports
 
@@ -1936,6 +1948,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   index it had, which the transport took to mean it was still bound, but the
   kernel detaches the socket when the interface leaves, so the node heard
   nothing on that interface until it was restarted.
+
+- A UDP peer configured by hostname is now dialed at the first address the
+  resolver returns in the transport socket's own address family, and at the
+  resolver's first answer only when none is in that family. Before, the
+  transport always took the first answer. On a DNS64/NAT64 network, such as
+  an IPv6-only mobile carrier, a name with only an A record resolves with a
+  synthesized AAAA first, so a transport bound to `0.0.0.0` failed every
+  send to that peer with "Address family not supported by protocol" and
+  never linked. The IPv4 address is then reached through the platform's
+  464XLAT (CLAT on Android), which is how the fix was confirmed on such a
+  carrier. On an IPv6-only network without one an IPv4 socket still cannot
+  reach the peer, and the transport has to be bound to `[::]` to link. A send
+  from an IPv4 socket to an IPv6 address is now refused with an error that
+  names both families and the bind address.
 
 - A TCP link no longer resets on frames it should carry. On Linux, a frame
   above the local MSS but within the configured `mtu` used to reset it, as
@@ -2206,6 +2232,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   msg1 resend draws the answer again. Each rekey attempt starts its own
   count. A first dial and an end-to-end session's rekey are unchanged, and
   nothing on the wire changes.
+- With Tor cookie authentication, the daemon no longer sends the cookie to
+  the control port. It runs Tor's SAFECOOKIE exchange and sends its own
+  hash only after the port has shown that it holds the cookie. A port that
+  refuses the exchange or answers with the wrong hash fails
+  authentication; there is no fallback to sending the cookie. Before,
+  whatever answered on `control_addr`, Tor or a process standing in for
+  it, received the cookie, as did anyone watching a TCP control
+  connection. An active on-path attacker on a TCP control connection that
+  crosses a network can still relay the exchange and use the session,
+  which the control protocol does not encrypt, so keep the control port on
+  the Unix socket or on loopback.
+- A `control_auth` password containing a CR or LF is refused at start.
+  Before, the line break ended the AUTHENTICATE command and the rest of
+  the password ran as a second control command. A password sent over TCP
+  to an address that is not loopback now draws a warning, at start and
+  whenever the daemon authenticates again, that it crosses the network in
+  clear; the config is still accepted. The error for an unrecognised
+  `control_auth` value no longer quotes it, since it could hold a
+  mistyped password.
+- The Tor control client reads replies as bytes, accepts a reply line of
+  at most 8 KiB and a reply of at most 64 KiB, and gives up on a connect or
+  a reply after 30 s. Before, a reply line with a multi-byte character
+  where the status code or separator belongs panicked the daemon, and a
+  control port that stopped answering blocked node start for good. In
+  `control_port` mode such a port now fails the Tor transport, and the
+  node starts DEGRADED without it, as it already did when authentication
+  was refused. A monitoring connection that fails part-way through a reply
+  is dropped, and the next monitoring round connects and authenticates
+  again.
 
 #### Sessions
 
@@ -2311,6 +2366,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advert relays, and a burst of about 2,048 arriving faster than the node
   read them pushed a queued offer or answer out unread, so its traversal
   waited out its timeout.
+- With Nostr rendezvous enabled, a traversal offer whose session id or
+  nonce is over 128 bytes is refused with a warning, before it is recorded
+  or answered. An advert whose content is over 8 KiB, or any of whose
+  `endpoints`, `signalRelays` and `stunServers` lists has more than 32
+  entries, is refused whole before it is cached. Before, the seen-sessions
+  memory kept a peer's session id at any length, the answer copied its
+  nonce at any length, and the advert cache kept lists of any length: one
+  advert of 1000 Tor endpoints held about 4 MB. A node now publishes at
+  most the first 32 entries of each of its own lists, in configured order,
+  with a warning when it cuts one, and warns if its advert is still over
+  8 KiB. The default configuration's advert is far inside both bounds.
 
 #### OpenWrt
 
@@ -2366,6 +2432,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching its target address and port. A host that kept an edited
   `fips.nft` on upgrade gets the chain only after merging in the packaged
   file.
+
+#### Control tools
+
+- `fipsctl` and `fipstop` check which account serves the control socket
+  before sending anything, including a path given with `-s`, and talk only
+  to a server running as root, as their own user, or as the `fips`
+  account. Membership of group `fips` is not enough. A refusal names the
+  path and the server's uid. A client in a user namespace that does not
+  map the daemon's uid, such as a rootless container reaching the host's
+  socket through a bind mount, sees the overflow uid and refuses the
+  daemon; run the client outside the namespace. On Windows the clients
+  connect over TCP and make no such check.
+- A daemon, `fipsctl` or `fipstop` running as root always uses
+  `/run/fips/control.sock`, or `/var/run/fips/control.sock` on macOS and
+  FreeBSD when `/run/fips` is absent, and never falls back to
+  `$XDG_RUNTIME_DIR` or `/tmp`. The same holds for the native API socket
+  and for the gateway socket `fipstop` reads. Before, a root `fipsctl` run
+  after the packaged daemon stopped, when systemd had removed `/run/fips`,
+  could connect to `/tmp/fips-control.sock`, which any local account could
+  have bound first. Runs that are not root keep the XDG and `/tmp`
+  fallbacks.
+- `fipsctl` prints each control character in the daemon's reply strings
+  as U+FFFD, so a reply cannot drive the terminal.
+
+#### Identity and config
+
+- On Unix, `fips` or `fips-gateway` running as root without `-c` now logs
+  a warning for each config file it reads from root's user config
+  directory, `~/.fips.yaml` or `./fips.yaml`, naming the file and
+  `--config`. Another account may be able to write those files, and a
+  config there can set anything, the node identity included. The warning
+  is logged at ERROR, so a `node.log_level` set in one of those files
+  cannot hide it. The search itself is unchanged, and starts that pass
+  `-c`, as the packaged services do, see no warning. To start a root node
+  by hand, pass `-c` with the config file to use.
+
+#### NixOS
+
+- The NixOS module's service start no longer writes through a symlink
+  planted at `/var/lib/fips/fips.yaml` or `/etc/fips/hosts`. Both
+  directories are group-writable, so a member of group `fips` could plant
+  either name as a link before the first start, and the root `preStart`
+  followed it when seeding the file: a link to a root-only device node
+  made the device writable by group `fips`, and a link to a directory had
+  the directory's mode set to 0664. The seed now takes group and other
+  write off the directory while it checks and writes, writes only when
+  nothing at all is at the path, and then puts the directory's mode back.
+  An existing file or symlink, the operator's included, is left alone.
+  This was checked by running the module's start script, not on a NixOS
+  system.
+
+#### Examples
+
+- The macOS WireGuard example no longer starts an ssh server or publishes
+  port 2222. Its container is built on the `fips-test` image, whose ssh
+  server let root log in with an empty password, and the port was
+  published on every host interface. For a shell in the container, use
+  `docker exec -it wireguard-sidecar bash`. The `fips-test` image no
+  longer gives root an empty password, and its ssh server accepts keys
+  only. The Nostr relay example images no longer install an ssh server or
+  clear root's password.
 
 ## [0.5.3] - 2026-10-16
 

@@ -167,6 +167,46 @@ pub(super) fn delay_loopback_delivery(node: &TestNode, delay: Option<Duration>) 
         .insert(node.addr.clone(), (transport_id, tx));
 }
 
+/// Drop every packet sent between `a` and `b`, both ways, while the returned
+/// flag is set; other traffic to either node flows as before.
+///
+/// Stands in for a link that has gone silent without either end noticing
+/// yet. Like [`delay_loopback_delivery`], it points each node's registry
+/// entry at a forwarder, so it must not be combined with that helper on the
+/// same node. Clearing the flag lets the link carry frames again.
+pub(super) fn silence_link(
+    a: &TestNode,
+    b: &TestNode,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    let silent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    for (dst, src) in [(a, b), (b, a)] {
+        let (transport_id, inner) = LOOPBACK_REGISTRY
+            .lock()
+            .unwrap()
+            .get(&dst.addr)
+            .expect("node's loopback address must be registered")
+            .clone();
+        let src_addr = src.addr.clone();
+        let silent = silent.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ReceivedPacket>();
+        tokio::spawn(async move {
+            while let Some(packet) = rx.recv().await {
+                if packet.remote_addr == src_addr
+                    && silent.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    continue;
+                }
+                let _ = inner.send(packet);
+            }
+        });
+        LOOPBACK_REGISTRY
+            .lock()
+            .unwrap()
+            .insert(dst.addr.clone(), (transport_id, tx));
+    }
+    silent
+}
+
 /// Build a node that stands for `old` after a restart: the same identity
 /// and loopback address, a fresh startup epoch and no peers.
 ///
@@ -1822,4 +1862,355 @@ async fn a_stepped_drain_returns_only_after_the_decrypt_workers_handled_what_the
         handled > 0,
         "defect: the drain returned before the decrypt worker handled any frame it was sent"
     );
+}
+
+// ===== Two nodes picking each other as parent across a silent link =====
+//
+// Four nodes in a ring R-X-B-Y-R, R the smallest address. After convergence
+// B sits under one neighbour, C; the other neighbour is A. The link A-B then
+// carries nothing while both ends still hold the other's coordinate at a
+// cheap cost from before, and the links B-C and A-R have degraded. B moves
+// under A, then A moves under B on B's old coordinate: each is the other's
+// parent, and no announce crosses the silent link to show either the loop.
+
+/// Set the measured cost of `node`'s link to `peer` from an SRTT sample.
+fn set_link_srtt(node: &mut TestNode, peer: NodeAddr, srtt_us: i64) {
+    let mmp = node
+        .node
+        .get_peer_mut(&peer)
+        .expect("peer")
+        .mmp_mut()
+        .expect("mmp");
+    mmp.metrics.etx = 1.0;
+    mmp.metrics.srtt = Default::default();
+    mmp.metrics.srtt.update(srtt_us);
+}
+
+/// Deliver whatever is in flight until the mesh goes quiet.
+async fn settle_mesh(nodes: &mut [TestNode]) {
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if process_available_packets(nodes).await == 0 {
+            break;
+        }
+    }
+}
+
+fn parent_index(nodes: &[TestNode], i: usize) -> Option<usize> {
+    let state = nodes[i].node.tree_state();
+    if state.is_root() {
+        return None;
+    }
+    let parent = *state.my_declaration().parent_id();
+    nodes.iter().position(|n| *n.node.node_addr() == parent)
+}
+
+/// Whether following parents from every node reaches `root` without a cycle.
+fn tree_reaches(nodes: &[TestNode], root: usize) -> bool {
+    (0..nodes.len()).all(|start| {
+        let mut at = start;
+        for _ in 0..nodes.len() {
+            if at == root {
+                return true;
+            }
+            match parent_index(nodes, at) {
+                Some(next) => at = next,
+                None => return false,
+            }
+        }
+        false
+    })
+}
+
+/// The ring, its roles, and the silenced A-B link.
+struct SilentRing {
+    nodes: Vec<TestNode>,
+    r: usize,
+    a: usize,
+    b: usize,
+    c: usize,
+    silent: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SilentRing {
+    /// Converge the ring, then silence A-B and set the costs the outage left.
+    async fn new() -> Self {
+        let mut config = crate::config::Config::new();
+        // Hold-down cannot then mask a re-switch.
+        config.node.tree.hold_down_secs = 0;
+        // The test's ticks run tens of milliseconds apart; the announce rate
+        // limit would hold every announce after the first for the length of
+        // the test, and no heartbeat runs, so nothing would cross a restored
+        // link.
+        config.node.tree.announce_min_interval_ms = 0;
+        let mut nodes = Vec::new();
+        for _ in 0..4 {
+            nodes.push(make_test_node_with_config(config.clone(), 1280).await);
+        }
+        let mut order: Vec<usize> = (0..4).collect();
+        order.sort_by_key(|&i| *nodes[i].node.node_addr());
+        let (r, x, y, b) = (order[0], order[1], order[2], order[3]);
+        for (i, j) in [(r, x), (x, b), (b, y), (y, r)] {
+            initiate_handshake(&mut nodes, i, j).await;
+        }
+        drain_all_packets(&mut nodes, false).await;
+        assert!(
+            tree_reaches(&nodes, r),
+            "precondition: the ring converged on R"
+        );
+        let c = parent_index(&nodes, b).expect("B has a parent");
+        let a = if c == x { y } else { x };
+        let silent = silence_link(&nodes[a], &nodes[b]);
+        let mut ring = Self {
+            nodes,
+            r,
+            a,
+            b,
+            c,
+            silent,
+        };
+        ring.hold_outage_costs();
+        ring
+    }
+
+    fn addr(&self, i: usize) -> NodeAddr {
+        *self.nodes[i].node.node_addr()
+    }
+
+    /// B-C at cost 3.0 and A-R at 5.0, degraded and still measured; A-B at
+    /// about 1.0 both ways, frozen when the link went silent.
+    fn hold_outage_costs(&mut self) {
+        let (r, a, b, c) = (
+            self.addr(self.r),
+            self.addr(self.a),
+            self.addr(self.b),
+            self.addr(self.c),
+        );
+        set_link_srtt(&mut self.nodes[self.b], c, 200_000);
+        set_link_srtt(&mut self.nodes[self.b], a, 1);
+        set_link_srtt(&mut self.nodes[self.a], r, 400_000);
+        set_link_srtt(&mut self.nodes[self.a], b, 1);
+    }
+
+    /// Run a node's tick with its periodic re-evaluation due.
+    async fn tick(&mut self, i: usize) {
+        self.nodes[i].node.last_parent_reeval = None;
+        self.nodes[i].node.check_tree_state().await;
+        settle_mesh(&mut self.nodes).await;
+    }
+
+    fn looped(&self) -> bool {
+        parent_index(&self.nodes, self.a) == Some(self.b)
+            && parent_index(&self.nodes, self.b) == Some(self.a)
+    }
+
+    /// B's periodic tick, then A's: the two become each other's parent.
+    async fn form_loop(&mut self) {
+        self.tick(self.b).await;
+        assert_eq!(
+            parent_index(&self.nodes, self.b),
+            Some(self.a),
+            "precondition: B moved under A"
+        );
+        self.tick(self.a).await;
+        assert!(
+            self.looped(),
+            "precondition: A and B are each other's parent"
+        );
+    }
+
+    /// Run the confirmation check on A and B as if `D` and a millisecond had
+    /// passed since the switches.
+    async fn pass_deadline(&mut self) {
+        for i in [self.b, self.a] {
+            let now = crate::time::mono_ms() + self.nodes[i].node.parent_confirm_ms() + 1;
+            self.nodes[i].node.check_parent_confirmation(now).await;
+            settle_mesh(&mut self.nodes).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn two_nodes_that_pick_each_other_across_a_silent_link_stay_apart_after_the_confirmation_deadline()
+ {
+    let mut ring = SilentRing::new().await;
+    ring.form_loop().await;
+    ring.pass_deadline().await;
+    assert!(
+        !ring.looped(),
+        "the loop stands after the confirmation deadline"
+    );
+    assert_eq!(parent_index(&ring.nodes, ring.a), Some(ring.r));
+    assert!(
+        ring.nodes[ring.a]
+            .node
+            .tree_state()
+            .is_shunned(&ring.addr(ring.b))
+    );
+
+    for round in 0..10 {
+        ring.hold_outage_costs();
+        for i in [ring.a, ring.b] {
+            ring.tick(i).await;
+        }
+        assert!(
+            !ring.looped(),
+            "round {round}: the loop re-formed across the silent link"
+        );
+        assert_eq!(
+            parent_index(&ring.nodes, ring.a),
+            Some(ring.r),
+            "round {round}: A left R"
+        );
+        assert!(
+            tree_reaches(&ring.nodes, ring.r),
+            "round {round}: a node does not reach R"
+        );
+    }
+    cleanup_nodes(&mut ring.nodes).await;
+}
+
+#[tokio::test]
+async fn a_shunned_peer_is_taken_back_into_candidacy_once_the_link_carries_frames() {
+    let mut ring = SilentRing::new().await;
+    ring.form_loop().await;
+    ring.pass_deadline().await;
+    let (a_addr, b_addr) = (ring.addr(ring.a), ring.addr(ring.b));
+    assert!(ring.nodes[ring.a].node.tree_state().is_shunned(&b_addr));
+
+    ring.silent
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    for _ in 0..5 {
+        for i in [ring.a, ring.b] {
+            ring.tick(i).await;
+        }
+    }
+    assert!(!ring.nodes[ring.a].node.tree_state().is_shunned(&b_addr));
+    assert!(!ring.nodes[ring.b].node.tree_state().is_shunned(&a_addr));
+    assert!(!ring.looped());
+    assert!(
+        tree_reaches(&ring.nodes, ring.r),
+        "the tree did not converge on R"
+    );
+    // With the link back, A-B is the cheapest link either has, so the tree
+    // uses it again, one way or the other.
+    assert!(
+        parent_index(&ring.nodes, ring.a) == Some(ring.b)
+            || parent_index(&ring.nodes, ring.b) == Some(ring.a),
+        "the tree no longer uses the restored link"
+    );
+    cleanup_nodes(&mut ring.nodes).await;
+}
+
+#[tokio::test]
+async fn a_new_parent_heard_from_after_the_switch_is_kept() {
+    let mut ring = SilentRing::new().await;
+    ring.silent
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    ring.tick(ring.b).await;
+    assert_eq!(
+        parent_index(&ring.nodes, ring.b),
+        Some(ring.a),
+        "precondition: B moved under A"
+    );
+    // A's periodic re-broadcast is a frame from the new parent.
+    ring.tick(ring.a).await;
+    let now = crate::time::mono_ms() + ring.nodes[ring.b].node.parent_confirm_ms() + 1;
+    ring.nodes[ring.b].node.check_parent_confirmation(now).await;
+    assert_eq!(parent_index(&ring.nodes, ring.b), Some(ring.a));
+    assert!(
+        ring.nodes[ring.b]
+            .node
+            .tree_state()
+            .unconfirmed_parent()
+            .is_none()
+    );
+    cleanup_nodes(&mut ring.nodes).await;
+}
+
+#[tokio::test]
+async fn a_silent_new_parent_is_kept_until_fifteen_seconds_after_the_switch_at_default_settings() {
+    let mut ring = SilentRing::new().await;
+    assert_eq!(ring.nodes[ring.a].node.parent_confirm_ms(), 15_000);
+    ring.form_loop().await;
+    let (parent, since) = ring.nodes[ring.a]
+        .node
+        .tree_state()
+        .unconfirmed_parent()
+        .expect("A's new parent is unconfirmed");
+    assert_eq!(parent, ring.addr(ring.b));
+
+    ring.nodes[ring.a]
+        .node
+        .check_parent_confirmation(since + 15_000 - 1)
+        .await;
+    settle_mesh(&mut ring.nodes).await;
+    assert_eq!(
+        parent_index(&ring.nodes, ring.a),
+        Some(ring.b),
+        "A dropped its parent before the deadline"
+    );
+
+    ring.nodes[ring.a]
+        .node
+        .check_parent_confirmation(since + 15_000)
+        .await;
+    settle_mesh(&mut ring.nodes).await;
+    assert_eq!(
+        parent_index(&ring.nodes, ring.a),
+        Some(ring.r),
+        "A kept its silent parent past the deadline"
+    );
+    cleanup_nodes(&mut ring.nodes).await;
+}
+
+#[tokio::test]
+async fn the_tree_tick_breaks_the_silent_link_loop_once_the_deadline_has_passed_on_the_clock() {
+    let mut ring = SilentRing::new().await;
+    // With no heartbeat interval the deadline is the longest MMP report
+    // interval alone, short enough for the test to wait out.
+    for i in [ring.a, ring.b] {
+        super::heartbeat::set_heartbeat_interval(&mut ring.nodes[i].node, 0);
+    }
+    let deadline = ring.nodes[ring.a].node.parent_confirm_ms();
+    assert_eq!(deadline, crate::proto::mmp::MAX_REPORT_INTERVAL_MS);
+    ring.form_loop().await;
+
+    ring.hold_outage_costs();
+    for i in [ring.b, ring.a] {
+        ring.tick(i).await;
+    }
+    assert!(ring.looped(), "the loop broke before the deadline");
+
+    tokio::time::sleep(Duration::from_millis(deadline + 200)).await;
+    ring.hold_outage_costs();
+    for i in [ring.b, ring.a] {
+        ring.tick(i).await;
+    }
+    assert!(
+        !ring.looped(),
+        "the tick left the loop standing after the deadline"
+    );
+    assert_eq!(parent_index(&ring.nodes, ring.a), Some(ring.r));
+    assert!(tree_reaches(&ring.nodes, ring.r), "a node does not reach R");
+    cleanup_nodes(&mut ring.nodes).await;
+}
+
+#[tokio::test]
+async fn an_announce_from_a_shunned_peer_lets_it_compete_again_before_the_next_tick() {
+    let mut ring = SilentRing::new().await;
+    ring.form_loop().await;
+    ring.pass_deadline().await;
+    let b_addr = ring.addr(ring.b);
+    assert!(ring.nodes[ring.a].node.tree_state().is_shunned(&b_addr));
+
+    ring.silent
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    // B's tick sends its periodic announce; A runs no tick of its own.
+    ring.tick(ring.b).await;
+    assert!(
+        !ring.nodes[ring.a].node.tree_state().is_shunned(&b_addr),
+        "B's announce did not lift A's shun on B"
+    );
+    cleanup_nodes(&mut ring.nodes).await;
 }

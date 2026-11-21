@@ -12,12 +12,15 @@
 # in its VM, over the root-only test runner that ci.yml and ci-local.sh
 # run (testing/root-tests.sh) and the two scripts ci-local.sh runs beside it
 # in the root tests' container (testing/root-tests/*.sh), over the
-# node-context guard both runners run (testing/check-node-context.sh), and
-# over
+# node-context guard both runners run (testing/check-node-context.sh), over
 # the single-test classifier the known-defect lane sources and its fixture
-# test (testing/lib/test-verdict.sh, test-verdict-test.sh), and over the
-# chaos agreement break lane ci-local.sh runs and its judge's test
-# (testing/chaos/agreement-break.sh, testing/lib/agreement-break-test.sh).
+# test (testing/lib/test-verdict.sh, test-verdict-test.sh), over the chaos
+# agreement break lane ci-local.sh runs and its judge's test
+# (testing/chaos/agreement-break.sh, testing/lib/agreement-break-test.sh),
+# over the local CI guards that check the nftables ruleset, the package
+# versions and the glibc floor, with the package-hint helper they share, and
+# over the WireGuard example's container entrypoint
+# (examples/wireguard-sidecar-macos/entrypoint-sidecar.sh).
 #
 # This is the one copy of that lint. The OpenWrt Package workflow calls it
 # after building each .ipk, and ci.yml and ci-local.sh call it too, because
@@ -46,10 +49,14 @@
 #     testing/cross-check/ scripts, testing/check-crate.sh,
 #     testing/root-tests.sh, testing/check-node-context.sh,
 #     testing/install-shellcheck.sh, the two
-#     testing/lib/test-verdict scripts and the two agreement break scripts
-#     as bash, with no exclusions, following what each sources (-x), so a
-#     sourced helper is checked as the script uses it. They are CI scripts,
-#     not shipped ones, and the sh exclusion set below misfires on bash.
+#     testing/lib/test-verdict scripts, the two agreement break scripts,
+#     testing/check-nft-syntax.sh, testing/check-package-versions.sh,
+#     testing/check-glibc-floor.sh, testing/glibc-floor/test.sh,
+#     testing/lib/tool-hint.sh and the WireGuard example's
+#     entrypoint-sidecar.sh as bash, with no exclusions, following what each
+#     sources (-x), so a sourced helper is checked as the script uses it.
+#     They are CI and example scripts, not shipped ones, and the sh
+#     exclusion set below misfires on bash.
 #
 # The sh exclusions, with reason:
 #   SC1008  the init scripts' `#!/bin/sh /etc/rc.common` shebang, an
@@ -113,6 +120,12 @@ BASH_TARGETS=(
     "testing/cross-check/zig-ar"
     "testing/chaos/agreement-break.sh"
     "testing/lib/agreement-break-test.sh"
+    "testing/check-nft-syntax.sh"
+    "testing/lib/tool-hint.sh"
+    "testing/check-package-versions.sh"
+    "testing/check-glibc-floor.sh"
+    "testing/glibc-floor/test.sh"
+    "examples/wireguard-sidecar-macos/entrypoint-sidecar.sh"
 )
 
 SHELLCHECK="${SHELLCHECK:-shellcheck}"

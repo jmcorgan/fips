@@ -344,7 +344,7 @@ impl TorTransport {
         // Store control client (used for monitoring queries)
         self.control_client = Some(Arc::new(Mutex::new(client)));
         self.state = TransportState::Up;
-        self.spawn_monitoring_task();
+        self.spawn_monitoring_task(control_addr, auth);
 
         Ok(())
     }
@@ -495,7 +495,7 @@ impl TorTransport {
         );
 
         self.control_client = Some(Arc::new(Mutex::new(client)));
-        self.spawn_monitoring_task();
+        self.spawn_monitoring_task(control_addr, auth);
     }
 
     /// Stop the transport asynchronously.
@@ -579,7 +579,11 @@ impl TorTransport {
 
     /// Spawn a background task that periodically queries the Tor control
     /// port for daemon status and caches the result.
-    fn spawn_monitoring_task(&mut self) {
+    ///
+    /// When a query leaves the connection out of step, the cached result is
+    /// cleared and the next round opens a new connection to `control_addr`
+    /// and authenticates with `auth` before querying again.
+    fn spawn_monitoring_task(&mut self, control_addr: String, auth: ControlAuth) {
         let Some(client) = self.control_client.clone() else {
             return;
         };
@@ -593,11 +597,44 @@ impl TorTransport {
             let mut last_liveness = String::new();
             let mut was_dormant = false;
             let mut stall_warned = false;
+            let mut reconnect_warned = false;
             let started_at = Instant::now();
 
             loop {
                 interval.tick().await;
                 let mut guard = client.lock().await;
+                if guard.is_out_of_step() {
+                    match reconnect_control(&control_addr, &auth).await {
+                        Ok(fresh) => {
+                            *guard = fresh;
+                            reconnect_warned = false;
+                            info!(
+                                transport_id = %transport_id,
+                                addr = %control_addr,
+                                "Tor control port reconnected"
+                            );
+                        }
+                        Err(e) => {
+                            stats.record_control_error();
+                            if reconnect_warned {
+                                debug!(
+                                    transport_id = %transport_id,
+                                    error = %e,
+                                    "Tor control port reconnect failed again"
+                                );
+                            } else {
+                                warn!(
+                                    transport_id = %transport_id,
+                                    addr = %control_addr,
+                                    error = %e,
+                                    "Tor control port reconnect failed, will retry"
+                                );
+                                reconnect_warned = true;
+                            }
+                            continue;
+                        }
+                    }
+                }
                 match guard.monitoring_snapshot().await {
                     Ok(info) => {
                         // Log bootstrap milestones
@@ -661,6 +698,9 @@ impl TorTransport {
                             error = %e,
                             "Tor monitoring query failed"
                         );
+                        if let Ok(mut w) = cache.write() {
+                            *w = None;
+                        }
                     }
                 }
             }
@@ -1538,9 +1578,23 @@ fn validate_host_port(addr: &str, field_name: &str) -> Result<(), TransportError
     Ok(())
 }
 
+/// Open a new control connection for the monitoring task and authenticate it.
+async fn reconnect_control(
+    addr: &str,
+    auth: &ControlAuth,
+) -> Result<TorControlClient, control::TorControlError> {
+    let mut client = TorControlClient::connect(addr).await?;
+    client.authenticate(auth).await?;
+    Ok(client)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+#[path = "tests/monitoring.rs"]
+mod monitoring_tests;
 
 #[cfg(test)]
 mod tests {

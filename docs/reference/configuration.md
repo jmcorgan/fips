@@ -46,6 +46,14 @@ deprecated: any local user can create that file, so the daemon warns when
 it loads a config from there, and from v0.6.0 the search no longer looks
 there. Move the settings you need into `C:\ProgramData\fips\fips.yaml`.
 
+On Unix, a daemon or gateway running as root without `-c` still reads
+priorities 2 to 4: root's user config, `~/.fips.yaml` and `./fips.yaml`
+in whatever directory it was started from. Another account may be able to
+write those files, so it logs a warning naming each one it read. The
+warning is logged at ERROR, so `node.log_level` set in one of those files
+cannot hide it. The packaged services pass `-c` and are not affected. To
+start a root node by hand, pass `-c` with the config file to use.
+
 ### CLI Option
 
 ```text
@@ -108,7 +116,7 @@ gateway:     # LAN gateway service (Linux only)
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.control.enabled` | bool | `true` | Enable the control socket. The IPv6 adapter's status socket is bound beside it only while this is `true`. |
-| `node.control.socket_path` | string | *(auto)* | **Unix:** Socket file path. Resolution is shared by daemon and clients: `/run/fips/control.sock` when `/run/fips` exists; then `/var/run/fips/control.sock` on macOS/FreeBSD when its private directory exists; then `$XDG_RUNTIME_DIR/fips/control.sock`; finally `/tmp/fips-control.sock`. A privileged macOS daemon selects `/var/run/fips/control.sock` even when the private directory must be created after boot. **Windows:** TCP port number (default: `21210`); the control socket listens on `127.0.0.1` at this port. The IPv6 adapter's status socket is derived from this value: on Unix a sibling with `-ipv6tun` before the extension (`control-ipv6tun.sock` beside `control.sock`), on Windows this port plus 2 (see [control-socket.md](control-socket.md#ipv6-adapter-status-socket)). |
+| `node.control.socket_path` | string | *(auto)* | **Unix:** Socket file path. Resolution is shared by daemon and clients. A process running as root always uses `/run/fips/control.sock`, or `/var/run/fips/control.sock` on macOS/FreeBSD when `/run/fips` is absent, creating the directory at bind, and never the XDG or `/tmp` fallbacks. Any other process uses `/run/fips/control.sock` when `/run/fips` exists; then `/var/run/fips/control.sock` on macOS/FreeBSD when its private directory exists; then `$XDG_RUNTIME_DIR/fips/control.sock`; finally `/tmp/fips-control.sock`. A privileged macOS daemon selects `/var/run/fips/control.sock` even when the private directory must be created after boot. **Windows:** TCP port number (default: `21210`); the control socket listens on `127.0.0.1` at this port. The IPv6 adapter's status socket is derived from this value: on Unix a sibling with `-ipv6tun` before the extension (`control-ipv6tun.sock` beside `control.sock`), on Windows this port plus 2 (see [control-socket.md](control-socket.md#ipv6-adapter-status-socket)). |
 
 The control socket provides access to node state and runtime management
 via the `fipsctl` command-line tool. In addition to read-only status
@@ -709,7 +717,7 @@ way to hand a file descriptor to another process at all, while macOS has
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.native_api.enabled` | bool | `false` | Enable the native API socket |
-| `node.native_api.socket_path` | string | *(auto)* | Socket file path. Resolved the same way as the control socket, with the filename `api.sock`: `/run/fips/api.sock` when `/run/fips` exists; then `/var/run/fips/api.sock` on FreeBSD when its private directory exists; then `$XDG_RUNTIME_DIR/fips/api.sock`; finally `/tmp/fips-api.sock` |
+| `node.native_api.socket_path` | string | *(auto)* | Socket file path. Resolved the same way as the control socket, with the filename `api.sock`; as root always `/run/fips/api.sock`, or `/var/run/fips/api.sock` on FreeBSD and macOS when `/run/fips` is absent. Otherwise `/run/fips/api.sock` when `/run/fips` exists; then `/var/run/fips/api.sock` on FreeBSD when its private directory exists; then `$XDG_RUNTIME_DIR/fips/api.sock`; finally `/tmp/fips-api.sock` |
 | `node.native_api.pending_per_flow` | usize | `16` | Datagrams held for one flow while it waits to be accepted, or while an established flow's client is slow to read. Refused above 64 at startup: the whole batch is written onto a socket pair the client cannot read yet. Refused below 1: a flow that can hold nothing loses its peer's opening datagram between the arrival being announced and the client taking the flow |
 | `node.native_api.backlog` | usize | `16` | Flows announced on one listener and not yet taken by its task. Refused below 1 at startup: a listener with no backlog admits no flow, so every arrival would be dropped |
 | `node.native_api.max_flows` | usize | `256` | Flows this node holds at once. Refused below 1 at startup: a node that can hold no flow refuses every client connect and drops every arrival |
@@ -1012,7 +1020,7 @@ Requires an external Tor daemon providing a SOCKS5 proxy. Three modes:
 | `transports.tor.connect_timeout_ms` | u64 | `120000` | Connect timeout in milliseconds. Tor circuits take 10–60s. |
 | `transports.tor.mtu` | u16 | `1400` | Default MTU |
 | `transports.tor.control_addr` | string | `"/run/tor/control"` | Tor control port address: Unix socket path or host:port. Used in `control_port` mode; optional in `directory` mode for monitoring. |
-| `transports.tor.control_auth` | string | `"cookie"` | Control port authentication: `"cookie"`, `"cookie:/path/to/cookie"`, or `"password:<secret>"`. |
+| `transports.tor.control_auth` | string | `"cookie"` | Control port authentication: `"cookie"`, `"cookie:/path/to/cookie"`, or `"password:<secret>"`. Cookie authentication uses Tor's SAFECOOKIE exchange. A password may not contain a line break; such a config is refused at load. |
 | `transports.tor.cookie_path` | string | `"/var/run/tor/control.authcookie"` | Path to Tor control cookie file. Used when `control_auth` is `"cookie"`. |
 | `transports.tor.max_inbound_connections` | usize | `64` | Maximum inbound connections via onion service. |
 | `transports.tor.directory_service.hostname_file` | string | `"/var/lib/tor/fips_onion_service/hostname"` | Path to Tor-managed hostname file containing the `.onion` address. |
@@ -1034,6 +1042,34 @@ set, the transport connects to the control port for daemon monitoring
 monitoring only (bootstrap status, circuit health, traffic stats).
 No inbound connections. Both `control_addr` and `control_auth` are
 required.
+
+The control client waits at most 30 s for the control port to accept
+the connection, and at most 30 s for each reply. It refuses a reply
+line longer than 8 KiB, a reply longer than 64 KiB, and a reply that
+is not well-formed. In `control_port` mode any of these fails the Tor
+transport at start, so the node starts DEGRADED without it; in
+`directory` mode it only disables monitoring. Once the transport is
+up, a monitoring query that fails this way clears the cached Tor
+status, and the next monitoring round reconnects and authenticates
+again before querying.
+
+With cookie authentication the client never sends the cookie. It runs
+Tor's SAFECOOKIE exchange: it sends a random nonce, the control port
+must answer with a hash that proves it holds the cookie, and only then
+does the client send its own hash. A port that refuses the exchange or
+answers with the wrong hash fails authentication; there is no fallback
+to sending the cookie itself. This keeps the cookie from a process
+standing in for Tor on the control address and from anyone passively
+watching a TCP control connection. It does not protect a TCP control
+connection that crosses a network from an active on-path attacker,
+who can relay the exchange to the real Tor and then use the
+authenticated session, which stays unencrypted: the Tor control
+protocol has no encryption. Prefer the Unix socket, or a loopback TCP
+address.
+
+Password authentication sends the password in clear. When
+`control_addr` is a TCP address that is not loopback, the daemon logs
+a warning at start that the password crosses the network in clear.
 
 ### UDP + Tor Bridge Example
 
