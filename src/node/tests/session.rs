@@ -1855,6 +1855,45 @@ async fn a_worker_decrypted_frame_on_the_previous_link_session_does_not_feed_mmp
     cleanup_nodes(&mut nodes).await;
 }
 
+/// The responder hold is the drain ceiling at stock settings, and a raised
+/// link-dead timeout or heartbeat interval raises it past that ceiling, taking
+/// the larger of the two rather than their sum, as a raised handshake timeout
+/// does through the time a peer takes to retry.
+#[test]
+fn the_responder_hold_is_the_drain_ceiling_at_stock_settings_and_outlasts_a_raised_link_dead_timeout()
+ {
+    use crate::node::handlers::rekey::link_params;
+    use fips_core::proto::rekey::Config;
+
+    let hold = |node: &crate::config::NodeConfig| link_params(node).config().hold;
+    let stock = crate::config::NodeConfig::default();
+    assert_eq!(hold(&stock), Duration::from_secs(120));
+    assert_eq!(hold(&stock), Config::fmp().retention);
+
+    // 31 s of msg1 ladder (1+2+4+8+16), three 1 s ticks, and 200 s of
+    // link-dead timeout: 234 s.
+    let raised = crate::config::NodeConfig {
+        link_dead_timeout_secs: 200,
+        ..Default::default()
+    };
+    assert_eq!(hold(&raised), Duration::from_secs(234));
+
+    // The heartbeat term raised instead, link-dead at its default: the floor
+    // takes the larger of the two, so 234 s again, not 264 s.
+    let raised = crate::config::NodeConfig {
+        heartbeat_interval_secs: 200,
+        ..Default::default()
+    };
+    assert_eq!(hold(&raised), Duration::from_secs(234));
+
+    // A raised handshake timeout lengthens a peer's retry after a lost
+    // answer past the ceiling: 31 s of msg1 ladder, the 100 s timeout and
+    // 30 s of dampening, 161 s.
+    let mut raised = crate::config::NodeConfig::default();
+    raised.rate_limit.handshake_timeout_secs = 100;
+    assert_eq!(hold(&raised), Duration::from_secs(161));
+}
+
 #[tokio::test]
 async fn test_tun_outbound_triggers_session_initiation() {
     // Two connected nodes, no session yet.

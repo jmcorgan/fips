@@ -34,7 +34,8 @@ tests.
   `fips_core::proto::settle::parity` states for the schedules a real node
   and the joint world both run, so the two run alike.
 - `links.rs`: the settlement core's link records the link table keeps, from
-  a link's open to its close or a dial's forget; and the live audit's
+  a link's open to its close or a dial's forget, and holding a link capable
+  once its bundle turns capable through the core's join; and the live audit's
   `links-mirror` clause, which skips only a peer a test mutator changed past
   the feed, every other clause still reading it, with one row per mutator
   that it flags its peer. The clause on real nodes is in

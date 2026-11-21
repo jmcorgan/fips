@@ -322,6 +322,17 @@ fn test_invalid_msg_sizes() {
 }
 
 #[test]
+fn test_invalid_pubkey_in_msg1() {
+    let keypair = generate_keypair();
+    let mut responder = HandshakeState::new_responder(keypair);
+    responder.set_local_epoch(generate_epoch());
+
+    // Invalid pubkey bytes (first 33 bytes are zero)
+    let invalid_msg = [0u8; HANDSHAKE_MSG1_SIZE];
+    assert!(responder.read_message_1(&invalid_msg).is_err());
+}
+
+#[test]
 fn test_decryption_failure_wrong_key() {
     let keypair1 = generate_keypair();
     let keypair2 = generate_keypair();

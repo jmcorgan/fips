@@ -1203,3 +1203,52 @@ async fn an_acl_refusal_at_msg3_closes_its_inbound_tcp_connection() {
         "defect: the responder's pool still holds the refused initiator's connection"
     );
 }
+
+/// A responder that can draw no session index refuses a fresh inbound msg1
+/// at the msg1, before it knows who sent it. It should close the inbound TCP
+/// connection the msg1 came on, as nothing else uses it; on next the
+/// refusal returns without a close, and the responder's pool still holds the
+/// connection a second later. Only the responder runs after the dial, so the
+/// initiator neither resends nor closes.
+#[tokio::test]
+#[ignore = "known defect: a msg1 refused for want of a session index keeps its inbound TCP connection"]
+async fn a_msg1_refused_for_want_of_a_session_index_closes_its_inbound_tcp_connection() {
+    let mut nodes = vec![make_test_node_tcp().await, make_test_node_tcp().await];
+    nodes[1].node.index_allocator = crate::utils::index::IndexAllocator::with_max_attempts(0);
+    let bad = nodes[1].node.stats().handshake.bad_state;
+    initiate_handshake(&mut nodes, 0, 1).await;
+    let mut seen = 0;
+    for _ in 0..200 {
+        seen = pooled(&nodes[1], &nodes[0].addr.clone()).1;
+        if seen > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    for _ in 0..200 {
+        if nodes[1].node.stats().handshake.bad_state > bad {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(&mut nodes[1..]).await;
+    }
+    let refused = nodes[1].node.stats().handshake.bad_state > bad;
+    let held = nodes[1].node.peer_count() + nodes[1].node.connection_count();
+    settle_for(&mut nodes[1..], Duration::from_secs(1)).await;
+    let after = pooled(&nodes[1], &nodes[0].addr.clone()).1;
+    cleanup_nodes(&mut nodes).await;
+
+    assert_eq!(
+        seen, 1,
+        "precondition: the dial's connection is pooled inbound"
+    );
+    assert!(refused, "precondition: the responder refused the msg1");
+    assert_eq!(
+        held, 0,
+        "precondition: the responder holds no peer and no leg"
+    );
+    assert_eq!(
+        after, 0,
+        "defect: the responder's pool still holds the refused msg1's connection"
+    );
+}

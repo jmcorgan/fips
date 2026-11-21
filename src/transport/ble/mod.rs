@@ -1449,6 +1449,10 @@ mod lane_tests;
 mod retry_tests;
 
 #[cfg(test)]
+#[path = "tests/connection.rs"]
+mod connection_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::framing::build_established_frame;
@@ -1714,14 +1718,14 @@ mod tests {
         (task, rx, pool)
     }
 
-    fn test_addr(n: u8) -> BleAddr {
+    pub(super) fn test_addr(n: u8) -> BleAddr {
         BleAddr {
             adapter: "hci0".to_string(),
             device: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, n],
         }
     }
 
-    fn make_transport(
+    pub(super) fn make_transport(
         io: MockBleIo,
     ) -> (
         BleTransport<MockBleIo>,

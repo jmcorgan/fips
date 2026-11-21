@@ -119,9 +119,11 @@ known-defect  fips-mesh  node::tests::ble::a_crossed_dial_won_on_a_second_link_l
 # msg3, and its target tests run.
 known-defect  fips-mesh  node::tests::roam_redial::a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering  src/node/tests/roam_redial.rs
 known-defect  fips-mesh  node::tests::roam_redial::a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering_with_multipath_on  src/node/tests/roam_redial.rs
-# The next two are one known defect on next, at its own refusal points: a
+# The next three are one known defect on next, at its own refusal points: a
 # connection refused after the handshake read it stays open, where master
-# closes it when nothing else uses it. A dial refused at the peer cap at the dialer's msg2, and an inbound
-# initiator the responder's ACL refuses at the msg3.
+# closes it when nothing else uses it. A dial refused at the peer cap at the
+# dialer's msg2, an inbound initiator the responder's ACL refuses at the msg3,
+# and a fresh inbound msg1 refused at the msg1 for want of a session index.
 known-defect  fips-mesh  node::tests::tcp::a_dial_refused_at_the_peer_cap_closes_its_tcp_connection  src/node/tests/tcp.rs
 known-defect  fips-mesh  node::tests::tcp::an_acl_refusal_at_msg3_closes_its_inbound_tcp_connection  src/node/tests/tcp.rs
+known-defect  fips-mesh  node::tests::tcp::a_msg1_refused_for_want_of_a_session_index_closes_its_inbound_tcp_connection  src/node/tests/tcp.rs

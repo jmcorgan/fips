@@ -550,8 +550,9 @@ impl Node {
                 // ms. Fall back to the session's age for peers that sent
                 // nothing since it started, kept as a `Duration` so no
                 // monotonic-ms epoch conversion is needed.
-                let time_dead =
-                    silence(peer, now_ms).is_some_and(|s| s.is_dead(dead_timeout, dead_timeout_ms));
+                let time_dead = !node_fault!(LinkDeadNever)
+                    && silence(peer, now_ms)
+                        .is_some_and(|s| s.is_dead(dead_timeout, dead_timeout_ms));
 
                 // Suppress teardown while this node's FMP rekey is in
                 // flight: a rekey-handshake link is not silent. Bounded by

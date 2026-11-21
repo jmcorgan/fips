@@ -28,6 +28,11 @@ items.
   pooled nor in the retry book once it has gone unseen for the age limit,
   and keeps the address of a pooled link. Declared from `mod.rs` as
   `mod retry_tests`.
+- `connection.rs`, declared from `mod.rs` as `mod connection_tests`: the
+  `has_connection` test hook, which the conformance rules and the
+  settlement audit read the pool through. It reports a pooled channel, and
+  asking starts no connect. It takes `test_addr` and `make_transport` from
+  `mod.rs`'s inline `mod tests` block.
 - `bluez.rs`: tests for the scan-start and dial-address decisions of the
   BlueZ backend in `io_linux.rs`: which cached device objects scan start
   removes, and which LE address type a dial uses. Declared from

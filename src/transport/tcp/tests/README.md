@@ -24,6 +24,13 @@ can reach its private items.
   socket buffers at both ends, and fills the data queue until the writer
   waits in `write_all`. Frames go through the transport handle's lane send,
   as the node's do.
+- `connection.rs`, declared from `mod.rs` as `mod connection_tests`: the
+  `has_connection` test hook, which the conformance rules and the
+  settlement audit read the pool through. It reports a pooled connection and
+  nothing else: not a finished background connect, which it leaves in the
+  connecting map unpromoted, but a pooled connection whose queue is full or
+  whose writer has gone. It takes `make_config`, `make_outbound_config` and
+  `wait_connect_finished` from `mod.rs`'s inline `mod tests` block.
 
 The rules every connection-oriented transport keeps, among them the receive
 bound when the two ends are configured with different `mtu` values, are

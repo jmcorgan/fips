@@ -264,6 +264,9 @@ faults! {
     /// A link's setup address stays in the index derived from the link
     /// records after its bundle released the path there.
     ReleasedSetupIndexed,
+    /// The peer's bundle turning capable never reaches the core's record of
+    /// its link, so the record holds the link not capable for life.
+    CapableUnmirrored,
     /// The settlement core counts a msg1 from a held link's setup pair as on
     /// the link whether or not the peer is capable, where the node counts a
     /// capable peer's pair that its bundle holds no path at as off it.
@@ -389,6 +392,11 @@ faults! {
     /// Heartbeat pacing reads `std::time::Instant` instead of the node's
     /// monotonic clock, which the link-dead check reads.
     HeartbeatsOnStdClock,
+    /// The heartbeat check never finds a peer's link dead, however long the
+    /// peer has been silent, so a silent peer stays held: nothing ends a
+    /// pair split across two sessions, and the redial that follows
+    /// link-dead never comes.
+    LinkDeadNever,
     /// The node tests' drain steps the test clock without waiting for the
     /// jobs dispatched to the nodes' decrypt workers, so it returns with a
     /// frame still on a worker thread.

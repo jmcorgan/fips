@@ -1541,6 +1541,10 @@ fn validate_host_port(addr: &str, field_name: &str) -> Result<(), TransportError
 // ============================================================================
 
 #[cfg(test)]
+#[path = "tests/connection.rs"]
+mod connection_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::wait_until;
@@ -1768,7 +1772,7 @@ mod tests {
     const MSG1_PAYLOAD_LEN: u16 = (MSG1_WIRE_SIZE - 4) as u16;
 
     /// Build a msg1 frame (41 bytes) for testing.
-    fn build_msg1_frame() -> Vec<u8> {
+    pub(super) fn build_msg1_frame() -> Vec<u8> {
         let mut frame = vec![0xAA; MSG1_WIRE_SIZE];
         frame[0] = 0x11; // ver=1, phase=1
         frame[1] = 0x00; // flags
@@ -2772,7 +2776,7 @@ mod tests {
 
     /// A destination TCP transport behind a mock SOCKS5 proxy, and a
     /// started Tor transport pointed at the proxy.
-    async fn tor_behind_mock_proxy() -> (
+    pub(super) async fn tor_behind_mock_proxy() -> (
         TorTransport,
         TcpTransport,
         crate::transport::PacketRx,

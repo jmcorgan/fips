@@ -4,7 +4,8 @@ Unit tests for `core/src/noise`.
 
 - `mod.rs`: the module's tests, declared from `../mod.rs` with
   `#[cfg(test)] mod tests;`, so their names are `noise::tests::*`. The
-  XX handshake end to end and its message sizes, the sessions
+  XX handshake end to end and its message sizes, a msg1 whose ephemeral
+  is not a point refused (`test_invalid_pubkey_in_msg1`), the sessions
   and the replay window, the clearing of secrets on drop and by
   `take_cleared` and `clear_slot`,
   `cipher_state_still_implements_zeroize_on_drop` (the trait impl

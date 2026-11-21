@@ -66,6 +66,9 @@ impl Node {
             // The mutation lane's break: a path's state never reaches the
             // record.
             Input::State { .. } if node_fault!(LinksNotFed) => {}
+            // The mutation lane's break: the peer turning capable never
+            // reaches the record.
+            Input::Capable { .. } if node_fault!(CapableUnmirrored) => {}
             Input::State { .. }
             | Input::Moved { .. }
             | Input::Switched { .. }

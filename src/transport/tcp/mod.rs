@@ -1833,6 +1833,10 @@ mod mss_tests;
 mod lane_tests;
 
 #[cfg(test)]
+#[path = "tests/connection.rs"]
+mod connection_tests;
+
+#[cfg(test)]
 mod tests {
     use super::pool::PoolMap;
     use super::*;
@@ -1860,7 +1864,7 @@ mod tests {
         }
     }
 
-    fn make_config() -> TcpConfig {
+    pub(super) fn make_config() -> TcpConfig {
         TcpConfig {
             bind_addr: Some("127.0.0.1:0".to_string()),
             mtu: Some(1400),
@@ -1992,7 +1996,7 @@ mod tests {
         send_to_hostname(true).await;
     }
 
-    fn make_outbound_config() -> TcpConfig {
+    pub(super) fn make_outbound_config() -> TcpConfig {
         TcpConfig {
             bind_addr: None,
             mtu: Some(1400),
@@ -3716,7 +3720,7 @@ mod tests {
 
     /// Wait until the background connect to `remote` has finished, leaving
     /// it unpromoted in the connecting map.
-    async fn wait_connect_finished(t: &TcpTransport, remote: &TransportAddr) {
+    pub(super) async fn wait_connect_finished(t: &TcpTransport, remote: &TransportAddr) {
         let finished = wait_until(
             || {
                 t.connecting
