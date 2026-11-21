@@ -326,6 +326,12 @@ pub struct ActivePeer {
     /// directly by the data plane. See `PeerSendState`.
     send: PeerSendState,
 
+    /// The index of the pending session whose rekey answer went out on the
+    /// connection its msg1 arrived on, in place of the link's own
+    /// connection, which had gone: the session's adoption tells the
+    /// settlement core the peer set the link up.
+    answered: Option<SessionIndex>,
+
     /// Whether a test changed the link's bundle past the feed of the
     /// settlement core's record of the link: a test mutator of the paths, or
     /// a test's own call of [`account`](Self::account). The live audit then
@@ -348,6 +354,7 @@ impl ActivePeer {
             rekey: None,
             data: PeerData::new(authenticated_at, now, true),
             send: PeerSendState::new(link_id),
+            answered: None,
             #[cfg(test)]
             past_feed: false,
         }
@@ -455,6 +462,7 @@ impl ActivePeer {
             rekey,
             data,
             send,
+            answered: None,
             #[cfg(test)]
             past_feed: false,
         };
@@ -1896,6 +1904,21 @@ impl ActivePeer {
     /// Get the pending new session's our_index.
     pub(crate) fn pending_our_index(&self) -> Option<SessionIndex> {
         self.index(Slot::Pending)
+    }
+
+    /// Note that the rekey answer arming the pending session went out on
+    /// the connection its msg1 arrived on, in place of the link's own
+    /// connection, which had gone.
+    pub(crate) fn mark_answered_off(&mut self) {
+        self.answered = self.pending_our_index();
+    }
+
+    /// Whether the session now current is the one a rekey answer sent on
+    /// its msg1's connection armed ([`Self::mark_answered_off`]). The note
+    /// is taken either way, so it answers once, at the cutover after it.
+    pub(crate) fn take_answered_off(&mut self) -> bool {
+        let answered = self.answered.take();
+        answered.is_some() && answered == self.our_index()
     }
 
     /// Get the pending new session's their_index.

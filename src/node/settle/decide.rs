@@ -86,6 +86,7 @@ fn kind_of(input: &Input) -> &'static str {
         Input::Disconnect { .. } => "Disconnect",
         Input::Dead { .. } => "Dead",
         Input::Admin { .. } => "Admin",
+        Input::Adopted { .. } => "Adopted",
         Input::Sent { .. } => "Sent",
         Input::SendFailed { .. } => "SendFailed",
         Input::Unsendable { .. } => "Unsendable",

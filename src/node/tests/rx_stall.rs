@@ -1572,7 +1572,7 @@ async fn an_answer_routed_to_the_arrival_goes_out_on_the_msg1s_connection_with_t
     let sent = node
         .answer_msg1(&sender_addr, &msg1, &reply, Route::Arrival)
         .await;
-    assert_eq!(sent, Ok(tcp_id));
+    assert_eq!(sent, Ok((tcp_id, false)));
     assert!(
         client_gets_msg2(&mut client).await,
         "the msg1's own connection gets the answer"
@@ -1592,7 +1592,7 @@ async fn an_answer_routed_to_the_arrival_goes_out_on_the_msg1s_connection_with_t
             Route::Established { fallback: true },
         )
         .await;
-    assert_eq!(sent, Ok(tcp_id));
+    assert_eq!(sent, Ok((tcp_id, false)));
     assert!(
         read_frame(&mut far_end)
             .await
@@ -1637,7 +1637,7 @@ async fn an_answer_on_the_established_route_falls_back_only_when_the_route_allow
     let r = timeout(BOUND, node.answer_msg1(&sender_addr, &msg1, &reply, answer))
         .await
         .expect("the send returns without dialing");
-    assert_eq!(r, Ok(tcp_id));
+    assert_eq!(r, Ok((tcp_id, true)));
     assert!(
         client_gets_msg2(&mut client).await,
         "with it, the msg1's own connection gets the answer"

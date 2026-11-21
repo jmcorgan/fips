@@ -323,6 +323,11 @@ MoveLeavesDialOpen	red	fips-core	proto::settle::table::tests::a_move_onto_a_dial
 MoveLeavesDialOpen	red	fips-mesh	node::tests::ble::a_crossed_dial_answered_over_the_peers_dial_connection_closes_the_connection_it_dialled
 MoveLeavesDialOpen	red	fips-mesh	node::tests::settle::table::crossing::an_own_dial_answered_on_an_aged_link_does_what_the_move_cells_say
 MoveLeavesDialOpen	red	fips-mesh	node::tests::settle::table::crossing::an_own_dial_answered_on_an_aged_link_does_what_the_move_cells_say_with_multipath_on
+AdoptedKeepsDir	red	fips-core	proto::settle::table::tests::an_adopted_answer_on_the_msg1s_connection_turns_a_dialed_link_inbound
+AdoptedKeepsDir	red	fips-mesh	node::tests::settle::redialed::a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_is_held_outbound_at_one_end_and_inbound_at_the_other
+AdoptedKeepsDir	red	fips-mesh	node::tests::settle::redialed::a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_is_held_outbound_at_one_end_and_inbound_at_the_other_with_multipath_on
+AdoptedKeepsDir	red	fips-mesh	node::tests::settle::redialed::a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_the_smaller_nodes_dial	after the redial the smaller node must hold the link Outbound and the larger Inbound
+AdoptedKeepsDir	red	fips-mesh	node::tests::settle::redialed::a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_the_smaller_nodes_dial_with_multipath_on	after the redial the smaller node must hold the link Outbound and the larger Inbound
 # A crossed dial from another address or transport retires a link that is
 # named at no pair by the time it closes, so this break has nothing to
 # take from the held link there. Those tests' check that the held link stays

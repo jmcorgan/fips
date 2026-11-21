@@ -167,6 +167,22 @@ impl LinkTable {
         let _ = key;
     }
 
+    /// The core's record of the link it numbers `no` now says `dir` set it
+    /// up ([`Output::Turned`](crate::proto::settle::output::Output::Turned)):
+    /// the link takes that direction. The index does not read directions,
+    /// so it is not rebuilt.
+    pub(in crate::node) fn turned(&mut self, no: LinkNo, dir: Dir) {
+        let Some(id) = self.id(no) else {
+            return;
+        };
+        if let Some(link) = self.links.get_mut(&id) {
+            link.set_direction(match dir {
+                Dir::Inbound => LinkDirection::Inbound,
+                Dir::Outbound => LinkDirection::Outbound,
+            });
+        }
+    }
+
     /// The link's path moved. The core's record follows when the feed
     /// applies the move, so this only rebuilds the index.
     pub(in crate::node) fn follow(&mut self, core: &mut Core) {

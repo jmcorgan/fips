@@ -113,6 +113,10 @@ pub(crate) enum Fault {
     /// A move onto a pair other than the dial's own leaves the connection
     /// the dial was set up at open with no link using it.
     MoveLeavesDialOpen,
+    /// A rekey answer adopted on its msg1's connection, the link's own
+    /// connection having gone, leaves the link's record as this node's
+    /// dial.
+    AdoptedKeepsDir,
     /// A move hands the per-peer data no reset.
     MoveNoReset,
     /// A move leaves the peering unheard until the peer's first frame.
@@ -452,6 +456,7 @@ impl Fault {
         Self::MoveKeepsInboundLink,
         Self::MoveClosesNewPair,
         Self::MoveLeavesDialOpen,
+        Self::AdoptedKeepsDir,
         Self::MoveNoReset,
         Self::MoveLeavesUnheard,
         Self::MoveKeepsReplayMemory,

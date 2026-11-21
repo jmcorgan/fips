@@ -33,11 +33,13 @@ field, at once.
   test: `bind` and `open` add a link the core numbered or opened, `close`
   and `forget` drop one the core retired, `held`, the path driver's
   `follow`, `claimed` and `unclaimed`, and `stepped` rebuild the lookup
-  after a step of the core; `get_mut`; `index` for reads of the lookup, and
-  under `cfg(test)` `raw_index`, and `hold`, `claim`, `unclaim` and
-  `mirror` for a test that drives the table alone, writing the records as
-  the core would. Its doc carries
-  the warning about the lookup's key form. `used` is the node's close rule,
+  after a step of the core; `turned` gives a link the direction the core's
+  record of it took (`Output::Turned`, at a peer's adoption of a rekey
+  answer sent on its msg1's connection); `get_mut`; `index` for reads of
+  the lookup, and under `cfg(test)` `raw_index`, and `hold`, `claim`,
+  `unclaim` and `mirror` for a test that drives the table alone, writing
+  the records as the core would. Its doc carries the warning about the
+  lookup's key form. `used` is the node's close rule,
   asked of the core's records (`Links::in_use`): whether a live link other
   than the one closing uses a pair, a held link by the Live or acknowledged
   paths of its record and a handshake leg by its setup pair. `Node::in_use`

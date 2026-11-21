@@ -651,6 +651,12 @@ impl Link {
         self.direction
     }
 
+    /// Set which end set the link up, as the settlement core's record of
+    /// it says.
+    pub(crate) fn set_direction(&mut self, direction: LinkDirection) {
+        self.direction = direction;
+    }
+
     /// Get the current state.
     pub fn state(&self) -> LinkState {
         self.state

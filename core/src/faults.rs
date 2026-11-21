@@ -349,6 +349,12 @@ faults! {
     /// leaves the connection the dial was set up at open, though no path and
     /// no handshake uses it, in the settlement core and in the node.
     MoveLeavesDialOpen,
+    /// The settlement core leaves the record of a link this node dialed as
+    /// its dial when the peer adopts a rekey answer that went out on the
+    /// connection its msg1 arrived on, the link's own connection having
+    /// gone, so the node keeps the link `Outbound` while the peer, which
+    /// opened that connection, holds it as one it dialed.
+    AdoptedKeepsDir,
     /// Closing a link takes the index's entry at each pair it was named at
     /// from any other link that uses the pair, as the written index did.
     ShadowLosesEntry,

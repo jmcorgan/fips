@@ -117,11 +117,15 @@ so it reaches no normal or release build.
   applies the path bundle's events to the link records and to where the
   peer held on the link is: a move of the path it is at, a one-path roam
   among them, or a switch of the active path moves it, and a frame alone
-  never does. Only a one-path roam resets the peer's data, as a roam; a
-  path the bundle moved at a path message, which the node runs as its own
-  Follow, resets nothing, as a switch does not, and nor does the roam of
-  a link's one path while it is not the active path, as the node resets
-  nothing for it.
+  never does. When the peer adopts a rekey answer that went out on the
+  connection its msg1 arrived on, the link's own connection having gone
+  (`Adopted`), the held link's record says the peer set it up, since the
+  peer opened that connection, and a later dial of this node for the peer
+  is decided by the node address ordering. Only a one-path roam resets
+  the peer's data, as a roam; a path the bundle moved at a path message,
+  which the node runs as its own Follow, resets nothing, as a switch does
+  not, and nor does the roam of a link's one path while it is not the
+  active path, as the node resets nothing for it.
 - `input.rs`: what the shell tells the core, each built after any Noise
   read. A msg1 comes in two steps: what the shell read, which the core
   classifies, and then, only for a msg1 the core admitted, the msg2 the
@@ -160,7 +164,8 @@ so it reaches no normal or release build.
   ask for an admitted msg1's answer, answers, resends, the hand-off to
   the rekey machine, installs, the per-peer data's transition, whether a
   move onto this node's own dial ends an operator's pin of the peer's
-  path (`Swapped`), removals, retired links with their closes, released
+  path (`Swapped`), a link whose record now says the peer set it up
+  (`Turned`), removals, retired links with their closes, released
   paths, freed leases, reconnects and refusals.
 - `params.rs`: the intervals and bounds the core reads, with the current
   node's values and the line each is taken from (the node's one-second

@@ -269,6 +269,17 @@ impl Links {
         self.reindex();
     }
 
+    /// `link`'s record says `dir` set it up. Whether that changed it.
+    pub fn turn(&mut self, link: LinkNo, dir: Dir) -> bool {
+        match self.recs.get_mut(&link) {
+            Some(r) if r.dir != dir => {
+                r.dir = dir;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// `link`'s bundle holds a path at `pair` in state `state`, new or
     /// changed.
     pub fn path(&mut self, link: LinkNo, pair: Pair, state: Proven) {
@@ -374,6 +385,7 @@ impl Links {
             | Input::Disconnect { .. }
             | Input::Dead { .. }
             | Input::Admin { .. }
+            | Input::Adopted { .. }
             | Input::Sent { .. }
             | Input::SendFailed { .. }
             | Input::Unsendable { .. } => {}

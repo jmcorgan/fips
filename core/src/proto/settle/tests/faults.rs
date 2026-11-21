@@ -641,6 +641,15 @@ pub const ROWS: &[Row] = &[
             ),
         ],
     ),
+    // No joint test, scripted start or sweep reds `AdoptedKeepsDir`: the
+    // joint party reports no adoption of a rekey answer.
+    (
+        Fault::AdoptedKeepsDir,
+        &[(
+            TABLE,
+            "an_adopted_answer_on_the_msg1s_connection_turns_a_dialed_link_inbound",
+        )],
+    ),
     (
         Fault::MoveLeavesDialOpen,
         &[
@@ -1679,6 +1688,10 @@ const UNPIN_HAND: &str = "a guard of the pin a move ends where `UnpinOwnOnly` ch
 
 /// The tests that characterise behaviour no switch breaks, each with why.
 pub const CHARACTERISATION: &[(&str, &str)] = &[
+    (
+        "an_adopted_answer_on_a_link_the_peer_set_up_or_for_no_held_peer_changes_nothing",
+        HAND,
+    ),
     (
         "a_msg1_from_a_capable_peers_setup_pair_with_no_path_is_off_the_link",
         SWITCH_BREAKS,

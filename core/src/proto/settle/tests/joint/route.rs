@@ -209,6 +209,7 @@ pub fn discard(kit: &mut Kit, out: Vec<CoreOutput>) {
             | CoreOutput::Release { .. }
             | CoreOutput::Close { .. }
             | CoreOutput::Swapped { .. }
+            | CoreOutput::Turned { .. }
             | CoreOutput::Retry { .. }
             | CoreOutput::Reject { .. }
             | CoreOutput::Hold { .. }

@@ -148,6 +148,18 @@ files run off, which is what they test.
   test (`chartest_`, as in `cells.rs`) holds what a restart found at a rekey
   keeps of the bundle, and that the pin ends. Its `own_dial` and
   `restart_dial` also serve the replay tests of `decrypt_replay.rs`.
+- `redialed.rs`: crossed TCP dials, then the larger node alone drops the
+  smaller, as link-dead does at the end that stops hearing first after a
+  flap, and dials it again once the connection the smaller node's link ran
+  on has closed: the smaller node answers as a rekey on the msg1's
+  connection, and the larger installs the answer as a peer it dialed. The
+  larger node must then hold the link `Outbound` and the smaller `Inbound`:
+  the smaller node's adoption of the answer turns its link `Inbound`. With
+  multipath on the pair here holds one path, not the two the chaos run
+  that found it held. A second test runs the other role, the larger node
+  alone dialing and the smaller dropping and redialing, then has the
+  larger node dial again: with its link turned, that dial is decided by
+  the node address ordering, and the pair stays on the smaller node's dial.
 - `restart.rs`: a restarted node that reads a late rekey msg1 of its
   peer's previous run, past the unheard floor, after the peer has moved
   onto its new run: a split accepted as behaviour in every placement of the

@@ -586,8 +586,12 @@ impl Node {
             return;
         };
         peer.after_cutover(role);
+        let adopted = role == Role::Responder && peer.take_answered_off();
         let epoch = OrNone(peer.noise_session().map(diag::epoch_tag));
         let kbit_ours = peer.current_k_bit();
+        if adopted {
+            self.adopted(node_addr);
+        }
         match role {
             Role::Initiator => debug!(
                 peer = %name,
@@ -603,6 +607,25 @@ impl Node {
                 kbit_ours,
                 "Peer new-epoch frame authenticated, K-bit flip promoting new session"
             ),
+        }
+    }
+
+    /// `node_addr` adopted a rekey answer that went out on the connection its
+    /// msg1 arrived on, the link's own connection having gone: the core
+    /// decides what the link is now, and the node's record of it follows.
+    fn adopted(&mut self, node_addr: &NodeAddr) {
+        for o in self.decide(In::Adopted { peer: *node_addr }) {
+            match o {
+                Decided::Turned { link, dir } => {
+                    self.links.turned(link, dir);
+                    debug!(
+                        peer = %self.peer_display_name(node_addr),
+                        dir = ?dir,
+                        "Rekey answered on the msg1's connection adopted, link held as the peer's dial"
+                    );
+                }
+                other => debug_assert!(false, "an adopted rekey answer gave {other:?}"),
+            }
         }
     }
 

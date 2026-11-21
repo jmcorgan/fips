@@ -652,6 +652,7 @@ impl Drive {
                 | Output::Close { .. }
                 | Output::Free { .. }
                 | Output::Swapped { .. }
+                | Output::Turned { .. }
                 | Output::Retry { .. }
                 | Output::Hold { .. }
                 | Output::Settle { .. } => {}
@@ -860,6 +861,7 @@ impl Drive {
                 | Output::Rekey { .. }
                 | Output::Reset { .. }
                 | Output::Swapped { .. }
+                | Output::Turned { .. }
                 | Output::Retry { .. }
                 | Output::Reject { .. }
                 | Output::Hold { .. }

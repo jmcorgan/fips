@@ -359,7 +359,6 @@ impl Node {
     }
 
     /// Send `reply`, an answer to `packet`'s msg1 from `peer`, on `route`.
-    /// Returns the transport the reply went out on.
     ///
     /// [`Route::Arrival`] sends on the msg1's own transport and source
     /// address, with the link up or not. A connectionless source address is
@@ -391,13 +390,16 @@ impl Node {
     /// pool. A half-open one, whose path broke without a FIN or reset
     /// reaching this node, still accepts writes, so the reply is lost there
     /// until the link-dead reaper removes the peer.
+    ///
+    /// Returns, beside the transport, whether the reply went out on the
+    /// msg1's connection in place of the established link's, which had gone.
     pub(in crate::node) async fn answer_msg1(
         &self,
         peer: &NodeAddr,
         packet: &ReceivedPacket,
         reply: &[u8],
         route: Route,
-    ) -> Result<TransportId, String> {
+    ) -> Result<(TransportId, bool), String> {
         let fallback = match route {
             Route::Arrival => {
                 let transport = self
@@ -408,7 +410,7 @@ impl Node {
                     .send_existing(&packet.remote_addr, reply)
                     .await
                     .map_err(|e| e.to_string())?;
-                return Ok(packet.transport_id);
+                return Ok((packet.transport_id, false));
             }
             Route::Established { fallback } => fallback,
         };
@@ -420,7 +422,7 @@ impl Node {
             .get(&tid)
             .ok_or_else(|| "no transport for the peer's link".to_string())?;
         match transport.send_existing(&addr, reply).await {
-            Ok(_) => return Ok(tid),
+            Ok(_) => return Ok((tid, false)),
             Err(TransportError::NotConnected) => {}
             Err(e) => return Err(e.to_string()),
         }
@@ -443,7 +445,7 @@ impl Node {
             link_addr = %addr,
             "Established link not connected, answered on the msg1's connection"
         );
-        Ok(tid)
+        Ok((tid, true))
     }
 
     /// Handle handshake message 1 (phase 0x1).
@@ -1604,6 +1606,13 @@ impl Node {
             };
             let sent = self.answer_msg1(peer, packet, msg2, route).await;
             if report.pending {
+                // The pending session's adoption then tells the core the
+                // peer set the link up, on the connection it opened.
+                if matches!(sent, Ok((_, true)))
+                    && let Some(p) = self.peers.get_mut(peer)
+                {
+                    p.mark_answered_off();
+                }
                 match sent {
                     Ok(_) => debug!(
                         peer = %self.peer_display_name(peer),
