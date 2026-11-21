@@ -64,6 +64,9 @@ x-fips-common: &fips-common
 {%- for name, count in workers.items() %}
     - {{ name }}={{ count }}
 {%- endfor %}
+{%- if topology.both_dial %}
+    - FIPS_START_ON_READY=1
+{%- endif %}
 
 services:
 {% for node in nodes %}
@@ -134,6 +137,11 @@ def generate_compose(
     resolv_conf = os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "..", "docker", "resolv.conf")
     )
+
+    # A scenario with an edge dialed from both ends starts every daemon on the
+    # runner's word (FIPS_START_ON_READY, testing/docker/entrypoint.sh), once
+    # the initial netem holds those edges at their startup delay, so that the
+    # two ends' first msg1s cross (sim/netem.py, CROSS_HOLD_MS).
 
     content = _COMPOSE_TEMPLATE.render(
         network_name=network_name,

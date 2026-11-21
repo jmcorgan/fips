@@ -10,11 +10,16 @@ import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from .assertions import (
+    AgreementEdge,
     AssertionOutcome,
     BloomSendRateMonitor,
+    Judged,
+    edge_crossings,
+    evaluate_agreement,
     evaluate_baseline,
     evaluate_congestion_signals,
     evaluate_delivery,
@@ -38,6 +43,7 @@ from .assertions import (
     evaluate_switch_latency,
     switch_timeouts,
     evaluate_tree_parents,
+    judge,
     dropped_senders,
     switch_delays,
     uncarried_downs,
@@ -66,7 +72,7 @@ from .peer_churn import PeerChurnManager
 from .scenario import Scenario
 from .topology import SimTopology, generate_topology
 from .traffic import TrafficManager
-from .veth import VethManager
+from .veth import VethManager, mark_ready
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +82,11 @@ log = logging.getLogger(__name__)
 SETTLE_READS = 3
 SETTLE_INTERVAL_SECS = 5
 SETTLE_TIMEOUT_SECS = 90
+
+# How far apart edge_agreement re-reads the ends of an edge that does not
+# agree yet. A rekey's cutover outlasted no two reads this far apart in the
+# planning runs, and one round across a mesh took up to 2 s.
+REREAD_SECS = 3
 
 # Printed in place of the assertion verdicts when setup aborts, followed by
 # what raised. The mesh never finished forming, so an assertion would score a
@@ -159,6 +170,11 @@ class SimRunner:
         # Set by _probe_delivery. None means the probe never ran, which the
         # delivery assertion reports as a harness failure.
         self.delivery_probe: dict | None = None
+        # Set by _readedges: each edge on the round it is scored on, and
+        # each node's last peer listing (None for a node that never
+        # answered), kept as a record only.
+        self.agreement_judged: list[Judged] | None = None
+        self.final_peers: dict[str, list[dict] | None] = {}
 
     def _npub(self, node_id: str) -> str:
         """A node's npub: the one it reported if known, else its configured one."""
@@ -572,6 +588,8 @@ class SimRunner:
         # unshaped is far below the path's real one, and the path machine
         # keeps its least round trip for a minute, long enough to hold the
         # link off a faster path past a scenario's first down.
+        if self.topology.both_dial:
+            self._startall()
         if self.veth_mgr:
             for node_id in sorted({n for edge in self.topology.veth_edges() for n in edge}):
                 self.veth_mgr.mark_ready(node_id)
@@ -626,12 +644,31 @@ class SimRunner:
             if self.traffic_mgr:
                 self.traffic_mgr.npub_cache = self.peer_churn_mgr.npub_cache
 
+    def _startall(self):
+        """Tell every node to start its daemon, all at once.
+
+        A scenario with an edge dialed from both ends starts every daemon on
+        this word (FIPS_START_ON_READY), now that the initial netem holds
+        those edges at their startup delay. The words go out together, so the
+        two ends of each such edge start well inside that delay
+        (sim/netem.py, CROSS_HOLD_MS); one after another, each node's docker
+        call would add to the spread.
+        """
+        nodes = sorted(self.topology.nodes)
+        log.info("Starting the daemons of %d nodes together", len(nodes))
+        with ThreadPoolExecutor(max_workers=len(nodes)) as pool:
+            list(pool.map(lambda nid: mark_ready(self.topology, nid), nodes))
+
     def _warmup(self):
         """Wait for mesh convergence."""
         n = len(self.topology.nodes)
         wait = max(10, n)  # Heuristic: ~1s per node, minimum 10s
         log.info("Waiting %ds for mesh convergence...", wait)
         self._sleep(wait)
+        # The crossings the startup delay set up resolve within a few of its
+        # CROSS_HOLD_MS (sim/netem.py), well inside the warmup's 10 s or more.
+        if self.netem_mgr and self.topology.both_dial:
+            self.netem_mgr.release_holds()
         self._take_snapshot("warmup")
 
         # Populate npub cache after convergence (nodes must be running)
@@ -1017,6 +1054,8 @@ class SimRunner:
             # yet either, and the settle waits for it.
             self._settle_tree()
             self._take_snapshot("final")
+            if self.scenario.assertions.edge_agreement is not None:
+                self._readedges()
 
             # Collect logs before stopping containers
             container_names = [
@@ -1063,6 +1102,7 @@ class SimRunner:
                     log.error("%s", outcome.detail)
 
             self._evaluatepaths(result, iperf_results, udp_results)
+            self._scoreagreement(logs)
 
             # Applied to every scenario by default, so this is the one
             # assertion that is present even when the YAML declares no
@@ -1308,6 +1348,132 @@ class SimRunner:
             if peers or waited >= wait_secs:
                 return {"when": when, "peers": peers, "waited_s": waited}
             time.sleep(2)
+
+    def _agreementedges(self) -> list[AgreementEdge]:
+        """Every topology edge as edge_agreement judges it, with its dialers.
+
+        An end dials the edge when its ``directed_outbound()`` list names the
+        other end, tested in both directions: so an Ethernet edge, which
+        neither end is configured to dial, has no dialer, a one-way edge
+        has one, and an edge listed from both ends has two. Picking one
+        dialer per edge, as the lanes and veth code do, would give an edge
+        dialed from both ends a dialer that the dialer clause then holds to
+        ``outbound`` when either end may rightly be ``inbound``.
+        """
+        topo = self.topology
+        outbound = topo.directed_outbound()
+        edges = []
+        for a, b in sorted(topo.edges):
+            edges.append(AgreementEdge(
+                a, b, topo.transport_for_edge(a, b),
+                npub={n: topo.nodes[n].npub for n in (a, b)},
+                ip={n: topo.nodes[n].docker_ip for n in (a, b)},
+                dialers=frozenset(
+                    x for x, y in ((a, b), (b, a)) if y in outbound.get(x, [])
+                ),
+            ))
+        return edges
+
+    def _readedges(self, read=None, clock=time.time, sleep=None) -> list[Judged]:
+        """Read both ends of every edge until each agrees or the bound runs out.
+
+        Round 1 reads every node once and judges each edge on the two rows
+        of that round. Then, every ``REREAD_SECS`` until
+        ``within_secs`` from the first read, it re-reads both ends of each
+        edge that still has faults and judges the edge on that round's two
+        rows. An edge is done at the first round in which it has no fault,
+        and is scored on that round's pair; an edge that never agrees is
+        scored on its last round's. Each edge therefore keeps its own two
+        rows: a node re-read for one edge does not replace the rows another
+        edge already agreed on, so a rekey of that other edge between rounds
+        cannot fail it. A round's time is the earlier of its two ends' read
+        times, so log lines timed before it precede both rows.
+
+        ``read`` gives a node's ``peers``, or ``None`` where it does not
+        answer, which the edge's clauses fail as observed nothing; ``clock``
+        and ``sleep`` give and pass wall-clock time. Each node's last
+        listing is written to ``peers-final.json`` as a record; it is not
+        what is scored.
+        """
+        cfg = self.scenario.assertions.edge_agreement
+        if read is None:
+            read = self._listpeers
+        if sleep is None:
+            sleep = self._sleep
+        edges = self._agreementedges()
+        latest: dict[str, tuple[float, list[dict] | None]] = {}
+
+        def readround(nodes: set[str]) -> None:
+            """Read each of ``nodes`` once, keeping its rows and read time."""
+            for node in sorted(nodes):
+                at = clock()
+                latest[node] = (at, read(node))
+
+        start = clock()
+        readround(set(self.topology.nodes))
+        judged: dict[tuple[str, str], Judged] = {}
+        pending = edges
+        rounds = 1
+        while True:
+            still = []
+            for edge in pending:
+                (ta, ra), (tb, rb) = latest[edge.a], latest[edge.b]
+                j = judge(edge, ra, rb, min(ta, tb))
+                judged[edge.key] = j
+                if j.faults:
+                    still.append(edge)
+            pending = still
+            if not pending or self._interrupted:
+                break
+            if clock() - start + REREAD_SECS > cfg.within_secs:
+                break
+            sleep(REREAD_SECS)
+            readround({n for e in pending for n in (e.a, e.b)})
+            rounds += 1
+        log.info(
+            "edge_agreement: read %d edge(s) in %d round(s) over %.0fs; %d still disagree",
+            len(edges), rounds, clock() - start, len(pending),
+        )
+        self.final_peers = {n: rows for n, (_t, rows) in sorted(latest.items())}
+        self.agreement_judged = [judged[e.key] for e in edges]
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            with open(os.path.join(self.output_dir, "peers-final.json"), "w") as f:
+                json.dump(self.final_peers, f, indent=2)
+        except OSError:
+            log.exception("Could not write peers-final.json")
+        return self.agreement_judged
+
+    def _listpeers(self, node_id: str) -> list[dict] | None:
+        """A node's ``show_peers`` rows, or None where it does not answer."""
+        data = query_peers(self.topology.container_name(node_id))
+        return None if data is None else data.get("peers", [])
+
+    def _scoreagreement(self, logs: dict[str, str]) -> None:
+        """Score edge_agreement on the rows ``_readedges`` kept and the
+        crossings the collected logs show.
+
+        Runs after the logs are collected, since the crossing clause and the
+        floor read them. A declared assertion whose read never ran fails
+        as observed nothing rather than passing.
+        """
+        cfg = self.scenario.assertions.edge_agreement
+        if cfg is None:
+            return
+        judged = self.agreement_judged
+        if judged is None:
+            outcome = AssertionOutcome(
+                name="edge_agreement", passed=False,
+                detail="FAIL edge_agreement: the peer listings were never read, so "
+                       "nothing was observed",
+            )
+        else:
+            outcome = evaluate_agreement(cfg, judged, edge_crossings(logs, self.topology))
+        self.assertion_outcomes.append(outcome)
+        if outcome.passed:
+            log.info("%s", outcome.detail)
+        else:
+            log.error("%s", outcome.detail)
 
     def _ping_until(self, src: str, dst: str, size: int, cfg) -> dict:
         """Ping dst from src until cfg.min_replies replies or the deadline."""

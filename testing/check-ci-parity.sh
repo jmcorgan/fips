@@ -371,9 +371,9 @@ NIGHTLY_ONLY = {
         "binding is also exercised by forward-only and two-bound-udp",
     "two-bound-udp-bulk": "its finds came from repeated stability runs, not "
         "from a per-push gate",
-    "churn-mixed-10": "a pass means only that the mesh formed and nobody "
-        "errored, on thresholds calibrated from 14 runs; its finds came from "
-        "development runs",
+    "churn-mixed-10": "beyond both ends of each edge agreeing, a pass means "
+        "only that the mesh formed and nobody errored, on thresholds "
+        "calibrated from 14 runs; its finds came from development runs",
     "congestion-stress": "176 recorded runs met none of its criteria, cause "
         "unknown",
 }

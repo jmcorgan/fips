@@ -31,6 +31,20 @@ log = logging.getLogger(__name__)
 
 IFACE = "eth0"
 
+# The delay each direction of an edge dialed from both ends carries from the
+# initial netem until the warmup ends (`release_holds`). Every daemon starts
+# only on the runner's word, after the initial netem (FIPS_START_ON_READY), and
+# the two ends of an edge start within a few hundred milliseconds of each
+# other, so each end's first msg1 is still in flight when the other end dials.
+# Each end then answers the other's msg1 while its own dial is open, both
+# handshakes complete, and the crossing resolves by the node address ordering
+# (FRC-1201 Section 5.6). Unshaped, the first end to start dials a port that is
+# not bound yet, its later attempts meet a peer already held, and the edge
+# never crosses. The delay must exceed the spread between the two ends'
+# starts; two of it, the TCP connect's round trip, must stay under the TCP
+# transport's 5 s connect timeout.
+CROSS_HOLD_MS = 1500
+
 
 @dataclass
 class NetemParams:
@@ -79,10 +93,18 @@ class LinkNetemState:
     # link's normal impairment, so every path that re-installs the qdisc asks
     # tc_args() and a restart or mutation cannot end a flap early.
     held_down: bool = False
+    # Set from the initial netem until the warmup ends on a direction of an
+    # edge dialed from both ends, which carries CROSS_HOLD_MS meanwhile.
+    # `params` keeps its sampled impairment for the release.
+    held_cross: bool = False
 
     def tc_args(self) -> str:
         """Return the netem arguments this direction should carry now."""
-        return "loss 100%" if self.held_down else self.params.to_tc_args()
+        if self.held_down:
+            return "loss 100%"
+        if self.held_cross:
+            return f"delay {CROSS_HOLD_MS}ms"
+        return self.params.to_tc_args()
 
 
 @dataclass
@@ -245,18 +267,6 @@ class NetemManager:
 
                     rate = self._htb_rate(node_id, peer_id)
                     rate_mbit = self._edge_rates.get((node_id, peer_id), 0)
-                    cmds.append(
-                        f"tc class add dev {IFACE} parent 1: classid {class_id} htb rate {rate}"
-                    )
-                    cmds.append(
-                        f"tc qdisc add dev {IFACE} parent {class_id} "
-                        f"handle {netem_handle} netem {params.to_tc_args()}"
-                    )
-                    cmds.append(
-                        f"tc filter add dev {IFACE} parent 1: protocol ip "
-                        f"prio {idx} u32 match ip dst {dest_ip}/32 flowid {class_id}"
-                    )
-
                     ingress_rate = self._ingress_rates.get((node_id, peer_id), 0)
                     ingress_burst = self._ingress_config.burst_bytes if self._ingress_config else 32000
 
@@ -270,8 +280,21 @@ class NetemManager:
                         ingress_rate_kbps=ingress_rate,
                         ingress_burst_bytes=ingress_burst,
                         ingress_filter_prio=idx,
+                        held_cross=self.topology.is_both_dial(node_id, peer_id),
                     )
                     container_states[dest_ip] = state
+
+                    cmds.append(
+                        f"tc class add dev {IFACE} parent 1: classid {class_id} htb rate {rate}"
+                    )
+                    cmds.append(
+                        f"tc qdisc add dev {IFACE} parent {class_id} "
+                        f"handle {netem_handle} netem {state.tc_args()}"
+                    )
+                    cmds.append(
+                        f"tc filter add dev {IFACE} parent 1: protocol ip "
+                        f"prio {idx} u32 match ip dst {dest_ip}/32 flowid {class_id}"
+                    )
 
                 # Ingress policing: add ingress qdisc + per-peer policer filters
                 if self._ingress_rates:
@@ -330,6 +353,27 @@ class NetemManager:
                     container,
                     len(eth_peers),
                 )
+
+    def release_holds(self):
+        """End the startup delay on every edge dialed from both ends.
+
+        Each held direction gets its sampled impairment, or keeps a flap's
+        loss if one holds it down. Called when the warmup ends, by which time
+        the crossings the delay set up have resolved (CROSS_HOLD_MS).
+        """
+        for container, container_states in sorted(self.states.items()):
+            for state in container_states.values():
+                if not state.held_cross:
+                    continue
+                state.held_cross = False
+                cmd = (
+                    f"tc qdisc replace dev {IFACE} parent {state.class_id} "
+                    f"handle {state.netem_handle} netem {state.tc_args()}"
+                )
+                if docker_exec_quiet(container, cmd) is None:
+                    log.warning("Failed to end the startup delay on %s -> %s", container, state.dest_ip)
+                else:
+                    log.info("Ended the startup delay on %s -> %s: %s", container, state.dest_ip, state.tc_args())
 
     def setup_node(self, node_id: str):
         """Re-apply HTB/netem/filters for a single node (after container restart).
@@ -512,9 +556,9 @@ class NetemManager:
                 state = states.get(dest_ip)
                 if state is None:
                     continue
-                if state.held_down:
+                if state.held_down or state.held_cross:
                     state.params = params
-                    log.debug("Deferred netem %s -> %s until the flap ends", src, dst)
+                    log.debug("Deferred netem %s -> %s until the flap or startup delay ends", src, dst)
                     continue
                 cmd = (
                     f"tc qdisc replace dev {IFACE} parent {state.class_id} "

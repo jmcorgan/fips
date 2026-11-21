@@ -74,9 +74,25 @@ HELPER_CHECK_TIMEOUT_SECS = 30
 # The namespace name `_link_place` reports for the host's own.
 HOST_NS = "host"
 
-# Where `mark_ready` tells a node's entrypoint that its veths and their netem
-# are set up (testing/docker/entrypoint.sh, VETH_READY).
+# Where `mark_ready` tells a node's entrypoint that the harness is done with it:
+# its veths, if any, and its initial netem (testing/docker/entrypoint.sh, VETH_READY).
 VETH_READY = "/tmp/fips-veth-ready"
+
+
+def mark_ready(topology: SimTopology, node_id: str) -> None:
+    """Write ``node_id``'s ready word: its container's boot id, to VETH_READY.
+
+    The entrypoint of a node with bound interfaces, or one started with
+    FIPS_START_ON_READY=1, starts the daemon on this word and not before
+    (testing/docker/entrypoint.sh). A failed write is logged and not raised,
+    as in ``VethManager.mark_ready``.
+    """
+    docker_exec_quiet(
+        topology.container_name(node_id),
+        f"awk '{{print $22}}' /proc/1/stat > {VETH_READY}.tmp "
+        f"&& mv -f {VETH_READY}.tmp {VETH_READY}",
+        timeout=EXEC_TIMEOUT_SECS,
+    )
 
 
 class HostOutcome(enum.Enum):
@@ -194,12 +210,7 @@ class VethManager:
         is logged and not raised: the entrypoint then starts the daemon at
         its backstop (IFACE_WAIT_SECS in testing/docker/entrypoint.sh).
         """
-        docker_exec_quiet(
-            self.topology.container_name(node_id),
-            f"awk '{{print $22}}' /proc/1/stat > {VETH_READY}.tmp "
-            f"&& mv -f {VETH_READY}.tmp {VETH_READY}",
-            timeout=EXEC_TIMEOUT_SECS,
-        )
+        mark_ready(self.topology, node_id)
 
     def teardown_all(self):
         """Clean up all veth pairs."""

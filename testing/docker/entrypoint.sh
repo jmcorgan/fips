@@ -43,7 +43,11 @@ start_udpserver() {
 # when it has finished setting up the container's veths and applied their
 # initial netem, after the first start and after every restart. The file
 # outlives a restart, so the id is what tells this start's word from an
-# earlier one's.
+# earlier one's. A container started with FIPS_START_ON_READY=1 waits for the
+# same word with no interface bound: the harness sets it when a scenario has
+# an edge dialed from both ends, so that every daemon starts only once that
+# edge's startup delay is in place (testing/chaos/README.md, "Directed
+# Outbound Configs").
 VETH_READY=/tmp/fips-veth-ready
 IFACE_WAIT_SECS=600
 
@@ -67,7 +71,8 @@ wait_for_ethernet() {
     # before that takes round trips no shaped link would give: unshaped,
     # every path reads under a millisecond, and the path machine keeps its
     # least round trip for a minute. So the word, not the interfaces being
-    # up, is what starts the daemon.
+    # up, is what starts the daemon. With FIPS_START_ON_READY=1 and no
+    # interface bound, the word alone starts it.
     #
     # Ready means `ip link show dev <name> up` lists it, not that
     # /sys/class/net/<name> exists. The harness renames a veth end to its
@@ -87,8 +92,8 @@ wait_for_ethernet() {
         | sed 's/.*interface:\s*//' \
         | tr -d ' "' || true)
 
-    if [ -n "$eth_ifaces" ]; then
-        echo "Waiting for interfaces to be up and the harness ready: $eth_ifaces"
+    if [ -n "$eth_ifaces" ] || [ "${FIPS_START_ON_READY:-}" = 1 ]; then
+        echo "Waiting for interfaces to be up and the harness ready: ${eth_ifaces:-none}"
         local boot missing iface
         boot=$(bootid)
         local deadline=$((SECONDS + IFACE_WAIT_SECS))

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Hermetic tests of the chaos assertions that read path lines, and of the
-Ethernet kernel drop ceiling, which reads the final congestion snapshot.
+"""Hermetic tests of the chaos assertions that read path lines, of the
+Ethernet kernel drop ceiling, which reads the final congestion snapshot, and
+of the edge agreement, which reads both ends' peer rows and the crossing
+lines.
 
 Each case feeds an evaluator planted log lines, flap stamps or iperf3
 results and checks its verdict, so every assertion is shown able to fail
@@ -1648,6 +1650,489 @@ def _():
     return t["ethernet"].get("role") == "preferred" and "role" not in t["udp"]
 
 
+# --- both dials ------------------------------------------------------------------
+
+# Two edges dialed from both ends, one UDP and one TCP, beside a one-way UDP
+# edge, a one-way TCP edge and an Ethernet edge, which nothing dials.
+BOTHDIAL = """
+scenario: {name: bothdial, seed: 1, duration_secs: 60}
+topology:
+  algorithm: explicit
+  num_nodes: 4
+  params:
+    adjacency:
+      - [n01, n02, udp, {dial: both}]
+      - [n02, n03, tcp, {dial: both}]
+      - [n03, n04, udp]
+      - [n01, n04, tcp]
+      - [n02, n04, ethernet]
+netem: {enabled: true}
+"""
+
+
+def _bothtopo(text: str = BOTHDIAL):
+    """The topology the real loader and generator build from ``text``."""
+    import random
+
+    from sim.topology import generate_topology
+
+    scen = _scenario(text)
+    return generate_topology(scen.topology, random.Random(1), "selftest")
+
+
+def _written(text: str) -> dict[str, dict[str, str]]:
+    """Per node, the alias and transport of each static peer in the config
+    write_configs writes for the topology of ``text``."""
+    import tempfile
+
+    import yaml
+    from sim.config_gen import write_configs
+
+    topo = _bothtopo(text)
+    got = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        write_configs(topo, tmp)
+        for nid in topo.nodes:
+            with open(os.path.join(tmp, f"{nid}.yaml")) as f:
+                peers = yaml.safe_load(f).get("peers") or []
+            got[nid] = {p["alias"]: p["addresses"][0]["transport"] for p in peers}
+    return got
+
+
+def _onedial(text: str) -> str:
+    """``text`` with every ``{dial: both}`` removed."""
+    return text.replace(", {dial: both}", "")
+
+
+@case("{dial: both} puts each end in the other's peers, and every other edge keeps its dialer", True)
+def _():
+    both = _written(BOTHDIAL)
+    base = _written(_onedial(BOTHDIAL))
+    crossed = (
+        both["n01"].get("n02") == "udp" and both["n02"].get("n01") == "udp"
+        and both["n02"].get("n03") == "tcp" and both["n03"].get("n02") == "tcp"
+    )
+    pairs = {("n01", "n02"), ("n02", "n03")}
+
+    def rest(written: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+        """Each node's peers but those across a both-dial edge."""
+        return {
+            nid: {p: t for p, t in peers.items() if tuple(sorted((nid, p))) not in pairs}
+            for nid, peers in written.items()
+        }
+
+    others = rest(base)
+    return crossed and rest(both) == others and sum(map(len, others.values())) == 2
+
+
+@case("directed_outbound names both ends of a {dial: both} edge, one end of each other "
+      "static edge, and neither end of an Ethernet edge", True)
+def _():
+    out = _bothtopo().directed_outbound()
+
+    def dialers(a: str, b: str) -> set[str]:
+        """The ends whose outbound list names the other end."""
+        return {x for x, y in ((a, b), (b, a)) if y in out[x]}
+
+    return (
+        dialers("n01", "n02") == {"n01", "n02"}
+        and dialers("n02", "n03") == {"n02", "n03"}
+        and len(dialers("n03", "n04")) == 1
+        and len(dialers("n01", "n04")) == 1
+        and dialers("n02", "n04") == set()
+        and all(len(peers) == len(set(peers)) for peers in out.values())
+    )
+
+
+@case("a scenario with {dial: both} edges loads and records exactly those edges", True)
+def _():
+    topo = _bothtopo()
+    return topo.both_dial == {("n01", "n02"), ("n02", "n03")} and not topo.edge_lanes
+
+
+def _refusesboth(edge: str) -> bool:
+    """Whether BOTHDIAL with its first edge replaced by ``edge`` loads;
+    False when the loader refuses it."""
+    try:
+        _scenario(BOTHDIAL.replace("[n01, n02, udp, {dial: both}]", edge))
+    except ValueError:
+        return False
+    return True
+
+
+for _edge in (
+    "[n01, n02, ethernet, {dial: both}]",
+    "[n01, n02, ethernet+udp, {dial: both}]",
+    "[n01, n02, udp-veth, {dial: both}]",
+    "[n01, n02, udp-veth+udp, {dial: both}]",
+    "[n01, n02, udp-veth, {lanes: 2, dial: both}]",
+    "[n01, n02, udp, {lanes: 2, dial: both}]",
+    "[n01, n02, udp, {dial: sideways}]",
+    "[n01, n02, udp, {dial: both, speed: 1}]",
+    "[n01, n02, udp, {speed: 1}]",
+    "[n01, n02, udp-veth, {lanes: 2, speed: 1}]",
+    "[n01, n02, udp, {}]",
+    "[n01, n02, udp, {lanes: 2}]",
+    "[n01, n02, udp-veth, {lanes: 5}]",
+):
+    case(f"loading refuses {_edge}", False)(lambda e=_edge: _refusesboth(e))
+
+
+@case("an edge with {lanes: 2} still loads and keeps its lanes", True)
+def _():
+    topo = _bothtopo(BOTHDIAL.replace("[n01, n02, udp, {dial: both}]",
+                                      "[n01, n02, udp-veth, {lanes: 2}]"))
+    return topo.lanes("n01", "n02") == 2 and topo.both_dial == {("n02", "n03")}
+
+
+# --- both dials: the startup delay that makes them cross -----------------------
+
+
+def _bothcompose(text: str) -> dict[str, list[str]]:
+    """Each service's environment in the compose file the sim writes for the
+    topology of ``text``."""
+    import tempfile
+
+    import yaml
+    from sim.compose import generate_compose
+
+    with tempfile.TemporaryDirectory() as out:
+        with open(generate_compose(_bothtopo(text), _scenario(text), out, "selftest-net")) as f:
+            doc = yaml.safe_load(f)
+    return {name: svc["environment"] for name, svc in doc["services"].items()}
+
+
+@case("the sim starts every daemon on the runner's word when an edge is dialed from both ends",
+      True)
+def _():
+    env = _bothcompose(BOTHDIAL)
+    return (sorted(env) == ["n01", "n02", "n03", "n04"]
+            and all("FIPS_START_ON_READY=1" in e for e in env.values()))
+
+
+@case("the sim lets every daemon start at once when no edge is dialed from both ends", True)
+def _():
+    env = _bothcompose(_onedial(BOTHDIAL))
+    return (sorted(env) == ["n01", "n02", "n03", "n04"]
+            and not any(v.startswith("FIPS_START_ON_READY") for e in env.values() for v in e))
+
+
+class _Tc:
+    """Stands in for the docker calls of sim.netem: records each command run
+    in a container, and answers every container as running."""
+
+    def __enter__(self):
+        import sim.netem as N
+
+        self.N, self.ran = N, []
+        self.saved = (N.docker_exec_quiet, N.is_container_running)
+        N.docker_exec_quiet = lambda c, cmd, timeout=None: self.ran.append((c, cmd)) or ""
+        N.is_container_running = lambda c: True
+        return self
+
+    def __exit__(self, *exc):
+        self.N.docker_exec_quiet, self.N.is_container_running = self.saved
+
+
+def _heldnetem():
+    """A NetemManager over BOTHDIAL's topology after its initial netem, with
+    a default policy whose sampled delay is not the hold's, and the commands
+    that initial netem ran."""
+    import random
+
+    import sim.netem as N
+
+    scen = _scenario(BOTHDIAL.replace("netem: {enabled: true}",
+                                      "netem: {enabled: true, default_policy: {delay_ms: [20, 30]}}"))
+    nm = N.NetemManager(_bothtopo(), scen.netem, random.Random(1))
+    with _Tc() as tc:
+        nm.setup_initial()
+    return nm, tc.ran
+
+
+def _ipstates(nm) -> dict[tuple[str, str], object]:
+    """Each UDP or TCP link direction's state, keyed (from node, to node)."""
+    byip = {n.docker_ip: nid for nid, n in nm.topology.nodes.items()}
+    return {
+        (c.split("-")[2], byip[ip]): st
+        for c, states in nm.states.items() for ip, st in states.items()
+    }
+
+
+@case("the initial netem holds both directions of each edge dialed from both ends at the "
+      "startup delay, and only those", True)
+def _():
+    import sim.netem as N
+
+    nm, ran = _heldnetem()
+    states = _ipstates(nm)
+    held = {k for k, st in states.items() if st.held_cross}
+    want = {("n01", "n02"), ("n02", "n01"), ("n02", "n03"), ("n03", "n02")}
+    installed = " ".join(cmd for _, cmd in ran)
+    return (
+        held == want
+        and len(states) == 8
+        and all(states[k].tc_args() == f"delay {N.CROSS_HOLD_MS}ms" for k in want)
+        and all(f"handle {st.netem_handle} netem {st.tc_args()}" in installed
+                for st in states.values())
+        and all(st.params.delay_ms >= 20 for st in states.values())
+    )
+
+
+@case("ending the startup delay gives each held direction its sampled netem and touches "
+      "no other", True)
+def _():
+    nm, _ = _heldnetem()
+    states = _ipstates(nm)
+    sampled = {k: st.params.to_tc_args() for k, st in states.items() if st.held_cross}
+    with _Tc() as tc:
+        nm.release_holds()
+    got = {}
+    for container, cmd in tc.ran:
+        for k, st in states.items():
+            if container.split("-")[2] == k[0] and f"handle {st.netem_handle} " in cmd:
+                got[k] = cmd.split(" netem ", 1)[1]
+    return (
+        len(sampled) == 4
+        and got == sampled
+        and not any(st.held_cross for st in states.values())
+    )
+
+
+@case("a netem mutation during the startup delay waits for its end, which installs it", True)
+def _():
+    import sim.netem as N
+
+    nm, _ = _heldnetem()
+    st = _ipstates(nm)[("n01", "n02")]
+    mutated = N.NetemParams(delay_ms=77)
+    with _Tc() as during:
+        nm._update_link("n01", "n02", mutated)
+    held_args = st.tc_args()
+    with _Tc() as after:
+        nm.release_holds()
+    return (
+        during.ran == []
+        and held_args == f"delay {N.CROSS_HOLD_MS}ms"
+        and st.params == mutated
+        and any(cmd.endswith("netem delay 77ms") for _, cmd in after.ran)
+    )
+
+
+@case("a flap holding a direction down during the startup delay holds it at a loss, and "
+      "keeps it down when the delay ends", True)
+def _():
+    nm, _ = _heldnetem()
+    st = _ipstates(nm)[("n02", "n03")]
+    st.held_down = True
+    during = st.tc_args()
+    with _Tc() as tc:
+        nm.release_holds()
+    return (during == "loss 100%" and not st.held_cross
+            and any(f"handle {st.netem_handle} netem loss 100%" in cmd for _, cmd in tc.ran))
+
+
+@case("the runner tells every node to start when an edge is dialed from both ends, and "
+      "ends the startup delay when the warmup ends", True)
+def _():
+    from types import SimpleNamespace
+
+    from sim import runner as R
+
+    r = R.SimRunner(_scenario(BOTHDIAL))
+    r.topology = _bothtopo()
+    told, events = [], []
+    saved = R.mark_ready
+    R.mark_ready = lambda topo, nid: told.append(nid)
+    try:
+        r._startall()
+    finally:
+        R.mark_ready = saved
+    r.netem_mgr = SimpleNamespace(release_holds=lambda: events.append("release"))
+    r._sleep = lambda secs: events.append(f"sleep {secs}")
+    r._take_snapshot = lambda label: events.append(f"snapshot {label}")
+    r.peer_churn_mgr = r.link_swap_mgr = None
+    r._warmup()
+    return sorted(told) == ["n01", "n02", "n03", "n04"] and events == [
+        "sleep 10", "release", "snapshot warmup"]
+
+
+@case("the runner leaves the netem alone at the warmup's end when no edge is dialed from "
+      "both ends", True)
+def _():
+    from types import SimpleNamespace
+
+    from sim import runner as R
+
+    r = R.SimRunner(_scenario(_onedial(BOTHDIAL)))
+    r.topology = _bothtopo(_onedial(BOTHDIAL))
+    events = []
+    r.netem_mgr = SimpleNamespace(release_holds=lambda: events.append("release"))
+    r._sleep = lambda secs: events.append(f"sleep {secs}")
+    r._take_snapshot = lambda label: events.append(f"snapshot {label}")
+    r.peer_churn_mgr = r.link_swap_mgr = None
+    r._warmup()
+    return events == ["sleep 10", "snapshot warmup"]
+
+
+def _setuporder(text: str) -> list[str]:
+    """What the runner's setup does to the nodes of ``text``, in order, with
+    every docker, network and file step replaced by a stand-in."""
+    import logging
+    import tempfile
+    from types import SimpleNamespace
+
+    from sim import runner as R
+
+    events: list[str] = []
+
+    class Veth:
+        """Stands in for VethManager, recording its calls."""
+
+        def __init__(self, topology):
+            pass
+
+        def setup_all(self):
+            events.append("veth setup")
+
+        def mark_ready(self, nid):
+            events.append(f"veth ready {nid}")
+
+    class Netem:
+        """Stands in for NetemManager, recording its initial netem."""
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def setup_initial(self):
+            events.append("netem initial")
+
+    saved = {k: getattr(R, k) for k in (
+        "claim_network", "write_configs", "generate_compose", "docker_compose",
+        "VethManager", "NetemManager", "mark_ready")}
+    run = R.subprocess.run
+    image = os.environ.get("FIPS_TEST_IMAGE")
+    root = logging.getLogger()
+    handlers = list(root.handlers)
+    R.claim_network = lambda *a, **k: "172.20.0.0/24"
+    R.write_configs = lambda *a, **k: None
+    R.generate_compose = lambda *a, **k: "compose.yml"
+    R.docker_compose = lambda *a, **k: events.append("compose up")
+    R.VethManager = Veth
+    R.NetemManager = Netem
+    R.mark_ready = lambda topo, nid: events.append(f"start {nid}")
+    R.subprocess.run = lambda *a, **k: SimpleNamespace(returncode=0)
+    os.environ["FIPS_TEST_IMAGE"] = "selftest"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            r = R.SimRunner(_scenario(text))
+            r.output_dir = tmp
+            r._setup()
+    finally:
+        for k, v in saved.items():
+            setattr(R, k, v)
+        R.subprocess.run = run
+        if image is None:
+            os.environ.pop("FIPS_TEST_IMAGE", None)
+        else:
+            os.environ["FIPS_TEST_IMAGE"] = image
+        for h in root.handlers[:]:
+            if h not in handlers:
+                root.removeHandler(h)
+                h.close()
+    # The words go out in parallel, so their order among themselves is not
+    # the runner's; their place in the sequence is.
+    starts = [e for e in events if e.startswith("start ")]
+    if starts:
+        first = events.index(starts[0])
+        rest = [e for e in events if not e.startswith("start ")]
+        events = rest[:first] + ["start " + ",".join(sorted(s[6:] for s in starts))] + rest[first:]
+    return events
+
+
+@case("setup starts every node only after the initial netem when an edge is dialed from "
+      "both ends", True)
+def _():
+    return _setuporder(BOTHDIAL) == [
+        "compose up", "veth setup", "netem initial", "start n01,n02,n03,n04",
+        "veth ready n02", "veth ready n04"]
+
+
+@case("setup tells only the nodes with bound interfaces when no edge is dialed from both "
+      "ends", True)
+def _():
+    return _setuporder(_onedial(BOTHDIAL)) == [
+        "compose up", "veth setup", "netem initial", "veth ready n02", "veth ready n04"]
+
+
+def _entrywait(ready: str | None, word: bool) -> str:
+    """The output of the entrypoint's wait_for_ethernet for a node with no
+    bound interface, FIPS_START_ON_READY set to ``ready`` (unset if None),
+    and the harness's word written first if ``word``. The wait's backstop is
+    cut to a second, so a wait that never sees the word times out."""
+    import subprocess
+    import tempfile
+
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "docker", "entrypoint.sh")
+    with open(script) as f:
+        text = f.read()
+    body = text[text.index("wait_for_ethernet() {"):]
+    body = body[:body.index("\n}\n") + 3]
+    with tempfile.TemporaryDirectory() as tmp:
+        flag = os.path.join(tmp, "ready")
+        conf = os.path.join(tmp, "fips.yaml")
+        with open(conf, "w") as f:
+            f.write("transports:\n  udp:\n    bind_addr: 0.0.0.0:2121\n")
+        if word:
+            with open(flag, "w") as f:
+                f.write("42\n")
+        env = {k: v for k, v in os.environ.items() if k != "FIPS_START_ON_READY"}
+        if ready is not None:
+            env["FIPS_START_ON_READY"] = ready
+        prog = (f"CONFIG={conf}\nVETH_READY={flag}\nIFACE_WAIT_SECS=1\n"
+                "bootid() { echo 42; }\n" + body + "wait_for_ethernet\n")
+        out = subprocess.run(["bash", "-c", prog], env=env, capture_output=True,
+                             text=True, timeout=30)
+    return out.stdout if out.returncode == 0 else f"exit {out.returncode}"
+
+
+@case("the entrypoint of a node started on the runner's word waits for it with no "
+      "interface bound", True)
+def _():
+    got = _entrywait("1", word=False)
+    return "harness ready: none" in got and "Timed out" in got
+
+
+@case("the entrypoint of a node started on the runner's word starts once the word is "
+      "there", True)
+def _():
+    got = _entrywait("1", word=True)
+    return "harness ready: none" in got and "the harness ready after" in got
+
+
+@case("the entrypoint of a node with no bound interface and no start word does not wait",
+      True)
+def _():
+    return _entrywait(None, word=False) == "" and _entrywait("0", word=False) == ""
+
+
+def _loadsboth(netem: str) -> bool:
+    """Whether BOTHDIAL loads with its netem line replaced by ``netem``;
+    False when the loader refuses it."""
+    try:
+        _scenario(BOTHDIAL.replace("netem: {enabled: true}", netem))
+    except ValueError:
+        return False
+    return True
+
+
+case("loading refuses {dial: both} with netem off", False)(
+    lambda: _loadsboth("netem: {enabled: false}"))
+case("loading refuses {dial: both} with node churn", False)(
+    lambda: _loadsboth("netem: {enabled: true}\nnode_churn: {enabled: true}"))
+
+
 # --- schedule ----------------------------------------------------------------
 
 SCHEDULED = """
@@ -2622,6 +3107,986 @@ def _():
     return (
         all(s.assertions.active_timeouts is not None for s in three)
         and all(S.log_enables(s.logging.rust_log, target, "debug") for s in three + [bulk])
+    )
+
+
+# --- edge_agreement: the read clauses ------------------------------------------
+
+# Identities from a real churn-mixed run (sim-results 20260726-142044): each
+# node's npub and node_addr as its startup lines logged them.
+_NPUB = {
+    "n01": "npub1xw8a2v4c987kmwxkzm8c87evfpsjsfkny749j523jgmu5hk57xzsjr8ekk",
+    "n02": "npub1dvn480ww83c7frz5xytf383ecy3g84ndzu76geajgmpwg4vwfzcshfnfv6",
+    "n03": "npub1etj07lxvxmdqzuz6lwkx5c6s33z5c7y4hxuwjvnwv7p7060rr83q5l3wxc",
+    "n04": "npub1wnqcet5vgl0kklzcn4sa7hltqsjhegd3alxw99k98v0j29hmhtds793eeh",
+    "n06": "npub12plr4fgdpku7l0gteep2y04hhzq8syegvkaausjxzm6wkc03amjs98ceep",
+    "n09": "npub1y6l49pa2jh6mk9vdyw6xveu7w0jgqrhxdld7mu5srtp6sdjk0mfq0j2mry",
+}
+_ADDR = {
+    "n01": "3d3de38d7efeeeed5e81a6f5dd5843f2",
+    "n02": "6224fe254bf38afc7a3714b69f6dbf37",
+    "n03": "649a3f8d5ddaed386f29cf7e99447ddb",
+    "n04": "90118bf964c18364bb8dd81661d84088",
+    "n06": "da188b0a719f076c9c922f8c15c8f233",
+    "n09": "e6f81ba75745b70e2208467ac9d3d13f",
+}
+
+
+def _edge(a: str, b: str, transport: str = "udp", dialers=None,
+          net: str = "10.30.4") -> A.AgreementEdge:
+    """An edge between two planted nodes, dialed by ``a`` unless ``dialers``
+    says otherwise; each node's Docker address is ``net`` and 9 plus its
+    number, as the planning runs' were."""
+    return A.AgreementEdge(
+        a, b, transport,
+        npub={n: _NPUB[n] for n in (a, b)},
+        ip={n: f"{net}.{9 + int(n[1:])}" for n in (a, b)},
+        dialers=frozenset({a} if dialers is None else dialers),
+    )
+
+
+def _row(peer: str, our: str | None, their: str | None, direction: str,
+         transport: str, addr: str, **extra) -> dict:
+    """A ``show_peers`` row for ``peer`` carrying the fields the assertion
+    reads; ``None`` leaves an index key out, as the node does with no
+    session."""
+    row = {"npub": _NPUB[peer], "node_addr": _ADDR[peer], "direction": direction,
+           "transport_type": transport, "transport_addr": addr}
+    if our is not None:
+        row["our_session_index"] = our
+    if their is not None:
+        row["their_session_index"] = their
+    row.update(extra)
+    return row
+
+
+def _clauses(faults: list[str]) -> list[str]:
+    """The clause each fault names."""
+    return [f.split(":", 1)[0] for f in faults]
+
+
+# Real final rows of the planning runs (plan logs/planning-results.txt): the
+# indices, direction, transport and address each end listed for the other.
+def _udp_ok():
+    """tcp-mesh on master, n01-n02, one-way from n01."""
+    return (_edge("n01", "n02"),
+            [_row("n02", "a4bfa56b", "8cb13a9d", "outbound", "udp", "10.30.4.11:2121")],
+            [_row("n01", "8cb13a9d", "a4bfa56b", "inbound", "udp", "10.30.4.10:2121")])
+
+
+@case("a healthy UDP edge agrees", True)
+def _():
+    return A.edge_faults(*_udp_ok()) == []
+
+
+@case("a healthy TCP edge agrees though its inbound end lists an ephemeral port", True)
+def _():
+    edge = _edge("n01", "n04", "tcp")
+    ra = [_row("n04", "8cf1b7a3", "301008e3", "outbound", "tcp", "10.30.4.13:443")]
+    rb = [_row("n01", "301008e3", "8cf1b7a3", "inbound", "tcp", "10.30.4.10:55798")]
+    return A.edge_faults(edge, ra, rb) == []
+
+
+@case("a healthy Ethernet edge agrees with MACs for addresses", True)
+def _():
+    # churn-mixed on master, n01-n09, found by beacon at both ends.
+    edge = _edge("n01", "n09", "ethernet", dialers=(), net="10.30.2")
+    ra = [_row("n09", "f8b19503", "e1fcdf6a", "outbound", "ethernet", "4e:ad:52:d7:a0:6c")]
+    rb = [_row("n01", "e1fcdf6a", "f8b19503", "inbound", "ethernet", "a6:a5:e1:7a:0a:f2")]
+    return A.edge_faults(edge, ra, rb) == []
+
+
+@case("both ends inbound, master's crossed rows, fails at direction alone", True)
+def _():
+    # tcp-mesh on master with UDP edges dialed from both ends, at 79ee9c2c.
+    edge = _edge("n01", "n02", dialers=("n01", "n02"), net="10.30.5")
+    ra = [_row("n02", "16856bd9", "c28b7830", "inbound", "udp", "10.30.5.11:2121")]
+    rb = [_row("n01", "c28b7830", "16856bd9", "inbound", "udp", "10.30.5.10:2121")]
+    return _clauses(A.edge_faults(edge, ra, rb)) == ["direction"]
+
+
+@case("both ends outbound, next's crossed rows, fails at direction alone", True)
+def _():
+    edge = _edge("n01", "n02", dialers=("n01", "n02"))
+    ra = [_row("n02", "309c7707", "7888b708", "outbound", "udp", "10.30.4.11:2121")]
+    rb = [_row("n01", "7888b708", "309c7707", "outbound", "udp", "10.30.4.10:2121")]
+    return _clauses(A.edge_faults(edge, ra, rb)) == ["direction"]
+
+
+@case("a one-way edge whose dialer is inbound fails at dialer", True)
+def _():
+    # churn-mixed on master, n02-n03, dialed by n03; planted here as n02's.
+    edge = _edge("n02", "n03", dialers=("n02",), net="10.30.2")
+    ra = [_row("n03", "1f692404", "e63fe9c7", "inbound", "udp", "10.30.2.12:2121")]
+    rb = [_row("n02", "e63fe9c7", "1f692404", "outbound", "udp", "10.30.2.11:2121")]
+    return _clauses(A.edge_faults(edge, ra, rb)) == ["dialer"]
+
+
+@case("an edge dialed from both ends passes with the smaller node outbound "
+      "though the lower name is the larger address", True)
+def _():
+    # n01 holds the larger address here, so the smaller is n02, outbound.
+    edge = _edge("n01", "n02", dialers=("n01", "n02"))
+    ra = [_row("n02", "fea7b6a0", "b2527821", "inbound", "udp", "10.30.4.11:2121")]
+    rb = [_row("n01", "b2527821", "fea7b6a0", "outbound", "udp", "10.30.4.10:2121",
+               node_addr="eb2aa74bfaf4c56738e40420722602e9")]
+    return A.edge_faults(edge, ra, rb) == []
+
+
+@case("an Ethernet edge with no dialer passes with its first end outbound", True)
+def _():
+    # churn-mixed on master, n03-n10's rows, planted on n03-n06.
+    edge = _edge("n03", "n06", "ethernet", dialers=())
+    ra = [_row("n06", "d4c1878d", "c8755a11", "outbound", "ethernet", "7e:57:10:37:6c:fb")]
+    rb = [_row("n03", "c8755a11", "d4c1878d", "inbound", "ethernet", "86:8b:98:ee:c8:b6")]
+    return A.edge_faults(edge, ra, rb) == []
+
+
+@case("an index pair apart with no rekey flag fails and says no flag was set", True)
+def _():
+    edge, ra, rb = _udp_ok()
+    rb[0]["our_session_index"] = "0badf00d"
+    faults = A.edge_faults(edge, ra, rb)
+    return _clauses(faults) == ["pair"] and "no rekey flag set" in faults[0]
+
+
+@case("an index pair apart with a rekey flag at the bound fails naming the flag", True)
+def _():
+    edge, ra, rb = _udp_ok()
+    rb[0]["our_session_index"] = "0badf00d"
+    rb[0]["rekey_in_progress"] = True
+    faults = A.edge_faults(edge, ra, rb)
+    return _clauses(faults) == ["pair"] and "n02 rekey_in_progress" in faults[0]
+
+
+@case("rows listing no session index at either end fail at pair", True)
+def _():
+    edge = _edge("n01", "n02")
+    ra = [_row("n02", None, None, "outbound", "udp", "10.30.4.11:2121",
+               their_session_index=None)]
+    rb = [_row("n01", None, None, "inbound", "udp", "10.30.4.10:2121",
+               their_session_index=None)]
+    return _clauses(A.edge_faults(edge, ra, rb)) == ["pair"]
+
+
+@case("a row with no their_session_index fails as a harness error", True)
+def _():
+    edge, ra, rb = _udp_ok()
+    for rows in (ra, rb):
+        del rows[0]["their_session_index"]
+    return _clauses(A.edge_faults(edge, ra, rb)) == ["harness"]
+
+
+@case("a row absent at one end fails at present, naming that end", True)
+def _():
+    edge, ra, _rb = _udp_ok()
+    faults = A.edge_faults(edge, ra, [])
+    return _clauses(faults) == ["present"] and "n02 lists no row for n01" in faults[0]
+
+
+@case("a node that gave no listing fails the edge as observed nothing", True)
+def _():
+    edge, ra, _rb = _udp_ok()
+    faults = A.edge_faults(edge, ra, None)
+    return _clauses(faults) == ["unread"] and "nothing was observed" in faults[0]
+
+
+@case("a row on another transport fails at transport", True)
+def _():
+    edge, ra, rb = _udp_ok()
+    rb[0]["transport_type"] = "tcp"
+    return _clauses(A.edge_faults(edge, ra, rb)) == ["transport"]
+
+
+@case("a row naming another IP fails at address", True)
+def _():
+    edge, ra, rb = _udp_ok()
+    rb[0]["transport_addr"] = "10.30.4.99:2121"
+    return _clauses(A.edge_faults(edge, ra, rb)) == ["address"]
+
+
+# --- edge_agreement: the crossing reader ----------------------------------------
+
+def _topology(*edges: tuple[str, str, str], npubs: dict | None = None):
+    """A planted topology over ``(a, b, transport)`` edges, each node with its
+    planted npub (``npubs`` adds or replaces some) and the planning runs'
+    addresses."""
+    from sim.topology import SimNode, SimTopology
+
+    npub = {**_NPUB, **(npubs or {})}
+    t = SimTopology()
+    for a, b, transport in edges:
+        for n in (a, b):
+            t.nodes.setdefault(n, SimNode(n, f"10.30.4.{9 + int(n[1:])}", "00" * 32, npub[n]))
+        t.edges.add((a, b))
+        t.edge_transport[(a, b)] = transport
+    return t
+
+
+def _swapped(t: float, peer: str) -> str:
+    """A "swapped to outbound session" line at ``t`` naming ``peer``, in the
+    form the node writes it."""
+    return (
+        f"{stamp(t)} DEBUG fips::node::settle::exec::cross: Cross-connection: swapped "
+        f"to outbound session (our outbound wins) peer={peer} new_our_index=9bcbbe9b "
+        f"new_their_index=225ac706 transport_id=transport:1 "
+        f"remote_addr=10.30.4.11:2121 msg1_sidx=9bcbbe9b msg1_dg=3f0c2a91 epoch=7d1e44b0"
+    )
+
+
+def _kept(t: float, peer: str) -> str:
+    """A "keeping inbound session" line at ``t`` naming ``peer``."""
+    return (
+        f"{stamp(t)} DEBUG fips::node::settle::exec::cross: Cross-connection: keeping "
+        f"inbound session and original their_index (peer outbound wins) peer={peer} "
+        f"kept_their_index=Some(SessionIndex(2613821083)) transport_id=transport:1 "
+        f"remote_addr=10.30.4.10:2121 epoch=7d1e44b0"
+    )
+
+
+def _answered(t: float, peer: str) -> str:
+    """A "Second dial answered" line: a swap onto the answer to this node's own
+    earlier dial, which is not a crossing."""
+    return (
+        f"{stamp(t)} DEBUG fips::node::settle::exec::cross: Second dial answered: "
+        f"swapped to its session (the answer supersedes our earlier dial's) peer={peer} "
+        f"new_our_index=9bcbbe9b new_their_index=225ac706 transport_id=transport:1 "
+        f"remote_addr=10.30.4.11:2121 msg1_sidx=9bcbbe9b msg1_dg=3f0c2a91 epoch=7d1e44b0"
+    )
+
+
+def _installed(t: float, peer: str) -> str:
+    """A "Peer promoted to active" line at ``t``: this node's dial installed
+    ``peer``."""
+    return (f"{stamp(t)}  INFO fips::node::handlers::handshake: Peer promoted to active "
+            f"peer={peer}")
+
+
+def _connected(t: float, peer: str, direction: str = "inbound") -> str:
+    """A "Connection promoted to active peer" line at ``t``."""
+    return (
+        f"{stamp(t)} DEBUG fips::node::handlers::handshake: Connection promoted to "
+        f"active peer peer={peer} link_id=4 our_index=5755bfa8 their_index=2adc7214 "
+        f"transport_id=transport:1 remote_addr=10.30.4.11:2121 direction={direction} "
+        f"msg1_sidx=5755bfa8 msg1_dg=3f0c2a91 epoch=7d1e44b0"
+    )
+
+
+def _adopted(t: float, peer: str) -> str:
+    """The line at ``t`` for this node's adoption of a rekey answer it sent on
+    the connection ``peer``'s msg1 arrived on."""
+    return (
+        f"{stamp(t)} DEBUG fips::node::handlers::rekey: Rekey answered on the msg1's "
+        f"connection adopted, link held as the peer's dial peer={peer} dir=Inbound"
+    )
+
+
+def _crossings(**per_node: list[str]):
+    """``edge_crossings`` over planted lines, one list per node id, on the
+    planted n01-n02 UDP edge."""
+    logs = {f"fips-node-{n}": "\n".join(lines) for n, lines in per_node.items()}
+    return A.edge_crossings(logs, _topology(("n01", "n02", "udp")))
+
+
+# n01 holds the smaller address. Its swap follows its own promotion of n02 by
+# 9 ms, as in the planning runs' crossings, and n02 kept its inbound session.
+_CROSSED = {
+    "n01": [_connected(T0 - 0.009, "n02"), _swapped(T0, "n02")],
+    "n02": [_kept(T0 - 0.004, "n01")],
+}
+
+
+@case("a swap whose far end kept its inbound session within 30 s is a crossed record", True)
+def _():
+    c = _crossings(**_CROSSED)
+    recs = c.edges.get(("n01", "n02"), [])
+    return (not c.errors and [(r.end, r.peer, r.kind) for r in recs] == [("n01", "n02", "crossed")]
+            and "keeping inbound" in recs[0].far and recs[0].ended is None)
+
+
+@case("a later Peer promoted to active for the peer at the swap end ends the crossed record", True)
+def _():
+    c = _crossings(n01=_CROSSED["n01"] + [_installed(T0 + 5, "n02")], n02=_CROSSED["n02"])
+    return [r.ended for r in c.edges[("n01", "n02")]] == [T0 + 5]
+
+
+@case("a later Connection promoted to active peer alone ends the crossed record", True)
+def _():
+    # The responder form: the peer's dial re-established it, which logs no
+    # Peer promoted to active at this end.
+    c = _crossings(n01=_CROSSED["n01"] + [_connected(T0 + 5, "n02")], n02=_CROSSED["n02"])
+    return [r.ended for r in c.edges[("n01", "n02")]] == [T0 + 5]
+
+
+@case("a later adoption of a rekey answer on the msg1's connection at the swap end ends "
+      "the crossed record", True)
+def _():
+    c = _crossings(n01=_CROSSED["n01"] + [_adopted(T0 + 5, "n02")], n02=_CROSSED["n02"])
+    return not c.errors and [r.ended for r in c.edges[("n01", "n02")]] == [T0 + 5]
+
+
+@case("an adoption at the far end does not end the crossed record", True)
+def _():
+    c = _crossings(n01=_CROSSED["n01"], n02=_CROSSED["n02"] + [_adopted(T0 + 5, "n01")])
+    return not c.errors and [r.ended for r in c.edges[("n01", "n02")]] == [None]
+
+
+@case("a keeping inbound line alone makes no record", True)
+def _():
+    c = _crossings(n01=[], n02=_CROSSED["n02"])
+    return not c.errors and not c.edges
+
+
+@case("a Second dial answered swap makes no record", True)
+def _():
+    c = _crossings(n01=[_answered(T0, "n02")], n02=[_kept(T0, "n01")])
+    return not c.errors and not c.edges
+
+
+# The archived re-dial (sim-results 20260726-142044-churn-mixed): n03 re-dialed
+# n06, which it held, over Ethernet, and n06 answered it as a rekey. The lines
+# are n03's and n06's as logged, the peer= values their real short npubs.
+_REDIAL = {
+    "n03": [
+        "2026-07-26T14:20:49.480232Z DEBUG fips::node::handlers::handshake: Connection "
+        "promoted to active peer peer=npub12plr...ceep link_id=link:1 our_index=a3400b9b "
+        "their_index=f822cfa0",
+        "2026-07-26T14:22:59.435030Z  INFO fips::node::lifecycle: Auto-connecting to "
+        "discovered peer peer=npub12plr...ceep transport_id=transport:2 "
+        "remote_addr=aa:96:55:43:75:c0 active_refresh=true",
+        "2026-07-26T14:22:59.587867Z DEBUG fips::node::handlers::handshake: "
+        "Cross-connection: swapped to outbound session (our outbound wins) "
+        "peer=npub12plr...ceep new_our_index=d3c3f31f new_their_index=a5f97614",
+    ],
+    "n06": [
+        "2026-07-26T14:20:49.480353Z DEBUG fips::node::handlers::handshake: Connection "
+        "promoted to active peer peer=npub1etj0...3wxc link_id=link:2 our_index=f822cfa0 "
+        "their_index=a3400b9b",
+        "2026-07-26T14:20:49.480376Z  INFO fips::node::handlers::handshake: Peer promoted "
+        "to active peer=npub1etj0...3wxc",
+        "2026-07-26T14:22:59.508374Z DEBUG fips::node::handlers::handshake: Dual rekey "
+        "initiation: we lose (larger addr), abandoning ours peer=npub1etj0...3wxc",
+    ],
+}
+
+
+def _redial():
+    """``edge_crossings`` over the archived re-dial on a planted Ethernet edge."""
+    logs = {f"fips-node-{n}": "\n".join(lines) for n, lines in _REDIAL.items()}
+    return A.edge_crossings(logs, _topology(("n03", "n06", "ethernet")))
+
+
+@case("the archived re-dial answered as a rekey is a rekey record, not a crossing", True)
+def _():
+    c = _redial()
+    recs = c.edges.get(("n03", "n06"), [])
+    return (not c.errors and [(r.end, r.kind) for r in recs] == [("n03", "rekey")]
+            and "Dual rekey initiation" in recs[0].far)
+
+
+@case("a swap whose far end logged neither line is unpaired", True)
+def _():
+    c = _crossings(n01=[_swapped(T0, "n02")], n02=[])
+    return [r.kind for r in c.edges[("n01", "n02")]] == ["unpaired"]
+
+
+@case("a keeping line naming another peer leaves the swap unpaired", True)
+def _():
+    logs = {"fips-node-n01": _swapped(T0, "n02"), "fips-node-n02": _kept(T0, "n03")}
+    c = A.edge_crossings(logs, _topology(("n01", "n02", "udp"), ("n02", "n03", "udp")))
+    return not c.errors and [r.kind for r in c.edges[("n01", "n02")]] == ["unpaired"]
+
+
+@case("a keeping line 31 s from the swap leaves it unpaired", True)
+def _():
+    c = _crossings(n01=[_swapped(T0, "n02")], n02=[_kept(T0 + 31, "n01")])
+    return [r.kind for r in c.edges[("n01", "n02")]] == ["unpaired"]
+
+
+@case("a keeping line logged by another node leaves the swap unpaired", True)
+def _():
+    logs = {"fips-node-n01": _swapped(T0, "n02"), "fips-node-n03": _kept(T0, "n01")}
+    c = A.edge_crossings(logs, _topology(("n01", "n02", "udp"), ("n01", "n03", "udp")))
+    return not c.errors and [r.kind for r in c.edges[("n01", "n02")]] == ["unpaired"]
+
+
+@case("a swap naming its peer by alias and by short npub both resolve to the edge", True)
+def _():
+    # Each short form as the node writes it: npub1, four, "...", the last four.
+    by_alias = _crossings(n01=[_swapped(T0, "n02")], n02=[_kept(T0, "n01")])
+    by_npub = _crossings(n01=[_swapped(T0, "npub1dvn4...nfv6")],
+                         n02=[_kept(T0, "npub1xw8a...8ekk")])
+    return ([r.kind for r in by_alias.edges.get(("n01", "n02"), [])] == ["crossed"]
+            and [r.kind for r in by_npub.edges.get(("n01", "n02"), [])] == ["crossed"])
+
+
+@case("a peer= value that names no node is a harness error", True)
+def _():
+    c = _crossings(n01=[_swapped(T0, "npub1zzzz...zzzz")], n02=[])
+    return not c.edges and len(c.errors) == 1 and "names no node" in c.errors[0]
+
+
+@case("a peer= value that names two nodes is a harness error", True)
+def _():
+    twin = "npub1xw8a" + "q" * 50 + "8ekk"   # n01's short form, another key
+    logs = {"fips-node-n02": _swapped(T0, "npub1xw8a...8ekk")}
+    t = _topology(("n01", "n02", "udp"), ("n02", "n05", "udp"), npubs={"n05": twin})
+    c = A.edge_crossings(logs, t)
+    return not c.edges and len(c.errors) == 1 and "names n01 and n05" in c.errors[0]
+
+
+@case("a crossing line with no timestamp is a harness error", True)
+def _():
+    # A swap line as the node writes it, its leading timestamp cut off.
+    untimed = _swapped(T0, "n02").split(" ", 1)[1]
+    c = _crossings(n01=[untimed], n02=[_kept(T0, "n01")])
+    return not c.edges and len(c.errors) == 1 and "a crossing line with no time" in c.errors[0]
+
+
+@case("a swap between two nodes that share no edge is a harness error", True)
+def _():
+    # n01 and n03 are both in the topology, each on an edge with n02.
+    logs = {"fips-node-n01": _swapped(T0, "n03"), "fips-node-n03": _kept(T0, "n01")}
+    c = A.edge_crossings(logs, _topology(("n01", "n02", "udp"), ("n02", "n03", "udp")))
+    return (not c.edges and len(c.errors) == 1
+            and "a swap for n03, with which it shares no edge" in c.errors[0])
+
+
+# --- edge_agreement: the score ----------------------------------------------------
+
+def _agreement(min_crossings: int = 0, rust_log: str = "debug"):
+    """The assertion's config as loading sets it at ``rust_log``."""
+    return S.EdgeAgreementAssertion(min_crossings=min_crossings,
+                                    crossings_logged=S.logs_crossings(rust_log))
+
+
+def _both(da: str, db: str, at: float = T0 + 60, n01_addr: str | None = None) -> A.Judged:
+    """n01-n02, dialed from both ends, scored on rows read at ``at``: n01 ``da``
+    and n02 ``db``. n01 holds the smaller address unless ``n01_addr`` replaces
+    it in n02's row."""
+    edge = _edge("n01", "n02", dialers=("n01", "n02"))
+    extra = {} if n01_addr is None else {"node_addr": n01_addr}
+    return A.judge(edge,
+                   [_row("n02", "9bcbbe9b", "225ac706", da, "udp", "10.30.4.11:2121")],
+                   [_row("n01", "225ac706", "9bcbbe9b", db, "udp", "10.30.4.10:2121",
+                         **extra)], at)
+
+
+# An address for n01 larger than n02's, so the second-named end is the smaller.
+_N01_LARGER = "eb2aa74bfaf4c56738e40420722602e9"
+
+# The crossing as it runs when n02 holds the smaller address: n02 swaps to its
+# own dial's session and n01 keeps its inbound one.
+_CROSSED_BY_N02 = {
+    "n02": [_connected(T0 - 0.009, "n01"), _swapped(T0, "n01")],
+    "n01": [_kept(T0 - 0.004, "n02")],
+}
+
+
+def _scored(outcome: A.AssertionOutcome) -> list[str]:
+    """The bracketed clauses of each failing edge's line."""
+    return [text.split("[", 1)[1].split("]", 1)[0]
+            for text in outcome.detail.splitlines() if "] scored at " in text]
+
+
+@case("a crossed edge with the smaller end outbound passes and counts", True)
+def _():
+    r = A.evaluate_agreement(_agreement(1), [_both("outbound", "inbound")],
+                             _crossings(**_CROSSED))
+    return r.passed and "1 edge(s) with a crossed record (floor 1)" in r.detail
+
+
+@case("a crossed edge with the smaller end inbound fails at crossing", True)
+def _():
+    r = A.evaluate_agreement(_agreement(), [_both("inbound", "outbound")],
+                             _crossings(**_CROSSED))
+    return not r.passed and _scored(r) == ["crossing"]
+
+
+@case("a crossed edge whose second-named end is the smaller passes with that end "
+      "outbound", True)
+def _():
+    r = A.evaluate_agreement(_agreement(1),
+                             [_both("inbound", "outbound", n01_addr=_N01_LARGER)],
+                             _crossings(**_CROSSED_BY_N02))
+    return r.passed and "1 edge(s) with a crossed record (floor 1)" in r.detail
+
+
+@case("a crossed edge whose second-named end is the smaller fails at crossing with "
+      "that end inbound", True)
+def _():
+    r = A.evaluate_agreement(_agreement(),
+                             [_both("outbound", "inbound", n01_addr=_N01_LARGER)],
+                             _crossings(**_CROSSED_BY_N02))
+    return (not r.passed and _scored(r) == ["crossing"]
+            and "crossing: n02, the smaller end, is inbound" in r.detail)
+
+
+@case("a crossed edge whose row lists no node_addr fails as a harness error", True)
+def _():
+    j = _both("outbound", "inbound")
+    del j.row_a["node_addr"]
+    r = A.evaluate_agreement(_agreement(), [j], _crossings(**_CROSSED))
+    return not r.passed and _scored(r) == ["harness"] and "lists no node_addr" in r.detail
+
+
+@case("at rust_log info a crossed record with the smaller end inbound is not judged", True)
+def _():
+    # At a level that does not emit every crossing line a record may lack the
+    # line that would class it, so the clause stands down rather than judge.
+    r = A.evaluate_agreement(_agreement(0, "info"), [_both("inbound", "outbound")],
+                             _crossings(**_CROSSED))
+    return r.passed and "crossing clause was not observed" in r.detail
+
+
+@case("both ends inbound on a crossed edge fails at direction and crossing", True)
+def _():
+    # The shape the crossed-dial switch leaves.
+    r = A.evaluate_agreement(_agreement(), [_both("inbound", "inbound")],
+                             _crossings(**_CROSSED))
+    return not r.passed and _scored(r) == ["direction, crossing"]
+
+
+@case("a crossed record ended by a later Peer promoted to active is not scored", True)
+def _():
+    c = _crossings(n01=_CROSSED["n01"] + [_installed(T0 + 5, "n02")], n02=_CROSSED["n02"])
+    return A.evaluate_agreement(_agreement(), [_both("inbound", "outbound")], c)
+
+
+@case("the responder form: a later Connection promoted to active peer ends the record "
+      "and an inbound smaller end passes", True)
+def _():
+    c = _crossings(n01=_CROSSED["n01"] + [_connected(T0 + 5, "n02")], n02=_CROSSED["n02"])
+    return A.evaluate_agreement(_agreement(), [_both("inbound", "outbound")], c)
+
+
+@case("a crossed record ended by a later adoption at the swap end is not scored", True)
+def _():
+    c = _crossings(n01=_CROSSED["n01"] + [_adopted(T0 + 5, "n02")], n02=_CROSSED["n02"])
+    return A.evaluate_agreement(_agreement(), [_both("inbound", "outbound")], c)
+
+
+@case("a promotion after the scored read does not end the record for that read", True)
+def _():
+    c = _crossings(n01=_CROSSED["n01"] + [_installed(T0 + 90, "n02")], n02=_CROSSED["n02"])
+    r = A.evaluate_agreement(_agreement(), [_both("inbound", "outbound")], c)
+    return not r.passed and _scored(r) == ["crossing"]
+
+
+@case("a crossed record timed after the scored read is listed, not scored or counted", True)
+def _():
+    r = A.evaluate_agreement(_agreement(), [_both("inbound", "outbound", at=T0 - 1)],
+                             _crossings(**_CROSSED))
+    return (r.passed and "crossed: n01 swapped" in r.detail and "after the read, not scored" in r.detail
+            and "0 edge(s) with a crossed record" in r.detail)
+
+
+def _redial_rows(d03: str, d06: str) -> A.Judged:
+    """The archived re-dial's edge scored after it, n03 ``d03``, n06 ``d06``."""
+    edge = _edge("n03", "n06", "ethernet", dialers=())
+    at = datetime(2026, 7, 26, 14, 23, 30, tzinfo=timezone.utc).timestamp()
+    return A.judge(edge,
+                   [_row("n06", "d3c3f31f", "a5f97614", d03, "ethernet", "aa:96:55:43:75:c0")],
+                   [_row("n03", "a5f97614", "d3c3f31f", d06, "ethernet", "4e:ad:52:d7:a0:6c")],
+                   at)
+
+
+@case("the archived re-dial is listed as a rekey record, not counted, and its edge "
+      "passes with n03 inbound and n06 outbound", True)
+def _():
+    r = A.evaluate_agreement(_agreement(), [_redial_rows("inbound", "outbound")], _redial())
+    return (r.passed and "rekey: n03 swapped" in r.detail
+            and "far: 2026-07-26T14:22:59.508374Z" in r.detail
+            and "0 edge(s) with a crossed record" in r.detail)
+
+
+@case("the archived re-dial with both ends outbound fails at direction, not at crossing", True)
+def _():
+    r = A.evaluate_agreement(_agreement(), [_redial_rows("outbound", "outbound")], _redial())
+    return (not r.passed and _scored(r) == ["direction"]
+            and "0 edge(s) with a crossed record" in r.detail)
+
+
+@case("at rust_log info the read clauses stand and the PASS line says the crossing "
+      "clause was not observed", True)
+def _():
+    edge, ra, rb = _udp_ok()
+    r = A.evaluate_agreement(_agreement(0, "info"), [A.judge(edge, ra, rb, T0)], A.Crossings())
+    return r.passed and "crossing clause was not observed" in r.detail
+
+
+@case("at rust_log info a failing read clause still fails", True)
+def _():
+    r = A.evaluate_agreement(_agreement(0, "info"), [_both("inbound", "inbound")],
+                             A.Crossings())
+    return not r.passed and _scored(r) == ["direction"]
+
+
+@case("min_crossings 2 with one crossed record fails as observing nothing", True)
+def _():
+    r = A.evaluate_agreement(_agreement(2), [_both("outbound", "inbound")],
+                             _crossings(**_CROSSED))
+    return not r.passed and "observed nothing" in r.detail
+
+
+@case("min_crossings 2 with one crossed and one rekey record fails", True)
+def _():
+    redial = _redial()
+    c = _crossings(**_CROSSED)
+    c.edges.update(redial.edges)
+    r = A.evaluate_agreement(_agreement(2), [_both("outbound", "inbound"),
+                                             _redial_rows("inbound", "outbound")], c)
+    return not r.passed and "observed nothing" in r.detail
+
+
+@case("min_crossings 2 counts edges, not swap lines", True)
+def _():
+    later = {"n01": _CROSSED["n01"] + [_swapped(T0 + 20, "n02")],
+             "n02": _CROSSED["n02"] + [_kept(T0 + 19.99, "n01")]}
+    c = _crossings(**later)
+    r = A.evaluate_agreement(_agreement(2), [_both("outbound", "inbound")], c)
+    return len(c.edges[("n01", "n02")]) == 2 and not r.passed and "observed nothing" in r.detail
+
+
+@case("a crossing line the reader could not resolve fails the run", True)
+def _():
+    c = _crossings(n01=[_swapped(T0, "npub1zzzz...zzzz")], n02=[])
+    edge, ra, rb = _udp_ok()
+    r = A.evaluate_agreement(_agreement(), [A.judge(edge, ra, rb, T0 + 60)], c)
+    return not r.passed and "harness: n01: peer=npub1zzzz...zzzz names no node" in r.detail
+
+
+@case("swap lines on an edge that was not read fail the run", True)
+def _():
+    edge, ra, rb = _udp_ok()
+    c = A.Crossings(edges={("n03", "n06"): _redial().edges[("n03", "n06")]})
+    r = A.evaluate_agreement(_agreement(), [A.judge(edge, ra, rb, T0 + 60)], c)
+    return not r.passed and "an edge that was not read" in r.detail
+
+
+@case("no edge read at all fails as observing nothing", True)
+def _():
+    r = A.evaluate_agreement(_agreement(), [], A.Crossings())
+    return not r.passed and "nothing was observed" in r.detail
+
+
+# --- edge_agreement: the runner's read and score -----------------------------------
+
+class _Reads:
+    """Planted ``show_peers`` answers on a fake clock.
+
+    ``script`` gives each node's listings, one per read, the last repeated;
+    ``None`` is a node that does not answer. Each read takes 0.2 s and a
+    sleep passes its time. A read loop that never stops raises instead of
+    hanging the suite.
+    """
+
+    def __init__(self, start: float, **script):
+        self.t = start
+        self.script = script
+        self.count = {n: 0 for n in script}
+
+    def clock(self) -> float:
+        """The fake wall clock."""
+        return self.t
+
+    def sleep(self, secs: float) -> None:
+        """Pass ``secs`` on the fake clock."""
+        self.t += secs
+
+    def read(self, node: str):
+        """The node's next planted listing."""
+        if sum(self.count.values()) > 500:
+            raise RuntimeError("the read loop did not stop")
+        seq = self.script[node]
+        i = self.count[node]
+        self.count[node] += 1
+        self.t += 0.2
+        return seq[min(i, len(seq) - 1)]
+
+
+def _link(x: str, y: str, our: str, their: str, direction: str,
+          transport: str = "udp", **extra) -> dict:
+    """The row ``x`` lists for ``y``: the session pair from ``x``'s side,
+    ``x``'s link direction, and ``y``'s planted Docker address."""
+    return _row(y, our, their, direction, transport,
+                f"10.30.4.{9 + int(y[1:])}:2121", **extra)
+
+
+def _agreement_runner(*edges: tuple[str, str, str], outbound: dict | None = None,
+                      rust_log: str = "info"):
+    """A runner over a planted topology whose scenario declares
+    edge_agreement at ``rust_log``; ``outbound`` replaces the topology's
+    ``directed_outbound()``."""
+    import tempfile
+
+    from sim import runner as R
+
+    r = R.SimRunner(_scenario(_agreement_scenario(rust_log)))
+    r.topology = _topology(*edges)
+    if outbound is not None:
+        r.topology.directed_outbound = lambda: {n: list(p) for n, p in outbound.items()}
+    r.output_dir = tempfile.mkdtemp(prefix="sim-assert-agree-")
+    return r
+
+
+def _readrun(r, reads: _Reads):
+    """``_readedges`` on planted reads, then the score with no crossing lines;
+    the runner's directory removed afterwards."""
+    import shutil
+
+    try:
+        r._readedges(read=reads.read, clock=reads.clock, sleep=reads.sleep)
+        r.assertion_outcomes = []
+        r._scoreagreement({})
+        return r.assertion_outcomes[0]
+    finally:
+        shutil.rmtree(r.output_dir, ignore_errors=True)
+
+
+@case("the read: an edge apart at the first read and agreeing at the second passes, "
+      "scored on the second", True)
+def _():
+    r = _agreement_runner(("n01", "n02", "udp"))
+    reads = _Reads(T0 + 60,
+                   n01=[[_link("n01", "n02", "a4bfa56b", "8cb13a9d", "outbound")]],
+                   n02=[[_link("n02", "n01", "5d0e11c2", "a4bfa56b", "inbound",
+                               rekey_in_progress=True)],
+                        [_link("n02", "n01", "8cb13a9d", "a4bfa56b", "inbound")]])
+    out = _readrun(r, reads)
+    j = r.agreement_judged[0]
+    return out.passed and j.faults == [] and j.at > T0 + 63 and reads.count["n02"] == 2
+
+
+@case("the read: an edge apart at every read fails at the bound, read no longer "
+      "than the bound", True)
+def _():
+    r = _agreement_runner(("n01", "n02", "udp"))
+    reads = _Reads(T0 + 60,
+                   n01=[[_link("n01", "n02", "a4bfa56b", "8cb13a9d", "outbound")]],
+                   n02=[[_link("n02", "n01", "5d0e11c2", "a4bfa56b", "inbound")]])
+    out = _readrun(r, reads)
+    return (not out.passed and _scored(out) == ["pair"] and "no rekey flag set" in out.detail
+            and 20 <= reads.count["n02"] <= 31 and reads.t <= T0 + 60 + 90 + 1)
+
+
+@case("the read: a node that never answers fails its edges as observed nothing", True)
+def _():
+    r = _agreement_runner(("n01", "n02", "udp"), ("n01", "n03", "udp"))
+    reads = _Reads(T0 + 60,
+                   n01=[[_link("n01", "n02", "a4bfa56b", "8cb13a9d", "outbound"),
+                         _link("n01", "n03", "11aa22bb", "33cc44dd", "outbound")]],
+                   n02=[None],
+                   n03=[[_link("n03", "n01", "33cc44dd", "11aa22bb", "inbound")]])
+    out = _readrun(r, reads)
+    return (not out.passed and _scored(out) == ["unread"]
+            and "n02 gave no peer listing" in out.detail and reads.count["n02"] > 1)
+
+
+@case("the read: an edge that agreed is not read again for it", True)
+def _():
+    r = _agreement_runner(("n01", "n02", "udp"), ("n02", "n03", "udp"))
+    reads = _Reads(T0 + 60,
+                   n01=[[_link("n01", "n02", "a4bfa56b", "8cb13a9d", "outbound")]],
+                   n02=[[_link("n02", "n01", "8cb13a9d", "a4bfa56b", "inbound"),
+                         _link("n02", "n03", "11aa22bb", "33cc44dd", "outbound")]],
+                   n03=[[_link("n03", "n02", "5d0e11c2", "11aa22bb", "inbound")],
+                        [_link("n03", "n02", "33cc44dd", "11aa22bb", "inbound")]])
+    out = _readrun(r, reads)
+    return out.passed and reads.count == {"n01": 1, "n02": 2, "n03": 2}
+
+
+@case("the read: an edge that agreed keeps its round's rows when one end is re-read "
+      "for another edge mid-rekey", True)
+def _():
+    # n01-n02 agrees in round 1. n01 is re-read in round 2 for n01-n03, and by
+    # then a rekey of n01-n02 has moved n01's side of that pair.
+    r = _agreement_runner(("n01", "n02", "udp"), ("n01", "n03", "udp"))
+    reads = _Reads(T0 + 60,
+                   n01=[[_link("n01", "n02", "a4bfa56b", "8cb13a9d", "outbound"),
+                         _link("n01", "n03", "11aa22bb", "33cc44dd", "outbound")],
+                        [_link("n01", "n02", "77e0c1d4", "8cb13a9d", "outbound",
+                               rekey_in_progress=True),
+                         _link("n01", "n03", "11aa22bb", "33cc44dd", "outbound")]],
+                   n02=[[_link("n02", "n01", "8cb13a9d", "a4bfa56b", "inbound")]],
+                   n03=[[_link("n03", "n01", "5d0e11c2", "11aa22bb", "inbound")],
+                        [_link("n03", "n01", "33cc44dd", "11aa22bb", "inbound")]])
+    out = _readrun(r, reads)
+    first = r.agreement_judged[0]
+    return (out.passed and first.edge.key == ("n01", "n02")
+            and first.row_a["our_session_index"] == "a4bfa56b"
+            and reads.count["n01"] == 2)
+
+
+@case("the runner scores the crossings the logs show: both ends inbound after a crossing "
+      "fails at direction and crossing", True)
+def _():
+    import shutil
+
+    r = _agreement_runner(("n01", "n02", "udp"), rust_log="debug",
+                          outbound={"n01": ["n02"], "n02": ["n01"]})
+    reads = _Reads(T0 + 60,
+                   n01=[[_link("n01", "n02", "9bcbbe9b", "225ac706", "inbound")]],
+                   n02=[[_link("n02", "n01", "225ac706", "9bcbbe9b", "inbound")]])
+    try:
+        r._readedges(read=reads.read, clock=reads.clock, sleep=reads.sleep)
+        r.assertion_outcomes = []
+        r._scoreagreement({f"fips-node-{n}": "\n".join(lines) for n, lines in _CROSSED.items()})
+        out = r.assertion_outcomes[0]
+    finally:
+        shutil.rmtree(r.output_dir, ignore_errors=True)
+    return (not out.passed and _scored(out) == ["direction, crossing"]
+            and "1 edge(s) with a crossed record" in out.detail)
+
+
+@case("the runner gives each edge its dialers from directed_outbound read both ways, "
+      "and a both-dial edge whose second end dialed outbound passes", True)
+def _():
+    # n01-n02 is listed from both ends, n02-n03 from n02 alone, n01-n03 is
+    # Ethernet and listed by neither. On the both-dial edge n01 holds the
+    # larger address and is inbound, so naming n01 its one dialer, as the
+    # lanes' idiom would, fails it at the dialer clause.
+    r = _agreement_runner(("n01", "n02", "udp"), ("n02", "n03", "udp"),
+                          ("n01", "n03", "ethernet"),
+                          outbound={"n01": ["n02"], "n02": ["n01", "n03"], "n03": []})
+    reads = _Reads(T0 + 60,
+                   n01=[[_link("n01", "n02", "9bcbbe9b", "225ac706", "inbound"),
+                         _row("n03", "d3c3f31f", "a5f97614", "outbound", "ethernet",
+                              "aa:96:55:43:75:c0")]],
+                   n02=[[_link("n02", "n01", "225ac706", "9bcbbe9b", "outbound",
+                               node_addr=_N01_LARGER),
+                         _link("n02", "n03", "11aa22bb", "33cc44dd", "outbound")]],
+                   n03=[[_link("n03", "n02", "33cc44dd", "11aa22bb", "inbound"),
+                         _row("n01", "a5f97614", "d3c3f31f", "inbound", "ethernet",
+                              "4e:ad:52:d7:a0:6c")]])
+    dialers = {e.key: e.dialers for e in r._agreementedges()}
+    out = _readrun(r, reads)
+    return out.passed and dialers == {
+        ("n01", "n02"): frozenset({"n01", "n02"}),
+        ("n02", "n03"): frozenset({"n02"}),
+        ("n01", "n03"): frozenset(),
+    }
+
+
+@case("the runner fails a declared edge_agreement whose read never ran", True)
+def _():
+    import shutil
+
+    r = _agreement_runner(("n01", "n02", "udp"))
+    shutil.rmtree(r.output_dir, ignore_errors=True)
+    r.assertion_outcomes = []
+    r._scoreagreement({})
+    out = r.assertion_outcomes[0]
+    return not out.passed and "never read" in out.detail
+
+
+@case("the read writes each node's last listing to peers-final.json", True)
+def _():
+    import json
+    import shutil
+
+    r = _agreement_runner(("n01", "n02", "udp"))
+    reads = _Reads(T0 + 60,
+                   n01=[[_link("n01", "n02", "a4bfa56b", "8cb13a9d", "outbound")]],
+                   n02=[None])
+    try:
+        r._readedges(read=reads.read, clock=reads.clock, sleep=reads.sleep)
+        with open(os.path.join(r.output_dir, "peers-final.json")) as f:
+            got = json.load(f)
+    finally:
+        shutil.rmtree(r.output_dir, ignore_errors=True)
+    return set(got) == {"n01", "n02"} and got["n02"] is None and len(got["n01"]) == 1
+
+
+def _agreement_scenario(rust_log: str, **block) -> str:
+    """A two-node explicit scenario carrying edge_agreement, as YAML."""
+    body = ", ".join(f"{k}: {v}" for k, v in block.items())
+    return (
+        "scenario: {name: agree, duration_secs: 60}\n"
+        "topology:\n  num_nodes: 2\n  algorithm: explicit\n"
+        "  params: {adjacency: [[n01, n02, udp]]}\n"
+        f"assertions:\n  edge_agreement: {{{body}}}\n"
+        f"logging: {{rust_log: \"{rust_log}\"}}\n"
+    )
+
+
+def _agreement_refused(text: str) -> bool:
+    """True when loading refuses ``text`` for its edge_agreement block."""
+    try:
+        _scenario(text)
+    except ValueError as e:
+        return "edge_agreement" in str(e)
+    return False
+
+
+@case("edge_agreement loads with its bound and floor and logs crossings at debug", True)
+def _():
+    text = _agreement_scenario("debug", within_secs=90, min_crossings=2)
+    ea = _scenario(text).assertions.edge_agreement
+    return (ea.within_secs, ea.min_crossings, ea.crossings_logged) == (90, 2, True)
+
+
+@case("edge_agreement refuses an unknown key", True)
+def _():
+    return _agreement_refused(_agreement_scenario("debug", min_crossing=2))
+
+
+@case("min_crossings 2 at rust_log info is refused at load", True)
+def _():
+    return _agreement_refused(_agreement_scenario("info", min_crossings=2))
+
+
+@case("min_crossings 2 with only the handshake target at debug is refused at load", True)
+def _():
+    return _agreement_refused(
+        _agreement_scenario("fips::node::handlers::handshake=debug", min_crossings=2))
+
+
+@case("min_crossings 2 at debug with fips::node at info is refused at load", True)
+def _():
+    return _agreement_refused(_agreement_scenario("debug,fips::node=info", min_crossings=2))
+
+
+@case("edge_agreement with no floor loads at rust_log info", True)
+def _():
+    ea = _scenario(_agreement_scenario("info")).assertions.edge_agreement
+    return ea is not None and ea.min_crossings == 0 and not ea.crossings_logged
+
+
+def _transport_scenario(topology: str, agreement: bool = True) -> str:
+    """A three-node scenario whose ``topology`` lines name its transports."""
+    return (
+        "scenario: {name: agree, duration_secs: 60}\n"
+        f"topology:\n  num_nodes: 3\n{topology}"
+        + ("assertions:\n  edge_agreement: {}\n" if agreement else "")
+    )
+
+
+_REFUSED_TOPOLOGIES = {
+    "an explicit udp-veth edge":
+        "  algorithm: explicit\n  params: {adjacency: [[n01, n02, udp-veth], [n02, n03, udp]]}\n",
+    "an explicit ethernet+udp edge":
+        "  algorithm: explicit\n  params: {adjacency: [[n01, n02, ethernet+udp], [n02, n03]]}\n",
+    "an explicit udp-veth+udp edge":
+        "  algorithm: explicit\n  params: {adjacency: [[n01, n02, udp-veth+udp], [n02, n03]]}\n",
+    "udp-veth in transport_mix":
+        "  algorithm: chain\n  transport_mix: {udp: 0.5, udp-veth: 0.5}\n",
+    "udp-veth as default_transport":
+        "  algorithm: chain\n  default_transport: udp-veth\n",
+}
+
+for _what, _topology_text in _REFUSED_TOPOLOGIES.items():
+    @case(f"edge_agreement on a scenario with {_what} is refused at load", True)
+    def _(text=_topology_text):
+        _scenario(_transport_scenario(text, agreement=False))   # loads without it
+        return _agreement_refused(_transport_scenario(text))
+
+
+@case("edge_agreement with peer_churn is refused at load", True)
+def _():
+    return _agreement_refused(
+        _transport_scenario("  algorithm: chain\n")
+        + "peer_churn: {enabled: true, interval_secs: {min: 30, max: 60}}\n"
     )
 
 
