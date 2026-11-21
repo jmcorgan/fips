@@ -1829,6 +1829,14 @@ impl Node {
     /// Initializes the TUN interface (if configured), spawns I/O threads,
     /// and transitions to the Running state.
     pub async fn start(&mut self) -> Result<(), NodeError> {
+        // A chaos break run looks for this line to know its image carries
+        // the switches, and which ones it was started with; a run on an
+        // image built without the feature has none.
+        #[cfg(feature = "test-hooks")]
+        warn!(
+            faults = %std::env::var(fips_core::faults::VAR).unwrap_or_default(),
+            "Test hooks compiled in"
+        );
         if !self.supervisor.state.can_start() {
             return Err(NodeError::AlreadyStarted);
         }

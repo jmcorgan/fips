@@ -10,18 +10,21 @@
 extern crate alloc;
 
 /// Whether the mutation lane's switch `$f` is on (`fips_core::faults`, read
-/// from `FIPS_NODE_FAULTS`). Outside test builds it is the literal `false`,
-/// so production code has no switch to turn and the branch it guards
-/// compiles away. Defined before the modules so every one of them sees it.
-#[cfg(test)]
+/// from `FIPS_NODE_FAULTS`). Outside test builds and the `test-hooks`
+/// feature it is the literal `false`, so production code has no switch to
+/// turn and the branch it guards compiles away. The feature is for the chaos
+/// break image alone. Defined before the modules so every one of them sees
+/// it.
+#[cfg(any(test, feature = "test-hooks"))]
 macro_rules! node_fault {
     ($f:ident) => {
         fips_core::faults::on(fips_core::faults::Fault::$f)
     };
 }
 
-/// Outside test builds no break can be switched on.
-#[cfg(not(test))]
+/// Outside test builds and the `test-hooks` feature no break can be
+/// switched on.
+#[cfg(not(any(test, feature = "test-hooks")))]
 macro_rules! node_fault {
     ($f:ident) => {
         false

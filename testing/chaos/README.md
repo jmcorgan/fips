@@ -452,9 +452,22 @@ the final snapshot (`_readedges`): every node once, then, every 3 s until
 `within_secs`, both ends of each edge that does not agree yet. Each edge is
 scored on the two rows of the round in which it agreed, or of its last
 round, so a node re-read for one edge does not change the rows another edge
-already agreed on. Each node's last listing is kept in `peers-final.json`.
-After the logs are collected the runner reads the crossings from them and
-gives the verdict.
+already agreed on. A pair fault on an edge scored on its last round counts
+only when it persists across two reads at least 2 s apart (`pair_unsure`,
+`confirm_pair`). Where the round before also showed the pair apart, or did
+not observe it, the fault stands. Where that round had both ends on one
+pair, or there was none, both ends are read once more 3 s later, past the
+bound if need be, and the fault stands if that read shows the pair apart too
+or observes no pair, and is dropped if it shows both ends on one pair. A
+node serves `show_peers` from a snapshot it publishes on its 1 s tick, so a
+row lags the node's own rekey cutover by up to about 1.06 s (measured on
+tcp-mesh, 2026-11-21), and one read can catch one end on the new pair and
+the other on the old; an edge that never agrees, as a crossed edge does
+under the agreement break, is scored on its last round, which can fall
+inside a rekey. The edge keeps the round and the other faults it was scored
+on. Each node's last listing is kept in `peers-final.json`. After the logs
+are collected the runner reads the crossings from them and gives the
+verdict.
 
 ```yaml
 assertions:
@@ -473,21 +486,26 @@ Ethernet each row's IP is the other node's Docker address (the port is not
 compared: an inbound TCP row names an ephemeral one). A node that gives no
 listing fails its edges as observed nothing, and a row without
 `their_session_index` fails as an image that predates the field. The
-crossing clause is judged from the logs (`edge_crossings`): every
-"swapped to outbound session" line is classed by what the far end logged
-naming the swapping node within 30 s, `crossed` for keeping its inbound
-session, `rekey` for losing a dual rekey initiation (a re-dial the far end
-answered as a rekey, which the same swap line ends), `unpaired` for
-neither. On an edge with a `crossed` record before its scored round, and no
-later promotion of the peer at the swapping end before that round, nor an
-adoption there of a rekey answer sent on the connection the peer's msg1
-arrived on (which holds the link as the peer's dial), the smaller node by
-`node_addr` must be `outbound`. `rekey` and `unpaired`
-records are listed with their lines and neither scored nor counted.
-`min_crossings` counts edges with a `crossed` record, and below it the run
-fails as the crossing clause having observed nothing. A failing edge's line
-names its clauses in brackets (`n01-n02 udp [direction, crossing] scored
-at ...`), then each fault and both rows.
+crossing clause is judged from the logs (`edge_crossings`): every "swapped
+to outbound session" line is classed by what the far end logged naming the
+swapping node within 30 s: `crossed` for keeping its inbound session,
+`rekey` for losing a dual rekey initiation (a re-dial the far end answered
+as a rekey, which the same swap line ends), `crossed` again for neither of
+those but a promotion of the swap's own handshake (its `epoch=`) as
+`inbound`, and `unpaired` for none. The far end logs that promotion with no
+keeping line when its own dial was promoted first, as after a flap on
+tcp-mesh's TCP edge: it answers the other dial into a pending redial and
+moves onto it, which leaves both ends on the swapping node's dial as a kept
+crossing does. On an edge with a `crossed` record before its scored round,
+and no later promotion of the peer at the swapping end before that round,
+nor an adoption there of a rekey answer sent on the connection the peer's
+msg1 arrived on (which holds the link as the peer's dial), the smaller node
+by `node_addr` must be `outbound`. `rekey` and `unpaired` records are listed
+with their lines and neither scored nor counted. `min_crossings` counts
+edges with a `crossed` record, and below it the run fails as the crossing
+clause having observed nothing. A failing edge's line names its clauses in
+brackets (`n01-n02 udp [direction, crossing] scored at ...`), then each
+fault and both rows.
 
 Loading refuses the block on a topology that names `udp-veth`,
 `ethernet+udp` or `udp-veth+udp` (explicitly, in `transport_mix` or as
@@ -803,6 +821,64 @@ CPU count of the host that runs it. Either variable set in the environment
 value that is not a whole number stops the run. `sim-compose-test.py`
 renders the compose file for every scenario and fails when a node is not
 given both counts. Both CI runners run it as a guard.
+
+## The agreement break lane
+
+`agreement-break.sh` shows that the `edge_agreement` assertion catches the
+defect it is there for. It builds a chaos image whose node switches
+(`node_fault!`, `core/src/faults.rs`) can be turned on: `fips` built with
+`--profile chaos-break --features test-overrides,test-hooks`, in a copy of
+the run's build context (`FIPS_BUILD_CONTEXT`, default `testing/docker`)
+with only that binary replaced, tagged `$FIPS_TEST_IMAGE-break`. It then runs
+the scenario at `BREAK_SCENARIO` (default `scenarios/tcp-mesh.yaml`) on that
+image twice at once, once with `FIPS_NODE_FAULTS` set to `BREAK_SWITCH`
+(default `MoveKeepsInboundLink`, a crossed dial's move leaving the peer on
+the link it was held on, so both ends list the edge inbound) and once with
+no switch, each under its own name suffix, and judges both:
+
+| Run | Must show, or the lane fails |
+| --- | --- |
+| Switch | sim exit 3; `FAIL edge_agreement` with every failing edge red at direction and crossing together, each such edge holding a `crossed` record, at least one of them, every edge holding a `crossed` record before its read and listed with no end among them, and no other clause, edge, harness or floor line; every other assertion `PASS`; every node's log has `Test hooks compiled in faults=<BREAK_SWITCH>` |
+| No switch | sim exit 0, `PASS edge_agreement`, every other assertion `PASS`; every node's log has the line with an empty value |
+
+Direction with crossing is one reason, not two: the switch leaves both ends
+of a crossed edge inbound, so its smaller end is inbound after the crossing
+as well. Direction alone on a crossed edge (both ends outbound, the shape
+`next` leaves), crossing alone, or any clause on an edge with no `crossed`
+record is a red for another reason. The startup line is what tells the break
+image from the integration image, which already carries `fips-core`'s hooks,
+so the switch variable's name in a binary cannot. A `crossed` record listed
+with an end does not oblige its edge to red, even where the promotion that
+ended it came after the read, since the verdict gives no read time for an
+edge that agreed. A pair fault in the verdict has held across two reads at
+least 2 s apart (`_readedges`, above), so it is a split and not a row read
+inside a rekey's cutover, and beside direction and crossing it is a red for
+another reason.
+
+Exit 0 when both rows hold. Exit 1 for a miss, named with the run, the edge
+and the clause: a guard that guards nothing, or a red for another reason.
+Exit 2 when nothing could be established: a run `NOT SCORED` or aborted, a
+scenario with no `edge_agreement`, an image that did not build. With
+`BREAK_SWITCH` set empty only the no-switch run is made, and the lane cannot
+pass: exit 2 when that run is green, since a guard not exercised has not
+passed, and exit 1 when it is red. Results go to `FIPS_SIM_OUTPUT`, by default
+`sim-results/agreement-break<suffix>-<time>/`, with a `healthy/` and a
+`switch/` directory each holding `sim.exit`, `sim.out` and the sim's own
+result directory; the image and the context copy are removed at the end.
+
+`agreement-break.sh --judge <dir>` judges a results directory alone, and
+`testing/lib/agreement-break-test.sh` runs it on planted directories, one per
+outcome, with no container. Local CI runs the lane as its `agreement-break`
+suite, after the chaos scenarios and skipped with them, with the defaults
+above (`testing/ci-local.sh --only agreement-break` runs it alone); GitHub
+CI runs the assertion in the scenarios and not the lane.
+
+The sim passes `FIPS_NODE_FAULTS` to every node when it is set in the sim's
+own environment, and nothing when it is not (`sim/compose.py`). Only the
+break image reads the root crate's switches; on any other image a set value
+reaches at most `fips-core`'s, with no startup line to say so, so a run that
+sets it belongs on the break image. A value naming no switch panics the node
+the first time it reads a switch (`fips_core::faults::load`).
 
 ## Creating Custom Scenarios
 

@@ -2133,6 +2133,49 @@ case("loading refuses {dial: both} with node churn", False)(
     lambda: _loadsboth("netem: {enabled: true}\nnode_churn: {enabled: true}"))
 
 
+# --- the node switches a break run sets ------------------------------------------
+
+def _compose_env(faults: str | None) -> dict[str, list[str]]:
+    """Each service's environment in the compose file the sim writes with
+    ``FIPS_NODE_FAULTS`` set to ``faults`` in its own environment, or unset."""
+    import random
+    import tempfile
+
+    import yaml
+    from sim.compose import generate_compose
+    from sim.topology import generate_topology
+
+    scen = _scenario(SCHEDULED)
+    topo = generate_topology(scen.topology, random.Random(1), "selftest")
+    saved = os.environ.pop("FIPS_NODE_FAULTS", None)
+    try:
+        if faults is not None:
+            os.environ["FIPS_NODE_FAULTS"] = faults
+        with tempfile.TemporaryDirectory() as out:
+            with open(generate_compose(topo, scen, out, "selftest-net")) as f:
+                doc = yaml.safe_load(f)
+    finally:
+        os.environ.pop("FIPS_NODE_FAULTS", None)
+        if saved is not None:
+            os.environ["FIPS_NODE_FAULTS"] = saved
+    return {name: svc["environment"] for name, svc in doc["services"].items()}
+
+
+@case("the sim passes FIPS_NODE_FAULTS to every node when it is given one", True)
+def _():
+    env = _compose_env("MoveKeepsInboundLink")
+    return (sorted(env) == ["n01", "n02"]
+            and all("FIPS_NODE_FAULTS=MoveKeepsInboundLink" in e for e in env.values()))
+
+
+@case("the sim passes no FIPS_NODE_FAULTS to any node when it has none", True)
+def _():
+    env = _compose_env(None)
+    return (sorted(env) == ["n01", "n02"]
+            and not any(v.startswith("FIPS_NODE_FAULTS") for e in env.values() for v in e)
+            and all("FIPS_TEST_MODE=chaos" in e for e in env.values()))
+
+
 # --- schedule ----------------------------------------------------------------
 
 SCHEDULED = """
@@ -3323,14 +3366,14 @@ def _topology(*edges: tuple[str, str, str], npubs: dict | None = None):
     return t
 
 
-def _swapped(t: float, peer: str) -> str:
+def _swapped(t: float, peer: str, epoch: str = "7d1e44b0") -> str:
     """A "swapped to outbound session" line at ``t`` naming ``peer``, in the
-    form the node writes it."""
+    form the node writes it, for the handshake ``epoch``."""
     return (
         f"{stamp(t)} DEBUG fips::node::settle::exec::cross: Cross-connection: swapped "
         f"to outbound session (our outbound wins) peer={peer} new_our_index=9bcbbe9b "
         f"new_their_index=225ac706 transport_id=transport:1 "
-        f"remote_addr=10.30.4.11:2121 msg1_sidx=9bcbbe9b msg1_dg=3f0c2a91 epoch=7d1e44b0"
+        f"remote_addr=10.30.4.11:2121 msg1_sidx=9bcbbe9b msg1_dg=3f0c2a91 epoch={epoch}"
     )
 
 
@@ -3362,13 +3405,15 @@ def _installed(t: float, peer: str) -> str:
             f"peer={peer}")
 
 
-def _connected(t: float, peer: str, direction: str = "inbound") -> str:
-    """A "Connection promoted to active peer" line at ``t``."""
+def _connected(t: float, peer: str, direction: str = "inbound",
+               epoch: str = "5f0e93c4") -> str:
+    """A "Connection promoted to active peer" line at ``t``, for the
+    handshake ``epoch`` (by default not the planted swap's)."""
     return (
         f"{stamp(t)} DEBUG fips::node::handlers::handshake: Connection promoted to "
         f"active peer peer={peer} link_id=4 our_index=5755bfa8 their_index=2adc7214 "
         f"transport_id=transport:1 remote_addr=10.30.4.11:2121 direction={direction} "
-        f"msg1_sidx=5755bfa8 msg1_dg=3f0c2a91 epoch=7d1e44b0"
+        f"msg1_sidx=5755bfa8 msg1_dg=3f0c2a91 epoch={epoch}"
     )
 
 
@@ -3508,6 +3553,91 @@ def _():
     logs = {"fips-node-n01": _swapped(T0, "n02"), "fips-node-n03": _kept(T0, "n01")}
     c = A.edge_crossings(logs, _topology(("n01", "n02", "udp"), ("n01", "n03", "udp")))
     return not c.errors and [r.kind for r in c.edges[("n01", "n02")]] == ["unpaired"]
+
+
+@case("a swap whose far end promoted the swap's own handshake as inbound, with no "
+      "keeping line, is a crossed record", True)
+def _():
+    took = _connected(T0 + 1, "n01", epoch="7d1e44b0")
+    c = _crossings(n01=[_swapped(T0, "n02")], n02=[took])
+    recs = c.edges.get(("n01", "n02"), [])
+    return (not c.errors and [r.kind for r in recs] == ["crossed"] and recs[0].far == took
+            and recs[0].ended is None)
+
+
+@case("a far-end promotion of another handshake leaves the swap unpaired", True)
+def _():
+    c = _crossings(n01=[_swapped(T0, "n02")], n02=[_connected(T0 + 1, "n01")])
+    return [r.kind for r in c.edges[("n01", "n02")]] == ["unpaired"]
+
+
+@case("a far-end promotion of the swap's handshake as outbound leaves the swap unpaired",
+      True)
+def _():
+    c = _crossings(n01=[_swapped(T0, "n02")],
+                   n02=[_connected(T0 + 1, "n01", "outbound", epoch="7d1e44b0")])
+    return [r.kind for r in c.edges[("n01", "n02")]] == ["unpaired"]
+
+
+@case("a far-end promotion of the swap's handshake 31 s away leaves the swap unpaired", True)
+def _():
+    c = _crossings(n01=[_swapped(T0, "n02")],
+                   n02=[_connected(T0 + 31, "n01", epoch="7d1e44b0")])
+    return [r.kind for r in c.edges[("n01", "n02")]] == ["unpaired"]
+
+
+@case("a far-end promotion of the swap's handshake does not outrank a rekey answer", True)
+def _():
+    rekey = (f"{stamp(T0 - 0.01)} DEBUG fips::node::handlers::handshake: Dual rekey "
+             f"initiation: we lose (larger addr), abandoning ours peer=n01")
+    c = _crossings(n01=[_swapped(T0, "n02")],
+                   n02=[rekey, _connected(T0 + 1, "n01", epoch="7d1e44b0")])
+    return [r.kind for r in c.edges[("n01", "n02")]] == ["rekey"]
+
+
+# A second crossing on tcp-mesh's n01-n04 after its link flapped (sim-results
+# ci-agreement-break-790aeedad-793212605, multipath off, 2026-11-21): n04's
+# own dial was promoted before n01's msg1 arrived, so n04 answered that msg1
+# into a pending redial and moved onto it a second later, logging no keeping
+# line. The lines are n01's and n04's as logged.
+_REDIAL_ANSWERED = {
+    "n01": [
+        "2026-11-21T15:41:26.926342Z DEBUG fips::node::handlers::handshake: Connection "
+        "promoted to active peer peer=n04 link_id=link:9 our_index=6ad85bd7 "
+        "their_index=a28145d4 transport_id=transport:2 remote_addr=10.30.0.13:36156 "
+        "direction=inbound msg1_sidx=a28145d4 msg1_dg=ef382b8a epoch=f8732543",
+        "2026-11-21T15:41:26.965584Z DEBUG fips::node::settle::exec::cross: "
+        "Cross-connection: swapped to outbound session (our outbound wins) peer=n04 "
+        "new_our_index=5f7472a2 new_their_index=6b0b8c4c transport_id=transport:2 "
+        "remote_addr=10.30.0.13:443 msg1_sidx=5f7472a2 msg1_dg=b7d50294 epoch=70d8b91e",
+    ],
+    "n04": [
+        "2026-11-21T15:41:26.930634Z DEBUG fips::node::handlers::handshake: Connection "
+        "promoted to active peer peer=n01 link_id=link:6 our_index=a28145d4 "
+        "their_index=6ad85bd7 transport_id=transport:1 remote_addr=10.30.0.10:443 "
+        "direction=outbound msg1_sidx=a28145d4 msg1_dg=ef382b8a epoch=f8732543",
+        "2026-11-21T15:41:26.956447Z DEBUG fips::node::handlers::redial: Same-epoch msg1 "
+        "off the established link, answered into a pending redial peer=n01 link_id=link:7 "
+        "our_index=6b0b8c4c transport_id=transport:1 remote_addr=10.30.0.10:60908",
+        "2026-11-21T15:41:27.956284Z DEBUG fips::node::handlers::redial: Redial proven by "
+        "the peer's frame, replacing the peering peer=n01 link_id=link:7",
+        "2026-11-21T15:41:27.956478Z DEBUG fips::node::handlers::handshake: Connection "
+        "promoted to active peer peer=n01 link_id=link:7 our_index=6b0b8c4c "
+        "their_index=5f7472a2 transport_id=transport:1 remote_addr=10.30.0.10:60908 "
+        "direction=inbound msg1_sidx=5f7472a2 msg1_dg=b7d50294 epoch=70d8b91e",
+    ],
+}
+
+
+@case("the logged swap n04 answered as a redial is a crossed record, paired with n04's "
+      "promotion of its handshake", True)
+def _():
+    logs = {f"fips-node-{n}": "\n".join(lines) for n, lines in _REDIAL_ANSWERED.items()}
+    c = A.edge_crossings(logs, _topology(("n01", "n04", "tcp")))
+    recs = c.edges.get(("n01", "n04"), [])
+    return (not c.errors and [(r.end, r.kind) for r in recs] == [("n01", "crossed")]
+            and "epoch=70d8b91e" in recs[0].far and "direction=inbound" in recs[0].far
+            and recs[0].ended is None)
 
 
 @case("a swap naming its peer by alias and by short npub both resolve to the edge", True)
@@ -3814,15 +3944,15 @@ def _link(x: str, y: str, our: str, their: str, direction: str,
 
 
 def _agreement_runner(*edges: tuple[str, str, str], outbound: dict | None = None,
-                      rust_log: str = "info"):
+                      rust_log: str = "info", **block):
     """A runner over a planted topology whose scenario declares
-    edge_agreement at ``rust_log``; ``outbound`` replaces the topology's
-    ``directed_outbound()``."""
+    edge_agreement at ``rust_log`` with ``block``'s keys; ``outbound``
+    replaces the topology's ``directed_outbound()``."""
     import tempfile
 
     from sim import runner as R
 
-    r = R.SimRunner(_scenario(_agreement_scenario(rust_log)))
+    r = R.SimRunner(_scenario(_agreement_scenario(rust_log, **block)))
     r.topology = _topology(*edges)
     if outbound is not None:
         r.topology.directed_outbound = lambda: {n: list(p) for n, p in outbound.items()}
@@ -3858,16 +3988,229 @@ def _():
     return out.passed and j.faults == [] and j.at > T0 + 63 and reads.count["n02"] == 2
 
 
-@case("the read: an edge apart at every read fails at the bound, read no longer "
-      "than the bound", True)
+# n01-n02 dialed by n01, with n02 on another pair (SPLIT) or on n01's (JOINED).
+_ONEWAY = [_link("n01", "n02", "a4bfa56b", "8cb13a9d", "outbound")]
+_SPLIT = [_link("n02", "n01", "5d0e11c2", "a4bfa56b", "inbound")]
+_JOINED = [_link("n02", "n01", "8cb13a9d", "a4bfa56b", "inbound")]
+
+
+@case("the read: an edge apart at every read fails at the bound, read no longer than "
+      "the bound, since a pair apart at two rounds needs no read to confirm it", True)
 def _():
     r = _agreement_runner(("n01", "n02", "udp"))
-    reads = _Reads(T0 + 60,
-                   n01=[[_link("n01", "n02", "a4bfa56b", "8cb13a9d", "outbound")]],
-                   n02=[[_link("n02", "n01", "5d0e11c2", "a4bfa56b", "inbound")]])
+    reads = _Reads(T0 + 60, n01=[_ONEWAY], n02=[_SPLIT])
     out = _readrun(r, reads)
+    j = r.agreement_judged[0]
     return (not out.passed and _scored(out) == ["pair"] and "no rekey flag set" in out.detail
-            and 20 <= reads.count["n02"] <= 31 and reads.t <= T0 + 60 + 90 + 1)
+            and 20 <= reads.count["n02"] <= 31 and j.at <= T0 + 60 + 90
+            and reads.t <= T0 + 60 + 90 + 1)
+
+
+@case("the read: an edge apart at every read within the bound and together only at the "
+      "read after it fails at pair", True)
+def _():
+    # n02 is read 27 times within 90 s; the 28th listing would agree.
+    r = _agreement_runner(("n01", "n02", "udp"))
+    reads = _Reads(T0 + 60, n01=[_ONEWAY], n02=[_SPLIT] * 27 + [_JOINED])
+    out = _readrun(r, reads)
+    return (not out.passed and _scored(out) == ["pair"] and reads.count["n02"] == 27
+            and "agree within" not in out.detail)
+
+
+# Both ends of n01-n02 inbound after a crossing, as the crossed-dial switch
+# leaves it, with n02 rekeyed: n02 lists the new pair, and n01 the new pair
+# (TOGETHER) or still the old one (APART), as a row read inside a tick of
+# the cutover does.
+_REKEYED = [_link("n02", "n01", "7c41d0e2", "3be09a15", "inbound", rekey_draining=True)]
+_TOGETHER = [_link("n01", "n02", "3be09a15", "7c41d0e2", "inbound")]
+_APART = [_link("n01", "n02", "9bcbbe9b", "225ac706", "inbound")]
+
+
+def _confirmrun(n01: list, n02: list | None = None, logs: dict | None = None, **block):
+    """``_readedges`` and the score on n01-n02, dialed from both ends and
+    crossed (``logs``, by default ``_CROSSED``), read from ``n01``'s and
+    ``n02``'s planted listings at debug: the outcome, the edge as scored,
+    and the reads."""
+    import shutil
+
+    r = _agreement_runner(("n01", "n02", "udp"), rust_log="debug",
+                          outbound={"n01": ["n02"], "n02": ["n01"]}, **block)
+    reads = _Reads(T0 + 60, n01=n01, n02=n02 or [_REKEYED])
+    try:
+        r._readedges(read=reads.read, clock=reads.clock, sleep=reads.sleep)
+        r.assertion_outcomes = []
+        r._scoreagreement({f"fips-node-{n}": "\n".join(lines)
+                           for n, lines in (logs or _CROSSED).items()})
+        return r.assertion_outcomes[0], r.agreement_judged[0], reads
+    finally:
+        shutil.rmtree(r.output_dir, ignore_errors=True)
+
+
+@case("the read: a pair apart at an edge's last read and together at the read that "
+      "confirms it is not a fault, and the edge is scored on its last round", True)
+def _():
+    out, j, reads = _confirmrun([_APART, _TOGETHER], within_secs=1)
+    return (not out.passed and _scored(out) == ["direction, crossing"]
+            and "pair:" not in out.detail and j.at < T0 + 61
+            and j.row_a["our_session_index"] == "9bcbbe9b" and reads.count["n01"] == 2)
+
+
+@case("the read: a pair apart at an edge's last read and still apart at the read that "
+      "confirms it fails at pair", True)
+def _():
+    out, _j, reads = _confirmrun([_APART, _APART], within_secs=1)
+    return (_scored(out) == ["pair, direction, crossing"] and "rekey_draining" in out.detail
+            and reads.count["n01"] == 2)
+
+
+@case("the read: a pair apart at an edge's last read keeps its fault when the read that "
+      "would confirm it gets no listing", True)
+def _():
+    out, _j, _reads = _confirmrun([_APART, None], within_secs=1)
+    return _scored(out) == ["pair, direction, crossing"]
+
+
+@case("the read: a pair apart at the last read within the full bound, after reads "
+      "that had it together, is not a fault when the next read has it together", True)
+def _():
+    # Within 90 s the edge is read 27 times (0.4 s a round, then 3.4 s each),
+    # so n01's 27th listing is the last one scored and its 28th confirms.
+    out, j, reads = _confirmrun([_TOGETHER] * 26 + [_APART, _TOGETHER])
+    return (reads.count["n01"] == 28 and j.row_a["our_session_index"] == "9bcbbe9b"
+            and _scored(out) == ["direction, crossing"] and "pair:" not in out.detail)
+
+
+@case("the read: a crossed edge's pair apart at every read within the bound and together "
+      "only at the read after it fails at pair beside direction and crossing", True)
+def _():
+    out, _j, reads = _confirmrun([_APART] * 27 + [_TOGETHER])
+    return _scored(out) == ["pair, direction, crossing"] and reads.count["n01"] == 27
+
+
+@case("the read: an edge failing without a pair fault gets no read to confirm one", True)
+def _():
+    out, _j, reads = _confirmrun([_TOGETHER], within_secs=1)
+    return _scored(out) == ["direction, crossing"] and reads.count["n01"] == 1
+
+
+def _pairjudged(n01: list | None, at: float) -> A.Judged:
+    """n01-n02, dialed from both ends, judged on n01's listing ``n01`` and
+    n02's ``_REKEYED`` read at ``at``."""
+    return A.judge(_edge("n01", "n02", dialers=("n01", "n02")), n01, _REKEYED, at)
+
+
+@case("confirm_pair drops a pair fault that a read 2 s later has together, and keeps "
+      "the edge's other faults and round", True)
+def _():
+    j = A.confirm_pair(_pairjudged(_APART, T0), _pairjudged(_TOGETHER, T0 + 2))
+    return _clauses(j.faults) == ["direction"] and j.at == T0
+
+
+@case("confirm_pair keeps a pair fault that a read 2 s later still has apart", True)
+def _():
+    j = A.confirm_pair(_pairjudged(_APART, T0), _pairjudged(_APART, T0 + 2))
+    return _clauses(j.faults) == ["pair", "direction"]
+
+
+@case("confirm_pair keeps a pair fault that a read under 2 s later has together", True)
+def _():
+    j = A.confirm_pair(_pairjudged(_APART, T0), _pairjudged(_TOGETHER, T0 + 1.9))
+    return _clauses(j.faults) == ["pair", "direction"]
+
+
+@case("confirm_pair keeps a pair fault when the later read observed no pair", True)
+def _():
+    first = _pairjudged(_APART, T0)
+    return all(_clauses(A.confirm_pair(first, again).faults) == ["pair", "direction"]
+               for again in (_pairjudged(None, T0 + 3), _pairjudged([], T0 + 3)))
+
+
+@case("confirm_pair keeps a pair fault the round before also had apart, even when a "
+      "read 2 s later has it together", True)
+def _():
+    j = A.confirm_pair(_pairjudged(_APART, T0), _pairjudged(_TOGETHER, T0 + 3),
+                       _pairjudged(_APART, T0 - 3.4))
+    return _clauses(j.faults) == ["pair", "direction"]
+
+
+@case("confirm_pair keeps a pair fault when the round before observed no pair", True)
+def _():
+    later = _pairjudged(_TOGETHER, T0 + 3)
+    return all(_clauses(A.confirm_pair(_pairjudged(_APART, T0), later, before).faults)
+               == ["pair", "direction"]
+               for before in (_pairjudged(None, T0 - 3.4), _pairjudged([], T0 - 3.4)))
+
+
+@case("confirm_pair drops a pair fault the round before had together and a read 2 s "
+      "later has together", True)
+def _():
+    j = A.confirm_pair(_pairjudged(_APART, T0), _pairjudged(_TOGETHER, T0 + 2),
+                       _pairjudged(_TOGETHER, T0 - 3.4))
+    return _clauses(j.faults) == ["direction"]
+
+
+@case("pair_unsure asks for a confirming read only for a pair fault that began at its "
+      "round or at the first", True)
+def _():
+    now = _pairjudged(_APART, T0)
+    return (A.pair_unsure(now, None) and A.pair_unsure(now, _pairjudged(_TOGETHER, T0 - 3.4))
+            and not A.pair_unsure(now, _pairjudged(_APART, T0 - 3.4))
+            and not A.pair_unsure(now, _pairjudged(None, T0 - 3.4))
+            and not A.pair_unsure(_pairjudged(_TOGETHER, T0), None))
+
+
+# n01-n02 crossed at startup, then its link flapped 45 s later, past the
+# window in which the first keeping line could pair the second swap: n01
+# promoted n02's redial (ending the first record) and swapped to its own
+# redial's session, and n02, whose own dial was promoted first, answered
+# n01's as a redial and promoted that handshake inbound, logging no keeping
+# line.
+_RECROSSED = {
+    "n01": _CROSSED["n01"] + [_connected(T0 + 45, "n02"),
+                              _swapped(T0 + 45.04, "n02", epoch="70d8b91e")],
+    "n02": _CROSSED["n02"] + [_connected(T0 + 45.01, "n01", "outbound"),
+                              _connected(T0 + 46, "n01", epoch="70d8b91e")],
+}
+
+
+@case("the score: both ends inbound after a second crossing the far end answered as a "
+      "redial fail at direction and crossing", True)
+def _():
+    out, _j, _reads = _confirmrun([_TOGETHER], logs=_RECROSSED, within_secs=1)
+    return (_scored(out) == ["direction, crossing"]
+            and f"after the crossing n01 logged at {A._stamp(T0 + 45.04)}" in out.detail
+            and "1 edge(s) with a crossed record" in out.detail)
+
+
+@case("the score: the smaller end outbound after a second crossing the far end answered "
+      "as a redial agrees", True)
+def _():
+    out, _j, _reads = _confirmrun([[_link("n01", "n02", "3be09a15", "7c41d0e2", "outbound")]],
+                                  logs=_RECROSSED, within_secs=1)
+    return out.passed and out.detail.count(" crossed: ") == 2
+
+
+def switch_verdict(split: str) -> str:
+    """The edge_agreement verdict line and its body for n01-n02 as the
+    crossed-dial switch leaves it, read by the runner with a bound of 1 s:
+    both ends inbound after a crossing. For ``"transient"`` and
+    ``"persistent"`` n01 is still on the old pair at the scored read while
+    n02 has rekeyed, and at the read 3 s later is on the new pair
+    (transient) or still the old one (persistent). For ``"redial"`` the pair
+    is together and the edge crossed a second time after a flap, its far end
+    answering the second crossing as a redial (``_RECROSSED``).
+    testing/lib/agreement-break-test.sh judges these, so the lane is tested
+    on the runner's own verdict."""
+    if split == "redial":
+        return _confirmrun([_TOGETHER], logs=_RECROSSED, within_secs=1)[0].detail
+    later = {"transient": _TOGETHER, "persistent": _APART}[split]
+    return _confirmrun([_APART, later], within_secs=1)[0].detail
+
+
+@case("the switch's verdict with a pair apart at one read only names direction and "
+      "crossing alone", True)
+def _():
+    return "[direction, crossing] scored at" in switch_verdict("transient")
 
 
 @case("the read: a node that never answers fails its edges as observed nothing", True)

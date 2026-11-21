@@ -37,7 +37,7 @@ Currently supported assertions:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 from .control import snapshot_all_bloom
@@ -2176,7 +2176,9 @@ def edge_faults(
       predates the field and cannot be judged.
     - ``pair``: the session index pair is not one pair seen from both ends
       (``a.our == b.their`` and ``a.their == b.our``, every key present),
-      with the rekey flags either end set.
+      with the rekey flags either end set. One round's pair fault is a
+      reading; the runner keeps it only where the reads around it confirm
+      it (``confirm_pair``).
     - ``direction``: not one end ``outbound`` and one ``inbound``.
     - ``dialer``: on an edge one end dials, that end is not ``outbound``.
       An edge with no dialer (Ethernet) or two (dialed from both ends) is
@@ -2254,8 +2256,13 @@ class SwapRecord:
     rekey, and the two leave the links differently, so ``kind`` is what
     ``peer`` logged naming ``end`` within ``CROSS_WINDOW`` of it, either
     side: ``crossed`` for keeping its inbound session, ``rekey`` for losing
-    a dual rekey initiation (and no keeping line), ``unpaired`` for
-    neither. ``far`` is the line that gave the kind. A ``crossed`` record's
+    a dual rekey initiation (and no keeping line), ``crossed`` again for
+    neither of those but a promotion of the swap's own handshake (its
+    ``epoch=``) as ``inbound``, and ``unpaired`` for none. The last
+    crossed form is the far end's own dial promoted first, so that it took
+    ``end``'s dial as a redial of that peering and moved onto it: both ends
+    then hold ``end``'s dial, as a kept crossing leaves them. ``far`` is
+    the line that gave the kind. A ``crossed`` record's
     ``ended`` is the time of the first promotion of ``peer`` at ``end``
     after the swap, or of ``end``'s adoption of a rekey answer it sent on
     the connection ``peer``'s msg1 arrived on: the swap arm runs only on a
@@ -2360,16 +2367,25 @@ def edge_crossings(logs: dict[str, str], topology: SimTopology) -> Crossings:
             continue
         rec = SwapRecord(node, peer, t, "unpaired", line)
         keep, rekey = answers("keep", peer, node, t), answers("rekey", peer, node, t)
+        epoch = line_fields(line).get("epoch")
+        took = [
+            (d, x) for d, x in answers("promoted", peer, node, t)
+            if epoch and line_fields(x).get("epoch") == epoch
+            and line_fields(x).get("direction") == "inbound"
+        ]
         if keep:
             rec.kind, rec.far = "crossed", keep[0][1]
+        elif rekey:
+            rec.kind, rec.far = "rekey", rekey[0][1]
+        elif took:
+            rec.kind, rec.far = "crossed", took[0][1]
+        if rec.kind == "crossed":
             rec.ended = min(
                 (e[3] for e in events
                  if e[0] in ("promoted", "adopted") and e[1] == node and e[2] == peer
                  and e[3] > t),
                 default=None,
             )
-        elif rekey:
-            rec.kind, rec.far = "rekey", rekey[0][1]
         out.edges.setdefault(key, []).append(rec)
     for recs in out.edges.values():
         recs.sort(key=lambda r: r.t)
@@ -2399,6 +2415,64 @@ def judge(edge: AgreementEdge, rows_a: list[dict] | None, rows_b: list[dict] | N
         at,
         edge_faults(edge, rows_a, rows_b),
     )
+
+
+# How far apart two reads must be for a pair fault seen in both to stand. A
+# node serves ``show_peers`` from a snapshot it publishes on its 1 s tick, so a
+# row can lag the node's own rekey cutover by up to about 1.06 s (measured on
+# tcp-mesh, 38 of 45 cutovers lagging 0.7 to 1.06 s): one read can catch one
+# end on the new pair and the other still on the old. Two reads more than a
+# tick apart cannot both catch the same lag.
+PAIR_CONFIRM_SECS = 2.0
+
+# The clauses under which a read did not observe an edge's session pair.
+_UNSEEN = ("unread", "present", "harness")
+
+
+def _clausesof(faults: list[str]) -> list[str]:
+    """The clause each fault names."""
+    return [f.split(":", 1)[0] for f in faults]
+
+
+def _together(j: Judged) -> bool:
+    """Whether ``j``'s read observed the edge's session pair as one pair."""
+    seen = _clausesof(j.faults)
+    return "pair" not in seen and not any(c in seen for c in _UNSEEN)
+
+
+def pair_unsure(j: Judged, before: Judged | None) -> bool:
+    """Whether ``j``'s pair fault needs a later read to confirm it.
+
+    ``before`` is the same edge judged on the round before ``j``'s, or
+    ``None`` when ``j``'s is the first. A pair fault the round before also
+    showed, or one that round did not observe, has already lasted across two
+    reads a round apart, so it stands without another; only a fault that
+    began at ``j``'s round, after a round with both ends on one pair, or at
+    the first round, can be a row read inside a cutover.
+    """
+    return "pair" in _clausesof(j.faults) and (before is None or _together(before))
+
+
+def confirm_pair(j: Judged, again: Judged, before: Judged | None = None) -> Judged:
+    """``j`` with its pair fault kept only where the reads around it confirm it.
+
+    ``again`` is the same edge judged on a later read of both ends, and
+    ``before`` on the round before ``j``'s (``None`` when ``j``'s was the
+    first). A pair fault counts when it persists across two reads at least
+    ``PAIR_CONFIRM_SECS`` apart. It is dropped, as an end read mid-cutover,
+    only when ``before`` (if there was one) showed both ends on one pair,
+    ``again`` shows them on one pair too, and ``again`` is at least that far
+    after ``j``. It stands when ``before`` showed the pair apart or did not
+    observe it (``pair_unsure``), when ``again`` shows it apart or did not
+    observe it (an end unread, a row absent or without the field), and when
+    the two reads are closer than that. ``j``'s other faults, rows and time
+    stand either way, so the edge is still scored on its own round.
+    """
+    if not pair_unsure(j, before):
+        return j
+    if not _together(again) or again.at - j.at < PAIR_CONFIRM_SECS:
+        return j
+    return replace(j, faults=[f for f in j.faults if not f.startswith("pair:")])
 
 
 def _rowtext(node: str, peer: str, row: dict | None) -> str:

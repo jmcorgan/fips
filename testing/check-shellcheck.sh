@@ -15,7 +15,9 @@
 # node-context guard both runners run (testing/check-node-context.sh), and
 # over
 # the single-test classifier the known-defect lane sources and its fixture
-# test (testing/lib/test-verdict.sh, test-verdict-test.sh).
+# test (testing/lib/test-verdict.sh, test-verdict-test.sh), and over the
+# chaos agreement break lane ci-local.sh runs and its judge's test
+# (testing/chaos/agreement-break.sh, testing/lib/agreement-break-test.sh).
 #
 # This is the one copy of that lint. The OpenWrt Package workflow calls it
 # after building each .ipk, and ci.yml and ci-local.sh call it too, because
@@ -43,10 +45,11 @@
 #     keep-pinned-toolchain.sh, build-core-baremetal.sh, the three
 #     testing/cross-check/ scripts, testing/check-crate.sh,
 #     testing/root-tests.sh, testing/check-node-context.sh,
-#     testing/install-shellcheck.sh and the two
-#     testing/lib/test-verdict scripts as bash, with
-#     no exclusions. They are CI scripts, not shipped ones, and the sh
-#     exclusion set below misfires on bash.
+#     testing/install-shellcheck.sh, the two
+#     testing/lib/test-verdict scripts and the two agreement break scripts
+#     as bash, with no exclusions, following what each sources (-x), so a
+#     sourced helper is checked as the script uses it. They are CI scripts,
+#     not shipped ones, and the sh exclusion set below misfires on bash.
 #
 # The sh exclusions, with reason:
 #   SC1008  the init scripts' `#!/bin/sh /etc/rc.common` shebang, an
@@ -108,6 +111,8 @@ BASH_TARGETS=(
     "testing/install-shellcheck.sh"
     "testing/cross-check/zig-cc"
     "testing/cross-check/zig-ar"
+    "testing/chaos/agreement-break.sh"
+    "testing/lib/agreement-break-test.sh"
 )
 
 SHELLCHECK="${SHELLCHECK:-shellcheck}"
@@ -175,7 +180,7 @@ for f in "${SH_TARGETS[@]}"; do
     lint "$f" --shell=sh --exclude="$SH_EXCLUDE"
 done
 for f in "${BASH_TARGETS[@]}"; do
-    lint "$f" --shell=bash
+    lint "$f" --shell=bash --external-sources
 done
 
 total=$(( ${#SH_TARGETS[@]} + ${#BASH_TARGETS[@]} ))

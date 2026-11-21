@@ -14,6 +14,13 @@
 #                    startup scenario is run by hand with ci-local.sh --only
 #                    when the Nostr rendezvous code changes, and is not in
 #                    local CI's default run either.
+#   agreement-break — the chaos agreement break lane: it builds a second
+#                    image per run (the break image's fips, under its own
+#                    profile, with the node's test switches compiled in) and
+#                    shows that edge_agreement reds under a switch and is
+#                    green without it. It proves the guard rather than
+#                    running it: GitHub runs the assertion itself in
+#                    tcp-mesh, as it runs every chaos scenario.
 #
 # Deliberate nightly-only (in neither runner's push-started set), with reason:
 #   dual-udp-flap, two-bound-udp-bulk, churn-mixed-10, congestion-stress —
@@ -144,7 +151,7 @@ DEB_TEST="$SCRIPT_DIR/deb-install/test.sh"
 RPM_TEST="$SCRIPT_DIR/rpm-install/test.sh"
 
 # Deliberate local-only allowlist (suites intentionally absent from GitHub).
-ALLOWLIST="tor-socks5 tor-directory nostr-open-discovery"
+ALLOWLIST="tor-socks5 tor-directory nostr-open-discovery agreement-break"
 
 for f in "$CI_LOCAL" "$CI_YML" "$DEB_TEST" "$RPM_TEST"; do
     if [[ ! -f "$f" ]]; then

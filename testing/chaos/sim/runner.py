@@ -18,6 +18,7 @@ from .assertions import (
     AssertionOutcome,
     BloomSendRateMonitor,
     Judged,
+    confirm_pair,
     edge_crossings,
     evaluate_agreement,
     evaluate_baseline,
@@ -44,6 +45,7 @@ from .assertions import (
     switch_timeouts,
     evaluate_tree_parents,
     judge,
+    pair_unsure,
     dropped_senders,
     switch_delays,
     uncarried_downs,
@@ -85,7 +87,9 @@ SETTLE_TIMEOUT_SECS = 90
 
 # How far apart edge_agreement re-reads the ends of an edge that does not
 # agree yet. A rekey's cutover outlasted no two reads this far apart in the
-# planning runs, and one round across a mesh took up to 2 s.
+# planning runs, and one round across a mesh took up to 2 s. It is also the
+# wait before the read that confirms a pair fault, so it must be at least
+# PAIR_CONFIRM_SECS (sim/assertions.py).
 REREAD_SECS = 3
 
 # Printed in place of the assertion verdicts when setup aborts, followed by
@@ -1389,6 +1393,17 @@ class SimRunner:
         cannot fail it. A round's time is the earlier of its two ends' read
         times, so log lines timed before it precede both rows.
 
+        An edge that never agrees, whose last round has a pair fault and
+        whose round before that, if any, had both ends on one pair, gets one
+        more read of both ends, ``REREAD_SECS`` later, even past the bound,
+        and its pair fault stands only if that read confirms it
+        (``pair_unsure``, ``confirm_pair``): a row can lag its own rekey
+        cutover by up to a tick, and a crossed edge under a break is scored
+        on its last round, which can fall inside a rekey. A pair fault the
+        round before also showed has lasted across two reads and stands
+        without one. The edge is still scored on its last round within the
+        bound, and its other faults stand as read there.
+
         ``read`` gives a node's ``peers``, or ``None`` where it does not
         answer, which the edge's clauses fail as observed nothing; ``clock``
         and ``sleep`` give and pass wall-clock time. Each node's last
@@ -1412,6 +1427,7 @@ class SimRunner:
         start = clock()
         readround(set(self.topology.nodes))
         judged: dict[tuple[str, str], Judged] = {}
+        before: dict[tuple[str, str], Judged] = {}
         pending = edges
         rounds = 1
         while True:
@@ -1419,6 +1435,8 @@ class SimRunner:
             for edge in pending:
                 (ta, ra), (tb, rb) = latest[edge.a], latest[edge.b]
                 j = judge(edge, ra, rb, min(ta, tb))
+                if edge.key in judged:
+                    before[edge.key] = judged[edge.key]
                 judged[edge.key] = j
                 if j.faults:
                     still.append(edge)
@@ -1430,6 +1448,21 @@ class SimRunner:
             sleep(REREAD_SECS)
             readround({n for e in pending for n in (e.a, e.b)})
             rounds += 1
+        unsure = [e for e in pending if pair_unsure(judged[e.key], before.get(e.key))]
+        if unsure and not self._interrupted:
+            sleep(REREAD_SECS)
+            readround({n for e in unsure for n in (e.a, e.b)})
+            rounds += 1
+            for edge in unsure:
+                (ta, ra), (tb, rb) = latest[edge.a], latest[edge.b]
+                j = confirm_pair(judged[edge.key], judge(edge, ra, rb, min(ta, tb)),
+                                 before.get(edge.key))
+                if len(j.faults) < len(judged[edge.key].faults):
+                    log.info("edge_agreement: %s: the pair apart at its last read was "
+                             "together %ds later, so it is not counted", edge.name(), REREAD_SECS)
+                judged[edge.key] = j
+                if not j.faults:
+                    pending.remove(edge)
         log.info(
             "edge_agreement: read %d edge(s) in %d round(s) over %.0fs; %d still disagree",
             len(edges), rounds, clock() - start, len(pending),

@@ -557,6 +557,30 @@ job, after the known-defect lane. On a host whose build has no BLE
 transport the lines behind `ble_available` are skipped and counted. It
 prints each break's wall time and the total.
 
+### The chaos agreement break lane (`chaos/agreement-break.sh`)
+
+[`chaos/agreement-break.sh`](chaos/agreement-break.sh) shows that the chaos
+`edge_agreement` assertion reds when a node switch puts a real defect's shape
+back, and stays green without it. It builds the break image (the
+`chaos-break` profile with the root crate's `test-hooks` feature, below),
+runs one scenario on it twice at once, with `FIPS_NODE_FAULTS` set to
+`BREAK_SWITCH` (default `MoveKeepsInboundLink`) and with nothing, and judges
+the pair: the switch run must red at direction and crossing on its crossed
+edges and nowhere else, the other must pass, and every node of each must log
+`Test hooks compiled in` with the switch list it was given. Exit 0 when both
+hold, 1 for a miss (a guard that guards nothing, or a red for another
+reason), 2 when nothing could be established, which includes `BREAK_SWITCH`
+set empty with a green no-switch run. The judge is
+`agreement-break.sh --judge <dir>`, and
+[`lib/agreement-break-test.sh`](lib/agreement-break-test.sh) tests it on
+planted result directories. Local CI runs the lane as the `agreement-break`
+suite, after the chaos scenarios and skipped with them (`--skip-chaos`), at
+tier 2 and above, with its default switch and scenario; `ci-local.sh --only
+agreement-break` or `--rerun agreement-break` runs it alone. GitHub CI does
+not run it (`check-ci-parity.sh` lists it as local-only, with the reason): it
+builds a second image per run, and GitHub runs the assertion itself in
+tcp-mesh. [`chaos/README.md`](chaos/README.md) has the rows it checks.
+
 ### The live audit's reach (`check-audit-reach.py`)
 
 In a debug test build every node entry that can change a per-peer map audits
@@ -745,6 +769,20 @@ flight) never collide:
   `node.cache.test_coord_ttl_secs`, and the `integration` profile builds in
   `target/integration`, so no package script, which reads `target/release`,
   can pick one up. `build.sh` no longer refreshes `target/release`.
+  Because `--examples` brings in dev-dependency features, the binaries
+  carry `fips-core`'s `test-hooks`, so `FIPS_NODE_FAULTS` appears in them
+  and the core's own switches can be set; the root crate's `node_fault!`
+  sites stay the literal `false`. Only a build with the root crate's own
+  `test-hooks` feature (`--features test-overrides,test-hooks`, for the
+  chaos break image) turns those on, and every node it starts logs
+  `Test hooks compiled in faults=<names>`, the value of `FIPS_NODE_FAULTS`,
+  empty when none is set. No integration or package build takes that
+  feature. The break image's `fips` is built under the `chaos-break`
+  profile, which inherits `integration` and writes `target/chaos-break`, so
+  it never replaces the integration build's `target/integration/fips`;
+  [`chaos/agreement-break.sh`](chaos/agreement-break.sh) builds it, copies
+  the run's build context with that one binary replaced, and tags the image
+  `$FIPS_TEST_IMAGE-break`, the run's own, removing it when it ends.
 - Each parallel chaos child gets a unique, non-overlapping `/24` in
   `10.30.x` (via the sim `--subnet` override). `10.30.x` sits outside
   Docker's default address pool and the fixed-subnet suites' `172.x`

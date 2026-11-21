@@ -209,12 +209,13 @@ own with `--lib`.
 
 Tests run on the host and may use `std`: `lib.rs` declares
 `#[cfg(any(test, feature = "test-hooks"))] extern crate std;`. The
-`test-hooks` half covers the root crate's tests, the only builds that
-enable that feature; the bare-metal build never does, so it still links
-no `std`. Code under that gate may name `std::` paths, and nothing
-outside it may. Declaring the crate does not bring `std`'s prelude
-macros into scope, so a test module that uses `format!` or `vec!` needs
-`use alloc::format;` or `use alloc::vec;`.
+`test-hooks` half covers the builds that enable that feature, the root
+crate's tests and its chaos break image, both on the host; the
+bare-metal build never does, so it still links no `std`. Code under that
+gate may name `std::` paths, and nothing outside it may. Declaring the
+crate does not bring `std`'s prelude macros into scope, so a test module
+that uses `format!` or `vec!` needs `use alloc::format;` or
+`use alloc::vec;`.
 
 Unit tests go in their own file, never in an inline `mod tests { ... }`
 block, and they are kept per directory: a directory's tests are in its
@@ -254,9 +255,10 @@ clock.
 - An item only the root crate's tests reach is gated
   `#[cfg(any(test, feature = "test-hooks"))]`, because `cfg(test)` does
   not cross crates. The root enables `test-hooks` from its
-  `[dev-dependencies]` only, so hooks reach only a build that compiles
-  tests, examples or benches; a plain `cargo build`, release or not,
-  leaves them out. Make the `cfg` change while the item is still in the
+  `[dev-dependencies]`, so hooks reach a build that compiles tests,
+  examples or benches, and from its own `test-hooks` feature, which only
+  the chaos break image's build turns on; a plain `cargo build`, release
+  or not, leaves them out. Make the `cfg` change while the item is still in the
   root, so the move stays a pure rename.
 - An inherent `impl` must live in the type's crate. Methods the root
   crate adds to a moved type move with it, or become a free function or

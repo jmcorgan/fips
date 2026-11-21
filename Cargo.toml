@@ -55,6 +55,14 @@ opt-level = 2
 [profile.integration]
 inherits = "release"
 
+# The chaos break image's binary (testing/chaos/agreement-break.sh): the
+# integration settings, built with `test-overrides,test-hooks`. Its own
+# directory, target/chaos-break, keeps that binary from replacing the
+# integration build's target/integration/fips, which every other suite's image
+# is made from.
+[profile.chaos-break]
+inherits = "integration"
+
 [features]
 default = []
 # Tick-body profiler (`src/instr`). Off by default: enabling it edits 26 call
@@ -77,6 +85,13 @@ test-overrides = []
 # The --all-features clippy pass lints the code it gates. fips-core's
 # explorers are behind its own `slow-explorers` feature.
 explorers = []
+# The mutation lane's node switches (`fips_core::faults`, read from
+# `FIPS_NODE_FAULTS`) in a binary, for a chaos image that puts back a break so
+# the chaos assertions can be seen to red. Only that image's build enables it;
+# no package build and no integration build may. Without it every
+# `node_fault!` site is the literal `false`. A build with it logs
+# `Test hooks compiled in` when the node starts.
+test-hooks = ["fips-core/test-hooks"]
 
 [dependencies]
 ratatui = "0.30"
@@ -206,8 +221,10 @@ conf-files = ["/etc/fips/hosts", "/etc/fips/fips.nft"]
 
 [dev-dependencies]
 # The protocol modules' test hooks, which this crate's tests call. Enabled
-# here only, so they are compiled into a build that includes tests, examples
-# or benches, where dev-dependency features apply, and into no other build.
+# here, so they are compiled into a build that includes tests, examples or
+# benches, where dev-dependency features apply. The one other route is this
+# crate's own `test-hooks` feature, for the chaos break image; a plain build,
+# release or not, has neither.
 fips-core = { path = "core", features = ["test-hooks"] }
 tempfile = "3.15"
 criterion = { version = "0.8.2", features = ["html_reports"] }
