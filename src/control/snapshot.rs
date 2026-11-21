@@ -729,6 +729,9 @@ pub(crate) struct PeerRow {
     pub nostr_traversal: PeerNostrState,
     pub noise: Option<PeerNoiseCounters>,
     pub our_session_index: Option<u32>,
+    /// The peer's index for the current session, the one this node sends
+    /// to it under; the other end lists it as its own.
+    pub their_session_index: Option<u32>,
     pub rekey_in_progress: bool,
     pub rekey_draining: bool,
     pub current_k_bit: bool,

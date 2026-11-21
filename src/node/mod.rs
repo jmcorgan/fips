@@ -2836,6 +2836,7 @@ impl Node {
                     nostr_traversal,
                     noise,
                     our_session_index: peer.our_index().map(|idx| idx.as_u32()),
+                    their_session_index: peer.their_index().map(|idx| idx.as_u32()),
                     rekey_in_progress: peer.rekey_in_progress(),
                     rekey_draining: peer.is_draining(),
                     current_k_bit: peer.current_k_bit(),

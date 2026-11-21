@@ -358,9 +358,13 @@ pub fn show_peers(node: &Node) -> Value {
                 });
             }
 
-            // Session indices (hijack detection)
+            // Session indices (hijack detection), and the peer's, which the
+            // other end lists as its own
             if let Some(idx) = peer.our_index() {
                 peer_json["our_session_index"] = json!(format!("{:08x}", idx.as_u32()));
+            }
+            if let Some(idx) = peer.their_index() {
+                peer_json["their_session_index"] = json!(format!("{:08x}", idx.as_u32()));
             }
 
             // Rekey state
@@ -570,6 +574,9 @@ pub(crate) fn show_peers_from_handle(handle: &super::read_handle::ControlReadHan
 
             if let Some(idx) = peer.our_session_index {
                 peer_json["our_session_index"] = json!(format!("{:08x}", idx));
+            }
+            if let Some(idx) = peer.their_session_index {
+                peer_json["their_session_index"] = json!(format!("{:08x}", idx));
             }
 
             if peer.rekey_in_progress {
