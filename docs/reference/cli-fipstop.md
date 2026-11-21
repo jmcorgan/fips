@@ -181,15 +181,17 @@ tick.
 
 | Variable | Description |
 | -------- | ----------- |
-| `XDG_RUNTIME_DIR` | Used to derive the default control-socket and gateway-socket paths when `/run/fips` is absent. |
+| `XDG_RUNTIME_DIR` | Used to derive the default control-socket and gateway-socket paths when `/run/fips` is absent and `fipstop` is not running as root. |
 
 ## Files
 
 Same control-socket resolution rules as
 [`fipsctl`](cli-fipsctl.md#files). The gateway socket follows the same
-pattern with `gateway.sock` in place of `control.sock`, falling back
-to `/tmp/fips-gateway.sock` if neither system path nor
-`XDG_RUNTIME_DIR` is available.
+pattern with `gateway.sock` in place of `control.sock`; when not running
+as root it falls back to `/tmp/fips-gateway.sock` if neither system path
+nor `XDG_RUNTIME_DIR` is available. Like `fipsctl`, `fipstop` refuses a
+control or gateway socket served by any account other than root, the
+user running it, or the `fips` account.
 
 ## See also
 

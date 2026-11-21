@@ -253,6 +253,9 @@ fn send_request(socket_path: &Path, request_json: &str) -> Result<serde_json::Va
             )
         }
     })?;
+    // Before anything is sent: whoever bound the path must be root, this user
+    // or the fips account, explicit -s paths included.
+    fips::utils::sockpeer::check_stream(socket_path, &stream)?;
 
     let timeout = Duration::from_secs(5);
     let _ = stream.set_read_timeout(Some(timeout));
@@ -270,7 +273,46 @@ fn send_request(socket_path: &Path, request_json: &str) -> Result<serde_json::Va
         .ok_or("no response from daemon")?
         .map_err(|e| format!("failed to read response: {e}"))?;
 
-    serde_json::from_str(&line).map_err(|e| format!("invalid response JSON: {e}"))
+    let mut value =
+        serde_json::from_str(&line).map_err(|e| format!("invalid response JSON: {e}"))?;
+    scrub(&mut value);
+    Ok(value)
+}
+
+/// Replace each control character in every string of a daemon reply, object
+/// keys included, with U+FFFD.
+///
+/// Reply strings reach the terminal through several printers, some of them
+/// raw (`eprintln!` of an error message, the probe renderer). Cleaning the
+/// reply once, where it is decoded, covers all of them and any added later.
+/// An honest reply carries no control characters, so this changes nothing a
+/// working daemon sends.
+fn scrub(value: &mut serde_json::Value) {
+    use serde_json::Value;
+
+    fn clean(text: &str) -> Option<String> {
+        text.chars().any(char::is_control).then(|| {
+            text.chars()
+                .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+                .collect()
+        })
+    }
+
+    match value {
+        Value::String(text) => {
+            if let Some(cleaned) = clean(text) {
+                *text = cleaned;
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(scrub),
+        Value::Object(map) => {
+            for (key, mut item) in std::mem::take(map) {
+                scrub(&mut item);
+                map.insert(clean(&key).unwrap_or(key), item);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 #[cfg(windows)]
@@ -310,7 +352,10 @@ fn send_request(socket_path: &Path, request_json: &str) -> Result<serde_json::Va
         .ok_or("no response from daemon")?
         .map_err(|e| format!("failed to read response: {e}"))?;
 
-    serde_json::from_str(&line).map_err(|e| format!("invalid response JSON: {e}"))
+    let mut value =
+        serde_json::from_str(&line).map_err(|e| format!("invalid response JSON: {e}"))?;
+    scrub(&mut value);
+    Ok(value)
 }
 
 /// Build a request JSON string for a simple command (no params).
@@ -1701,6 +1746,10 @@ mod probe_tests;
 #[cfg(test)]
 #[path = "tests/fipsctl_npub.rs"]
 mod npub_tests;
+
+#[cfg(all(test, unix))]
+#[path = "tests/fipsctl_socket.rs"]
+mod socket_tests;
 
 #[cfg(test)]
 mod tests {

@@ -10,7 +10,14 @@ length-bounded JSON over a stream socket.
 
 ### Unix
 
-A Unix domain socket. The default path is resolved in this order:
+A Unix domain socket. A process running as root, daemon or client, always
+uses the private runtime directory: `/run/fips/control.sock`, or
+`/var/run/fips/control.sock` on macOS and FreeBSD when `/run/fips` is absent.
+The daemon creates the directory at bind if it is missing. Root never falls
+back to `$XDG_RUNTIME_DIR` or `/tmp`, where another account could bind the
+socket first.
+
+For any other process the default path is resolved in this order:
 
 1. `/run/fips/control.sock` (or `/run/fips/gateway.sock` for the
    gateway), if `/run/fips` exists. This is what the `fips.service`
@@ -34,6 +41,20 @@ without root.
 The path can be overridden at the daemon side via
 `node.control.socket_path` in the YAML config, and at the client side
 via `fipsctl -s PATH` or `fipstop -s PATH`.
+
+`fipsctl` and `fipstop` read the peer credentials of the connected socket
+(`SO_PEERCRED` on Linux, `getpeereid` on macOS and FreeBSD) before sending
+anything, and talk only to a server running as root, as the client's own
+user, or as the `fips` account. A server running as any other account is
+refused, whatever its groups: a member of group `fips` can bind a socket in a
+group-writable directory, so group membership is not enough. The check
+applies to an explicit `-s` path too. `fipsctl` also replaces control
+characters in every string of the reply with U+FFFD before printing it.
+
+A client in a user namespace that does not map the daemon's uid, such as a
+rootless container reaching the host's socket through a bind mount, is told
+the overflow uid (usually 65534) in place of the daemon's, and refuses the
+daemon. Run the client outside the namespace.
 
 ### Windows
 

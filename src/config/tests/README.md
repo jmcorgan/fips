@@ -27,3 +27,10 @@ source file and can reach that file's private items.
   named instance's password, is refused at load, naming the instance's key
   and not echoing the password. An ordinary password, quotes included, and
   both cookie forms are accepted.
+- `socket_path.rs`: tests for the default Unix socket path (`resolve_for`),
+  declared from `mod.rs` as `mod socket_path`. A root process takes
+  `/run/fips/<name>`, or `/var/run/fips/<name>` under the macOS and FreeBSD
+  policy when `/run/fips` is absent, even with a valid `XDG_RUNTIME_DIR` and
+  no directory present, and never a `/tmp` path. A non-root process keeps the
+  XDG and `/tmp` fallbacks. The older resolver tests stay in `mod.rs`'s inline
+  `tests` module.

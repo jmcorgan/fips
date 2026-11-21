@@ -439,6 +439,44 @@ fn resolve_default_socket_with(
     format!("/tmp/fips-{filename}")
 }
 
+/// The socket path a root process uses: always the private runtime directory.
+///
+/// `/run/fips/<filename>`, or `/var/run/fips/<filename>` where the policy
+/// consults `/var/run/fips` (macOS and FreeBSD) and `/run/fips` is absent. The
+/// directory need not exist: the daemon creates it at bind, mode 0750, and a
+/// client finds no socket there rather than one some other account bound.
+#[cfg(unix)]
+fn privileged_socket(
+    filename: &str,
+    var_run_policy: VarRunPolicy,
+    is_dir: impl Fn(&Path) -> bool,
+) -> String {
+    if var_run_policy.consult_existing && !is_dir(Path::new("/run/fips")) {
+        return format!("/var/run/fips/{filename}");
+    }
+    format!("/run/fips/{filename}")
+}
+
+/// Pure choice between the root and non-root socket paths for `euid`.
+///
+/// Root takes [`privileged_socket`] and never the XDG or `/tmp` fallbacks,
+/// which another account may be able to write. Any other uid takes
+/// [`resolve_default_socket_with`].
+#[cfg(unix)]
+fn resolve_for(
+    euid: libc::uid_t,
+    filename: &str,
+    var_run_policy: VarRunPolicy,
+    xdg_runtime_dir: Option<&Path>,
+    is_dir: impl Fn(&Path) -> bool,
+) -> String {
+    if euid == 0 {
+        privileged_socket(filename, var_run_policy, is_dir)
+    } else {
+        resolve_default_socket_with(filename, var_run_policy, xdg_runtime_dir, is_dir)
+    }
+}
+
 /// Return whether `parent` is one of the private runtime directories used by
 /// the default Unix socket resolver.
 ///
@@ -464,9 +502,20 @@ pub(crate) fn is_managed_socket_parent(parent: &Path) -> bool {
     is_managed_socket_parent_with(parent, default_var_run_policy(), xdg_runtime_dir.as_deref())
 }
 
-/// Resolve a default Unix-socket path under the canonical order:
+/// Resolve a default Unix-socket path.
+///
+/// A root process always takes the private runtime directory:
+/// `/run/fips/<filename>`, or `/var/run/fips/<filename>` on macOS and FreeBSD
+/// when `/run/fips` is absent, whether or not the directory exists yet. Root
+/// never falls back to `XDG_RUNTIME_DIR` or `/tmp`, where another account
+/// could bind the socket first.
+///
+/// Any other process uses the canonical order:
 /// `/run/fips/<filename>` → `/var/run/fips/<filename>` on macOS/FreeBSD →
-/// `$XDG_RUNTIME_DIR/fips/<filename>` → `/tmp/fips-<filename>`.
+/// `$XDG_RUNTIME_DIR/fips/<filename>` → `/tmp/fips-<filename>`. The clients
+/// check who is listening before they send anything
+/// (`crate::utils::sockpeer`), which is what keeps the development fallbacks
+/// safe for a non-root client.
 ///
 /// `/run/fips` is the packaged Linux convention. FreeBSD's rc.d service
 /// creates `/var/run/fips` before starting the daemon. A privileged macOS
@@ -493,7 +542,9 @@ pub(crate) fn is_managed_socket_parent(parent: &Path) -> bool {
 #[cfg(unix)]
 pub(crate) fn resolve_default_socket(filename: &str) -> String {
     let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
-    resolve_default_socket_with(
+    resolve_for(
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        unsafe { libc::geteuid() },
         filename,
         default_var_run_policy(),
         xdg_runtime_dir.as_deref(),
@@ -2250,6 +2301,10 @@ mod native_flows;
 #[cfg(test)]
 #[path = "tests/tor_auth.rs"]
 mod tor_auth;
+
+#[cfg(all(test, unix))]
+#[path = "tests/socket_path.rs"]
+mod socket_path;
 
 #[cfg(test)]
 mod tests {

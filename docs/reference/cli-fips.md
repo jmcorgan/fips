@@ -50,7 +50,7 @@ YAML configuration. See [configuration.md](configuration.md).
 | Variable | Description |
 | -------- | ----------- |
 | `RUST_LOG` | Tracing filter directive. Overrides `node.log_level` from the config. Examples: `info`, `debug`, `fips=trace,fips::node::handlers::mmp=debug`. |
-| `XDG_RUNTIME_DIR` | Used to derive the default control-socket path when `/run/fips` does not exist. See [control-socket.md](control-socket.md). |
+| `XDG_RUNTIME_DIR` | Used to derive the default control-socket path when `/run/fips` does not exist and the daemon is not running as root. See [control-socket.md](control-socket.md). |
 | `FIPS_CONFIG` | (Windows service mode only) Path to the configuration file when the daemon runs under the service control manager. |
 
 The daemon also clamps the `nostr_relay_pool`, `nostr_sdk`, and `nostr`
