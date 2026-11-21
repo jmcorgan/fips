@@ -21,6 +21,36 @@ can reach its private items.
   Declared from `mod.rs` as
   `#[cfg(test)] #[path = "tests/mtu.rs"] mod mtu_tests;`, on every platform.
 
-`mod.rs` still carries an inline `mod tests` block. That block predates the
-rule that unit tests live in this directory; a new test for `mod.rs` belongs
-here.
+- `control.rs`: the Tor control client in `control.rs` one level up, against
+  a control port it cannot trust. Replies are read as bytes: a status code
+  or separator that is not ASCII, or content that is not UTF-8, is a
+  protocol error rather than a panic. The caps are tested at their edges: a
+  line of exactly 8 KiB with its terminator is accepted and one byte more is
+  refused, a reply just under 64 KiB is accepted and one over is refused,
+  and 1024 data lines are accepted and 1025 refused. A port that never
+  answers fails `authenticate` at the 30 s deadline, and, on Linux, a port
+  whose accept queue is full fails `connect` at the 30 s deadline; both are
+  measured on tokio's paused clock so the tests do not wait in real time.
+  After a reply fails part-way, here over the line cap, every later query
+  fails as out of step rather than reading the rest of that reply as its
+  answer, while an error reply read in full leaves the client usable. Most
+  tests read a canned reply through a client built over an in-memory
+  buffer; the rest talk to a stand-in port on loopback that records what it
+  is sent.
+  Declared from `control.rs` as
+  `#[cfg(test)] #[path = "tests/control.rs"] mod control_tests;`.
+
+- `monitoring.rs`: the control-port monitoring task in `mod.rs`. A control
+  port on loopback answers the first GETINFO 31 s late, past the reply
+  deadline, and everything else at once. The test checks that the task
+  opens one new connection and goes on to cache the port's true values,
+  instead of reading each later reply as the answer to the query before it.
+  It runs on tokio's paused clock.
+  Declared from `mod.rs` as
+  `#[cfg(test)] #[path = "tests/monitoring.rs"] mod monitoring_tests;`.
+
+`mod.rs` and `control.rs` still carry inline `mod tests` blocks. Those blocks
+predate the rule that unit tests live in this directory; a new test for
+either file belongs here. The modules declared from this directory take
+topic names (`mtu_tests`, `control_tests`, `monitoring_tests`) so they sit
+beside the inline `tests` module.

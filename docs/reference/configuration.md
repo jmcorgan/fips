@@ -705,6 +705,16 @@ monitoring only (bootstrap status, circuit health, traffic stats).
 No inbound connections. Both `control_addr` and `control_auth` are
 required.
 
+The control client waits at most 30 s for the control port to accept
+the connection, and at most 30 s for each reply. It refuses a reply
+line longer than 8 KiB, a reply longer than 64 KiB, and a reply that
+is not well-formed. In `control_port` mode any of these fails the Tor
+transport at start, so the node starts DEGRADED without it; in
+`directory` mode it only disables monitoring. Once the transport is
+up, a monitoring query that fails this way clears the cached Tor
+status, and the next monitoring round reconnects and authenticates
+again before querying.
+
 ### UDP + Tor Bridge Example
 
 A node bridging clearnet (UDP) and anonymous (Tor) portions of the mesh:
