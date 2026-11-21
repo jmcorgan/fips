@@ -38,6 +38,14 @@ deprecated: any local user can create that file, so the daemon warns when
 it loads a config from there, and from v0.6.0 the search no longer looks
 there. Move the settings you need into `C:\ProgramData\fips\fips.yaml`.
 
+On Unix, a daemon or gateway running as root without `-c` still reads
+priorities 2 to 4: root's user config, `~/.fips.yaml` and `./fips.yaml`
+in whatever directory it was started from. Another account may be able to
+write those files, so it logs a warning naming each one it read. The
+warning is logged at ERROR, so `node.log_level` set in one of those files
+cannot hide it. The packaged services pass `-c` and are not affected. To
+start a root node by hand, pass `-c` with the config file to use.
+
 ### CLI Option
 
 ```text

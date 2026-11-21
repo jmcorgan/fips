@@ -80,6 +80,12 @@ file, so the daemon warns when it loads a config from there, and from
 v0.6.0 the search no longer looks there. Move the settings you need into
 `C:\ProgramData\fips\fips.yaml`.
 
+On Unix, when `fips` runs as root without `-c`, it logs a warning for
+each config it read from priorities 2 to 4, since another account may be
+able to write those files. The warning is logged at ERROR, so
+`node.log_level` set in one of those files cannot hide it. Pass `-c` to
+name the file to use.
+
 If the file given with `-c`, or the files found on the search path taken
 together, configure nothing (no `node.identity.nsec`,
 `node.identity.persistent` off, no transports, no peers and no `gateway`

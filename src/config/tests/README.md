@@ -34,3 +34,12 @@ source file and can reach that file's private items.
   no directory present, and never a `/tmp` path. A non-root process keeps the
   XDG and `/tmp` fallbacks. The older resolver tests stay in `mod.rs`'s inline
   `tests` module.
+- `root_search.rs`: tests for the warning a root start gives for the user
+  configs it read (`warn_for`), declared from `mod.rs` as `mod root_search`.
+  A root process that took its config from the search warns once for each
+  file it read outside the system config paths (the user config directory,
+  `~/.fips.yaml`, `./fips.yaml`), naming the file and `--config`. It does
+  not warn for the system config, when `--config` named the file, or when
+  not running as root. Every search path after the system paths draws the
+  warning. It is logged at ERROR, which no `node.log_level` value filters
+  out, so a planted file cannot hide the warning about itself.

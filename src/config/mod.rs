@@ -300,6 +300,44 @@ pub fn warn_legacy_etc_unused(loaded: &[PathBuf], identity: &IdentitySource) {
     }
 }
 
+/// Warn about each config file a root start read from a user location.
+///
+/// `explicit` is whether `--config` named the file; `loaded` is the list of
+/// config files the start read. This only warns: the search still reads
+/// those files. Packaged starts pass `--config` and see no warning.
+#[cfg(unix)]
+pub fn warn_reads(explicit: bool, loaded: &[PathBuf]) {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    warn_for(unsafe { libc::geteuid() }, explicit, loaded);
+}
+
+/// Warn about each file among `loaded` outside the system config paths: the
+/// user config directory, `~/.fips.yaml` or the working directory.
+///
+/// Silent unless `euid` is root and the config came from the search rather
+/// than from `--config` (`explicit`). A root process reading those places
+/// takes settings, the node identity included, from files another account
+/// may be able to write.
+///
+/// Logged at ERROR because the daemon's log filter comes from the merged
+/// config: a file planted in one of those places could set
+/// `node.log_level: error` and hide a WARN about itself.
+#[cfg(unix)]
+fn warn_for(euid: libc::uid_t, explicit: bool, loaded: &[PathBuf]) {
+    if explicit || euid != 0 {
+        return;
+    }
+    let system = Config::system_paths();
+    for path in loaded.iter().filter(|path| !system.contains(path)) {
+        tracing::error!(
+            path = %path.display(),
+            "Config read from the user config directory, HOME or the working directory \
+             while running as root; another account may be able to change it. Pass \
+             --config to name the file to use"
+        );
+    }
+}
+
 /// Find an identity key stranded at the legacy system config directory.
 ///
 /// Adding a second system config directory to the search path moves the
@@ -1841,20 +1879,7 @@ impl Config {
 
     /// Get the standard search paths in priority order (lowest to highest).
     pub fn search_paths() -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-
-        // System config — /etc/fips is always probed so existing installs
-        // keep working after an upgrade.
-        paths.push(PathBuf::from(LEGACY_SYSTEM_CONFIG_DIR).join(CONFIG_FILENAME));
-
-        // macOS and FreeBSD packaging install config under /usr/local/etc/fips,
-        // and the Windows service installer under C:\ProgramData\fips; probe
-        // it after /etc/fips so the packaged file wins over a stale /etc/fips
-        // leftover. Read from SYSTEM_CONFIG_DIR rather than a second literal,
-        // so this path and the directory `fipsctl keygen` writes into cannot
-        // drift apart.
-        #[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
-        paths.push(PathBuf::from(SYSTEM_CONFIG_DIR).join(CONFIG_FILENAME));
+        let mut paths = Self::system_paths();
 
         // User config directory
         if let Some(config_dir) = dirs::config_dir() {
@@ -1868,6 +1893,26 @@ impl Config {
 
         // Current directory (highest priority)
         paths.push(PathBuf::from(".").join(CONFIG_FILENAME));
+
+        paths
+    }
+
+    /// The system config files [`Config::search_paths`] probes first, lowest
+    /// priority first.
+    fn system_paths() -> Vec<PathBuf> {
+        // System config — /etc/fips is always probed so existing installs
+        // keep working after an upgrade.
+        let mut paths = vec![PathBuf::from(LEGACY_SYSTEM_CONFIG_DIR).join(CONFIG_FILENAME)];
+
+        // macOS and FreeBSD packaging install config under /usr/local/etc/fips,
+        // and the Windows service installer under C:\ProgramData\fips; probe
+        // it after /etc/fips so the packaged file wins over a stale /etc/fips
+        // leftover. Read from SYSTEM_CONFIG_DIR rather than a second literal,
+        // so this path and the directory `fipsctl keygen` writes into cannot
+        // drift apart.
+        if cfg!(any(target_os = "macos", target_os = "freebsd", windows)) {
+            paths.push(PathBuf::from(SYSTEM_CONFIG_DIR).join(CONFIG_FILENAME));
+        }
 
         paths
     }
@@ -2305,6 +2350,10 @@ mod tor_auth;
 #[cfg(all(test, unix))]
 #[path = "tests/socket_path.rs"]
 mod socket_path;
+
+#[cfg(all(test, unix))]
+#[path = "tests/root_search.rs"]
+mod root_search;
 
 #[cfg(test)]
 mod tests {
