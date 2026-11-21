@@ -8,8 +8,10 @@
 # over the crate publication check that crate.yml runs
 # (testing/check-crate.sh), over the FreeBSD package's upgrade test
 # (packaging/freebsd/test-upgrade.sh), which the FreeBSD Package workflow runs
-# in its VM, and over the root-only test runner that ci.yml and ci-local.sh
-# run and the internal builder is to run (testing/root-tests.sh).
+# in its VM, over the root-only test runner that ci.yml and ci-local.sh run
+# and the internal builder is to run (testing/root-tests.sh), and over the
+# local CI guards that check the nftables ruleset, the package versions and
+# the glibc floor, with the package-hint helper they share.
 #
 # This is the one copy of that lint. The OpenWrt Package workflow calls it
 # after building each .ipk, and ci.yml and ci-local.sh call it too, because
@@ -34,9 +36,12 @@
 #   * install-nak.sh, blossom-upload.sh, test-blossom-upload.sh,
 #     keep-pinned-toolchain.sh, the three
 #     testing/cross-check/ scripts, testing/check-crate.sh,
-#     testing/root-tests.sh and testing/install-shellcheck.sh as bash, with
-#     no exclusions. They are CI scripts, not shipped ones, and the sh
-#     exclusion set below misfires on bash.
+#     testing/root-tests.sh, testing/install-shellcheck.sh,
+#     testing/check-nft-syntax.sh, testing/check-package-versions.sh,
+#     testing/check-glibc-floor.sh, testing/glibc-floor/test.sh and
+#     testing/lib/tool-hint.sh as bash, with no exclusions. They are CI
+#     scripts, not shipped ones, and the sh exclusion set below misfires on
+#     bash.
 #
 # The sh exclusions, with reason:
 #   SC1008  the init scripts' `#!/bin/sh /etc/rc.common` shebang, an
@@ -91,6 +96,11 @@ BASH_TARGETS=(
     "testing/install-shellcheck.sh"
     "testing/cross-check/zig-cc"
     "testing/cross-check/zig-ar"
+    "testing/check-nft-syntax.sh"
+    "testing/lib/tool-hint.sh"
+    "testing/check-package-versions.sh"
+    "testing/check-glibc-floor.sh"
+    "testing/glibc-floor/test.sh"
 )
 
 SHELLCHECK="${SHELLCHECK:-shellcheck}"

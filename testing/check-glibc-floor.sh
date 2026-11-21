@@ -38,7 +38,7 @@ if [ -z "${FIPS_GLIBC_FLOOR:-}" ]; then
         echo "                   there is no floor to check against." >&2
         exit 2
     }
-    # shellcheck source-path=SCRIPTDIR source=../packaging/build-floor.env
+    # shellcheck source=/dev/null
     . "$FLOOR_ENV"
 fi
 if [ -z "${FIPS_GLIBC_FLOOR:-}" ]; then
@@ -48,10 +48,18 @@ if [ -z "${FIPS_GLIBC_FLOOR:-}" ]; then
 fi
 FLOOR="$FIPS_GLIBC_FLOOR"
 
+# The package hint is sourced only when a tool is missing, and only if the
+# helper is there: glibc-floor/test.sh runs copies of this script with no lib/
+# beside them.
 for tool in readelf dpkg dpkg-deb; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "check-glibc-floor: $tool is not installed; cannot check anything." >&2
         echo "                   Refusing to report a pass I did not establish." >&2
+        if [ -r "$SCRIPT_DIR/lib/tool-hint.sh" ]; then
+            # shellcheck source=/dev/null
+            . "$SCRIPT_DIR/lib/tool-hint.sh"
+            hint="$(tool_hint "$tool")" && echo "                   $hint" >&2
+        fi
         exit 2
     }
 done

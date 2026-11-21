@@ -159,7 +159,10 @@ daemon refuses (three attempts, 2 s apart), and reports a start that never
 succeeds as an `INFRASTRUCTURE:` line naming Docker's error, so a daemon
 refusal under side load is not read as FIPS failing to start. Its hermetic
 test, [`lib/docker-run-test.sh`](lib/docker-run-test.sh), runs in local CI's
-guards and in GitHub CI's ci-parity job.
+guards and in GitHub CI's ci-parity job. [`lib/tool-hint.sh`](lib/tool-hint.sh)
+provides `tool_hint`, which a local CI guard missing a tool (`dpkg`, `readelf`,
+`nft`, the python3 `yaml` module and others) calls to name the package that
+provides it on Debian and Ubuntu, Fedora and Arch; the guard still exits 2.
 
 ## Running CI locally (`ci-local.sh`)
 
@@ -248,6 +251,23 @@ tarball, checks it against a pinned SHA-256 and leaves the binary at
 keeps the tarball in `${XDG_CACHE_HOME:-~/.cache}/fips-ci/shellcheck/`, so a
 host needs the network only for its first run. If the pinned binary cannot be
 installed the stage fails rather than falling back to the host's shellcheck.
+
+### nftables syntax check (`check-nft-syntax.sh`)
+
+[`check-nft-syntax.sh`](check-nft-syntax.sh) runs `nft -c -f` on
+`packaging/common/fips.nft`, recorded as `nft-syntax`. `nft -c` needs root, so
+the script runs it in a private user and network namespace (`unshare -rn`)
+where the host allows unprivileged user namespaces, and otherwise through
+`sudo -n`, which fails at once rather than prompting for a password. Each way
+is tried first on a small known-good ruleset, so exit 1 means nft refused the
+ruleset or a file it includes (fips.nft includes the host's
+`/etc/fips/fips.d/*.nft`, so a broken drop-in there fails it too), and exit 2
+means the check could not run: `nft` is not installed, or the host has neither
+unprivileged user namespaces nor passwordless sudo. `nft` is looked up on
+`PATH` and then in `/usr/sbin` and `/sbin`, which a non-root login `PATH` on
+Debian leaves out. Ubuntu 24.04 blocks unprivileged user namespaces
+(`kernel.apparmor_restrict_unprivileged_userns = 1`), so there it needs
+passwordless sudo.
 
 ### Per-run isolation and the `FIPS_CI_RUN_ID` override
 
