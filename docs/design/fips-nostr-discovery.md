@@ -171,6 +171,12 @@ reflexive address of the bound socket and advertises that. TCP has no
 STUN equivalent, so wildcard-bound TCP without `external_addr`
 produces a loud WARN and the endpoint is omitted from the advert.
 
+Peers refuse an advert with more than 32 entries in any of its
+`endpoints`, `signalRelays` and `stunServers` lists, or with content
+over 8 KiB (Phase 2). The node therefore publishes at most the first 32
+entries of each list, in configured order, and warns when it cuts one.
+It also warns if the advert it publishes is still over 8 KiB.
+
 ### Phase 2 — Lookup
 
 When the node decides to dial a peer that is eligible for Nostr
@@ -179,7 +185,15 @@ issues a Nostr REQ filtered by `author = peer_pubkey`, `kind = 37195`,
 `#d = fips-overlay-v1`. The fetch is time-bounded (~2 s) and runs
 against all configured `advert_relays` in parallel. The first valid
 advert wins; adverts whose `protocol` tag does not match the local
-`app` value are rejected at validation.
+`app` value are rejected at validation. So is an advert whose content
+is over 8 KiB, checked before it is parsed, or any of whose
+`endpoints`, `signalRelays` and `stunServers` lists has more than 32
+entries. Such an advert is refused whole, never cut, whichever path
+brought it: a lookup, the passive subscription or a stale-advert
+refetch. Both bounds are needed because the cache keeps the parsed
+advert, in which each list entry costs a string header beyond its
+bytes: about 2,000 one-character relays fit in 8 KiB and hold about
+51 KB once parsed.
 
 Results are kept in an in-memory cache keyed by author npub. Cache
 entries carry the advert's expiration time, and a periodic prune drops
@@ -236,7 +250,12 @@ nostr identities are free to generate, so an attacker running
 throwaway npubs still saturates it at the same total offer rate. Raising
 the attacker's cost beyond keypairs would mean pricing the offer itself.
 A `sessionId` replay cache (bounded by `seen_sessions_max_entries`, with
-entries valid for `replay_window_secs`) rejects duplicates.
+entries valid for `replay_window_secs`) rejects duplicates. Once an
+offer is admitted, and before anything else, the responder refuses an
+offer whose `sessionId` or `nonce` is longer than 128 bytes, with a
+warning (reason `oversized-offer`), so the replay cache never holds a
+longer id and the answer never copies a longer nonce. A node's own ids
+and nonces are about 30 bytes.
 
 The responder runs its own STUN query and replies with a
 `TraversalAnswer` carrying its reflexive and local addresses plus a
@@ -356,6 +375,8 @@ peer-connection machinery:
 | Per-npub offer allowance (`max_concurrent_offers_per_npub`) | 4 | One sender identity holding every offer slot and denying traversal onboarding to everyone else. Does not prevent the same denial from several throwaway npubs. | Debug log, offer dropped. |
 | Advert cache (`advert_cache_max_entries`) | 2048 | Memory growth from ambient advert traffic under `policy: open`. | New unconfigured authors refused until an entry expires; configured and linked authors kept. |
 | Seen-sessions (`seen_sessions_max_entries`) | 4096 | Replay of stale `sessionId` values. | New offer refused until an entry expires. |
+| Offer field bound (fixed) | 128 bytes | A peer's oversized `sessionId` held in the seen-sessions memory, or an oversized `nonce` copied into the answer. | Warn log, offer refused. |
+| Advert bounds (fixed) | 8 KiB content; 32 entries in each list | A peer's oversized advert held in the advert cache. | Advert refused whole. Our own lists are cut to 32 at publish, with a warning. |
 | Signal TTL (`signal_ttl_secs`) | 120 s | Indefinite in-flight offers on relays. | Expired offers rejected at validation. |
 | Open discovery queue (`open_discovery_max_pending`) | 64 | Unbounded retry queue under ambient advert load. | New candidates skipped until the queue drains. |
 | Punch window (`punch_duration_ms`) | 10 s | Endless probe traffic after one side has given up. | Attempt declared failed; sockets discarded. |
