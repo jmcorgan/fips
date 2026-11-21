@@ -9,9 +9,11 @@
 # (testing/check-crate.sh), over the FreeBSD package's upgrade test
 # (packaging/freebsd/test-upgrade.sh), which the FreeBSD Package workflow runs
 # in its VM, over the root-only test runner that ci.yml and ci-local.sh run
-# and the internal builder is to run (testing/root-tests.sh), and over the
+# and the internal builder is to run (testing/root-tests.sh), over the
 # local CI guards that check the nftables ruleset, the package versions and
-# the glibc floor, with the package-hint helper they share.
+# the glibc floor, with the package-hint helper they share, and over the
+# WireGuard example's container entrypoint
+# (examples/wireguard-sidecar-macos/entrypoint-sidecar.sh).
 #
 # This is the one copy of that lint. The OpenWrt Package workflow calls it
 # after building each .ipk, and ci.yml and ci-local.sh call it too, because
@@ -38,10 +40,11 @@
 #     testing/cross-check/ scripts, testing/check-crate.sh,
 #     testing/root-tests.sh, testing/install-shellcheck.sh,
 #     testing/check-nft-syntax.sh, testing/check-package-versions.sh,
-#     testing/check-glibc-floor.sh, testing/glibc-floor/test.sh and
-#     testing/lib/tool-hint.sh as bash, with no exclusions. They are CI
-#     scripts, not shipped ones, and the sh exclusion set below misfires on
-#     bash.
+#     testing/check-glibc-floor.sh, testing/glibc-floor/test.sh,
+#     testing/lib/tool-hint.sh and the WireGuard example's
+#     entrypoint-sidecar.sh as bash, with no exclusions. They are CI and
+#     example scripts, not shipped ones, and the sh exclusion set below
+#     misfires on bash.
 #
 # The sh exclusions, with reason:
 #   SC1008  the init scripts' `#!/bin/sh /etc/rc.common` shebang, an
@@ -101,6 +104,7 @@ BASH_TARGETS=(
     "testing/check-package-versions.sh"
     "testing/check-glibc-floor.sh"
     "testing/glibc-floor/test.sh"
+    "examples/wireguard-sidecar-macos/entrypoint-sidecar.sh"
 )
 
 SHELLCHECK="${SHELLCHECK:-shellcheck}"

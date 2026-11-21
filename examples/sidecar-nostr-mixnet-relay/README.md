@@ -169,6 +169,6 @@ all** and FIPS connects directly — useful as a baseline comparison.
 - The container's lifecycle follows the FIPS daemon; strfry, nginx and the
   nym client run as background processes inside the same container and are
   restarted with it (`restart: unless-stopped`).
-- SSH (port 22, no auth) and tools like `tcpdump`, `nak`, `iperf3` are
-  inside the image for poking around — this is a demo image, do not expose
-  it beyond your machine.
+- Tools like `tcpdump`, `nak` and `iperf3` are inside the image for poking
+  around with `docker exec` — this is a demo image, do not expose it beyond
+  your machine.

@@ -18,13 +18,13 @@ RUN apt-get update && \
         tcpdump netcat-openbsd rsync && \
     rm -rf /var/lib/apt/lists/*
 
-# SSH server with no authentication (test only!)
+# SSH server, keys only. The firewall suite needs a listener on port 22; no
+# test logs in. Root has no usable password, keeps Debian's prohibit-password
+# default, and password logins are off for every account.
 RUN mkdir -p /var/run/sshd && \
     ssh-keygen -A && \
-    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
-    sed -i 's/#PermitEmptyPasswords no/PermitEmptyPasswords yes/' /etc/ssh/sshd_config && \
     sed -i 's/UsePAM yes/UsePAM no/' /etc/ssh/sshd_config && \
-    passwd -d root
+    printf 'PasswordAuthentication no\n' > /etc/ssh/sshd_config.d/keys-only.conf
 
 # dnsmasq: forward .fips to FIPS daemon, everything else to Docker DNS.
 # no-negcache: a node that looks up a peer's hostname before Docker has

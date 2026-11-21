@@ -240,7 +240,8 @@ tests.
 ### Shell-script lint (`check-shellcheck.sh`)
 
 [`check-shellcheck.sh`](check-shellcheck.sh) lints the shell scripts the
-OpenWrt packages ship and the CI scripts it lists, recorded as `shellcheck`.
+OpenWrt packages ship, the CI scripts it lists and the WireGuard example's
+container entrypoint, recorded as `shellcheck`.
 `ci-local.sh`, `ci.yml` and the OpenWrt package workflow all run it with the
 shellcheck version that [`install-shellcheck.sh`](install-shellcheck.sh) pins,
 not the host's or the runner image's, because versions report the same finding

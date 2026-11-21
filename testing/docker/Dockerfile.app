@@ -10,12 +10,12 @@ RUN apt-get update && \
         tcpdump netcat-openbsd curl iperf3 && \
     rm -rf /var/lib/apt/lists/*
 
-# SSH server with no authentication (test only!)
+# SSH server, keys only, configured as in the main test image; nothing here
+# starts it. Root has no usable password, keeps Debian's prohibit-password
+# default, and password logins are off for every account.
 RUN mkdir -p /var/run/sshd && \
     ssh-keygen -A && \
-    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
-    sed -i 's/#PermitEmptyPasswords no/PermitEmptyPasswords yes/' /etc/ssh/sshd_config && \
     sed -i 's/UsePAM yes/UsePAM no/' /etc/ssh/sshd_config && \
-    passwd -d root
+    printf 'PasswordAuthentication no\n' > /etc/ssh/sshd_config.d/keys-only.conf
 
 CMD ["sleep", "infinity"]
