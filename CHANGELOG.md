@@ -167,6 +167,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to one path, `show_peers` lists each peer's `paths`, and fipstop shows them.
   See `docs/design/fips-multi-path-switchover.md`.
 
+- `show_peers` gives each peer's `their_session_index` beside
+  `our_session_index`: the peer's index for the current session, the one this
+  node sends to it under, in the same eight hex digits and absent, like
+  `our_session_index`, while no session is held. Each end of a link lists the
+  other's own index as the peer's, so two nodes' listings show whether their
+  two ends hold the same session.
+
 #### Node lifecycle
 
 - Transport-medium change detection, controlled by the new `node.netmon.*`
@@ -1739,6 +1746,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lists as outbound at the smaller node, and that node redials its peer if
   the connection drops. Which session each end runs on is unchanged, and
   nothing on the wire changes.
+- A TCP link both ends dial no longer ends with both ends listing it
+  outbound in `show_peers` and `show_links` after a link flap. When the end
+  holding the link inbound removed the peer and dialed again, the other end,
+  whose connection for the link had gone, answered the dial as a rekey on the
+  connection it arrived on and kept the link as the one it had dialed, while
+  the redialing end installed the answer as a link it dialed. The answering
+  end now holds the link as the peer's dial once a frame from the peer
+  authenticates under the session that answer set up, so one end lists the
+  link outbound and the other inbound. If the answering end later dials the
+  peer again, the node address ordering decides which dial the pair keeps,
+  as for crossed dials; before, that dial always took over the peering.
+  Nothing on the wire changes.
 - A node whose first msg2 could not be sent, as when its interface was
   between rebinds, now installs the peer when it answers the dialer's
   resent msg1 with the stored msg2. Before, the dialer completed the link
