@@ -117,7 +117,7 @@ that file and can reach its private items.
 `mod signal_ttl_floor`, `mod attempt_timeout_floor`, `mod offer_limit_floors`,
 `mod path_tests`, `mod native_flows`, `mod tor_auth`, `mod socket_path` and
 `mod root_search`, not as `mod tests`, because `mod.rs` still carries an
-inline `mod tests` block of that name. That block, and the inline blocks in the other files here,
-predate the rule that unit tests live in this directory; moving them is a
-separate change. Once `mod.rs`'s block has moved, its tests and these can
-share the usual `mod tests;` declaration.
+inline `mod tests` block of that name. That block, and the inline blocks in
+the other files here, predate the rule that unit tests live in this
+directory; moving them is a separate change. Once `mod.rs`'s block has
+moved, its tests and these can share the usual `mod tests;` declaration.
