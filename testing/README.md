@@ -628,10 +628,13 @@ reason), 2 when nothing could be established, which includes `BREAK_SWITCH`
 set empty with a green no-switch run. The judge is
 `agreement-break.sh --judge <dir>`, and
 [`lib/agreement-break-test.sh`](lib/agreement-break-test.sh) tests it on
-planted result directories. Local CI runs the lane as the `agreement-break`
-suite, after the chaos scenarios and skipped with them (`--skip-chaos`), at
-tier 2 and above, with its default switch and scenario; `ci-local.sh --only
-agreement-break` or `--rerun agreement-break` runs it alone. GitHub CI does
+planted result directories. Local CI on master runs the lane as the
+`agreement-break` suite, after the chaos scenarios and skipped with them
+(`--skip-chaos`), at tier 2 and above, with its default switch and scenario;
+on next the lane is left out of the default run until next's crossing is
+settled (`ci-local.sh`'s `AGREEMENT_BREAK_SUITES` says why).
+`ci-local.sh --only agreement-break` or `--rerun agreement-break` runs it
+alone. GitHub CI does
 not run it (`check-ci-parity.sh` lists it as local-only, with the reason): it
 builds a second image per run, and GitHub runs the assertion itself in
 tcp-mesh. [`chaos/README.md`](chaos/README.md) has the rows it checks.

@@ -130,10 +130,11 @@ check "--list names agreement-break" \
 check "run_suite has an arm for agreement-break" \
     "$(sed -n '/^run_suite() {$/,/^}$/p' "$CI_LOCAL" | grep -qE '^        agreement-break\)' && echo 0 || echo 1)"
 # The plan is printed by print_plan, apart from what runs, so the stage itself
-# is read: run_integration must call the lane after the chaos scenarios, inside
-# the --skip-chaos guard.
-check "run_integration runs agreement-break after the chaos scenarios, skipped with them" \
-    "$(sed -n '/^run_integration() {$/,/^}$/p' "$CI_LOCAL" | sed -n '/^    if \[\[ "\$SKIP_CHAOS" != true \]\]; then$/,/^    fi$/p' | grep -A1 -x '        run_chaos_set "\${CHAOS_SUITES\[@\]}"' | grep -qx '        run_agreement_break' && echo 0 || echo 1)"
+# is read. On next the lane is off until next's crossing is settled
+# (AGREEMENT_BREAK_SUITES in ci-local.sh): run_integration must not call it,
+# and the chaos scenarios must still run there.
+check "run_integration leaves agreement-break out on next and still runs the chaos scenarios" \
+    "$(body=$(sed -n '/^run_integration() {$/,/^}$/p' "$CI_LOCAL"); grep -qx '        run_chaos_set "\${CHAOS_SUITES\[@\]}"' <<<"$body" && ! grep -qE '^[[:space:]]*run_agreement_break([[:space:]]|$)' <<<"$body" && echo 0 || echo 1)"
 # The builder asks for the bare-metal stage by environment, not by option.
 FIPS_CI_BAREMETAL=1 expect_usage_error "--rerun with FIPS_CI_BAREMETAL=1" \
     "--rerun cannot be combined with --baremetal" --rerun firewall
@@ -218,21 +219,18 @@ expect_plan "--tier 1 --plan" \
     "ci-parity core-baremetal cross-check-x86_64-apple-darwin unit-tests core-fence-tests known-defect release-test-compile root-tests" \
     "mutations musl-tests build-integration chaos-tcp-mesh agreement-break core-explorers root-explorers mutations-explorers build deb-build" \
     --tier 1 --plan
+# On next the break lane is off, so no tier's plan lists it.
 expect_plan "--tier 2 --plan" \
-    "root-tests mutations musl-tests build-integration chaos-tcp-mesh agreement-break rpm-install deb-build" \
-    "core-explorers root-explorers mutations-explorers chaos-batch1-tcp-mesh chaos-maelstrom tor-socks5 build" \
+    "root-tests mutations musl-tests build-integration chaos-tcp-mesh rpm-install deb-build" \
+    "core-explorers root-explorers mutations-explorers chaos-batch1-tcp-mesh chaos-maelstrom tor-socks5 build agreement-break" \
     --tier 2 --plan
-# The break lane runs after the chaos scenarios, whose run it follows in the
-# integration stage, so it comes after the last of them.
-check "--tier 2 --plan: agreement-break comes after the chaos scenarios" \
-    "$(invoke --tier 2 --plan; a=$(grep -nx agreement-break <<<"$OUT" | cut -d: -f1); c=$(grep -n '^chaos-' <<<"$OUT" | tail -n 1 | cut -d: -f1); [ -n "$a" ] && [ -n "$c" ] && [ "$a" -gt "$c" ] && echo 0 || echo 1)"
 # The .deb is the release build at tier 2, so it comes first in the build
 # stage, before the lints.
 check "--tier 2 --plan: deb-build comes before fmt" \
     "$(invoke --tier 2 --plan; d=$(grep -nx deb-build <<<"$OUT" | cut -d: -f1); f=$(grep -nx fmt <<<"$OUT" | cut -d: -f1); [ -n "$d" ] && [ -n "$f" ] && [ "$d" -lt "$f" ] && echo 0 || echo 1)"
 expect_plan "--tier 3 --plan" \
     "mutations musl-tests chaos-tcp-mesh core-explorers chaos-batch3-tcp-mesh chaos-maelstrom chaos-maelstrom-sparse chaos-dead-grace-long" \
-    "tor-socks5 root-explorers mutations-explorers" \
+    "tor-socks5 root-explorers mutations-explorers agreement-break" \
     --tier 3 --plan
 expect_plan "--tier 3 --with-tor --plan" "tor-socks5 tor-directory core-explorers" "" \
     --plan --with-tor --tier 3

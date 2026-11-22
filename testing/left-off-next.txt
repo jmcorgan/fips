@@ -19,6 +19,15 @@
 #
 # A merge into next that brings an item adds it here or carries it; a merge that carries one
 # removes its line. The check cannot say a reason is true: the merge's review does.
+#
+# Left off next and outside the check's kinds, so recorded here as comments only: master's
+# chaos edge agreement on crossed edges. tcp-mesh dials four edges from both ends on master
+# and keeps every edge one-way on next, with no min_crossings floor; churn-mixed's
+# edge_agreement block is not on next; and the agreement break lane (agreement-break in
+# testing/ci-local.sh) is off in next's default run. On next a crossed edge has been seen to
+# end with both ends listing it outbound, and the crossing clause's rule, the smaller node on
+# its own dial, is not next's after a refusal. All three return when next's crossing is
+# settled.
 
 
 # The real-node explorer, its world, oracle and parity runs. next builds none of it:

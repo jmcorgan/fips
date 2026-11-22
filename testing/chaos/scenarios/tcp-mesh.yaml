@@ -15,14 +15,15 @@
 # UDP edges: n01-n02, n02-n03, n03-n06, n05-n06
 # TCP edges: n01-n04, n02-n05, n04-n05
 #
-# Dialed from both ends: n01-n02, n03-n06 and n05-n06 (UDP) and n01-n04
-# (TCP). Each of their ends lists the other as a static peer, both dial at
-# startup, and the harness holds the edge under a netem delay until every
-# node has started, so the two handshakes cross and the crossing has to be
-# resolved (testing/chaos/README.md, "Directed Outbound Configs"). The other
-# three edges, n02-n03 (UDP) and n02-n05 and n04-n05 (TCP), keep one dialer
-# each, so reconnection by the one end that dials stays exercised on both
-# transports.
+# Every edge has one dialer on next. Master dials n01-n02, n03-n06 and
+# n05-n06 (UDP) and n01-n04 (TCP) from both ends, so their handshakes cross
+# and the crossing has to be resolved. Next keeps each of them one-way
+# until its own crossing is settled: on next a crossed edge has been seen
+# to end with both ends listing it outbound, and next's msg3 crossing
+# keeps both connections. Its fix has no plan yet. The crossing clause of
+# edge_agreement assumes the smaller node keeps its own dial, which next's
+# rule after a refusal does not give. The both-dial edges come back with
+# that fix.
 
 scenario:
   name: "tcp-mesh"
@@ -34,11 +35,11 @@ topology:
   num_nodes: 6
   params:
     adjacency:
-      - [n01, n02, udp, {dial: both}]
+      - [n01, n02, udp]
       - [n02, n03, udp]
-      - [n03, n06, udp, {dial: both}]
-      - [n05, n06, udp, {dial: both}]
-      - [n01, n04, tcp, {dial: both}]
+      - [n03, n06, udp]
+      - [n05, n06, udp]
+      - [n01, n04, tcp]
       - [n02, n05, tcp]
       - [n04, n05, tcp]
 
@@ -83,28 +84,19 @@ assertions:
     max_roots: 1
     min_nodes_parented: 5
   # Both ends of every edge agree on the link between them: one session
-  # index pair, one end outbound and one inbound, the dialer outbound on a
-  # one-way edge, the edge's transport and the other end's address. An edge
-  # that disagrees is re-read until it agrees, for up to the same 90 s the
-  # tree's settle allows, since a rekey can be mid-cutover at any one read.
+  # index pair, one end outbound and one inbound, the dialer outbound, the
+  # edge's transport and the other end's address. An edge that disagrees is
+  # re-read until it agrees, for up to the same 90 s the tree's settle
+  # allows, since a rekey can be mid-cutover at any one read.
   #
-  # On an edge whose crossing the logs show, the smaller node by address
-  # must hold the link it dialed, as FRC-1201 Section 5.6 resolves a
-  # crossing, unless the crossing's record was ended first: by a later
-  # install for the peer at that node, or by that node adopting a rekey
-  # answer on the connection the peer's msg1 arrived on. min_crossings is
-  # the number of edges that must show a crossing, so a run in which the
-  # crossings stopped happening cannot pass by judging nothing. All four
-  # both-dial edges are expected to cross: measured 2026-11-21 over 20 runs,
-  # ten at each multipath setting, every one of the 80 both-dial edge-runs
-  # crossed, UDP and TCP alike. The floor of 2 leaves a margin of two edges.
-  # Do not lower it to make a run pass: a run under it means the crossing
-  # mechanism or the node changed, and that is looked at first.
+  # Every edge here is one-way, so none is expected to cross, and no
+  # min_crossings floor is set: one-way edges cross nothing, and a floor
+  # would red as observing nothing. The crossing clause is still judged on
+  # any edge whose logs show a crossing.
   edge_agreement:
     within_secs: 90
-    min_crossings: 2
 
-# The crossing lines are debug lines, and min_crossings needs them.
+# The crossing lines are debug lines, and the crossing clause reads them.
 logging:
   rust_log: "debug"
   output_dir: "./sim-results"

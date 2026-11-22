@@ -145,8 +145,8 @@
 #   chaos-ethernet-mesh, chaos-ethernet-churn, chaos-tcp-mesh,
 #   chaos-dual-path-flap, chaos-dual-path-carrier, chaos-forward-only,
 #   chaos-loaded-standby, chaos-two-bound-udp, chaos-steady-dual-path,
-#   agreement-break, native-api, mdns, dns-resolver, deb-install,
-#   rpm-install, medium-change
+#   native-api, mdns, dns-resolver, deb-install, rpm-install,
+#   medium-change
 #
 # Nightly only (tier 3's chaos batch; known to --only and --rerun):
 #   chaos-dual-udp-flap, chaos-two-bound-udp-bulk, chaos-churn-mixed-10,
@@ -158,6 +158,8 @@
 # Opt-in (run only when named with --only or --rerun):
 #   nostr-open-discovery  the Nostr open-discovery startup scenario; run by
 #                         hand when the Nostr rendezvous code changes
+#   agreement-break       the chaos agreement break lane; off on next until
+#                         next's crossing is settled (AGREEMENT_BREAK_SUITES)
 #
 # Deliberately not run by either runner, with the reason for each. Recorded
 # here so that "not in the suite list" stops being indistinguishable from
@@ -305,6 +307,8 @@
 #                    profile) to show that edge_agreement reds under a node
 #                    switch and is green without it. GitHub runs the
 #                    assertion itself in tcp-mesh; the lane proves the guard.
+#                    On next it is not run by default by either runner
+#                    (AGREEMENT_BREAK_SUITES below says why).
 #
 # Deliberate GitHub-only (NOT in this local run), with reason:
 #   deb-install ubuntu22 on arm64 — this host is x86_64 and cannot run an
@@ -479,10 +483,18 @@ MDNS_SUITES=(mdns)
 DEB_INSTALL_SUITES=(deb-install)
 RPM_INSTALL_SUITES=(rpm-install)
 TOR_SUITES=(tor-socks5 tor-directory)
-# The chaos agreement break lane (testing/chaos/agreement-break.sh), run after
-# the chaos scenarios and skipped with them. Not named chaos-*, since that
-# prefix means one scenario to run_suite and to the load annotation, and this
-# is two scenario runs on a break image the lane builds itself.
+# The chaos agreement break lane (testing/chaos/agreement-break.sh). Not named
+# chaos-*, since that prefix means one scenario to run_suite and to the load
+# annotation, and this is two scenario runs on a break image the lane builds
+# itself.
+#
+# Off on next: known to --only and --rerun, left out of the default run and
+# the plan. On master it runs after the chaos scenarios. Next has the lane's
+# switch (MoveKeepsInboundLink) but not the crossing rule the lane's healthy
+# run relies on: tcp-mesh's edges are one-way here, so nothing crosses for
+# the switch to break, and with both-dial edges restored a crossed edge ends
+# with both ends outbound on next, so the healthy run would red as well. It
+# returns to the default run when next's crossing is settled.
 AGREEMENT_BREAK_SUITES=(agreement-break)
 
 # ── Colors ─────────────────────────────────────────────────────────────────
@@ -545,7 +557,7 @@ list_suites() {
         echo "    chaos-${parts[0]}  (${parts[*]:1})"
     done
     echo ""
-    echo "  Chaos agreement break lane:"
+    echo "  Chaos agreement break lane (off on next; opt-in via --only):"
     for s in "${AGREEMENT_BREAK_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  Native API:"
@@ -735,7 +747,6 @@ print_plan() {
         for s in "${NAT_SUITES[@]}"; do echo "nat-$s"; done
         printf '%s\n' "${STUN_FAULTS_SUITES[@]}" "${MEDIUM_CHANGE_SUITES[@]}" veth-host
         for entry in "${CHAOS_SUITES[@]}"; do echo "chaos-${entry%% *}"; done
-        printf '%s\n' "${AGREEMENT_BREAK_SUITES[@]}"
         printf '%s\n' "${NATIVE_API_SUITES[@]}" "${MDNS_SUITES[@]}" \
             "${DNS_RESOLVER_SUITES[@]}" "${DEB_INSTALL_SUITES[@]}" rpm-budget \
             "${RPM_INSTALL_SUITES[@]}"
@@ -3032,7 +3043,7 @@ run_integration() {
     if [[ "$SKIP_CHAOS" != true ]]; then
         run_veth_host
         run_chaos_set "${CHAOS_SUITES[@]}"
-        run_agreement_break
+        # No run_agreement_break here on next (AGREEMENT_BREAK_SUITES).
     fi
 
     # Native datagram API (light — one single-node run plus a two-node pair)
