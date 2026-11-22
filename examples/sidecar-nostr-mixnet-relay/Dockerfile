@@ -69,7 +69,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         iproute2 iputils-ping dnsutils dnsmasq iptables \
-        openssh-client openssh-server python3 \
+        openssh-client python3 \
         tcpdump netcat-openbsd curl jq iperf3 nginx && \
     rm -rf /var/lib/apt/lists/*
 
@@ -100,14 +100,6 @@ COPY --from=nym /nym-socks5-client /usr/local/bin/nym-socks5-client
 COPY --from=nym /nym-rt/lib64/ /lib64/
 COPY --from=nym /nym-rt/libs/ /lib/x86_64-linux-gnu/
 RUN echo "Installed:" && /usr/local/bin/nym-socks5-client --version
-
-# Setup SSH server with no authentication (test only!)
-RUN mkdir -p /var/run/sshd && \
-    ssh-keygen -A && \
-    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
-    sed -i 's/#PermitEmptyPasswords no/PermitEmptyPasswords yes/' /etc/ssh/sshd_config && \
-    sed -i 's/UsePAM yes/UsePAM no/' /etc/ssh/sshd_config && \
-    passwd -d root
 
 # dnsmasq: forward .fips to FIPS daemon, everything else to Docker DNS
 RUN printf '%s\n' \

@@ -251,11 +251,11 @@ async fn main() {
     info!("fips-gateway {} starting", version::short_version());
 
     // Load configuration
-    let config = if let Some(config_path) = &args.config {
+    let (config, loaded) = if let Some(config_path) = &args.config {
         match Config::load_file(config_path) {
             Ok(config) => {
                 info!(path = %config_path.display(), "Loaded config file");
-                config
+                (config, vec![config_path.clone()])
             }
             Err(e) => {
                 error!(
@@ -276,7 +276,7 @@ async fn main() {
                         info!(path = %path.display(), "Loaded config file");
                     }
                 }
-                config
+                (config, paths)
             }
             Err(e) => {
                 error!("Failed to load config: {}", e);
@@ -284,6 +284,8 @@ async fn main() {
             }
         }
     };
+    // As in the daemon: name each user config a root start read.
+    fips::config::warn_reads(args.config.is_some(), &loaded);
 
     // Validate gateway config
     let gw_config = match &config.gateway {

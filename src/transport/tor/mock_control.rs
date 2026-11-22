@@ -1,19 +1,42 @@
 //! Mock Tor control port server for testing.
 //!
 //! Implements enough of the Tor control protocol to validate
-//! AUTHENTICATE and GETINFO commands.
+//! AUTHCHALLENGE, AUTHENTICATE and GETINFO commands.
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+
+/// The server nonce the mock returns in every AUTHCHALLENGE reply.
+const SERVER_NONCE: [u8; 32] = [0x5a; 32];
 
 /// Options for configuring mock behavior.
 #[derive(Default)]
 pub struct MockOptions {
     /// If true, reject all AUTHENTICATE attempts.
     pub reject_auth: bool,
+    /// The cookie the mock holds. With a cookie, the mock answers
+    /// `AUTHCHALLENGE SAFECOOKIE` as Tor does and accepts only an
+    /// AUTHENTICATE carrying the matching client hash. Without one, it
+    /// answers AUTHCHALLENGE with `510` and accepts any AUTHENTICATE.
+    pub cookie: Option<[u8; 32]>,
+}
+
+/// HMAC-SHA256 under the SAFECOOKIE key named by `direction`, over the
+/// cookie and the two nonces. Written out here rather than shared with the
+/// client, so a mistake in one does not hide in the other.
+fn safecookie_hash(direction: &str, cookie: &[u8], client_nonce: &[u8]) -> [u8; 32] {
+    let key = format!("Tor safe cookie authentication {direction} hash");
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("any key length");
+    mac.update(cookie);
+    mac.update(client_nonce);
+    mac.update(&SERVER_NONCE);
+    mac.finalize().into_bytes().into()
 }
 
 /// A mock Tor control port server.
@@ -22,6 +45,7 @@ pub struct MockOptions {
 /// commands with valid-looking responses for testing.
 pub struct MockTorControlServer {
     addr: SocketAddr,
+    log: Arc<Mutex<Vec<String>>>,
     _handle: JoinHandle<()>,
 }
 
@@ -37,6 +61,8 @@ impl MockTorControlServer {
             .await
             .expect("bind mock control");
         let addr = listener.local_addr().expect("local addr");
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let task_log = Arc::clone(&log);
 
         let handle = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
@@ -44,6 +70,7 @@ impl MockTorControlServer {
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
             let mut authenticated = false;
+            let mut expected_client_hash: Option<String> = None;
 
             loop {
                 line.clear();
@@ -56,13 +83,39 @@ impl MockTorControlServer {
                 }
 
                 let cmd = line.trim();
+                task_log.lock().expect("mock log").push(cmd.to_string());
 
-                if cmd.starts_with("AUTHENTICATE") {
-                    if options.reject_auth {
-                        let _ = writer.write_all(b"515 Authentication failed\r\n").await;
-                    } else {
+                if let Some(nonce_hex) = cmd.strip_prefix("AUTHCHALLENGE SAFECOOKIE ") {
+                    let client_nonce = hex::decode(nonce_hex).unwrap_or_default();
+                    let reply = match options.cookie {
+                        Some(cookie) if !client_nonce.is_empty() => {
+                            let server_hash =
+                                safecookie_hash("server-to-controller", &cookie, &client_nonce);
+                            let client_hash =
+                                safecookie_hash("controller-to-server", &cookie, &client_nonce);
+                            expected_client_hash = Some(hex::encode_upper(client_hash));
+                            format!(
+                                "250 AUTHCHALLENGE SERVERHASH={} SERVERNONCE={}\r\n",
+                                hex::encode_upper(server_hash),
+                                hex::encode_upper(SERVER_NONCE)
+                            )
+                        }
+                        Some(_) => "512 Invalid base16 client nonce\r\n".to_string(),
+                        None => "510 Unrecognized command\r\n".to_string(),
+                    };
+                    let _ = writer.write_all(reply.as_bytes()).await;
+                } else if let Some(arg) = cmd.strip_prefix("AUTHENTICATE") {
+                    let accepted = match (&options.cookie, &expected_client_hash) {
+                        _ if options.reject_auth => false,
+                        (None, _) => true,
+                        (Some(_), Some(expected)) => arg.trim().eq_ignore_ascii_case(expected),
+                        (Some(_), None) => false,
+                    };
+                    if accepted {
                         authenticated = true;
                         let _ = writer.write_all(b"250 OK\r\n").await;
+                    } else {
+                        let _ = writer.write_all(b"515 Authentication failed\r\n").await;
                     }
                 } else if !authenticated {
                     let _ = writer.write_all(b"514 Authentication required\r\n").await;
@@ -106,8 +159,14 @@ impl MockTorControlServer {
 
         Self {
             addr,
+            log,
             _handle: handle,
         }
+    }
+
+    /// Every command line the mock has received so far, trimmed.
+    pub fn log(&self) -> Vec<String> {
+        self.log.lock().expect("mock log").clone()
     }
 
     /// Get the address the mock server is listening on.

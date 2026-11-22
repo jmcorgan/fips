@@ -627,6 +627,24 @@ class RescueAssertion:
 
 
 @dataclass
+class EdgeAgreementAssertion:
+    """Both ends of every edge agree on the link between them at the run's
+    end (``edge_faults`` and ``evaluate_agreement`` in ``sim/assertions.py``).
+
+    Each edge is read from both ends until one round shows it agreeing, for
+    at most ``within_secs``. At least ``min_crossings`` edges must hold a
+    crossing the logs show, so a scenario whose edges are meant to cross
+    cannot pass on a run in which none did. ``crossings_logged`` is not read
+    from the YAML: loading sets it from ``logging.rust_log`` (see
+    ``logs_crossings``), and without it the crossing clause is not judged.
+    """
+
+    within_secs: int = 90
+    min_crossings: int = 0
+    crossings_logged: bool = False
+
+
+@dataclass
 class AssertionsConfig:
     """Optional post-run assertions evaluated against control-socket data."""
 
@@ -653,6 +671,7 @@ class AssertionsConfig:
     baseline: BaselineAssertion | None = None
     min_traffic: MinTrafficAssertion | None = None
     delivery: DeliveryAssertion | None = None
+    edge_agreement: EdgeAgreementAssertion | None = None
 
 
 @dataclass
@@ -744,6 +763,7 @@ _SECTION_KEYS = {
         "rescue", "lanes",
         "max_errors", "congestion_signals", "max_kernel_drops",
         "max_replay_refusals", "tree_parents", "baseline", "min_traffic", "delivery",
+        "edge_agreement",
     },
     "logging": {"rust_log", "output_dir"},
 }
@@ -776,6 +796,7 @@ _ASSERTION_KEYS = {
         "pairs", "payload_bytes", "min_replies", "deadline_secs",
         "require_transport", "transport_node",
     },
+    "edge_agreement": {"within_secs", "min_crossings"},
 }
 # Largest delivery probe payload: an ICMPv6 echo of this size fits the
 # 1280-byte TUN MTU with FIPS overhead to spare.
@@ -1313,6 +1334,7 @@ def load_scenario(path: str) -> Scenario:
     _reject_unknown(lg, _SECTION_KEYS["logging"], "logging")
     s.logging.rust_log = lg.get("rust_log", "info")
     s.logging.output_dir = lg.get("output_dir", "./sim-results")
+    _parseagreement(asrt, s)
 
     # FIPS config overrides (raw YAML dict appended to node configs)
     s.fips_overrides = raw.get("fips_overrides", {})
@@ -1574,6 +1596,24 @@ def _parsepaths(asrt: dict, s: Scenario):
         )
 
 
+def _parseagreement(asrt: dict, s: Scenario):
+    """Parse edge_agreement, once the log level it depends on is known."""
+    if "edge_agreement" not in asrt:
+        return
+    raw = asrt["edge_agreement"]
+    where = "assertions.edge_agreement"
+    if raw is True or raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{where}: give true or a mapping, got {raw!r}")
+    _reject_unknown(raw, _ASSERTION_KEYS["edge_agreement"], where)
+    s.assertions.edge_agreement = EdgeAgreementAssertion(
+        within_secs=_count(raw.get("within_secs", 90), f"{where}.within_secs", 1),
+        min_crossings=_count(raw.get("min_crossings", 0), f"{where}.min_crossings"),
+        crossings_logged=logs_crossings(s.logging.rust_log),
+    )
+
+
 _SUPPRESSING_LOG_LEVELS = ("off", "error", "warn")
 
 _LEVELS = ("off", "error", "warn", "info", "debug", "trace")
@@ -1607,6 +1647,68 @@ def log_enables(rust_log: str, target: str, level: str) -> bool:
                 best = (len(name), lvl)
     chosen = best[1] if best else default
     return _LEVELS.index(chosen) >= _LEVELS.index(level)
+
+
+def logs_crossings(rust_log: str) -> bool:
+    """Whether ``rust_log`` emits every line the crossing reader reads.
+
+    Those are debug lines of more than one target (the swap and keeping
+    lines, the dual rekey line, a promotion), and a target can move with
+    the code that logs it, as the swap line's did. So no target is named:
+    ``fips`` must be at ``debug``, and no directive may set a ``fips``
+    target lower.
+    """
+    if not log_enables(rust_log, "fips", "debug"):
+        return False
+    for part in rust_log.split(","):
+        if "=" not in part:
+            continue
+        name, lvl = (x.strip().lower() for x in part.rsplit("=", 1))
+        name = re.split(r"[\[{]", name, maxsplit=1)[0]
+        lower = lvl in _LEVELS and _LEVELS.index(lvl) < _LEVELS.index("debug")
+        if lower and (name == "fips" or name.startswith("fips::")):
+            return False
+    return True
+
+
+# Transports whose rows edge_agreement's clauses do not describe: a veth
+# carrying UDP, and the dual edges, whose Ethernet or veth half sits beside a
+# static UDP peer under one session.
+_AGREEMENT_REFUSED = ("udp-veth",) + DUAL_TRANSPORTS
+
+
+def _checkagreement(s: Scenario):
+    """Refuse an edge_agreement its clauses cannot describe or its logs cannot
+    show."""
+    ea = s.assertions.edge_agreement
+    if ea is None:
+        return
+    where = "assertions.edge_agreement"
+    named = {s.topology.default_transport, *(s.topology.transport_mix or {})}
+    if s.topology.algorithm == "explicit":
+        named |= {
+            str(e[2]) for e in s.topology.params.get("adjacency") or []
+            if isinstance(e, (list, tuple)) and len(e) >= 3
+        }
+    refused = sorted(t for t in named if t in _AGREEMENT_REFUSED)
+    if refused:
+        raise ValueError(
+            f"{where}: judges single-transport udp, tcp and ethernet edges, and the "
+            f"topology names {', '.join(refused)}, whose rows its transport and "
+            f"address clauses do not describe"
+        )
+    if s.peer_churn.enabled:
+        raise ValueError(
+            f"{where}: peer_churn gives nodes new identities, so a row or a crossing "
+            f"line can name an npub the topology no longer holds"
+        )
+    if ea.min_crossings > 0 and not logs_crossings(s.logging.rust_log):
+        raise ValueError(
+            f"{where}.min_crossings: counts crossings from debug lines that "
+            f"logging.rust_log '{s.logging.rust_log}' does not emit, so the floor "
+            f"would fail whatever the edges did. Set rust_log to 'debug' with no "
+            f"fips target lower, or drop min_crossings."
+        )
 
 
 # Each assertion that reads a debug line, and the target that emits it.
@@ -1884,8 +1986,75 @@ def _checksender(s: Scenario):
         )
 
 
+def _checkopts(i: int, entry: list, laned: set[str], churn: bool, netem: bool):
+    """Check an explicit edge's fourth element: ``{lanes: n}`` on a
+    ``udp-veth`` edge, or ``{dial: both}`` on a ``udp`` or ``tcp`` one.
+
+    ``laned`` holds the ends of the laned edges seen so far and gains this
+    edge's ends when it is laned; ``churn`` is whether node churn runs, and
+    ``netem`` whether netem does.
+    """
+    opts = entry[3]
+    if not isinstance(opts, dict) or not opts or set(opts) - {"lanes", "dial"}:
+        raise ValueError(
+            f"explicit adjacency[{i}]: the fourth element takes {{lanes: n}} "
+            f"or {{dial: both}} and nothing else, got {entry}"
+        )
+    if "dial" in opts:
+        # Only a static peer entry is dialed. An Ethernet edge has none; a
+        # dual edge's sits beside a half found by beacon or bound to a veth;
+        # and the runner and the veth manager read a laned edge's one dialer
+        # from directed_outbound.
+        if (
+            set(opts) != {"dial"} or opts["dial"] != "both"
+            or str(entry[2]) not in ("udp", "tcp")
+        ):
+            raise ValueError(
+                f"explicit adjacency[{i}]: only a plain udp or tcp edge takes "
+                f"{{dial: both}}, got {entry}"
+            )
+        # The two dials cross only under the startup delay the initial netem
+        # puts on the edge, and every daemon then starts on the runner's word,
+        # which node churn's restart does not give (sim/netem.py,
+        # CROSS_HOLD_MS).
+        if not netem:
+            raise ValueError(
+                f"explicit adjacency[{i}]: {{dial: both}} needs netem.enabled, "
+                f"whose initial netem holds the edge at its startup delay"
+            )
+        if churn:
+            raise ValueError(
+                f"explicit adjacency[{i}]: {{dial: both}} cannot run with "
+                f"node_churn, whose restart does not tell the daemon to start"
+            )
+        return
+    lanes = opts["lanes"]
+    if (
+        str(entry[2]) != "udp-veth"
+        or isinstance(lanes, bool) or not isinstance(lanes, int)
+        or not 1 <= lanes <= 4
+    ):
+        raise ValueError(
+            f"explicit adjacency[{i}]: only a udp-veth edge takes "
+            f"{{lanes: n}}, n from 1 to 4, got {entry}"
+        )
+    ends = {str(p) for p in entry[:2]}
+    if ends & laned:
+        raise ValueError(
+            f"explicit adjacency[{i}]: a node holds at most one laned "
+            f"edge (its lanes are named vl<k>-<node>)"
+        )
+    laned |= ends
+    if churn:
+        raise ValueError(
+            f"explicit adjacency[{i}]: lanes cannot run with node_churn, "
+            f"whose restart does not rebuild them"
+        )
+
+
 def _validate(s: Scenario):
     """Validate scenario constraints."""
+    _checkagreement(s)
     _checkreverse(s)
     _checksender(s)
     _validate_parent_switch_observability(s)
@@ -1928,34 +2097,13 @@ def _validate(s: Scenario):
             if not isinstance(entry, (list, tuple)) or len(entry) not in (2, 3, 4):
                 raise ValueError(
                     f"explicit adjacency[{i}]: expected [nodeA, nodeB], "
-                    f"[nodeA, nodeB, transport] or [nodeA, nodeB, udp-veth, "
-                    f"{{lanes: n}}], got {entry}"
+                    f"[nodeA, nodeB, transport], [nodeA, nodeB, udp-veth, "
+                    f"{{lanes: n}}] or [nodeA, nodeB, udp|tcp, {{dial: both}}], "
+                    f"got {entry}"
                 )
             node_ids.update(str(p) for p in entry[:2])
             if len(entry) == 4:
-                opts = entry[3]
-                lanes = opts.get("lanes") if isinstance(opts, dict) else None
-                if (
-                    str(entry[2]) != "udp-veth" or set(opts) != {"lanes"}
-                    or isinstance(lanes, bool) or not isinstance(lanes, int)
-                    or not 1 <= lanes <= 4
-                ):
-                    raise ValueError(
-                        f"explicit adjacency[{i}]: only a udp-veth edge takes "
-                        f"{{lanes: n}}, n from 1 to 4, got {entry}"
-                    )
-                ends = {str(p) for p in entry[:2]}
-                if ends & laned:
-                    raise ValueError(
-                        f"explicit adjacency[{i}]: a node holds at most one laned "
-                        f"edge (its lanes are named vl<k>-<node>)"
-                    )
-                laned |= ends
-                if s.node_churn.enabled:
-                    raise ValueError(
-                        f"explicit adjacency[{i}]: lanes cannot run with node_churn, "
-                        f"whose restart does not rebuild them"
-                    )
+                _checkopts(i, entry, laned, s.node_churn.enabled, s.netem.enabled)
             if len(entry) == 3:
                 transport = str(entry[2])
                 if transport not in VALID_TRANSPORTS and transport not in DUAL_TRANSPORTS:

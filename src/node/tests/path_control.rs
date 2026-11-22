@@ -1,15 +1,18 @@
 //! What the operator is shown of a link's paths at the node, and the pin:
 //! the link cost a peer row carries while a change of active path holds
 //! it, the `paths` array of each peer row, on the loop and in the published
-//! snapshot, and the control socket's `path_show`, `path_pin` and
-//! `path_unpin`, called on the node and, once, through the control
-//! protocol over an in-memory stream. Loopback nodes only, and no socket.
+//! snapshot, the session index pair each end's row lists, and the control
+//! socket's `path_show`, `path_pin` and `path_unpin`, called on the node
+//! and, once, through the control protocol over an in-memory stream.
+//! Loopback nodes and no control socket, except that the crossed dial whose
+//! index pair is read runs between two TCP nodes on 127.0.0.1.
 
 use super::paths::{
     active_of, carrier, disabled, enabled, loopback_mut, report_body, same_transport,
     same_transport_with, second_transport, shut_p, state_at, t2, two_transports,
 };
 use super::rekey_parity::{deliver, linked_pair};
+use super::settle::crossed_tcp;
 use super::spanning_tree::{TestNode, cleanup_nodes, process_available_packets};
 use super::*;
 use crate::control::protocol::Request;
@@ -30,7 +33,7 @@ const REQUESTS: &str = include_str!("../../control/snapshots/fipsctl_path_reques
 
 /// The keys of a one-path peer's `show_peers` row before the `paths`
 /// array, as the base renders them, both on the loop and off it.
-const BASE_KEYS: [&str; 27] = [
+const BASE_KEYS: [&str; 28] = [
     "authenticated_at_ms",
     "connectivity",
     "consecutive_decrypt_failures",
@@ -55,6 +58,7 @@ const BASE_KEYS: [&str; 27] = [
     "replay_suppressed",
     "replay_suppressed_total",
     "stats",
+    "their_session_index",
     "transport_addr",
     "transport_type",
     "tree_depth",
@@ -186,6 +190,118 @@ async fn a_one_path_peer_row_keeps_every_field_and_lists_its_one_path() {
     }
     assert_eq!(on, off, "the two renders agree");
     cleanup_nodes(&mut nodes).await;
+}
+
+/// The session index `tn` holds for its peer `peer`, this end's and the
+/// peer's, in the row's form: eight hex digits, `Null` when absent.
+fn live_pair(tn: &TestNode, peer: &NodeAddr) -> (Value, Value) {
+    let p = tn
+        .node
+        .get_peer(peer)
+        .expect("precondition: the node holds the peer");
+    let hex = |idx: Option<SessionIndex>| {
+        idx.map(|i| json!(format!("{:08x}", i.as_u32())))
+            .unwrap_or(Value::Null)
+    };
+    (hex(p.our_index()), hex(p.their_index()))
+}
+
+/// Read both ends' rows for each other, on the loop and from the published
+/// snapshot, and check that in each rendering every row names the session
+/// its node holds, this end's index and the peer's, and that each end's
+/// index is the one the other end lists as the peer's. Each rendering is
+/// checked on its own before the two are compared, so a fault in one of
+/// them is named as that rendering's.
+fn assert_pairs_listed(nodes: &mut [TestNode], a: usize, b: usize) {
+    let a_addr = *nodes[a].node.node_addr();
+    let b_addr = *nodes[b].node.node_addr();
+    let a_npub = nodes[a].node.npub();
+    let b_npub = nodes[b].node.npub();
+    let a_live = live_pair(&nodes[a], &b_addr);
+    let b_live = live_pair(&nodes[b], &a_addr);
+    assert!(
+        a_live.0.is_string() && a_live.1.is_string(),
+        "precondition: node {a} holds a session with node {b}: {a_live:?}"
+    );
+    assert_eq!(
+        (&a_live.0, &a_live.1),
+        (&b_live.1, &b_live.0),
+        "precondition: the two ends hold one session"
+    );
+    let (a_on, a_off) = rows(&mut nodes[a], &b_npub);
+    let (b_on, b_off) = rows(&mut nodes[b], &a_npub);
+    let listed = |row: &Value| {
+        (
+            row["our_session_index"].clone(),
+            row["their_session_index"].clone(),
+        )
+    };
+    for (render, a_row, b_row) in [
+        ("on the loop", &a_on, &b_on),
+        ("off the loop", &a_off, &b_off),
+    ] {
+        assert_eq!(
+            listed(a_row),
+            a_live,
+            "node {a}'s row {render} lists the session it holds"
+        );
+        assert_eq!(
+            listed(b_row),
+            b_live,
+            "node {b}'s row {render} lists the session it holds"
+        );
+        assert_eq!(
+            a_row["their_session_index"], b_row["our_session_index"],
+            "{render}: node {a} lists node {b}'s index as the peer's"
+        );
+        assert_eq!(
+            b_row["their_session_index"], a_row["our_session_index"],
+            "{render}: node {b} lists node {a}'s index as the peer's"
+        );
+    }
+    assert_eq!(a_on, a_off, "node {a}'s two renders agree");
+    assert_eq!(b_on, b_off, "node {b}'s two renders agree");
+}
+
+/// Each end of a link lists the peer's session index beside its own, on
+/// the loop and in the snapshot it publishes, and the peer's index is the
+/// one the other end lists as its own. With multipath on.
+#[tokio::test]
+async fn both_ends_of_a_link_list_each_others_session_index_on_the_loop_and_in_the_snapshot() {
+    let mut nodes = linked_pair(enabled(), enabled()).await;
+    assert_pairs_listed(&mut nodes, 0, 1);
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// [`both_ends_of_a_link_list_each_others_session_index_on_the_loop_and_in_the_snapshot`]
+/// with multipath off.
+#[tokio::test]
+async fn both_ends_of_a_link_list_each_others_session_index_on_the_loop_and_in_the_snapshot_with_multipath_off()
+ {
+    let mut nodes = linked_pair(disabled(), disabled()).await;
+    assert_pairs_listed(&mut nodes, 0, 1);
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// After crossed TCP dials, where the smaller node moves its peer to the
+/// session of its own dial, both ends list that one session: the smaller
+/// node's row names its dial's index and the larger node's answer to it,
+/// and the larger node's row names the same two the other way round, on
+/// the loop and in the published snapshot. With multipath off.
+async fn crossed_dial_pairs_listed(zero_smaller: bool) {
+    let (mut nodes, s, l) = crossed_tcp(false, zero_smaller).await;
+    assert_pairs_listed(&mut nodes, s, l);
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn after_a_crossed_dial_both_ends_list_the_one_session_they_moved_to_smaller_first() {
+    crossed_dial_pairs_listed(true).await;
+}
+
+#[tokio::test]
+async fn after_a_crossed_dial_both_ends_list_the_one_session_they_moved_to_larger_first() {
+    crossed_dial_pairs_listed(false).await;
 }
 
 /// A peer on a link of two paths lists both in its row, on the loop and

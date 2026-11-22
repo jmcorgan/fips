@@ -56,8 +56,9 @@ ring = ["dep:ring"]
 # Test hooks in `proto`, `cache`, `noise` and `node`: methods and re-exports that
 # only unit tests use to set up or inspect state. This crate's tests see them
 # through `cfg(test)`; the root crate's tests see them because the root
-# enables this feature from its `[dev-dependencies]` only. Never enable it
-# outside tests.
+# enables this feature from its `[dev-dependencies]`. The root's own
+# `test-hooks` feature enables it too, for the chaos break image alone. No
+# package build may enable it.
 test-hooks = []
 # The slow test suites: the guard-switch meta-tests of the rekey machine and
 # of settlement (`proto/rekey/tests/faults.rs`, `proto/settle/tests/faults.rs`),

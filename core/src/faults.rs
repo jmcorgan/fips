@@ -9,12 +9,17 @@
 //! guards nothing.
 //!
 //! One list holds every switch, whichever crate its site is in. A site is
-//! `node_fault!(Name)`, defined once in each crate's root: in test builds it
-//! asks [`on`], and in any other build it is the literal `false`, so a
-//! normal or release build compiles the branch away. This crate's sites see
-//! the module through `cfg(test)` and the root crate's through the
-//! `test-hooks` feature, which the root enables from its
-//! `[dev-dependencies]` only.
+//! `node_fault!(Name)`, defined once in each crate's root: in test builds
+//! and under the `test-hooks` feature it asks [`on`], and in any other build
+//! it is the literal `false`, so a normal or release build compiles the
+//! branch away. This crate's sites see the module in its own test builds
+//! and under its `test-hooks` feature, and the root crate's sites through
+//! that feature alone. The root enables it from its `[dev-dependencies]`,
+//! so this crate's sites are live in the root's tests and in the integration
+//! image, and from its own `test-hooks` feature, which also turns the root's
+//! `node_fault!` sites on, for the chaos break image: a chaos run can then
+//! start its nodes with a switch set and see the chaos assertions red. No
+//! package build enables either.
 //!
 //! The set is read once per process from the `FIPS_NODE_FAULTS`
 //! environment variable, a comma-separated list of variant names, and an
@@ -303,6 +308,12 @@ faults! {
     /// leaves the connection the dial was set up at open, though no path and
     /// no handshake uses it, in the settlement core and in the node.
     MoveLeavesDialOpen,
+    /// The settlement core leaves the record of a link this node dialed as
+    /// its dial when the peer adopts a rekey answer that went out on the
+    /// connection its msg1 arrived on, the link's own connection having
+    /// gone, so the node keeps the link `Outbound` while the peer, which
+    /// opened that connection, holds it as one it dialed.
+    AdoptedKeepsDir,
     /// Closing a link takes the index's entry at each pair it was named at
     /// from any other link that uses the pair, as the written index did.
     ShadowLosesEntry,

@@ -23,10 +23,12 @@ nor be blamed on another's. Cases:
        and peer churn turned on, so every known site is exercised. 20 nodes
        is what makes the dial-direction site reliably visible.
   dual DUAL_FIXTURE below, an explicit topology mixing dual edges
-       (ethernet+udp, udp-veth+udp) with plain Ethernet and UDP ones, with
-       link flaps confined to Ethernet edges (only_transport), so the
-       filter that picks which edges may flap is exercised and the dial
-       direction of a dual edge's bridge half is compared.
+       (ethernet+udp, udp-veth+udp) with plain Ethernet and UDP ones, two
+       of the UDP ones dialed from both ends ({dial: both}, which needs
+       netem on), with link flaps confined to Ethernet edges
+       (only_transport), so the filter
+       that picks which edges may flap is exercised, and the dial direction
+       of a dual edge's bridge half and of a both-dial edge is compared.
 
 A child's printed outbound lists are sorted per node, because the generated
 config sorts them; only which node dials which reaches a run.
@@ -96,7 +98,9 @@ CASES: dict[str, tuple[str, ...]] = {
 # neither the suite list nor the excluded list needs it. Nine edges, so the
 # unsorted control's sample of five has room to differ; five of them are
 # Ethernet (three dual, two plain), so three rounds of flaps draw from a
-# filtered set of two kinds.
+# filtered set of two kinds. Two edges are dialed from both ends, so a walk
+# of that set whose order decided which of them gains its second dialer
+# would show here; with one, every order is the same.
 DUAL_FIXTURE = """
 scenario:
   name: "chaos-schedule-dual"
@@ -114,10 +118,11 @@ topology:
       - [n05, n06, ethernet]
       - [n06, n07, udp-veth+udp]
       - [n07, n01, udp]
-      - [n01, n04, udp]
-      - [n02, n06, udp]
+      - [n01, n04, udp, {dial: both}]
+      - [n02, n06, udp, {dial: both}]
+# On, because an edge dialed from both ends needs it (its startup delay).
 netem:
-  enabled: false
+  enabled: true
 link_flaps:
   enabled: true
   only_transport: ethernet

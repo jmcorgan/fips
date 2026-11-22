@@ -89,13 +89,35 @@ that file and can reach its private items.
   `Config::validate` (`mod.rs`). A `node.native_api.max_flows` of 0 is
   refused at load, naming the key, and 1, the smallest working ceiling, is
   accepted.
+- `tor_auth.rs`: tests for `Config::validate_tor_auth`, called from
+  `Config::validate` (`mod.rs`). A Tor `control_auth` password holding a
+  line feed, or a carriage return in a named instance's password, is
+  refused at load, naming the instance's key and not echoing the password.
+  An ordinary password, quotes included, and both cookie forms are
+  accepted.
+- `socket_path.rs`: tests for the default Unix socket path (`resolve_for`,
+  `mod.rs`). A root process takes `/run/fips/<name>`, or
+  `/var/run/fips/<name>` under the macOS and FreeBSD policy when
+  `/run/fips` is absent, even with a valid `XDG_RUNTIME_DIR` and no
+  directory present, and never a `/tmp` path. A non-root process keeps the
+  XDG and `/tmp` fallbacks. The older resolver tests stay in `mod.rs`'s
+  inline `tests` module. Unix only.
+- `root_search.rs`: tests for the warning a root start gives for the user
+  configs it read (`warn_for`, `mod.rs`). A root process that took its
+  config from the search warns once for each file it read outside the
+  system config paths (the user config directory, `~/.fips.yaml`,
+  `./fips.yaml`), naming the file and `--config`. It does not warn for the
+  system config, when `--config` named the file, or when not running as
+  root. Every search path after the system paths draws the warning. It is
+  logged at ERROR, which no `node.log_level` value filters out, so a
+  planted file cannot hide the warning about itself. Unix only.
 
 `mod.rs` declares the others as `mod udp_interface_tests`, `mod rekey_switch`,
 `mod tick_setting`, `mod buffers`, `mod grants`, `mod sockets`, `mod merge`,
 `mod signal_ttl_floor`, `mod attempt_timeout_floor`, `mod offer_limit_floors`,
-`mod path_tests` and `mod native_flows`, not as
-`mod tests`, because `mod.rs` still carries an inline `mod tests` block of
-that name. That block, and the inline blocks in the other files here,
-predate the rule that unit tests live in this directory; moving them is a
-separate change. Once `mod.rs`'s block has moved, its tests and these can
-share the usual `mod tests;` declaration.
+`mod path_tests`, `mod native_flows`, `mod tor_auth`, `mod socket_path` and
+`mod root_search`, not as `mod tests`, because `mod.rs` still carries an
+inline `mod tests` block of that name. That block, and the inline blocks in
+the other files here, predate the rule that unit tests live in this
+directory; moving them is a separate change. Once `mod.rs`'s block has
+moved, its tests and these can share the usual `mod tests;` declaration.

@@ -27,8 +27,21 @@ trap 'chmod -R u+rwx "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 cannot() { echo "glibc-floor cases: $*; cannot run." >&2; exit 2; }
 
+# missing <tool>: like cannot, then names the package that provides the tool.
+# The helper is sourced only here, and only if it is there.
+missing() {
+    echo "glibc-floor cases: $1 is not installed; cannot run." >&2
+    if [ -r "$SCRIPT_DIR/../lib/tool-hint.sh" ]; then
+        # shellcheck source=/dev/null
+        . "$SCRIPT_DIR/../lib/tool-hint.sh"
+        local hint
+        hint="$(tool_hint "$1")" && echo "glibc-floor cases: $hint" >&2
+    fi
+    exit 2
+}
+
 for tool in readelf dpkg dpkg-deb tar; do
-    command -v "$tool" >/dev/null 2>&1 || cannot "$tool is not installed"
+    command -v "$tool" >/dev/null 2>&1 || missing "$tool"
 done
 # `true` is a shell builtin, so `command -v` would print the bare word.
 HOSTELF="$(type -P true)" || cannot "no true executable on PATH"

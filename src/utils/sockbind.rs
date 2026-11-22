@@ -233,6 +233,47 @@ fn fips_group_id() -> Option<libc::gid_t> {
     }
 }
 
+/// The largest buffer [`fips_user_id`] grows to for one passwd entry.
+#[cfg(unix)]
+const PASSWD_BUF_MAX: usize = 1 << 20;
+
+/// The `fips` account's uid, or `None` when the host has no such account or
+/// the lookup fails.
+///
+/// The control clients trust a server running as this account, which is how
+/// the documented unprivileged daemon runs. Looked up with `getpwnam_r` into
+/// a buffer of this call's own, for the same reason [`fips_group_id`] uses
+/// `getgrnam_r`: `getpwnam` keeps its result in static storage.
+#[cfg(unix)]
+pub(crate) fn fips_user_id() -> Option<libc::uid_t> {
+    let mut buf: Vec<libc::c_char> = vec![0; 1024];
+    loop {
+        // SAFETY: `passwd` is a plain C struct of integers and pointers, for
+        // which all zeros is a valid value.
+        let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: the name is a NUL-terminated literal, `passwd` and `found`
+        // are live locals, and `buf` is `buf.len()` writable bytes. The
+        // entry's strings point into `buf`, and only `pw_uid`, a plain
+        // integer, is read from it.
+        let rc = unsafe {
+            libc::getpwnam_r(
+                c"fips".as_ptr(),
+                &mut passwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut found,
+            )
+        };
+        match rc {
+            0 if found.is_null() => return None,
+            0 => return Some(passwd.pw_uid),
+            libc::ERANGE if buf.len() < PASSWD_BUF_MAX => buf.resize(buf.len() * 2, 0),
+            _ => return None,
+        }
+    }
+}
+
 /// Remove a socket file at teardown, ignoring a path that is already gone.
 #[cfg(unix)]
 pub fn cleanup(path: &PathBuf, what: &str) {

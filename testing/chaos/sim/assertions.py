@@ -28,12 +28,16 @@ Currently supported assertions:
   without a stall, a re-peering or a dial, and the second path existed.
 - ``active_timeouts``: a report, failing nothing, of the active path's
   timeouts that no down explains.
+- ``edge_agreement``: both ends of every edge list one session index pair
+  and one link, one end ``outbound`` and one ``inbound``, the dialer of a
+  one-way edge ``outbound``, and after a crossing the logs show, the
+  smaller node ``outbound``.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 from .control import snapshot_all_bloom
@@ -47,6 +51,7 @@ from .scenario import (
     CongestionSignalsAssertion,
     DeliveryAssertion,
     DiscoveryLimitAssertion,
+    EdgeAgreementAssertion,
     MaxKernelDropsAssertion,
     MaxReplayRefusalsAssertion,
     LanesAssertion,
@@ -2099,4 +2104,493 @@ def evaluate_max_kernel_drops(
         name=name,
         passed=True,
         detail=f"PASS max_kernel_drops: ceiling {cfg.max_pct}%; {summary}",
+    )
+
+
+# --- edge agreement ----------------------------------------------------------
+
+@dataclass
+class AgreementEdge:
+    """One topology edge as the ``edge_agreement`` assertion judges it.
+
+    ``a`` and ``b`` are its node ids in the topology's canonical order,
+    ``transport`` its single transport (``udp``, ``tcp`` or ``ethernet``),
+    ``npub`` and ``ip`` each end's configured npub and Docker address, by
+    node id. ``dialers`` are the ends whose ``directed_outbound()`` list
+    names the other end, found by testing membership in both directions:
+    none for an Ethernet edge, which beacons find at both ends, one end
+    for an edge dialed one way, both for an edge dialed from both ends.
+    """
+
+    a: str
+    b: str
+    transport: str
+    npub: dict[str, str]
+    ip: dict[str, str]
+    dialers: frozenset[str] = frozenset()
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """The edge as the topology's ``edges`` set holds it."""
+        return (self.a, self.b)
+
+    def name(self) -> str:
+        """The edge for a message: its ends and transport."""
+        return f"{self.a}-{self.b} {self.transport}"
+
+
+def peer_row(rows: list[dict], npub: str) -> dict | None:
+    """The row of a ``show_peers`` listing that names ``npub``, if any."""
+    return next((r for r in rows if r.get("npub") == npub), None)
+
+
+def _host(addr) -> str | None:
+    """The IP of a ``transport_addr``, without its port or IPv6 brackets."""
+    if not isinstance(addr, str) or ":" not in addr:
+        return None
+    return addr.rsplit(":", 1)[0].strip("[]")
+
+
+def rekey_flags(node: str, row: dict | None) -> list[str]:
+    """The rekey flags ``row`` sets, each named with its node."""
+    if not row:
+        return []
+    return [f"{node} {flag}" for flag in ("rekey_in_progress", "rekey_draining") if row.get(flag)]
+
+
+def edge_faults(
+    edge: AgreementEdge,
+    rows_a: list[dict] | None,
+    rows_b: list[dict] | None,
+) -> list[str]:
+    """The read clauses one edge fails, from both ends' listings of one round.
+
+    ``rows_a`` and ``rows_b`` are the ``peers`` of each end's ``show_peers``
+    from the same round, or ``None`` where the node gave no listing. Each
+    fault starts with the clause it names:
+
+    - ``unread``: an end gave no listing, so nothing was observed of the
+      edge; never a pass.
+    - ``present``: an end has no row for the other's configured npub.
+    - ``harness``: a row lacks ``their_session_index``, so the image
+      predates the field and cannot be judged.
+    - ``pair``: the session index pair is not one pair seen from both ends
+      (``a.our == b.their`` and ``a.their == b.our``, every key present),
+      with the rekey flags either end set. One round's pair fault is a
+      reading; the runner keeps it only where the reads around it confirm
+      it (``confirm_pair``).
+    - ``direction``: not one end ``outbound`` and one ``inbound``.
+    - ``dialer``: on an edge one end dials, that end is not ``outbound``.
+      An edge with no dialer (Ethernet) or two (dialed from both ends) is
+      left to ``direction`` and, after a crossing, the crossing clause,
+      which ``evaluate_agreement`` judges from the logs.
+    - ``transport``: a row's ``transport_type`` is not the edge's.
+    - ``address``: off Ethernet, a row's IP is not the other end's Docker
+      address. Only the host is compared: an inbound TCP row names an
+      ephemeral port, and with multipath a row can name the dial's port on
+      an inbound link.
+
+    Empty when the edge agrees.
+    """
+    a, b = edge.a, edge.b
+    unread = [n for n, rows in ((a, rows_a), (b, rows_b)) if rows is None]
+    if unread:
+        return [
+            f"unread: {' and '.join(unread)} gave no peer listing, so nothing "
+            f"was observed of the edge"
+        ]
+    ra, rb = peer_row(rows_a, edge.npub[b]), peer_row(rows_b, edge.npub[a])
+    absent = [f"{x} lists no row for {y}" for x, y, r in ((a, b, ra), (b, a, rb)) if r is None]
+    if absent:
+        return [f"present: {'; '.join(absent)}"]
+    stale = [n for n, r in ((a, ra), (b, rb)) if "their_session_index" not in r]
+    if stale:
+        return [
+            f"harness: {' and '.join(stale)} listed no their_session_index, so the "
+            f"image predates the field and the edge cannot be judged"
+        ]
+    faults = []
+    keys = (ra.get("our_session_index"), ra.get("their_session_index"),
+            rb.get("our_session_index"), rb.get("their_session_index"))
+    if None in keys or keys[0] != keys[3] or keys[1] != keys[2]:
+        flags = rekey_flags(a, ra) + rekey_flags(b, rb)
+        faults.append(
+            f"pair: {a} our={keys[0]} their={keys[1]}, {b} our={keys[2]} "
+            f"their={keys[3]}; " + (f"rekey flags: {', '.join(flags)}" if flags
+                                    else "no rekey flag set")
+        )
+    da, db = ra.get("direction"), rb.get("direction")
+    if {da, db} != {"outbound", "inbound"}:
+        faults.append(f"direction: {a} {da}, {b} {db}")
+    if len(edge.dialers) == 1:
+        (dialer,) = edge.dialers
+        mine = da if dialer == a else db
+        if mine != "outbound":
+            faults.append(f"dialer: {dialer} dials the edge and is {mine}")
+    ta, tb = ra.get("transport_type"), rb.get("transport_type")
+    if ta != edge.transport or tb != edge.transport:
+        faults.append(f"transport: {a} {ta}, {b} {tb}, the edge {edge.transport}")
+    if edge.transport != "ethernet":
+        wrong = [
+            f"{x} lists {r.get('transport_addr')}, {y} is {edge.ip[y]}"
+            for x, y, r in ((a, b, ra), (b, a, rb))
+            if _host(r.get("transport_addr")) != edge.ip[y]
+        ]
+        if wrong:
+            faults.append(f"address: {'; '.join(wrong)}")
+    return faults
+
+
+# How far either side of a swap line its far end's answer is looked for: the
+# default handshake_timeout_secs, since both lines answer dials open at the
+# same time.
+CROSS_WINDOW = 30.0
+
+
+@dataclass
+class SwapRecord:
+    """One "swapped to outbound session" line, classed by its far end.
+
+    ``end`` moved its peering with ``peer`` onto its own dial's session at
+    ``t``. The same line ends a crossing and a re-dial the far end took as a
+    rekey, and the two leave the links differently, so ``kind`` is what
+    ``peer`` logged naming ``end`` within ``CROSS_WINDOW`` of it, either
+    side: ``crossed`` for keeping its inbound session, ``rekey`` for losing
+    a dual rekey initiation (and no keeping line), ``crossed`` again for
+    neither of those but a promotion of the swap's own handshake (its
+    ``epoch=``) as ``inbound``, and ``unpaired`` for none. The last
+    crossed form is the far end's own dial promoted first, so that it took
+    ``end``'s dial as a redial of that peering and moved onto it: both ends
+    then hold ``end``'s dial, as a kept crossing leaves them. ``far`` is
+    the line that gave the kind. A ``crossed`` record's
+    ``ended`` is the time of the first promotion of ``peer`` at ``end``
+    after the swap, or of ``end``'s adoption of a rekey answer it sent on
+    the connection ``peer``'s msg1 arrived on: the swap arm runs only on a
+    peer already promoted, so a later promotion is a new install, and the
+    adoption holds the link as the one ``peer`` dialed, so either way what
+    the crossing left is gone.
+    """
+
+    end: str
+    peer: str
+    t: float
+    kind: str
+    line: str
+    far: str | None = None
+    ended: float | None = None
+
+
+@dataclass
+class Crossings:
+    """A run's swap records by edge, and the lines that could not be read."""
+
+    edges: dict[tuple[str, str], list[SwapRecord]] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
+
+
+def short_npub(npub: str) -> str:
+    """The node's short form of an npub, as it logs a peer it found itself:
+    ``npub1``, four characters, ``...``, the last four."""
+    return f"npub1{npub[5:9]}...{npub[-4:]}"
+
+
+def _crossline(line: str) -> str | None:
+    """Which crossing line ``line`` is, if it is one."""
+    if "Cross-connection: swapped to outbound session (our outbound wins)" in line:
+        return "swap"
+    if "Cross-connection: keeping inbound session and original their_index (peer outbound wins)" in line:
+        return "keep"
+    if "Dual rekey initiation: we lose (larger addr), abandoning ours" in line:
+        return "rekey"
+    if "Peer promoted to active" in line or "Connection promoted to active peer" in line:
+        return "promoted"
+    if "Rekey answered on the msg1's connection adopted" in line:
+        return "adopted"
+    return None
+
+
+def edge_crossings(logs: dict[str, str], topology: SimTopology) -> Crossings:
+    """Every swap line in the logs, by edge, classed by its far end.
+
+    ``logs`` are the collected node logs by container name. A line's
+    ``peer=`` is the alias ``config_gen.py`` gives every static peer (its
+    node id) or, for a peer the node found itself, as on an Ethernet edge,
+    its short npub; both are resolved against the topology. A value that
+    names no node, or two, a crossing line with no time, and a swap between
+    two nodes that share no edge are errors, never skipped: each could hide
+    a crossing. "Second dial answered", the line for a swap onto an answer
+    to this node's own earlier dial, is not a swap here.
+    """
+    out = Crossings()
+    names: dict[str, set[str]] = {}
+    for nid, node in topology.nodes.items():
+        names.setdefault(nid, set()).add(nid)
+        names.setdefault(short_npub(node.npub), set()).add(nid)
+    sources = {topology.container_name(nid): nid for nid in topology.nodes}
+    events: list[tuple[str, str, str, float, str]] = []
+    for source, text in sorted(logs.items()):
+        node = sources.get(source)
+        if node is None:
+            continue
+        for line in text.splitlines():
+            kind = _crossline(line)
+            if kind is None:
+                continue
+            t = line_epoch(line)
+            value = line_fields(line).get("peer")
+            named = names.get(value, set()) if value else set()
+            if t is not None and len(named) == 1:
+                events.append((kind, node, next(iter(named)), t, line.strip()))
+                continue
+            why = (
+                "a crossing line with no time" if t is None
+                else f"peer={value} names no node" if not named
+                else f"peer={value} names {' and '.join(sorted(named))}"
+            )
+            out.errors.append(f"{node}: {why}: {line.strip()[:240]}")
+
+    def answers(kind: str, far: str, node: str, t: float) -> list[tuple[float, str]]:
+        """``far``'s lines of ``kind`` naming ``node`` near ``t``, nearest first."""
+        return sorted(
+            (abs(e[3] - t), e[4]) for e in events
+            if e[0] == kind and e[1] == far and e[2] == node and abs(e[3] - t) <= CROSS_WINDOW
+        )
+
+    for kind, node, peer, t, line in events:
+        if kind != "swap":
+            continue
+        key = (min(node, peer), max(node, peer))
+        if key not in topology.edges:
+            out.errors.append(
+                f"{node}: a swap for {peer}, with which it shares no edge: {line[:240]}"
+            )
+            continue
+        rec = SwapRecord(node, peer, t, "unpaired", line)
+        keep, rekey = answers("keep", peer, node, t), answers("rekey", peer, node, t)
+        epoch = line_fields(line).get("epoch")
+        took = [
+            (d, x) for d, x in answers("promoted", peer, node, t)
+            if epoch and line_fields(x).get("epoch") == epoch
+            and line_fields(x).get("direction") == "inbound"
+        ]
+        if keep:
+            rec.kind, rec.far = "crossed", keep[0][1]
+        elif rekey:
+            rec.kind, rec.far = "rekey", rekey[0][1]
+        elif took:
+            rec.kind, rec.far = "crossed", took[0][1]
+        if rec.kind == "crossed":
+            rec.ended = min(
+                (e[3] for e in events
+                 if e[0] in ("promoted", "adopted") and e[1] == node and e[2] == peer
+                 and e[3] > t),
+                default=None,
+            )
+        out.edges.setdefault(key, []).append(rec)
+    for recs in out.edges.values():
+        recs.sort(key=lambda r: r.t)
+    return out
+
+
+@dataclass
+class Judged:
+    """One edge as it is scored: each end's row for the other from the round
+    it is scored on (``None`` where unread or absent), that round's time, and
+    the read clauses the edge failed then."""
+
+    edge: AgreementEdge
+    row_a: dict | None
+    row_b: dict | None
+    at: float
+    faults: list[str]
+
+
+def judge(edge: AgreementEdge, rows_a: list[dict] | None, rows_b: list[dict] | None,
+          at: float) -> Judged:
+    """Judge ``edge`` on both ends' listings of one round, read at ``at``."""
+    return Judged(
+        edge,
+        None if rows_a is None else peer_row(rows_a, edge.npub[edge.b]),
+        None if rows_b is None else peer_row(rows_b, edge.npub[edge.a]),
+        at,
+        edge_faults(edge, rows_a, rows_b),
+    )
+
+
+# How far apart two reads must be for a pair fault seen in both to stand. A
+# node serves ``show_peers`` from a snapshot it publishes on its 1 s tick, so a
+# row can lag the node's own rekey cutover by up to about 1.06 s (measured on
+# tcp-mesh, 38 of 45 cutovers lagging 0.7 to 1.06 s): one read can catch one
+# end on the new pair and the other still on the old. Two reads more than a
+# tick apart cannot both catch the same lag.
+PAIR_CONFIRM_SECS = 2.0
+
+# The clauses under which a read did not observe an edge's session pair.
+_UNSEEN = ("unread", "present", "harness")
+
+
+def _clausesof(faults: list[str]) -> list[str]:
+    """The clause each fault names."""
+    return [f.split(":", 1)[0] for f in faults]
+
+
+def _together(j: Judged) -> bool:
+    """Whether ``j``'s read observed the edge's session pair as one pair."""
+    seen = _clausesof(j.faults)
+    return "pair" not in seen and not any(c in seen for c in _UNSEEN)
+
+
+def pair_unsure(j: Judged, before: Judged | None) -> bool:
+    """Whether ``j``'s pair fault needs a later read to confirm it.
+
+    ``before`` is the same edge judged on the round before ``j``'s, or
+    ``None`` when ``j``'s is the first. A pair fault the round before also
+    showed, or one that round did not observe, has already lasted across two
+    reads a round apart, so it stands without another; only a fault that
+    began at ``j``'s round, after a round with both ends on one pair, or at
+    the first round, can be a row read inside a cutover.
+    """
+    return "pair" in _clausesof(j.faults) and (before is None or _together(before))
+
+
+def confirm_pair(j: Judged, again: Judged, before: Judged | None = None) -> Judged:
+    """``j`` with its pair fault kept only where the reads around it confirm it.
+
+    ``again`` is the same edge judged on a later read of both ends, and
+    ``before`` on the round before ``j``'s (``None`` when ``j``'s was the
+    first). A pair fault counts when it persists across two reads at least
+    ``PAIR_CONFIRM_SECS`` apart. It is dropped, as an end read mid-cutover,
+    only when ``before`` (if there was one) showed both ends on one pair,
+    ``again`` shows them on one pair too, and ``again`` is at least that far
+    after ``j``. It stands when ``before`` showed the pair apart or did not
+    observe it (``pair_unsure``), when ``again`` shows it apart or did not
+    observe it (an end unread, a row absent or without the field), and when
+    the two reads are closer than that. ``j``'s other faults, rows and time
+    stand either way, so the edge is still scored on its own round.
+    """
+    if not pair_unsure(j, before):
+        return j
+    if not _together(again) or again.at - j.at < PAIR_CONFIRM_SECS:
+        return j
+    return replace(j, faults=[f for f in j.faults if not f.startswith("pair:")])
+
+
+def _rowtext(node: str, peer: str, row: dict | None) -> str:
+    """The fields of ``node``'s row for ``peer`` that the clauses read."""
+    if row is None:
+        return f"{node} has no row for {peer}"
+    flags = [f for f in ("rekey_in_progress", "rekey_draining") if row.get(f)]
+    return (
+        f"{node} lists {peer} our={row.get('our_session_index')} "
+        f"their={row.get('their_session_index')} {row.get('direction')} "
+        f"{row.get('transport_type')} {row.get('transport_addr')} "
+        f"rekey={','.join(flags) or 'none'}"
+    )
+
+
+def _crossfault(j: Judged, recs: list[SwapRecord]) -> str | None:
+    """The crossing clause on one scored edge, given its ``crossed`` records
+    before the round: the smaller end ``outbound`` while a record stands."""
+    live = [r for r in recs if r.ended is None or r.ended >= j.at]
+    if not live or j.row_a is None or j.row_b is None:
+        return None
+    a, b = j.edge.a, j.edge.b
+    # Each row carries the other end's address.
+    addr_a, addr_b = j.row_b.get("node_addr"), j.row_a.get("node_addr")
+    if not addr_a or not addr_b:
+        return "harness: a row lists no node_addr, so the smaller end is not known"
+    smaller, row = (a, j.row_a) if addr_a < addr_b else (b, j.row_b)
+    if row.get("direction") == "outbound":
+        return None
+    r = live[-1]
+    return (
+        f"crossing: {smaller}, the smaller end, is {row.get('direction')} after the "
+        f"crossing {r.end} logged at {_stamp(r.t)}"
+    )
+
+
+def evaluate_agreement(
+    cfg: EdgeAgreementAssertion,
+    judged: list[Judged],
+    crossings: Crossings,
+) -> AssertionOutcome:
+    """The ``edge_agreement`` verdict over every edge as it was scored.
+
+    ``judged`` holds each edge once, on the round it is scored on
+    (``judge``); ``crossings`` is ``edge_crossings`` over the run's logs.
+    The read clauses stand as ``edge_faults`` gave them. The crossing clause
+    adds one: where an edge holds a ``crossed`` record timed before its
+    scored round, and no promotion before that round ended it, the smaller
+    end by ``node_addr`` must be ``outbound``. A record after the round is
+    listed, neither scored nor counted, since the rows cannot show it;
+    ``rekey`` and ``unpaired`` records are listed only. Fewer edges with a
+    ``crossed`` record before their round than ``cfg.min_crossings`` fails
+    as the crossing clause having observed nothing. Where the log level does
+    not emit every crossing line (``cfg.crossings_logged``), the crossing
+    clause is not judged and the verdict says it was not observed. A line
+    the reader could not resolve, evidence on an edge not read, or no edge
+    read at all fails the run.
+
+    A failing edge's line gives its clauses in brackets, then each fault,
+    then both rows.
+    """
+    errors = [f"harness: {e}" for e in crossings.errors]
+    keys = {j.edge.key for j in judged}
+    for key in sorted(set(crossings.edges) - keys):
+        errors.append(f"harness: swap lines for {key[0]}-{key[1]}, an edge that was not read")
+    if not judged:
+        errors.append("no edge was read, so nothing was observed")
+    failing, listed, counted = [], [], 0
+    for j in sorted(judged, key=lambda j: j.edge.key):
+        faults = list(j.faults)
+        recs = crossings.edges.get(j.edge.key, [])
+        before = [r for r in recs if r.t < j.at]
+        for r in recs:
+            listed.append(
+                f"{j.edge.name()} {r.kind}: {r.end} swapped at {_stamp(r.t)}"
+                + (f", ended at {_stamp(r.ended)}" if r.ended is not None else "")
+                + ("" if r.t < j.at else ", after the read, not scored")
+                + f"\n        swap: {r.line}"
+                + (f"\n        far: {r.far}" if r.far else "")
+            )
+        crossed = [r for r in before if r.kind == "crossed"]
+        if cfg.crossings_logged and crossed:
+            counted += 1
+            fault = _crossfault(j, crossed)
+            if fault:
+                faults.append(fault)
+        if faults:
+            a, b = j.edge.a, j.edge.b
+            clauses = ", ".join(dict.fromkeys(f.split(":", 1)[0] for f in faults))
+            failing.append(
+                f"{j.edge.name()} [{clauses}] scored at {_stamp(j.at)}: "
+                f"{'; '.join(faults)}. Rows: {_rowtext(a, b, j.row_a)}; "
+                f"{_rowtext(b, a, j.row_b)}"
+            )
+    if not cfg.crossings_logged:
+        floor = ("the crossing clause was not observed: logging.rust_log does not emit "
+                 "the crossing lines")
+    else:
+        floor = f"{counted} edge(s) with a crossed record (floor {cfg.min_crossings})"
+        if counted < cfg.min_crossings:
+            errors.append(
+                f"the crossing clause observed nothing: {counted} edge(s) with a crossed "
+                f"record before their read, need {cfg.min_crossings}"
+            )
+    tail = "".join(f"\n    record {x}" for x in listed)
+    if failing or errors:
+        lines = "".join(f"\n    {x}" for x in errors + failing)
+        return AssertionOutcome(
+            name="edge_agreement", passed=False,
+            detail=(
+                f"FAIL edge_agreement: {len(failing)} of {len(judged)} edge(s) disagree "
+                f"after up to {cfg.within_secs} s; {floor}{lines}{tail}"
+            ),
+        )
+    return AssertionOutcome(
+        name="edge_agreement", passed=True,
+        detail=(
+            f"PASS edge_agreement: {len(judged)} edge(s) agree within "
+            f"{cfg.within_secs} s; {floor}{tail}"
+        ),
     )

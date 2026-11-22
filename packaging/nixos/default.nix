@@ -125,21 +125,31 @@ in
       # overwritten, so operator edits survive service restarts and system
       # rebuilds.
       preStart = ''
+        # seed DIR NAME SRC: copy SRC to DIR/NAME as root:fips 0664, only if
+        # nothing at all is at DIR/NAME. DIR is group-writable, so a member
+        # of group fips could plant a link there for root to write through.
+        # Group and other write come off DIR while it is tested and written,
+        # so no entry can appear or change in between, and an existing entry
+        # of any kind (the operator's file or symlink, or a planted link) is
+        # left alone. DIR's recorded mode is put back afterwards; if the
+        # script stops part-way, DIR is left less writable, not more.
+        seed() {
+          dir=$1 name=$2 src=$3
+          mode=$(stat -c %a "$dir")
+          chmod go-w "$dir"
+          if [ ! -e "$dir/$name" ] && [ ! -L "$dir/$name" ]; then
+            install -m 0664 -o root -g fips "$src" "$dir/$name"
+          fi
+          chmod "$mode" "$dir"
+        }
+
         # Seed writable config from the shipped default (only if absent).
         # fips derives key paths (fips.key/fips.pub) from the config file's
         # parent directory, so keys also land in /var/lib/fips/.
-        if [ ! -f ${stateDir}/fips.yaml ]; then
-          cp "${cfg.configFile}" ${stateDir}/fips.yaml
-          chown root:fips ${stateDir}/fips.yaml
-          chmod 0664 ${stateDir}/fips.yaml
-        fi
+        seed ${stateDir} fips.yaml "${cfg.configFile}"
 
         # Seed hosts file (fips hardcodes /etc/fips/hosts on Linux).
-        if [ ! -f /etc/fips/hosts ]; then
-          cp "${cfg.package}/share/fips/hosts" /etc/fips/hosts
-          chown root:fips /etc/fips/hosts
-          chmod 0664 /etc/fips/hosts
-        fi
+        seed /etc/fips hosts "${cfg.package}/share/fips/hosts"
       '';
 
       serviceConfig = {

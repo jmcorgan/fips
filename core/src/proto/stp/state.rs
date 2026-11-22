@@ -64,6 +64,21 @@ pub struct TreeState {
     /// wire-invalid coordinate; a global-min NonRouting node is a separate open
     /// problem for the leaf/non-routing tree-participation model.
     self_is_leaf: bool,
+    /// The parent taken at the last parent change, with the monotonic ms of
+    /// the change, until a frame from it arrives after that moment.
+    ///
+    /// A switch decided on a coordinate held from before a link went silent
+    /// can make two nodes each other's parent across that link, and nothing
+    /// that crosses the link can correct the stale coordinate. A frame from
+    /// the new parent shows its traffic reaches us, so its next announce
+    /// would too.
+    unconfirmed: Option<(NodeAddr, u64)>,
+    /// Peers dropped as an unconfirmed parent, with the monotonic ms they were
+    /// taken as parent, kept out of parent candidacy until a later frame
+    /// arrives from them or they are removed. Nothing arrived between that
+    /// moment and the drop, or the parent would not have been dropped.
+    /// Bounded by the peer table.
+    shunned: BTreeMap<NodeAddr, u64>,
 }
 
 impl TreeState {
@@ -89,6 +104,8 @@ impl TreeState {
             parent_hysteresis: 0.0,
             flap: FlapDampener::new(),
             self_is_leaf: false,
+            unconfirmed: None,
+            shunned: BTreeMap::new(),
         }
     }
 
@@ -174,6 +191,51 @@ impl TreeState {
         self.peer_ancestry.remove(peer_id);
         self.acks.remove(peer_id);
         self.announced.remove(peer_id);
+        self.shunned.remove(peer_id);
+        if self.unconfirmed.is_some_and(|(p, _)| p == *peer_id) {
+            self.unconfirmed = None;
+        }
+    }
+
+    /// The current parent, with the monotonic ms it was taken, while nothing
+    /// has arrived from it since. `None` when the parent is confirmed or this
+    /// node is root.
+    pub fn unconfirmed_parent(&self) -> Option<(NodeAddr, u64)> {
+        self.unconfirmed
+            .filter(|(p, _)| !self.is_root() && self.my_declaration.parent_id() == p)
+    }
+
+    /// The peers whose next frame matters to parent selection: the
+    /// unconfirmed parent and every peer kept out of candidacy.
+    pub fn awaiting_frames(&self) -> impl Iterator<Item = NodeAddr> + '_ {
+        self.unconfirmed_parent()
+            .map(|(p, _)| p)
+            .into_iter()
+            .chain(self.shunned.keys().copied())
+    }
+
+    /// Whether `peer` is kept out of parent candidacy until heard from.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn is_shunned(&self, peer: &NodeAddr) -> bool {
+        self.shunned.contains_key(peer)
+    }
+
+    /// Record that the latest frame from `peer` arrived at monotonic ms
+    /// `last_heard_ms`.
+    ///
+    /// A frame later than the parent change confirms `peer` as parent, and
+    /// lets a `peer` dropped for its silence compete for parent again.
+    /// Clock-free: the shell reads the receive time and passes it in.
+    pub fn heard_from(&mut self, peer: &NodeAddr, last_heard_ms: u64) {
+        if self
+            .unconfirmed
+            .is_some_and(|(p, at)| p == *peer && last_heard_ms > at)
+        {
+            self.unconfirmed = None;
+        }
+        if self.shunned.get(peer).is_some_and(|&at| last_heard_ms > at) {
+            self.shunned.remove(peer);
+        }
     }
 
     /// Record a TreeAnnounce the transport accepted for `peer`, carrying our
@@ -254,12 +316,14 @@ impl TreeState {
         now_ms: u64,
     ) -> bool {
         let parent_changed = self.is_root() || *self.my_declaration.parent_id() != parent_id;
+        self.shunned.remove(&parent_id);
         self.my_declaration =
             ParentDeclaration::new(self.my_node_addr, parent_id, sequence, timestamp);
         // The hold-down and flap detection run from a change of parent only;
         // a same-parent re-declaration (an ancestry update) restarts neither.
         // Coordinates are recomputed by the caller once ancestry is available.
         if parent_changed {
+            self.unconfirmed = Some((parent_id, now_ms));
             self.flap.mark_switch(now_ms);
             self.flap.record_parent_switch(now_ms)
         } else {
@@ -478,6 +542,9 @@ impl TreeState {
     ///
     /// `skip_peers` contains peers that should not be considered as parent
     /// candidates (e.g., non-routing and leaf nodes that don't forward transit).
+    /// Peers dropped as an unconfirmed parent
+    /// ([`abandon_unconfirmed`](Self::abandon_unconfirmed)) are left out the
+    /// same way, unless no other candidate reaches the smallest root.
     ///
     /// Once any peer is measured (`peer_costs` non-empty), only measured peers
     /// compete, so a fresh peer at the neutral cost cannot look artificially
@@ -534,20 +601,16 @@ impl TreeState {
         }
 
         // Among peers that reach the smallest root, find the lowest effective
-        // depth. Once any peer is measured, only measured peers compete. If none
-        // of them reaches the smallest root, fall back to the unmeasured ones so
-        // the root can still be corrected (mandatory switches only, below).
-        let measured_only = !peer_costs.is_empty();
-        let mut best_peer =
-            self.best_candidate(smallest_root, peer_costs, skip_peers, measured_only);
-        let fallback = best_peer.is_none() && measured_only;
-        if fallback {
-            best_peer = self.best_candidate(smallest_root, peer_costs, skip_peers, false);
-        }
-
-        let (best_peer_id, best_eff_depth) = match best_peer {
-            Some(b) => b,
-            None => return ParentEval::None,
+        // depth. Peers abandoned as an unconfirmed parent stay out unless no
+        // other candidate reaches the smallest root: a node never becomes root,
+        // or keeps a broken path, because of them.
+        let shunning = (!self.shunned.is_empty())
+            .then(|| self.pick(smallest_root, peer_costs, &self.with_shunned(skip_peers)))
+            .flatten();
+        let Some(((best_peer_id, best_eff_depth), fallback)) =
+            shunning.or_else(|| self.pick(smallest_root, peer_costs, skip_peers))
+        else {
+            return ParentEval::None;
         };
 
         // If already using this peer as parent, no switch needed
@@ -640,6 +703,40 @@ impl TreeState {
         }
 
         ParentEval::None
+    }
+
+    /// The best candidate on `root`, and whether it was found only among
+    /// unmeasured peers.
+    ///
+    /// Once any peer is measured, only measured peers compete. If none of them
+    /// reaches `root`, the unmeasured ones are ranked at 1.0 so the root can
+    /// still be corrected (the caller allows that fallback no cost-based
+    /// switch).
+    fn pick(
+        &self,
+        root: NodeAddr,
+        peer_costs: &BTreeMap<NodeAddr, f64>,
+        skip: &BTreeSet<NodeAddr>,
+    ) -> Option<((NodeAddr, f64), bool)> {
+        let measured_only = !peer_costs.is_empty();
+        if let Some(best) = self.best_candidate(root, peer_costs, skip, measured_only) {
+            return Some((best, false));
+        }
+        if measured_only {
+            return self
+                .best_candidate(root, peer_costs, skip, false)
+                .map(|best| (best, true));
+        }
+        None
+    }
+
+    /// `skip_peers` with every shunned peer added.
+    fn with_shunned(&self, skip_peers: &BTreeSet<NodeAddr>) -> BTreeSet<NodeAddr> {
+        skip_peers
+            .iter()
+            .chain(self.shunned.keys())
+            .copied()
+            .collect()
     }
 
     /// The lowest effective-depth candidate on `root`, ties going to the
@@ -744,6 +841,58 @@ impl TreeState {
             changed: true,
             dampened: false,
         }
+    }
+
+    /// Drop a parent that has sent nothing since it was taken, if another
+    /// candidate exists.
+    ///
+    /// The caller decides when the parent has been silent too long. The
+    /// candidate is chosen as on parent loss, with the parent's coordinate
+    /// counting for nothing, and is taken as a mandatory switch: hold-down and
+    /// flap dampening do not delay it. The dropped parent is then kept out of
+    /// candidacy until a later frame arrives from it, so the coordinate that
+    /// made it look like a parent cannot pick it again while the link carries
+    /// nothing. The exception is [`evaluate_parent`](Self::evaluate_parent)'s:
+    /// a dropped parent that is the only candidate on the smallest root is
+    /// still taken, so a replacement on a larger root lasts until the next
+    /// evaluation.
+    ///
+    /// With no other candidate, peers already kept out included, the parent is
+    /// kept, still unconfirmed, and `None` is returned: changing to another
+    /// peer nothing has been heard from gains nothing, and becoming root would
+    /// cut this node off while a peer could still be its parent.
+    ///
+    /// `now_secs` is the wall-clock Unix seconds stamped onto a new
+    /// declaration; `now_ms` is the monotonic milliseconds for the flap timers
+    /// and the confirmation state.
+    pub fn abandon_unconfirmed(
+        &mut self,
+        peer_costs: &BTreeMap<NodeAddr, f64>,
+        skip_peers: &BTreeSet<NodeAddr>,
+        now_secs: u64,
+        now_ms: u64,
+    ) -> Option<ParentLoss> {
+        let (parent, since) = self.unconfirmed_parent()?;
+        let root = self
+            .peer_ancestry
+            .iter()
+            .filter(|(peer, _)| **peer != parent)
+            .map(|(_, coords)| *coords.root_id())
+            .min()?;
+        if self.my_node_addr <= root {
+            return None;
+        }
+        let mut skip = self.with_shunned(skip_peers);
+        skip.insert(parent);
+        let ((alt, _), _) = self.pick(root, peer_costs, &skip)?;
+        let new_seq = self.my_declaration.sequence() + 1;
+        let dampened = self.set_parent(alt, new_seq, now_secs, now_ms);
+        self.recompute_coords();
+        self.shunned.insert(parent, since);
+        Some(ParentLoss {
+            changed: true,
+            dampened,
+        })
     }
 
     /// Mutable access to this node's declaration.

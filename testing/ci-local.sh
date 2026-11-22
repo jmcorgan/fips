@@ -145,8 +145,8 @@
 #   chaos-ethernet-mesh, chaos-ethernet-churn, chaos-tcp-mesh,
 #   chaos-dual-path-flap, chaos-dual-path-carrier, chaos-forward-only,
 #   chaos-loaded-standby, chaos-two-bound-udp, chaos-steady-dual-path,
-#   native-api, mdns, dns-resolver, deb-install, rpm-install,
-#   medium-change
+#   agreement-break, native-api, mdns, dns-resolver, deb-install,
+#   rpm-install, medium-change
 #
 # Nightly only (tier 3's chaos batch; known to --only and --rerun):
 #   chaos-dual-udp-flap, chaos-two-bound-udp-bulk, chaos-churn-mixed-10,
@@ -300,6 +300,11 @@
 #   nostr-open-discovery — not run by default by either runner: it is the
 #                    acceptance check for changes to the Nostr rendezvous
 #                    code, run by hand with --only when that code changes.
+#   agreement-break — the chaos agreement break lane: it builds a second
+#                    image per run (the break image's fips, under its own
+#                    profile) to show that edge_agreement reds under a node
+#                    switch and is green without it. GitHub runs the
+#                    assertion itself in tcp-mesh; the lane proves the guard.
 #
 # Deliberate GitHub-only (NOT in this local run), with reason:
 #   deb-install ubuntu22 on arm64 — this host is x86_64 and cannot run an
@@ -474,6 +479,11 @@ MDNS_SUITES=(mdns)
 DEB_INSTALL_SUITES=(deb-install)
 RPM_INSTALL_SUITES=(rpm-install)
 TOR_SUITES=(tor-socks5 tor-directory)
+# The chaos agreement break lane (testing/chaos/agreement-break.sh), run after
+# the chaos scenarios and skipped with them. Not named chaos-*, since that
+# prefix means one scenario to run_suite and to the load annotation, and this
+# is two scenario runs on a break image the lane builds itself.
+AGREEMENT_BREAK_SUITES=(agreement-break)
 
 # ── Colors ─────────────────────────────────────────────────────────────────
 
@@ -534,6 +544,9 @@ list_suites() {
         read -ra parts <<< "$entry"
         echo "    chaos-${parts[0]}  (${parts[*]:1})"
     done
+    echo ""
+    echo "  Chaos agreement break lane:"
+    for s in "${AGREEMENT_BREAK_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  Native API:"
     for s in "${NATIVE_API_SUITES[@]}"; do echo "    $s"; done
@@ -722,6 +735,7 @@ print_plan() {
         for s in "${NAT_SUITES[@]}"; do echo "nat-$s"; done
         printf '%s\n' "${STUN_FAULTS_SUITES[@]}" "${MEDIUM_CHANGE_SUITES[@]}" veth-host
         for entry in "${CHAOS_SUITES[@]}"; do echo "chaos-${entry%% *}"; done
+        printf '%s\n' "${AGREEMENT_BREAK_SUITES[@]}"
         printf '%s\n' "${NATIVE_API_SUITES[@]}" "${MDNS_SUITES[@]}" \
             "${DNS_RESOLVER_SUITES[@]}" "${DEB_INSTALL_SUITES[@]}" rpm-budget \
             "${RPM_INSTALL_SUITES[@]}"
@@ -1115,6 +1129,10 @@ ci_teardown() {
     #    the half of that fix that fails silently: widening the regex in
     #    ci-cleanup.sh without this line looks correct and reaps nothing.
     _suffixes+=("$CI_RUN_NAME_SUFFIX")
+    #    The agreement break lane runs its two scenario runs under suffixes
+    #    of its own, put in front of the run-wide one.
+    _suffixes+=("$(ci_chaos_suffix agreement-break-healthy)" \
+        "$(ci_chaos_suffix agreement-break-switch)")
     #    A chaos scenario named with --only but declared in no list above
     #    (an ethernet one run by hand, say) runs under its own name as the
     #    scenario, so its interfaces carry that name's suffix.
@@ -1220,16 +1238,14 @@ BUILD_GATE=1
 run_build() {
     stage "Stage 1: Build"
 
-    info "sudo nft -c -f packaging/common/fips.nft (nftables ruleset syntax check)"
-    if command -v nft &>/dev/null; then
-        if sudo nft -c -f packaging/common/fips.nft 2>&1; then
-            record "nft-syntax" 0
-        else
-            record "nft-syntax" 1
-            return 1
-        fi
+    # Exit 1 is nft refusing the ruleset or a file it includes; exit 2 is a
+    # check that could not run (no nft, or neither an unprivileged user
+    # namespace nor passwordless sudo to run it as root). Both are red: a check
+    # that did not run is not a pass.
+    info "check-nft-syntax.sh packaging/common/fips.nft (nftables ruleset syntax check)"
+    if bash "$SCRIPT_DIR/check-nft-syntax.sh" packaging/common/fips.nft 2>&1; then
+        record "nft-syntax" 0
     else
-        info "nftables not installed; install with 'apt install nftables' to validate fips.nft"
         record "nft-syntax" 1
         return 1
     fi
@@ -2018,6 +2034,23 @@ run_chaos() {
     # record() already wrote the true rc into the parent's own RESULTS, and
     # returning it as well is inert: this script does not set -e.
     return $rc
+}
+
+# The chaos agreement break lane (testing/chaos/agreement-break.sh, default
+# scenario tcp-mesh, default switch MoveKeepsInboundLink): it builds the break
+# image from this run's image and build context, runs the scenario on it with
+# the switch and without, and judges the two. Its results go to a directory
+# of this run's, and its compose projects carry this run's prefix
+# (FIPS_CI_RUN_ID), so teardown reaps them. Exit 2 from the lane (nothing
+# established) records as red like a miss: neither is a pass.
+run_agreement_break() {
+    local rc=0
+    local -x FIPS_SIM_OUTPUT
+    FIPS_SIM_OUTPUT="$SCRIPT_DIR/chaos/sim-results/ci-agreement-break$CI_RUN_NAME_SUFFIX-$(date +%Y%m%d-%H%M%S)"
+    info "[agreement-break] Running the chaos agreement break lane"
+    bash "$SCRIPT_DIR/chaos/agreement-break.sh" 2>&1 || rc=$?
+    record "agreement-break" "$rc"
+    return 0
 }
 
 # Claim a free /64 for this run's gateway-lan network (Mechanism B).
@@ -2999,6 +3032,7 @@ run_integration() {
     if [[ "$SKIP_CHAOS" != true ]]; then
         run_veth_host
         run_chaos_set "${CHAOS_SUITES[@]}"
+        run_agreement_break
     fi
 
     # Native datagram API (light — one single-node run plus a two-node pair)
@@ -3066,6 +3100,8 @@ run_suite() {
                 run_chaos "$chaos_name" "$chaos_name"
             fi
             ;;
+        agreement-break)
+            run_agreement_break ;;
         dns-resolver)
             run_dns_resolver ;;
         native-api)

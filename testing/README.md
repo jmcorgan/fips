@@ -254,7 +254,10 @@ guards and in GitHub CI's ci-parity job. `lib/` also holds the hermetic tests
 of `ci-local.sh` itself, which run the same way:
 [`lib/ci-args-test.sh`](lib/ci-args-test.sh) for its options and
 [`lib/ci-plan-test.sh`](lib/ci-plan-test.sh) for its plan check (Tiers,
-below).
+below). [`lib/tool-hint.sh`](lib/tool-hint.sh) provides `tool_hint`, which a
+local CI guard missing a tool (`dpkg`, `readelf`, `nft`, the python3 `yaml`
+module and others) calls to name the package that provides it on Debian and
+Ubuntu, Fedora and Arch; the guard still exits 2.
 
 ## Running CI locally (`ci-local.sh`)
 
@@ -609,6 +612,30 @@ job, after the known-defect lane. On a host whose build has no BLE
 transport the lines behind `ble_available` are skipped and counted. It
 prints each break's wall time and the total.
 
+### The chaos agreement break lane (`chaos/agreement-break.sh`)
+
+[`chaos/agreement-break.sh`](chaos/agreement-break.sh) shows that the chaos
+`edge_agreement` assertion reds when a node switch puts a real defect's shape
+back, and stays green without it. It builds the break image (the
+`chaos-break` profile with the root crate's `test-hooks` feature, below),
+runs one scenario on it twice at once, with `FIPS_NODE_FAULTS` set to
+`BREAK_SWITCH` (default `MoveKeepsInboundLink`) and with nothing, and judges
+the pair: the switch run must red at direction and crossing on its crossed
+edges and nowhere else, the other must pass, and every node of each must log
+`Test hooks compiled in` with the switch list it was given. Exit 0 when both
+hold, 1 for a miss (a guard that guards nothing, or a red for another
+reason), 2 when nothing could be established, which includes `BREAK_SWITCH`
+set empty with a green no-switch run. The judge is
+`agreement-break.sh --judge <dir>`, and
+[`lib/agreement-break-test.sh`](lib/agreement-break-test.sh) tests it on
+planted result directories. Local CI runs the lane as the `agreement-break`
+suite, after the chaos scenarios and skipped with them (`--skip-chaos`), at
+tier 2 and above, with its default switch and scenario; `ci-local.sh --only
+agreement-break` or `--rerun agreement-break` runs it alone. GitHub CI does
+not run it (`check-ci-parity.sh` lists it as local-only, with the reason): it
+builds a second image per run, and GitHub runs the assertion itself in
+tcp-mesh. [`chaos/README.md`](chaos/README.md) has the rows it checks.
+
 ### The live audit's reach (`check-audit-reach.py`)
 
 In a debug test build every node entry that can change a per-peer map audits
@@ -750,7 +777,8 @@ macOS, Windows and FreeBSD runners instead.
 ### Shell-script lint (`check-shellcheck.sh`)
 
 [`check-shellcheck.sh`](check-shellcheck.sh) lints the shell scripts the
-OpenWrt packages ship and the CI scripts it lists, recorded as `shellcheck`.
+OpenWrt packages ship, the CI scripts it lists and the WireGuard example's
+container entrypoint, recorded as `shellcheck`.
 `ci-local.sh`, `ci.yml` and the OpenWrt package workflow all run it with the
 shellcheck version that [`install-shellcheck.sh`](install-shellcheck.sh) pins,
 not the host's or the runner image's, because versions report the same finding
@@ -763,6 +791,23 @@ host needs the network only for its first run. If the pinned binary cannot be
 installed the stage fails rather than falling back to the host's shellcheck.
 The FreeBSD package workflow lints `pfsense-install-smoke.sh` with the same
 pinned binary.
+
+### nftables syntax check (`check-nft-syntax.sh`)
+
+[`check-nft-syntax.sh`](check-nft-syntax.sh) runs `nft -c -f` on
+`packaging/common/fips.nft`, recorded as `nft-syntax`. `nft -c` needs root, so
+the script runs it in a private user and network namespace (`unshare -rn`)
+where the host allows unprivileged user namespaces, and otherwise through
+`sudo -n`, which fails at once rather than prompting for a password. Each way
+is tried first on a small known-good ruleset, so exit 1 means nft refused the
+ruleset or a file it includes (fips.nft includes the host's
+`/etc/fips/fips.d/*.nft`, so a broken drop-in there fails it too), and exit 2
+means the check could not run: `nft` is not installed, or the host has neither
+unprivileged user namespaces nor passwordless sudo. `nft` is looked up on
+`PATH` and then in `/usr/sbin` and `/sbin`, which a non-root login `PATH` on
+Debian leaves out. Ubuntu 24.04 blocks unprivileged user namespaces
+(`kernel.apparmor_restrict_unprivileged_userns = 1`), so there it needs
+passwordless sudo.
 
 ### Per-run isolation and the `FIPS_CI_RUN_ID` override
 
@@ -797,6 +842,20 @@ flight) never collide:
   `node.cache.test_coord_ttl_secs`, and the `integration` profile builds in
   `target/integration`, so no package script, which reads `target/release`,
   can pick one up. `build.sh` no longer refreshes `target/release`.
+  Because `--examples` brings in dev-dependency features, the binaries
+  carry `fips-core`'s `test-hooks`, so `FIPS_NODE_FAULTS` appears in them
+  and the core's own switches can be set; the root crate's `node_fault!`
+  sites stay the literal `false`. Only a build with the root crate's own
+  `test-hooks` feature (`--features test-overrides,test-hooks`, for the
+  chaos break image) turns those on, and every node it starts logs
+  `Test hooks compiled in faults=<names>`, the value of `FIPS_NODE_FAULTS`,
+  empty when none is set. No integration or package build takes that
+  feature. The break image's `fips` is built under the `chaos-break`
+  profile, which inherits `integration` and writes `target/chaos-break`, so
+  it never replaces the integration build's `target/integration/fips`;
+  [`chaos/agreement-break.sh`](chaos/agreement-break.sh) builds it, copies
+  the run's build context with that one binary replaced, and tags the image
+  `$FIPS_TEST_IMAGE-break`, the run's own, removing it when it ends.
 - Each parallel chaos child gets a unique, non-overlapping `/24` in
   `10.30.x` (via the sim `--subnet` override). `10.30.x` sits outside
   Docker's default address pool and the fixed-subnet suites' `172.x`

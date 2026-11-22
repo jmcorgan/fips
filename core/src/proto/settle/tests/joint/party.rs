@@ -1012,6 +1012,8 @@ impl JointParty {
                 }
                 // The joint party keeps no operator pin of a path.
                 Output::Swapped { .. } => {}
+                // Only the adoption the party never reports turns a link.
+                Output::Turned { .. } => {}
                 Output::Retry { peer } => {
                     if let Some(n) = who(&peer)
                         && self.s.configured.iter().any(|c| c.peer == n)

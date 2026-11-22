@@ -2,8 +2,9 @@
 //! history for: path events, attribution by a proven path, a punched dial,
 //! a failed msg2 send, a failed dial resend, an orphaned bundle, the
 //! admission cap, the links a move retires, the reset a move hands the
-//! per-peer data, the answer a msg1 is asked for only once admitted, and
-//! the max-peers cap at each of its three sites.
+//! per-peer data, the answer a msg1 is asked for only once admitted, the
+//! max-peers cap at each of its three sites, and the link a rekey answer
+//! adopted on its msg1's connection turns.
 
 use alloc::vec::Vec;
 
@@ -145,6 +146,7 @@ fn drain(out: Vec<Output>) -> Vec<Output> {
             | Output::Release { .. }
             | Output::Close { .. }
             | Output::Swapped { .. }
+            | Output::Turned { .. }
             | Output::Retry { .. }
             | Output::Reject { .. }
             | Output::Hold { .. }
@@ -1706,6 +1708,7 @@ fn kinds(out: &[Output]) -> Vec<&'static str> {
             Output::Close { .. } => "Close",
             Output::Free { .. } => "Free",
             Output::Swapped { .. } => "Swapped",
+            Output::Turned { .. } => "Turned",
             Output::Retry { .. } => "Retry",
             Output::Reject { .. } => "Reject",
             Output::Hold { .. } => "Hold",
@@ -2729,5 +2732,55 @@ fn a_redials_answer_given_up_as_unsendable_is_no_longer_a_pending_redial() {
             }
         )),
         "defect: a later redial was held by the slot of the given-up one: {again:?}"
+    );
+}
+
+/// A held peer's adoption of a rekey answer that went out on its msg1's
+/// connection, the link's own connection having gone, turns a link this
+/// node dialed into one the peer set up: the record says `Inbound`, and the
+/// shell is told to follow.
+#[test]
+fn an_adopted_answer_on_the_msg1s_connection_turns_a_dialed_link_inbound() {
+    use crate::proto::settle::links::Dir;
+
+    let (mut table, link) = dialer(2);
+    let out = go(&mut table, Input::Adopted { peer: large() }, 0);
+    assert_eq!(
+        out,
+        alloc::vec![Output::Turned {
+            link,
+            dir: Dir::Inbound
+        }],
+        "defect: the adoption did not tell the shell the link turned"
+    );
+    assert_eq!(
+        table.links().get(link).map(|r| r.dir),
+        Some(Dir::Inbound),
+        "defect: the dialed link's record still says this node set it up"
+    );
+}
+
+/// The same adoption on a link the peer set up, or for an identity not
+/// held, changes no record and asks nothing of the shell.
+#[test]
+fn an_adopted_answer_on_a_link_the_peer_set_up_or_for_no_held_peer_changes_nothing() {
+    use crate::proto::settle::links::Dir;
+
+    let (mut table, link) = responder(small(), 1, 12);
+    let out = go(&mut table, Input::Adopted { peer: large() }, 0);
+    assert!(
+        out.is_empty(),
+        "defect: an adoption on an inbound link asked for {out:?}"
+    );
+    assert_eq!(
+        table.links().get(link).map(|r| r.dir),
+        Some(Dir::Inbound),
+        "defect: the inbound link's record changed"
+    );
+    let mut table = Table::new(small(), Params::default());
+    let out = go(&mut table, Input::Adopted { peer: large() }, 0);
+    assert!(
+        out.is_empty(),
+        "defect: an adoption for no held peer asked for {out:?}"
     );
 }

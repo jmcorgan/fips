@@ -13,7 +13,7 @@
 use alloc::vec::Vec;
 
 use super::gates::{Refusal, Source};
-use super::links::{LinkNo, Pair};
+use super::links::{Dir, LinkNo, Pair};
 use crate::identity::NodeAddr;
 use crate::proto::rekey::{Arrival, IndexLease};
 
@@ -201,6 +201,14 @@ pub enum Output {
         own: bool,
         /// The move ends an operator's pin of the peer's path.
         unpin: bool,
+    },
+    /// The link record of `link` now says `dir` set it up; the shell's
+    /// record of the link takes the same direction.
+    Turned {
+        /// The link.
+        link: LinkNo,
+        /// The end that set it up, as the record says now.
+        dir: Dir,
     },
     /// Schedule a reconnect to the peer.
     Retry {

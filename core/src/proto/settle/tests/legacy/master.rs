@@ -563,6 +563,7 @@ impl MasterParty {
                 | In::Disconnect { .. }
                 | In::Dead { .. }
                 | In::Admin { .. }
+                | In::Adopted { .. }
                 | In::Sent { .. }
                 | In::SendFailed { .. }
                 | In::Unsendable { .. }

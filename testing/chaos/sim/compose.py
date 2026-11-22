@@ -64,6 +64,12 @@ x-fips-common: &fips-common
 {%- for name, count in workers.items() %}
     - {{ name }}={{ count }}
 {%- endfor %}
+{%- if node_faults is not none %}
+    - FIPS_NODE_FAULTS={{ node_faults }}
+{%- endif %}
+{%- if topology.both_dial %}
+    - FIPS_START_ON_READY=1
+{%- endif %}
 
 services:
 {% for node in nodes %}
@@ -135,8 +141,20 @@ def generate_compose(
         os.path.join(os.path.dirname(__file__), "..", "..", "docker", "resolv.conf")
     )
 
+    # The node switches a break run sets (`fips_core::faults`), passed to every
+    # node as the sim was given them. Only an image built with the root
+    # crate's `test-hooks` feature reads the root's switches; any other image
+    # turns on at most the core's, and logs nothing to say so.
+    node_faults = os.environ.get("FIPS_NODE_FAULTS")
+
+    # A scenario with an edge dialed from both ends starts every daemon on the
+    # runner's word (FIPS_START_ON_READY, testing/docker/entrypoint.sh), once
+    # the initial netem holds those edges at their startup delay, so that the
+    # two ends' first msg1s cross (sim/netem.py, CROSS_HOLD_MS).
+
     content = _COMPOSE_TEMPLATE.render(
         network_name=network_name,
+        node_faults=node_faults,
         rust_log=scenario.logging.rust_log,
         image=FIPS_SIM_IMAGE,
         nodes=nodes,

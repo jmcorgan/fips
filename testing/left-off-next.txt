@@ -416,6 +416,16 @@ test          next-rule  a_rekey_msg1_from_a_probing_path_is_answered_as_a_redia
 test          next-rule  a_late_acl_refusal_of_a_restart_msg1_over_tcp_closes_its_connection_at_once  src/node/tests/tcp.rs
 test          next-rule  a_restart_msg1_over_tcp_refused_for_want_of_a_session_index_closes_its_connection_at_once  src/node/tests/tcp.rs
 test          next-rule  a_redial_over_tcp_refused_by_the_acl_closes_its_connection_at_once  src/node/tests/tcp.rs
+# Master's fix for a redialed TCP link both ends listed outbound: master's node answers a held
+# peer's msg1 as a rekey on the msg1's connection when the link's own connection has gone, and
+# turns the link inbound once the peer adopts that answer. next keeps its own handshake shell,
+# which has neither that answer route (answer_msg1 is not in its tree) nor the adoption; the
+# core's record turn (Input::Adopted, AdoptedKeepsDir) comes with the core and its table test.
+# Whether next's shell can reach the both-outbound state is not established.
+test          next-rule  a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_is_held_outbound_at_one_end_and_inbound_at_the_other  src/node/tests/settle/redialed.rs
+test          next-rule  a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_is_held_outbound_at_one_end_and_inbound_at_the_other_with_multipath_on  src/node/tests/settle/redialed.rs
+test          next-rule  a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_the_smaller_nodes_dial  src/node/tests/settle/redialed.rs
+test          next-rule  a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_the_smaller_nodes_dial_with_multipath_on  src/node/tests/settle/redialed.rs
 # The failed mark and the shown handshake state of master's handshake entry. next's peer machine
 # keeps both under the same rule and strings, and its tests in src/peer/machine.rs, named in the
 # fifth field, cover them: a failed send marks the leg failed and shows "failed", and every

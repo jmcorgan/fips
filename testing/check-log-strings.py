@@ -68,6 +68,12 @@ ALLOWED = {
         "that as a crossed handshake and logs the Cross-connection line the "
         "same pattern also matches, and it has the harness by merge"
     ),
+    "Rekey answered on the msg1's connection adopted": (
+        "emitted only on master, when a peer adopts a rekey answer sent on its "
+        "msg1's connection and the link turns inbound (src/node/handlers/rekey.rs "
+        "there); next keeps its own handshake shell without that answer route, "
+        "and it has the harness by merge"
+    ),
 }
 
 # Shell helpers whose first argument is a pattern matched against daemon logs.

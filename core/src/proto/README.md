@@ -86,8 +86,9 @@ Each subdirectory has its own README.
   "test-hooks"))]`: methods and re-exports that only tests use to set up
   or inspect state. The root crate's tests reach them through the
   `test-hooks` feature, which the root enables from its
-  `[dev-dependencies]` only, so they reach only a build that compiles
-  tests, examples or benches; a plain `cargo build`, release or not, leaves
+  `[dev-dependencies]`, so they reach a build that compiles tests,
+  examples or benches, and from its own `test-hooks` feature, for the
+  chaos break image alone; a plain `cargo build`, release or not, leaves
   them out. Among them are `set_interval_ms` and `len` on the address
   limiter in `rate_limit.rs`, `set_interval_ms` on the lookup forward
   limiter, `len` on the routing error limiter,

@@ -83,6 +83,9 @@ internet traffic still uses the macOS host network and does not route through
 The container's DNS port 5354 is published on `127.0.0.1` only, for the macOS
 resolver that `/etc/resolver/fips` points at, and not to the network.
 
+The sidecar runs no ssh server. For a shell inside it, use
+`docker exec -it wireguard-sidecar bash`.
+
 ## Sidecar FIPS Identity
 
 `fips-on.sh` generates `identity/fips.key` and `identity/fips.pub` on first run by calling:

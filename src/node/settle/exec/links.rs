@@ -95,6 +95,7 @@ impl Node {
             | Input::Disconnect { .. }
             | Input::Dead { .. }
             | Input::Admin { .. }
+            | Input::Adopted { .. }
             | Input::Sent { .. }
             | Input::SendFailed { .. } => {}
         }

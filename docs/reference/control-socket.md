@@ -10,7 +10,14 @@ length-bounded JSON over a stream socket.
 
 ### Unix
 
-A Unix domain socket. The default path is resolved in this order:
+A Unix domain socket. A process running as root, daemon or client, always
+uses the private runtime directory: `/run/fips/control.sock`, or
+`/var/run/fips/control.sock` on macOS and FreeBSD when `/run/fips` is absent.
+The daemon creates the directory at bind if it is missing. Root never falls
+back to `$XDG_RUNTIME_DIR` or `/tmp`, where another account could bind the
+socket first.
+
+For any other process the default path is resolved in this order:
 
 1. `/run/fips/control.sock` (or `/run/fips/gateway.sock` for the
    gateway), if `/run/fips` exists. This is what the `fips.service`
@@ -34,6 +41,20 @@ without root.
 The path can be overridden at the daemon side via
 `node.control.socket_path` in the YAML config, and at the client side
 via `fipsctl -s PATH` or `fipstop -s PATH`.
+
+`fipsctl` and `fipstop` read the peer credentials of the connected socket
+(`SO_PEERCRED` on Linux, `getpeereid` on macOS and FreeBSD) before sending
+anything, and talk only to a server running as root, as the client's own
+user, or as the `fips` account. A server running as any other account is
+refused, whatever its groups: a member of group `fips` can bind a socket in a
+group-writable directory, so group membership is not enough. The check
+applies to an explicit `-s` path too. `fipsctl` also replaces control
+characters in every string of the reply with U+FFFD before printing it.
+
+A client in a user namespace that does not map the daemon's uid, such as a
+rootless container reaching the host's socket through a bind mount, is told
+the overflow uid (usually 65534) in place of the daemon's, and refuses the
+daemon. Run the client outside the namespace.
 
 ### Windows
 
@@ -116,7 +137,7 @@ table below lists every command currently registered.
 | ------- | ------ | ----------------------------- |
 | `show_status` | none | `version`, `npub`, `node_addr`, `ipv6_addr`, `state`, `is_leaf_only`, `is_root` (bool: this node is the spanning-tree root), `root` (hex node-addr of the current tree root), `persistent` (bool: identity is persisted, i.e. `persistent` set or an `nsec` configured), `peer_count`, `session_count`, `link_count`, `transport_count`, `connection_count`, `transport_peer_counts` (object mapping transport-type name to its connected-peer count; configured transports appear with `0`), `control_socket`, `pid`, `exe_path`, `uptime_secs`, `estimated_mesh_size`, `forwarding`, `sparklines`. The TUN keys `tun_state`, `tun_name` and `effective_ipv6_mtu` are answered by the IPv6 adapter's status socket; see [IPv6 adapter command catalog](#ipv6-adapter-command-catalog). |
 | `show_acl` | — | `allow_file`, `deny_file`, `enforcement_active`, `effective_mode`, `default_decision`, `allow_all`, `deny_all`, `allow_file_entries`, `deny_file_entries`, `allow_entries`, `deny_entries`. |
-| `show_peers` | — | `peers[]` — per-peer object: `node_addr`, `npub`, `display_name`, `ipv6_addr`, `connectivity`, `link_id`, `direction`, `transport_addr`, `transport_type`, `is_parent`, `is_child`, `tree_depth`, `effective_depth` (`tree_depth + link_cost` — the metric `evaluate_parent` ranks on; `null` when the peer has no coords, or is unmeasured while another peer has an SRTT sample, per the cold-start gate), `stats`, `replay_suppressed` (frames refused as replays since the last session reset, on either receive path), `replay_suppressed_total` (the same since the peer was promoted; no session reset clears it, and a connection that replaces the peer starts a new total), `paths[]` (each path of the link: `transport_id`, `transport`, `transport_type`, `addr`, `state`, `active`, `remote_active`, `role`, `pinned`, `last_rtt_ms`, `min_rtt_ms`, `rtt_samples`, `etx`, `score`), `noise`, `current_k_bit`, `mmp`, plus optional `nostr_traversal`, `rekey_in_progress`, `rekey_draining`. |
+| `show_peers` | — | `peers[]` — per-peer object: `node_addr`, `npub`, `display_name`, `ipv6_addr`, `connectivity`, `link_id`, `direction`, `transport_addr`, `transport_type`, `is_parent`, `is_child`, `tree_depth`, `effective_depth` (`tree_depth + link_cost` — the metric `evaluate_parent` ranks on; `null` when the peer has no coords, or is unmeasured while another peer has an SRTT sample, per the cold-start gate), `stats`, `replay_suppressed` (frames refused as replays since the last session reset, on either receive path), `replay_suppressed_total` (the same since the peer was promoted; no session reset clears it, and a connection that replaces the peer starts a new total), `paths[]` (each path of the link: `transport_id`, `transport`, `transport_type`, `addr`, `state`, `active`, `remote_active`, `role`, `pinned`, `last_rtt_ms`, `min_rtt_ms`, `rtt_samples`, `etx`, `score`), `noise`, `current_k_bit`, `mmp`, plus optional `our_session_index` and `their_session_index` (this end's and the peer's index for the current session, eight hex digits, absent while no session is held; each end lists the other's as the peer's), `nostr_traversal`, `rekey_in_progress`, `rekey_draining`. |
 | `show_links` | — | `links[]` — `link_id`, `transport_id`, `remote_addr`, `direction`, `state`, `created_at_ms`, `stats`. |
 | `show_tree` | — | `my_node_addr`, `root`, `root_npub` (bech32 npub of the current tree root), `is_root`, `depth`, `my_coords[]`, `parent`, `parent_display_name`, `declaration_sequence`, `declaration_signed`, `peer_tree_count`, `peers[]`, `stats`. |
 | `show_sessions` | — | `sessions[]` — `remote_addr`, `identity` (`proven` once a handshake has authenticated the peer's key, `unproven` before that), `npub` (present only when `identity` is `proven`), `display_name`, `state` (`established`, `initiating`, `awaiting_msg3`, `unknown`), `is_initiator`, `last_activity_ms`, `stats`, optional `mmp`, `current_k_bit`, `is_draining`. |

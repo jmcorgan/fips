@@ -43,7 +43,10 @@ below are defaults rather than fixed sizes.
   policies; link flaps (max 3 down, 10-30s, connectivity protected); node
   churn (max 5 down, 30-90s, partitions allowed); bandwidth tiers
   (1/10/100/1000 Mbps). Carries baseline assertions, so a run in which the
-  mesh never formed cannot report success. The nightly run's chaos batch
+  mesh never formed cannot report success, and `edge_agreement` with no
+  floor: both ends of each edge agree on the link at the end, and an
+  Ethernet edge that crossed at startup (found by beacon at both ends) ends
+  with the smaller node on its own dial. The nightly run's chaos batch
   runs it as `churn-mixed --nodes 10 --duration 120` (`churn-mixed-10`),
   which is the invocation its thresholds are calibrated for; no run a push
   starts takes it.
@@ -107,7 +110,7 @@ Explicit topologies exercising non-UDP transports.
 | ------------- | ----- | -------------- | ----- | -------- | ----- | ---------- | ------------------------------------------ |
 | ethernet-only | 4     | Ethernet       | Ring  | 30s      | yes   | --         | By hand: AF_PACKET transport with beacon discovery |
 | ethernet-mesh | 6     | UDP + Ethernet | Mesh  | 120s     | yes   | yes        | Mixed UDP/Ethernet, netem mutation + flaps |
-| tcp-mesh      | 6     | UDP + TCP      | Mesh  | 120s     | yes   | yes        | Mixed UDP/TCP, netem mutation + flaps      |
+| tcp-mesh      | 6     | UDP + TCP      | Mesh  | 120s     | yes   | yes        | Mixed UDP/TCP, netem mutation + flaps; four edges dialed from both ends cross |
 | dual-path-flap | 2    | Ethernet + UDP | Pair  | 180s     | yes   | yes        | Two paths; netem flaps of the cable, K-timeout switch |
 | dual-udp-flap | 2     | UDP + UDP      | Pair  | 180s     | yes   | yes        | Two interface-bound UDP paths; the same flaps |
 | dual-path-carrier | 2 | Ethernet + UDP | Pair  | 180s     | yes   | scheduled  | Two paths; the cable taken down at one end; signalled switch in 1 s |
@@ -130,7 +133,13 @@ Explicit topologies exercising non-UDP transports.
   payload sizes, and checks that n04 has no peer on another transport.
 - **tcp-mesh**: 6-node mesh with 4 UDP and 3 TCP edges. Both transports use
   static peer config. Netem mutation (30% fraction, every 20-40s) and link
-  flaps (1 link max, 10-20s down).
+  flaps (1 link max, 10-20s down). Three UDP edges and one TCP edge are
+  dialed from both ends (`{dial: both}`), so their handshakes cross at
+  startup; the other three keep one dialer. Its `edge_agreement` checks that
+  both ends of each edge agree on the link at the end, the smaller node on
+  its own dial after a crossing, and with `min_crossings: 2` that at least
+  two edges' logs show a crossing (all four are expected to). It runs at
+  `debug`, which the crossing lines need.
 - **dual-path-flap**: two nodes joined by a raw-Ethernet veth and by UDP over
   the bridge (`[n01, n02, ethernet+udp]`), multipath on. Only the cable
   flaps, by 100% netem loss with carrier kept, so neither end has a signal:
@@ -435,6 +444,78 @@ assertions:
                                                      # nodes must report one
 ```
 
+`edge_agreement` checks that both ends of every edge agree on the link
+between them at the end of the run. Its pure parts are in `sim/assertions.py`
+and tested against planted rows and log lines in
+`testing/chaos/sim-assert-test.py`. `sim/runner.py` reads the listings after
+the final snapshot (`_readedges`): every node once, then, every 3 s until
+`within_secs`, both ends of each edge that does not agree yet. Each edge is
+scored on the two rows of the round in which it agreed, or of its last
+round, so a node re-read for one edge does not change the rows another edge
+already agreed on. A pair fault on an edge scored on its last round counts
+only when it persists across two reads at least 2 s apart (`pair_unsure`,
+`confirm_pair`). Where the round before also showed the pair apart, or did
+not observe it, the fault stands. Where that round had both ends on one
+pair, or there was none, both ends are read once more 3 s later, past the
+bound if need be, and the fault stands if that read shows the pair apart too
+or observes no pair, and is dropped if it shows both ends on one pair. A
+node serves `show_peers` from a snapshot it publishes on its 1 s tick, so a
+row lags the node's own rekey cutover by up to about 1.06 s (measured on
+tcp-mesh, 2026-11-21), and one read can catch one end on the new pair and
+the other on the old; an edge that never agrees, as a crossed edge does
+under the agreement break, is scored on its last round, which can fall
+inside a rekey. The edge keeps the round and the other faults it was scored
+on. Each node's last listing is kept in `peers-final.json`. After the logs
+are collected the runner reads the crossings from them and gives the
+verdict.
+
+```yaml
+assertions:
+  edge_agreement:
+    within_secs: 90                 # how long an edge may take to agree
+    min_crossings: 2                # edges whose crossing the logs show;
+                                    # default 0
+```
+
+An edge is judged on both ends' `show_peers` rows from one round
+(`edge_faults`): each end lists the other's configured npub; the two rows
+hold one session index pair (`our_session_index` and `their_session_index`,
+crosswise); one end is `outbound` and one `inbound`; on an edge dialed one
+way, the dialer is `outbound`; both rows name the edge's transport; and off
+Ethernet each row's IP is the other node's Docker address (the port is not
+compared: an inbound TCP row names an ephemeral one). A node that gives no
+listing fails its edges as observed nothing, and a row without
+`their_session_index` fails as an image that predates the field. The
+crossing clause is judged from the logs (`edge_crossings`): every "swapped
+to outbound session" line is classed by what the far end logged naming the
+swapping node within 30 s: `crossed` for keeping its inbound session,
+`rekey` for losing a dual rekey initiation (a re-dial the far end answered
+as a rekey, which the same swap line ends), `crossed` again for neither of
+those but a promotion of the swap's own handshake (its `epoch=`) as
+`inbound`, and `unpaired` for none. The far end logs that promotion with no
+keeping line when its own dial was promoted first, as after a flap on
+tcp-mesh's TCP edge: it answers the other dial into a pending redial and
+moves onto it, which leaves both ends on the swapping node's dial as a kept
+crossing does. On an edge with a `crossed` record before its scored round,
+and no later promotion of the peer at the swapping end before that round,
+nor an adoption there of a rekey answer sent on the connection the peer's
+msg1 arrived on (which holds the link as the peer's dial), the smaller node
+by `node_addr` must be `outbound`. `rekey` and `unpaired` records are listed
+with their lines and neither scored nor counted. `min_crossings` counts
+edges with a `crossed` record, and below it the run fails as the crossing
+clause having observed nothing. A failing edge's line names its clauses in
+brackets (`n01-n02 udp [direction, crossing] scored at ...`), then each
+fault and both rows.
+
+Loading refuses the block on a topology that names `udp-veth`,
+`ethernet+udp` or `udp-veth+udp` (explicitly, in `transport_mix` or as
+`default_transport`), whose rows the transport and address clauses do not
+describe, and with `peer_churn`, whose new identities the topology's npubs do
+not follow. The crossing lines are `debug` lines of more than one target, so
+`min_crossings` above 0 needs `fips` at `debug` with no `fips` target set
+lower; at any other level the crossing clause is not judged, and the `PASS`
+line says it was not observed.
+
 `active_timeouts` is a report and fails nothing. It counts `Live -> Suspect
 why=Timeout` on a node's active path that falls outside the K-timeout bound
 after a down at that node, which `path_switches` cannot see, and prints each
@@ -563,6 +644,44 @@ and creates a clear "owning side" for each link — relevant for
 auto-reconnect testing. Ethernet edges are excluded from static config
 since they use beacon discovery.
 
+An explicit `udp` or `tcp` edge may opt back into that race with a fourth
+element, `[n01, n02, udp, {dial: both}]`: each end then lists the other as
+a static peer, both dial at startup, and the two handshakes cross. The
+reverse direction is added after the assignment above, so every other edge
+keeps its one dialer, and `SimTopology.directed_outbound()` names both ends
+of such an edge, which is how the harness tells who dials it. The loader
+refuses `{dial: both}` on `ethernet`, `udp-veth` and either dual transport,
+beside `lanes` (a laned edge's one dialer is read from that same list), with
+any value but `both`, with any other key, with netem off, and with
+`node_churn`; `testing/chaos/sim-assert-test.py` tests the written peers, the
+dialers and each refusal. `testing/check-chaos-schedule.py` carries two such
+edges in its `dual` fixture, so the dial direction they produce is compared
+across hash seeds.
+
+The crossing is made, not left to startup timing. Left alone, the node that
+starts first sends its msg1 within a few tens of milliseconds of binding its
+socket, often before the other end has bound its own, and that msg1 is lost;
+the other end's dial then completes, the first node's later attempts meet a
+peer already held and are refused, and the edge never crosses. So a scenario
+with a both-dial edge starts every daemon on the runner's word
+(`FIPS_START_ON_READY=1` in the compose file; the entrypoint waits for the
+same word a node with bound interfaces waits for), after the initial netem
+holds each direction of each both-dial edge at a delay of `CROSS_HOLD_MS`
+(1500 ms, `sim/netem.py`). The runner gives every node the word at once, so
+the two ends of an edge start well inside that delay; each end's first msg1
+is then still in flight when the other end dials, each answers the other
+while its own dial is open, both handshakes complete, and the crossing
+resolves by the node address ordering (FRC-1201 Section 5.6). TCP crosses
+the same way, its connect taking twice the delay against a 5 s connect
+timeout. The delay ends at the end of the warmup, when each held direction
+gets its sampled netem; a mutation drawn meanwhile waits for that, and a
+flap's loss outlasts it. While the delay holds, a round trip (twice the
+delay) is longer than the 1 s msg1 resend, so each crossing also leaves debug
+lines dropping the answer to a resent msg1 (`Rekey msg2 for no attempt in
+flight, dropping`, `reason=LateReply`); they are expected and count against
+no assertion. The cases for the netem, the runner's start order and the
+entrypoint's wait are in `sim-assert-test.py`.
+
 ### Dual edges: two paths between one pair
 
 An explicit adjacency entry may name one of two dual transports, which join
@@ -607,6 +726,8 @@ Results written to `sim-results/` (configurable via
   container names it used; one `key=value` per line
 - `analysis.txt` -- Summary: panics, errors, sessions, metrics
 - `metadata.txt` -- Seed, node count, edges, adjacency list
+- `peers-final.json` -- Each node's last `show_peers` listing, where the
+  scenario declares `edge_agreement`; a record, not what is scored
 - `runner.log` -- Orchestration events (topology, netem, churn, traffic) with timestamps
 - `fips-node-nXX.log` -- Per-node log output
 
@@ -700,6 +821,64 @@ CPU count of the host that runs it. Either variable set in the environment
 value that is not a whole number stops the run. `sim-compose-test.py`
 renders the compose file for every scenario and fails when a node is not
 given both counts. Both CI runners run it as a guard.
+
+## The agreement break lane
+
+`agreement-break.sh` shows that the `edge_agreement` assertion catches the
+defect it is there for. It builds a chaos image whose node switches
+(`node_fault!`, `core/src/faults.rs`) can be turned on: `fips` built with
+`--profile chaos-break --features test-overrides,test-hooks`, in a copy of
+the run's build context (`FIPS_BUILD_CONTEXT`, default `testing/docker`)
+with only that binary replaced, tagged `$FIPS_TEST_IMAGE-break`. It then runs
+the scenario at `BREAK_SCENARIO` (default `scenarios/tcp-mesh.yaml`) on that
+image twice at once, once with `FIPS_NODE_FAULTS` set to `BREAK_SWITCH`
+(default `MoveKeepsInboundLink`, a crossed dial's move leaving the peer on
+the link it was held on, so both ends list the edge inbound) and once with
+no switch, each under its own name suffix, and judges both:
+
+| Run | Must show, or the lane fails |
+| --- | --- |
+| Switch | sim exit 3; `FAIL edge_agreement` with every failing edge red at direction and crossing together, each such edge holding a `crossed` record, at least one of them, every edge holding a `crossed` record before its read and listed with no end among them, and no other clause, edge, harness or floor line; every other assertion `PASS`; every node's log has `Test hooks compiled in faults=<BREAK_SWITCH>` |
+| No switch | sim exit 0, `PASS edge_agreement`, every other assertion `PASS`; every node's log has the line with an empty value |
+
+Direction with crossing is one reason, not two: the switch leaves both ends
+of a crossed edge inbound, so its smaller end is inbound after the crossing
+as well. Direction alone on a crossed edge (both ends outbound, the shape
+`next` leaves), crossing alone, or any clause on an edge with no `crossed`
+record is a red for another reason. The startup line is what tells the break
+image from the integration image, which already carries `fips-core`'s hooks,
+so the switch variable's name in a binary cannot. A `crossed` record listed
+with an end does not oblige its edge to red, even where the promotion that
+ended it came after the read, since the verdict gives no read time for an
+edge that agreed. A pair fault in the verdict has held across two reads at
+least 2 s apart (`_readedges`, above), so it is a split and not a row read
+inside a rekey's cutover, and beside direction and crossing it is a red for
+another reason.
+
+Exit 0 when both rows hold. Exit 1 for a miss, named with the run, the edge
+and the clause: a guard that guards nothing, or a red for another reason.
+Exit 2 when nothing could be established: a run `NOT SCORED` or aborted, a
+scenario with no `edge_agreement`, an image that did not build. With
+`BREAK_SWITCH` set empty only the no-switch run is made, and the lane cannot
+pass: exit 2 when that run is green, since a guard not exercised has not
+passed, and exit 1 when it is red. Results go to `FIPS_SIM_OUTPUT`, by default
+`sim-results/agreement-break<suffix>-<time>/`, with a `healthy/` and a
+`switch/` directory each holding `sim.exit`, `sim.out` and the sim's own
+result directory; the image and the context copy are removed at the end.
+
+`agreement-break.sh --judge <dir>` judges a results directory alone, and
+`testing/lib/agreement-break-test.sh` runs it on planted directories, one per
+outcome, with no container. Local CI runs the lane as its `agreement-break`
+suite, after the chaos scenarios and skipped with them, with the defaults
+above (`testing/ci-local.sh --only agreement-break` runs it alone); GitHub
+CI runs the assertion in the scenarios and not the lane.
+
+The sim passes `FIPS_NODE_FAULTS` to every node when it is set in the sim's
+own environment, and nothing when it is not (`sim/compose.py`). Only the
+break image reads the root crate's switches; on any other image a set value
+reaches at most `fips-core`'s, with no startup line to say so, so a run that
+sets it belongs on the break image. A value naming no switch panics the node
+the first time it reads a switch (`fips_core::faults::load`).
 
 ## Creating Custom Scenarios
 

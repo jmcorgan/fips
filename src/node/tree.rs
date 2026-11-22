@@ -389,6 +389,9 @@ impl Node {
         // the wall-clock `now_ms` above used for the peer's tree position). Read
         // once and threaded into classify + the state mutators.
         let mono_now_ms = crate::time::mono_ms();
+        // This announce is a frame from the peer: it confirms the peer as our
+        // parent, or lets it compete again, now rather than at the next tick.
+        self.tree_state.heard_from(from, mono_now_ms);
         // Compute the flap-dampening / hold-down veto at the edge; the classify core
         // is clock-free and consumes only this pre-computed verdict.
         let switch_suppressed = self.tree_state.is_switch_suppressed(mono_now_ms);
@@ -609,12 +612,127 @@ impl Node {
     ///
     /// Marks peers whose last announce was not confirmed delivered, sends
     /// pending rate-limited announces (so a resend goes out in the same tick
-    /// through the ordinary send path), and checks for periodic parent
-    /// re-evaluation based on current MMP link costs.
+    /// through the ordinary send path), drops a new parent that has sent
+    /// nothing in time, and checks for periodic parent re-evaluation based on
+    /// current MMP link costs.
     pub(super) async fn check_tree_state(&mut self) {
         self.tree_resend();
         self.send_pending_tree_announces().await;
+        self.check_parent_confirmation(crate::time::mono_ms()).await;
         self.check_periodic_parent_reeval().await;
+    }
+
+    /// How long a new parent has to send a frame before it is dropped: one
+    /// heartbeat interval and the longest MMP report interval.
+    ///
+    /// A live parent's heartbeat lands within the first, and the receiver
+    /// report our post-switch announce asks for within the second, so a live
+    /// parent is dropped only when both are lost. Then it costs one extra
+    /// switch, since its next frame lets it compete again.
+    pub(super) fn parent_confirm_ms(&self) -> u64 {
+        self.config()
+            .node
+            .heartbeat_interval_secs
+            .saturating_mul(1000)
+            .saturating_add(crate::proto::mmp::MAX_REPORT_INTERVAL_MS)
+    }
+
+    /// Confirm a new parent once a frame from it arrives, and drop it for
+    /// another candidate if none has arrived [`parent_confirm_ms`] after the
+    /// switch.
+    ///
+    /// Two nodes can pick each other as parent across a link that has gone
+    /// silent, each on the other's coordinate from before the silence; no
+    /// announce crosses the link to correct either view, so the loop would
+    /// hold until the link carries frames again or is declared dead. The
+    /// dropped parent stays out of candidacy until a frame from it arrives.
+    ///
+    /// `now_ms` is the monotonic clock the MMP receiver stamps frames with.
+    ///
+    /// [`parent_confirm_ms`]: Self::parent_confirm_ms
+    pub(super) async fn check_parent_confirmation(&mut self, now_ms: u64) {
+        let watched: Vec<NodeAddr> = self.tree_state.awaiting_frames().collect();
+        for addr in watched {
+            let Some(peer) = self.peers.get(&addr) else {
+                continue;
+            };
+            // A peer with no MMP state cannot be judged silent, as the
+            // link-dead check also treats it.
+            let last = match peer.mmp() {
+                Some(mmp) => mmp.receiver.last_recv_ms(),
+                None => Some(u64::MAX),
+            };
+            if let Some(last) = last {
+                self.tree_state.heard_from(&addr, last);
+            }
+        }
+
+        let Some((parent, since)) = self.tree_state.unconfirmed_parent() else {
+            return;
+        };
+        if now_ms.saturating_sub(since) < self.parent_confirm_ms() {
+            return;
+        }
+
+        let peer_costs: BTreeMap<NodeAddr, f64> = self
+            .peers
+            .iter()
+            .filter(|(_, peer)| peer.has_srtt())
+            .map(|(addr, peer)| (*addr, peer.link_cost()))
+            .collect();
+        // The replacement is chosen with the skip set the announce and
+        // periodic paths classify with, so a non-full peer, a Leaf included,
+        // is never taken in the silent parent's place.
+        let skip = self.non_full_peers();
+        let timestamp = Self::now_ms() / 1000;
+        let old_root = *self.tree_state.root();
+        let Some(outcome) =
+            self.tree_state
+                .abandon_unconfirmed(&peer_costs, &skip, timestamp, now_ms)
+        else {
+            return;
+        };
+
+        // Clone identity up front to avoid a split borrow against the
+        // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
+        let our_identity = self.identity().clone();
+        if let Err(e) = sign_declaration(self.tree_state.my_declaration_mut(), &our_identity) {
+            warn!(error = %e, "Failed to sign declaration after dropping a silent parent");
+            self.metrics()
+                .tree
+                .record_reject(TreeReject::OutboundSignFailed);
+            return;
+        }
+        // Surgical invalidation — see CoordCache::invalidate_via_node doc. The
+        // replacement is chosen as on parent loss, so it may sit under another
+        // root; cover that class too, as the parent-loss path does.
+        self.coord_cache
+            .invalidate_via_node(our_identity.node_addr());
+        if *self.tree_state.root() != old_root {
+            self.coord_cache
+                .invalidate_other_roots(self.tree_state.root());
+        }
+        self.reset_lookup_backoff();
+        self.metrics().tree.parent_switches.inc();
+
+        let new_parent = *self.tree_state.my_declaration().parent_id();
+        info!(
+            dropped = %self.peer_display_name(&parent),
+            new_parent = %self.peer_display_name(&new_parent),
+            new_seq = self.tree_state.my_declaration().sequence(),
+            new_root = %self.tree_state.root(),
+            depth = self.tree_state.my_coords().depth(),
+            trigger = "unconfirmed",
+            "Parent sent nothing since the switch, switched to another candidate"
+        );
+        if outcome.dampened {
+            self.note_flap("unconfirmed");
+        }
+
+        self.send_tree_announce_to_all().await;
+
+        let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+        self.bloom_state.mark_all_updates_needed(all_peers);
     }
 
     /// Mark for resend every peer whose outstanding TreeAnnounce the receiver

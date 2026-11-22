@@ -2967,5 +2967,6 @@ mod npub_spelling;
 mod punch_recv_error;
 mod seen_session_cap;
 mod seen_session_floor;
+mod signal_bounds;
 mod signal_lag;
 mod unknown_transport;

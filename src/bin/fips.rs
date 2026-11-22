@@ -309,6 +309,11 @@ async fn run_daemon(
     }
     load_log.replay();
 
+    // A root start without --config also read any config in the user config
+    // directory, HOME or the working directory; name each one.
+    #[cfg(unix)]
+    fips::config::warn_reads(config_path.is_some(), &loaded_paths);
+
     // The hosts/ACL defaults on these platforms moved from /etc/fips to
     // /usr/local/etc/fips; flag files stranded at the old location.
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]

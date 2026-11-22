@@ -51,6 +51,73 @@ use crate::config::{NostrRendezvousConfig, PeerConfig};
 
 const ADVERT_CACHE_STALE_GRACE_MULTIPLIER: u64 = 2;
 
+/// The longest `sessionId` or `nonce`, in bytes, an inbound traversal offer
+/// may carry. The seen-sessions memory keys on the session id, and the nonce
+/// is copied into the answer. Ours are about 30 bytes (`traversal::nonce`).
+const MAX_OFFER_FIELD_BYTES: usize = 128;
+
+/// The largest advert event content, in bytes, that is parsed at all.
+const MAX_ADVERT_CONTENT_BYTES: usize = 8 * 1024;
+
+/// The most entries an advert's `endpoints`, `signalRelays` or `stunServers`
+/// list may carry. The cache keeps the parsed advert, where each entry costs
+/// a string header on top of its bytes, so the content bound alone would let
+/// thousands of one-character entries through.
+const MAX_ADVERT_LIST_ENTRIES: usize = 32;
+
+/// Refuse an inbound offer whose session id or nonce is longer than
+/// `MAX_OFFER_FIELD_BYTES`. An honest peer never sends one.
+fn check_offer_bounds(offer: &TraversalOffer) -> Result<(), BootstrapError> {
+    if offer.session_id.len() > MAX_OFFER_FIELD_BYTES || offer.nonce.len() > MAX_OFFER_FIELD_BYTES {
+        return Err(BootstrapError::Protocol("oversized-offer".to_string()));
+    }
+    Ok(())
+}
+
+/// Refuse an advert any of whose lists has more than
+/// `MAX_ADVERT_LIST_ENTRIES` entries. The whole advert is refused, not cut,
+/// so what is cached is always what the author signed.
+fn check_advert_lists(advert: &OverlayAdvert) -> Result<(), BootstrapError> {
+    let lists = [
+        ("endpoints", Some(advert.endpoints.len())),
+        ("signalRelays", advert.signal_relays.as_ref().map(Vec::len)),
+        ("stunServers", advert.stun_servers.as_ref().map(Vec::len)),
+    ];
+    for (name, len) in lists {
+        if let Some(len) = len
+            && len > MAX_ADVERT_LIST_ENTRIES
+        {
+            return Err(BootstrapError::InvalidAdvert(format!(
+                "{name} has {len} entries, over the bound of {MAX_ADVERT_LIST_ENTRIES}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Cut each of our own advert's lists to `MAX_ADVERT_LIST_ENTRIES`, keeping
+/// the configured order, so peers do not refuse it. Warns for each list cut.
+fn clamp_own_advert(advert: &mut OverlayAdvert) {
+    fn clamp<T>(list: &mut Vec<T>, name: &str) {
+        if list.len() > MAX_ADVERT_LIST_ENTRIES {
+            warn!(
+                list = name,
+                configured = list.len(),
+                published = MAX_ADVERT_LIST_ENTRIES,
+                "advert: list longer than peers accept; publishing only its first entries"
+            );
+            list.truncate(MAX_ADVERT_LIST_ENTRIES);
+        }
+    }
+    clamp(&mut advert.endpoints, "endpoints");
+    if let Some(relays) = advert.signal_relays.as_mut() {
+        clamp(relays, "signalRelays");
+    }
+    if let Some(servers) = advert.stun_servers.as_mut() {
+        clamp(servers, "stunServers");
+    }
+}
+
 /// The advert machine for `config`: entries kept to a grace-extended max
 /// age, the configured cache cap, and one republish interval of lapse grace
 /// after an entry's horizon, so an honest author that misses one republish
@@ -186,6 +253,7 @@ pub(super) fn adversarial_offer_reject(err: &BootstrapError) -> bool {
             if reason == "future-dated-offer"
                 || reason == "identity-mismatch"
                 || reason == "invalid-offer"
+                || reason == "oversized-offer"
     )
 }
 
@@ -1328,13 +1396,7 @@ impl NostrRendezvous {
             PublishPlan::Publish(advert) => advert,
         };
 
-        let event = advert_event(
-            &self.keys,
-            &advert,
-            &self.config.app,
-            self.config.advert_ttl_secs,
-            now_ms(),
-        )?;
+        let (advert, event) = self.sign_advert(advert)?;
         self.client
             .send_event_to(self.config.advert_relays.clone(), &event)
             .await
@@ -1353,6 +1415,31 @@ impl NostrRendezvous {
         // publish, which strict relays (e.g. Damus) honor by removing the
         // new advert too.
         Ok(())
+    }
+
+    /// Sign `advert` as our advert event, with its lists cut to what peers
+    /// accept. Returns the advert as published along with the event, and
+    /// warns if the content is still over the bound peers parse.
+    fn sign_advert(
+        &self,
+        mut advert: OverlayAdvert,
+    ) -> Result<(OverlayAdvert, Event), BootstrapError> {
+        clamp_own_advert(&mut advert);
+        let event = advert_event(
+            &self.keys,
+            &advert,
+            &self.config.app,
+            self.config.advert_ttl_secs,
+            now_ms(),
+        )?;
+        if event.content.len() > MAX_ADVERT_CONTENT_BYTES {
+            warn!(
+                bytes = event.content.len(),
+                bound = MAX_ADVERT_CONTENT_BYTES,
+                "advert: larger than peers accept; peers will refuse it"
+            );
+        }
+        Ok((advert, event))
     }
 
     async fn connect_peer(
@@ -1613,6 +1700,8 @@ impl NostrRendezvous {
         sender: PublicKey,
         sender_npub: String,
     ) -> Result<(), BootstrapError> {
+        // Before anything logs, records or copies the session id or nonce.
+        check_offer_bounds(&offer)?;
         let peer_short = short_npub(&sender_npub);
         if !self.outbound_admission_allowed() {
             debug!(
@@ -1982,6 +2071,12 @@ impl NostrRendezvous {
             )));
         }
 
+        if event.content.len() > MAX_ADVERT_CONTENT_BYTES {
+            return Err(BootstrapError::InvalidAdvert(format!(
+                "content of {} bytes, over the bound of {MAX_ADVERT_CONTENT_BYTES}",
+                event.content.len()
+            )));
+        }
         let advert: OverlayAdvert = serde_json::from_str(&event.content)?;
         Self::validate_overlay_advert(advert)
     }
@@ -2006,6 +2101,7 @@ impl NostrRendezvous {
                 "missing required endpoints".to_string(),
             ));
         }
+        check_advert_lists(&advert)?;
         advert.endpoints.retain(endpoint_advert_is_publicly_usable);
         if advert.endpoints.is_empty() {
             return Err(BootstrapError::InvalidAdvert(
@@ -2500,6 +2596,15 @@ impl NostrRendezvous {
     /// This runtime's own npub.
     pub(crate) fn npub_for_test(&self) -> &str {
         &self.npub
+    }
+
+    /// The advert event `publish_advert` would send now, or `None` when there
+    /// is nothing to publish.
+    pub(crate) fn signed_advert_for_test(&self) -> Result<Option<Event>, BootstrapError> {
+        match self.advert.plan_publish()? {
+            PublishPlan::Publish(advert) => Ok(Some(self.sign_advert(advert)?.1)),
+            PublishPlan::Nothing => Ok(None),
+        }
     }
 
     /// Run the incoming-offer handler.

@@ -59,9 +59,22 @@ cant() {
     exit 2
 }
 
-command -v dpkg >/dev/null 2>&1 || cant "dpkg not found"
-command -v python3 >/dev/null 2>&1 || cant "python3 not found"
-python3 -c "import yaml" >/dev/null 2>&1 || cant "python3 module 'yaml' not found"
+# missing <tool> <message>: like cant, then names the package that provides
+# the tool. The helper is sourced only here, and only if it is there.
+missing() {
+    echo "check-package-versions: $2; cannot verify the package version derivation" >&2
+    if [ -r "$SCRIPT_DIR/lib/tool-hint.sh" ]; then
+        # shellcheck source=/dev/null
+        . "$SCRIPT_DIR/lib/tool-hint.sh"
+        local hint
+        hint="$(tool_hint "$1")" && echo "check-package-versions: $hint" >&2
+    fi
+    exit 2
+}
+
+command -v dpkg >/dev/null 2>&1 || missing dpkg "dpkg not found"
+command -v python3 >/dev/null 2>&1 || missing python3 "python3 not found"
+python3 -c "import yaml" >/dev/null 2>&1 || missing yaml "python3 module 'yaml' not found"
 
 WORK=$(mktemp -d) || cant "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT

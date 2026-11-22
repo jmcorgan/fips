@@ -91,7 +91,12 @@ operator-editable runtime state:
 NixOS `environment.etc` creates symlinks into the read-only Nix store. That
 makes files immutable at runtime and would clobber operator edits on every
 rebuild. The module instead seeds real writable files via a `preStart`
-script that only runs when the target file is absent.
+script that only writes a file when nothing is at its path. Because
+`/etc/fips` and `/var/lib/fips` are group-writable, the script takes group
+and other write off each directory while it checks and writes, then puts
+the directory's mode back, and it never writes through an existing entry:
+a symlink there, whether the operator's or one planted by a `fips` group
+member, is left alone.
 
 ### Why `--config /var/lib/fips/fips.yaml`?
 

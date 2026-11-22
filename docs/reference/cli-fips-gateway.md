@@ -56,7 +56,8 @@ and inbound `port_forwards[]` — see the
 [Gateway section](configuration.md#gateway-gateway) of the
 configuration reference.
 
-The same default search paths apply as for `fips`
+The same default search paths apply as for `fips`, as does its
+warning for each user config a root start reads
 (see [`fips`](cli-fips.md#files)); `-c FILE` overrides the search.
 The gateway must be able to read the same configuration file the
 daemon is reading, or the two will disagree about pool, DNS port,

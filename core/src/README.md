@@ -17,7 +17,11 @@ changing anything here.
   (`testing/mutations/`). Each puts back one break behind a
   `node_fault!(Name)` condition, read once per process from
   `FIPS_NODE_FAULTS`. Compiled for tests and under the `test-hooks`
-  feature only, and hidden from the documentation.
+  feature only, and hidden from the documentation. The root crate turns
+  that feature on from its dev-dependencies and from its own `test-hooks`
+  feature, which builds the chaos break image: the one binary whose
+  switches, the root's sites included, can be set, and which logs
+  `Test hooks compiled in` when its node starts.
 - `identity/`: node and peer identity types and their encodings. Its own
   README describes it.
 - `node/`: node-level bookkeeping that is not a protocol layer: the
@@ -66,8 +70,9 @@ changing anything here.
 ## Rules for this level
 
 - `lib.rs` stays `#![no_std]`. The `extern crate std;` line stays behind
-  `#[cfg(any(test, feature = "test-hooks"))]`, so only the host-run tests,
-  this crate's and the root crate's, see `std`.
+  `#[cfg(any(test, feature = "test-hooks"))]`, so only the host-run
+  builds, this crate's tests, the root crate's tests and the root's chaos
+  break image, see `std`.
 - Each module moved in from the root crate gets a `pub mod` line here,
   and its directory gets a README of its own.
 - Keep this README's list in step with the directory: a module added,

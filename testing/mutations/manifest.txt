@@ -308,6 +308,7 @@ SwitchWritesLive	red	fips-core	proto::settle::table::tests::a_switch_to_an_ackno
 SwitchWritesLive	red	fips-mesh	node::tests::settle::live::a_switch_to_an_acked_path_is_recorded_acked_and_the_mirror_holds_with_multipath_on	a switch to an acknowledged path is recorded Live
 MoveClosesNewPair	red	fips-core	proto::settle::table::tests::a_move_onto_a_dial_answered_from_the_peers_other_pair_keeps_that_pair_open
 MoveLeavesDialOpen	red	fips-core	proto::settle::table::tests::a_move_onto_a_dial_answered_from_the_peers_other_pair_closes_the_dials_own_connection
+AdoptedKeepsDir	red	fips-core	proto::settle::table::tests::an_adopted_answer_on_the_msg1s_connection_turns_a_dialed_link_inbound
 StoredAnswersAny	red	fips-core	proto::settle::table::tests::a_msg1_from_the_address_of_a_sent_answer_is_read_unless_it_is_the_msg1_answered
 RedialTearsDownAtMsg1	red	fips-core	proto::settle::table::tests::a_redials_answer_leaves_the_held_peer_until_a_frame_proves_it
 RedialNeverExpires	red	fips-core	proto::settle::table::tests::a_pending_redials_leg_is_reaped_at_its_deadline

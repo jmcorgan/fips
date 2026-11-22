@@ -52,7 +52,7 @@ the YAML configuration. See [configuration.md](configuration.md).
 | Variable | Description |
 | -------- | ----------- |
 | `RUST_LOG` | Tracing filter directive. Overrides `node.log_level` from the config. Examples: `info`, `debug`, `fips=trace,fips::node::handlers::mmp=debug`. |
-| `XDG_RUNTIME_DIR` | Used to derive the default control-socket path when `/run/fips` does not exist. See [control-socket.md](control-socket.md). |
+| `XDG_RUNTIME_DIR` | Used to derive the default control-socket path when `/run/fips` does not exist and the daemon is not running as root. See [control-socket.md](control-socket.md). |
 | `FIPS_CONFIG` | (Windows service mode only) Path to the configuration file when the daemon runs under the service control manager. |
 
 The daemon also clamps the `nostr_relay_pool`, `nostr_sdk`, and `nostr`
@@ -81,6 +81,12 @@ The `\etc\fips` probe is deprecated: any local user can create that
 file, so the daemon warns when it loads a config from there, and from
 v0.6.0 the search no longer looks there. Move the settings you need into
 `C:\ProgramData\fips\fips.yaml`.
+
+On Unix, when `fips` runs as root without `-c`, it logs a warning for
+each config it read from priorities 2 to 4, since another account may be
+able to write those files. The warning is logged at ERROR, so
+`node.log_level` set in one of those files cannot hide it. Pass `-c` to
+name the file to use.
 
 If the file given with `-c`, or the files found on the search path taken
 together, configure nothing (no `node.identity.nsec`,

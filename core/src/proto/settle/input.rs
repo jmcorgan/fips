@@ -223,6 +223,15 @@ pub enum Input {
         /// The peer.
         peer: NodeAddr,
     },
+    /// A frame of the held peer authenticated under the session its rekey
+    /// machine answered a msg1 into, where that answer went out on the
+    /// connection the msg1 arrived on because the link's own connection
+    /// had gone (FRC-1201 Section 5.7): the peer opened that connection,
+    /// and the link now runs on it.
+    Adopted {
+        /// The peer.
+        peer: NodeAddr,
+    },
     /// The msg2 an [`Output::Answer`](super::output::Output::Answer), or the
     /// msg1 an [`Output::Resend`](super::output::Output::Resend), asked for
     /// was sent.

@@ -55,6 +55,14 @@ opt-level = 2
 [profile.integration]
 inherits = "release"
 
+# The chaos break image's binary (testing/chaos/agreement-break.sh): the
+# integration settings, built with `test-overrides,test-hooks`. Its own
+# directory, target/chaos-break, keeps that binary from replacing the
+# integration build's target/integration/fips, which every other suite's image
+# is made from.
+[profile.chaos-break]
+inherits = "integration"
+
 [features]
 default = []
 # Tick-body profiler (`src/instr`). Off by default: enabling it edits 26 call
@@ -79,13 +87,23 @@ test-overrides = []
 # real-node explorer (the module is under `#[cfg(any())]` in
 # `src/node/tests/settle/mod.rs`), so on next this feature compiles no test.
 explorers = []
+# The mutation lane's node switches (`fips_core::faults`, read from
+# `FIPS_NODE_FAULTS`) in a binary, for a chaos image that puts back a break so
+# the chaos assertions can be seen to red. Only that image's build enables it;
+# no package build and no integration build may. Without it every
+# `node_fault!` site is the literal `false`. A build with it logs
+# `Test hooks compiled in` when the node starts.
+test-hooks = ["fips-core/test-hooks"]
 
 [dependencies]
 ratatui = "0.30"
 secp256k1 = { version = "0.30", features = ["rand", "global-context"] }
-# `zeroize` clears SHA-256 states on drop. No root code hashes a secret now;
-# `fips-core` enables the feature too, so it is on in every root build.
+# `zeroize` clears the SHA-256 and HMAC states on drop. The one root code that
+# hashes a secret is the Tor control client's SAFECOOKIE exchange
+# (`transport::tor::control`), which keys an HMAC with the cookie. `fips-core`
+# enables both features too, so they are on in every root build.
 sha2 = { version = "0.11", features = ["zeroize"] }
+hmac = { version = "0.13", features = ["zeroize"] }
 ring = "0.17"
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
 rand = "0.10.1"
@@ -208,8 +226,10 @@ conf-files = ["/etc/fips/hosts", "/etc/fips/fips.nft"]
 
 [dev-dependencies]
 # The protocol modules' test hooks, which this crate's tests call. Enabled
-# here only, so they are compiled into a build that includes tests, examples
-# or benches, where dev-dependency features apply, and into no other build.
+# here, so they are compiled into a build that includes tests, examples or
+# benches, where dev-dependency features apply. The one other route is this
+# crate's own `test-hooks` feature, for the chaos break image; a plain build,
+# release or not, has neither.
 fips-core = { path = "core", features = ["test-hooks"] }
 tempfile = "3.15"
 criterion = { version = "0.8.2", features = ["html_reports"] }

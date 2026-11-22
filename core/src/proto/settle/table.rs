@@ -448,6 +448,7 @@ impl<I: Instant> Table<I> {
             Input::Disconnect { peer } => self.remove(peer, Why::Disconnect, now, &mut out),
             Input::Dead { peer } => self.remove(peer, Why::Dead, now, &mut out),
             Input::Admin { peer } => self.admin(peer, now, &mut out),
+            Input::Adopted { peer } => self.adopted(peer, &mut out),
             Input::Sent { link } => self.sent(link, now, &mut out),
             Input::SendFailed { link } => self.unsent(link, now, &mut out),
             Input::Unsendable { link } => self.unsendable(link, &mut out),
@@ -1101,6 +1102,31 @@ impl<I: Instant> Table<I> {
             && let Some((leg, _)) = self.redials.get(&peer).copied()
         {
             self.abandon(leg, out);
+        }
+    }
+
+    /// The held peer adopted a rekey answer that went out on the connection
+    /// its msg1 arrived on, in place of the link's own connection, which had
+    /// gone (FRC-1201 Section 5.7). The peer opened that connection, so the
+    /// held link's record now says the peer set it up: a peer that dropped
+    /// the peering and dialed afresh, which this end cannot tell from one
+    /// that dialed again to rekey, holds it as the link it dialed.
+    /// FRC-1201 does not say whose dial a link is after such an answer. The
+    /// record's setup pair is left as it is, and a later dial of this node
+    /// for the peer is no longer its own dial on a link it dialed (Section
+    /// 5.6), so the node address ordering decides it.
+    fn adopted(&mut self, peer: NodeAddr, out: &mut Vec<Output>) {
+        let Some(link) = self.held.get(&peer).map(|h| h.link) else {
+            return;
+        };
+        if fault!(AdoptedKeepsDir) || node_fault!(AdoptedKeepsDir) {
+            return;
+        }
+        if self.links.turn(link, Dir::Inbound) {
+            out.push(Output::Turned {
+                link,
+                dir: Dir::Inbound,
+            });
         }
     }
 

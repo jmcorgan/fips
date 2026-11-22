@@ -145,6 +145,22 @@ assertions:
     max_roots: 6
     min_nodes_parented: 4
     min_sessions: 10
+  # Both ends of every edge agree on the link between them at the end of the
+  # run, as in tcp-mesh: one session index pair, one end outbound and one
+  # inbound, the dialer outbound on an edge with a static dialer, the edge's
+  # transport and, off Ethernet, the other end's address. An edge that
+  # disagrees is re-read for up to 90 s.
+  #
+  # The topology is generated, so no edge is dialed from both ends on
+  # purpose, but an Ethernet edge is found by beacon at both ends and can
+  # cross at startup; the assertion then requires the smaller node on its
+  # own dial. In 20 runs of the nightly invocation on the node this
+  # assertion landed with (2026-11-21, ten at each multipath setting), 11
+  # runs had such a crossing, 15 in all, each ending with the smaller node
+  # outbound. A crossing here is chance, so no floor is set: a run with
+  # none still judges every edge.
+  edge_agreement:
+    within_secs: 90
 
 logging:
   rust_log: "debug"

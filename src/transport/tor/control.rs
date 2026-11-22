@@ -2,16 +2,98 @@
 //!
 //! Minimal async client for the Tor control protocol (control-spec).
 //! Implements AUTHENTICATE and GETINFO for monitoring the Tor daemon.
+//!
+//! The control port is not trusted to be well-behaved. Replies are read as
+//! bytes under a per-line and a per-reply size cap, and every connect and
+//! every reply has a deadline, so a malformed or silent port gives an error
+//! rather than a panic or a hang.
+//!
+//! Cookie authentication uses Tor's SAFECOOKIE exchange: the port must prove
+//! it holds the cookie before the client sends anything derived from it, and
+//! the raw cookie is never sent. There is no fallback to plain COOKIE.
 
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use hmac::{Hmac, KeyInit, Mac};
 use serde::Serialize;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use sha2::Sha256;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
-use tracing::debug;
+use tracing::{debug, warn};
+use zeroize::Zeroizing;
+
+// ============================================================================
+// Limits
+// ============================================================================
+
+/// How long a connect, or a whole reply, may take before the client gives up.
+pub(crate) const CONTROL_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Longest reply line accepted, line terminator included.
+const MAX_LINE: usize = 8 * 1024;
+
+/// Most bytes accepted in one reply, all of its lines together.
+const MAX_REPLY: usize = 64 * 1024;
+
+/// Most data lines kept from one reply.
+const MAX_DATA_LINES: usize = 1024;
+
+// ============================================================================
+// SAFECOOKIE
+// ============================================================================
+
+/// HMAC key for the hash the control port sends to prove it holds the cookie.
+const SAFECOOKIE_SERVER_KEY: &[u8] = b"Tor safe cookie authentication server-to-controller hash";
+
+/// HMAC key for the hash the client sends to prove it holds the cookie.
+const SAFECOOKIE_CLIENT_KEY: &[u8] = b"Tor safe cookie authentication controller-to-server hash";
+
+/// Length of the client and server nonces, in bytes.
+const SAFECOOKIE_NONCE_LEN: usize = 32;
+
+/// HMAC-SHA256 under `key` over the cookie and the two nonces, in that order.
+fn safecookie_mac(
+    key: &[u8],
+    cookie: &[u8],
+    client_nonce: &[u8],
+    server_nonce: &[u8],
+) -> Hmac<Sha256> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes a key of any length");
+    mac.update(cookie);
+    mac.update(client_nonce);
+    mac.update(server_nonce);
+    mac
+}
+
+/// Read the server hash and server nonce from an `AUTHCHALLENGE` reply's
+/// final line, `AUTHCHALLENGE SERVERHASH=<hex> SERVERNONCE=<hex>`.
+fn parse_authchallenge(message: &str) -> Result<([u8; 32], [u8; 32]), TorControlError> {
+    let malformed = || TorControlError::AuthFailed("malformed AUTHCHALLENGE reply".into());
+    let mut words = message.split(' ');
+    if words.next() != Some("AUTHCHALLENGE") {
+        return Err(malformed());
+    }
+    let decode =
+        |hex_value: &str| -> Option<[u8; 32]> { ::hex::decode(hex_value).ok()?.try_into().ok() };
+    let mut server_hash = None;
+    let mut server_nonce = None;
+    for word in words {
+        if let Some(value) = word.strip_prefix("SERVERHASH=") {
+            server_hash = Some(decode(value).ok_or_else(malformed)?);
+        } else if let Some(value) = word.strip_prefix("SERVERNONCE=") {
+            server_nonce = Some(decode(value).ok_or_else(malformed)?);
+        }
+    }
+    match (server_hash, server_nonce) {
+        (Some(hash), Some(nonce)) => Ok((hash, nonce)),
+        _ => Err(malformed()),
+    }
+}
 
 // ============================================================================
 // Error Type
@@ -56,9 +138,11 @@ impl From<std::io::Error> for TorControlError {
 /// Control port authentication method.
 #[derive(Debug, Clone)]
 pub enum ControlAuth {
-    /// Cookie authentication — reads 32-byte cookie from file, sends as hex.
+    /// Cookie authentication — reads the 32-byte cookie from a file and
+    /// proves it holds it with the SAFECOOKIE exchange.
     Cookie(PathBuf),
-    /// Password authentication — sends AUTHENTICATE "password".
+    /// Password authentication — sends AUTHENTICATE "password". The
+    /// password may not contain CR or LF.
     Password(String),
 }
 
@@ -67,20 +151,33 @@ impl ControlAuth {
     ///
     /// - `"cookie"` or `"cookie:/path/to/cookie"` → Cookie auth
     /// - `"password:secret"` → Password auth
+    ///
+    /// No error quotes the string, since it may hold a password.
     pub fn from_config(auth_str: &str, default_cookie_path: &str) -> Result<Self, TorControlError> {
         if auth_str == "cookie" {
             Ok(Self::Cookie(PathBuf::from(default_cookie_path)))
         } else if let Some(path) = auth_str.strip_prefix("cookie:") {
             Ok(Self::Cookie(PathBuf::from(path)))
         } else if let Some(password) = auth_str.strip_prefix("password:") {
+            if has_line_break(password) {
+                return Err(TorControlError::AuthFailed(
+                    "control_auth password contains a line break".into(),
+                ));
+            }
             Ok(Self::Password(password.to_string()))
         } else {
-            Err(TorControlError::AuthFailed(format!(
-                "unknown control_auth format '{}': expected 'cookie', 'cookie:/path', or 'password:secret'",
-                auth_str
-            )))
+            Err(TorControlError::AuthFailed(
+                "unknown control_auth format: expected 'cookie', 'cookie:/path', or 'password:secret'"
+                    .into(),
+            ))
         }
     }
+}
+
+/// Whether a password holds a CR or LF, which would end the AUTHENTICATE
+/// line early and let the rest run as a second control command.
+fn has_line_break(password: &str) -> bool {
+    password.contains(['\r', '\n'])
 }
 
 // ============================================================================
@@ -119,6 +216,11 @@ pub struct TorMonitoringInfo {
 pub struct TorControlClient {
     reader: BufReader<Box<dyn AsyncRead + Unpin + Send>>,
     writer: Box<dyn AsyncWrite + Unpin + Send>,
+    /// Set when a command or reply failed part-way, so the next bytes on the
+    /// connection may belong to an earlier reply.
+    out_of_step: bool,
+    /// The peer's address, for a TCP connection to a non-loopback address.
+    remote_peer: Option<SocketAddr>,
 }
 
 impl fmt::Debug for TorControlClient {
@@ -137,12 +239,24 @@ impl TorControlClient {
     /// Unix sockets are preferred for security: they provide filesystem
     /// permission-based access control and are not reachable from containers
     /// unless explicitly mounted. The Debian default is `/run/tor/control`.
+    ///
+    /// The connect fails after [`CONTROL_DEADLINE`] if it has not completed.
     pub async fn connect(addr: &str) -> Result<Self, TorControlError> {
-        #[cfg(unix)]
-        if is_unix_socket_path(addr) {
-            return Self::connect_unix(addr).await;
+        let connecting = async {
+            #[cfg(unix)]
+            if is_unix_socket_path(addr) {
+                return Self::connect_unix(addr).await;
+            }
+            Self::connect_tcp(addr).await
+        };
+        match tokio::time::timeout(CONTROL_DEADLINE, connecting).await {
+            Ok(result) => result,
+            Err(_) => Err(TorControlError::ConnectionFailed(format!(
+                "no connection to control port {} within {} s",
+                addr,
+                CONTROL_DEADLINE.as_secs()
+            ))),
         }
-        Self::connect_tcp(addr).await
     }
 
     /// Connect via TCP to a control port at `host:port`.
@@ -154,6 +268,10 @@ impl TorControlClient {
             ))
         })?;
 
+        let remote_peer = stream
+            .peer_addr()
+            .ok()
+            .filter(|peer| !is_loopback_peer(peer));
         let (read_half, write_half) = stream.into_split();
 
         debug!(addr = %addr, transport = "tcp", "Connected to Tor control port");
@@ -161,6 +279,8 @@ impl TorControlClient {
         Ok(Self {
             reader: BufReader::new(Box::new(read_half)),
             writer: Box::new(write_half),
+            out_of_step: false,
+            remote_peer,
         })
     }
 
@@ -181,24 +301,87 @@ impl TorControlClient {
         Ok(Self {
             reader: BufReader::new(Box::new(read_half)),
             writer: Box::new(write_half),
+            out_of_step: false,
+            remote_peer: None,
         })
     }
 
     /// Authenticate with the Tor daemon.
+    ///
+    /// Cookie authentication runs the SAFECOOKIE exchange and fails if the
+    /// port refuses it or cannot prove it holds the cookie. A password with
+    /// a line break is refused before anything is sent. A password sent over
+    /// TCP to a non-loopback address is logged as crossing the network in
+    /// clear, since the control protocol has no encryption.
     pub async fn authenticate(&mut self, auth: &ControlAuth) -> Result<(), TorControlError> {
-        let command = match auth {
+        match auth {
             ControlAuth::Cookie(path) => {
                 let cookie = read_cookie_file(path)?;
-                format!("AUTHENTICATE {}\r\n", hex::encode(cookie))
+                self.authenticate_safecookie(&cookie).await
             }
             ControlAuth::Password(password) => {
+                if has_line_break(password) {
+                    return Err(TorControlError::AuthFailed(
+                        "control_auth password contains a line break".into(),
+                    ));
+                }
+                if let Some(peer) = self.remote_peer {
+                    warn!(
+                        peer = %peer,
+                        "Tor control port password sent in clear over a non-loopback TCP connection"
+                    );
+                }
                 // Escape quotes in password
                 let escaped = password.replace('\\', "\\\\").replace('"', "\\\"");
-                format!("AUTHENTICATE \"{}\"\r\n", escaped)
+                self.send_authenticate(&format!("AUTHENTICATE \"{}\"\r\n", escaped))
+                    .await
             }
-        };
+        }
+    }
 
-        self.send_command(&command).await?;
+    /// Run the SAFECOOKIE exchange: send a random client nonce, check the
+    /// server hash the port returns against the cookie, and only then send
+    /// the client hash.
+    async fn authenticate_safecookie(&mut self, cookie: &[u8]) -> Result<(), TorControlError> {
+        let mut client_nonce = [0u8; SAFECOOKIE_NONCE_LEN];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut client_nonce);
+
+        self.send_command(&format!(
+            "AUTHCHALLENGE SAFECOOKIE {}\r\n",
+            hex::encode(client_nonce.to_vec())
+        ))
+        .await?;
+        let response = self.read_response().await?;
+        if response.code != 250 {
+            return Err(TorControlError::AuthFailed(format!(
+                "AUTHCHALLENGE SAFECOOKIE refused: {} {}",
+                response.code, response.message
+            )));
+        }
+
+        let (server_hash, server_nonce) = parse_authchallenge(&response.message)?;
+        safecookie_mac(SAFECOOKIE_SERVER_KEY, cookie, &client_nonce, &server_nonce)
+            .verify_slice(&server_hash)
+            .map_err(|_| {
+                TorControlError::AuthFailed(
+                    "control port did not prove it holds the cookie (SERVERHASH mismatch)".into(),
+                )
+            })?;
+
+        let client_hash =
+            safecookie_mac(SAFECOOKIE_CLIENT_KEY, cookie, &client_nonce, &server_nonce)
+                .finalize()
+                .into_bytes();
+        self.send_authenticate(&format!(
+            "AUTHENTICATE {}\r\n",
+            hex::encode(client_hash.to_vec())
+        ))
+        .await
+    }
+
+    /// Send an AUTHENTICATE command and require a 250 reply.
+    async fn send_authenticate(&mut self, command: &str) -> Result<(), TorControlError> {
+        self.send_command(command).await?;
         let response = self.read_response().await?;
 
         if response.code != 250 {
@@ -316,7 +499,18 @@ impl TorControlClient {
             .collect())
     }
 
+    /// Whether a command or reply failed part-way, after a deadline, a cap,
+    /// a malformed line or a closed connection. Such a client fails every
+    /// later call at once rather than read what is left of an earlier reply
+    /// as the answer to a new query; open a new connection to recover.
+    pub(crate) fn is_out_of_step(&self) -> bool {
+        self.out_of_step
+    }
+
     /// Collect all monitoring info in a single batch of queries.
+    ///
+    /// A query that fails leaves its field at a default, unless the failure
+    /// left the connection out of step, which fails the whole snapshot.
     pub async fn monitoring_snapshot(&mut self) -> Result<TorMonitoringInfo, TorControlError> {
         let bootstrap = self.get_bootstrap_phase().await.unwrap_or(0);
         let circuit_established = self.is_circuit_established().await.unwrap_or(false);
@@ -328,6 +522,9 @@ impl TorControlClient {
             .unwrap_or_else(|_| "unknown".into());
         let version = self.version().await.unwrap_or_else(|_| "unknown".into());
         let dormant = self.is_dormant().await.unwrap_or(false);
+        if self.out_of_step {
+            return Err(Self::out_of_step_error());
+        }
 
         Ok(TorMonitoringInfo {
             bootstrap,
@@ -346,90 +543,196 @@ impl TorControlClient {
 
     /// Send a raw command string to the control port.
     async fn send_command(&mut self, command: &str) -> Result<(), TorControlError> {
-        self.writer.write_all(command.as_bytes()).await?;
-        self.writer.flush().await?;
+        if self.out_of_step {
+            return Err(Self::out_of_step_error());
+        }
+        let sent = async {
+            self.writer.write_all(command.as_bytes()).await?;
+            self.writer.flush().await
+        }
+        .await;
+        if let Err(e) = sent {
+            self.out_of_step = true;
+            return Err(e.into());
+        }
         Ok(())
+    }
+
+    /// The error for a call on a connection that is out of step.
+    fn out_of_step_error() -> TorControlError {
+        TorControlError::ProtocolError(
+            "control port connection is out of step after an earlier failure".into(),
+        )
     }
 
     /// Read a complete response from the control port.
     ///
     /// Tor responses are line-based:
     /// - `250-key=value` — mid-reply data line (more lines follow)
+    /// - `250+key=` — data in the dot-encoded lines that follow, up to a lone `.`
     /// - `250 OK` — final line of a successful reply
     /// - `5xx message` — error
     ///
-    /// Returns the status code and collected data lines.
+    /// Returns the status code and collected data lines. The whole reply must
+    /// arrive within [`CONTROL_DEADLINE`] and stay within the size caps, or
+    /// the read fails with [`TorControlError::ProtocolError`]. Any failure
+    /// leaves the client out of step (see [`Self::is_out_of_step`]).
     async fn read_response(&mut self) -> Result<ControlResponse, TorControlError> {
+        if self.out_of_step {
+            return Err(Self::out_of_step_error());
+        }
+        let result = match tokio::time::timeout(CONTROL_DEADLINE, self.read_reply()).await {
+            Ok(result) => result,
+            Err(_) => Err(TorControlError::ProtocolError(format!(
+                "no complete reply from control port within {} s",
+                CONTROL_DEADLINE.as_secs()
+            ))),
+        };
+        if result.is_err() {
+            self.out_of_step = true;
+        }
+        result
+    }
+
+    /// Read and parse one reply, with no deadline of its own.
+    async fn read_reply(&mut self) -> Result<ControlResponse, TorControlError> {
+        let mut budget = MAX_REPLY;
         let mut data_lines = Vec::new();
-        let mut line_buf = String::new();
 
         loop {
-            line_buf.clear();
-            let n = self.reader.read_line(&mut line_buf).await?;
-            if n == 0 {
-                return Err(TorControlError::ProtocolError(
-                    "control port connection closed".into(),
-                ));
-            }
-
-            let line = line_buf.trim_end_matches(['\r', '\n']);
-
-            if line.len() < 4 {
-                return Err(TorControlError::ProtocolError(format!(
-                    "response line too short: '{}'",
-                    line
-                )));
-            }
-
-            let code: u16 = line[..3].parse().map_err(|_| {
-                TorControlError::ProtocolError(format!("invalid response code in: '{}'", line))
-            })?;
-
-            let separator = line.as_bytes()[3];
-            let content = &line[4..];
+            let line = self.read_capped_line(&mut budget).await?;
+            let (code, separator, content) = parse_reply_line(&line)?;
 
             match separator {
-                b'-' => {
-                    // Mid-reply data line
-                    data_lines.push(content.to_string());
-                }
-                b' ' => {
-                    // Final line
+                ReplySeparator::Mid => push_data_line(&mut data_lines, content)?,
+                ReplySeparator::End => {
                     return Ok(ControlResponse {
                         code,
-                        message: content.to_string(),
+                        message: content,
                         data_lines,
                     });
                 }
-                b'+' => {
-                    // Multi-line data (dot-encoded). Read until lone "."
-                    data_lines.push(content.to_string());
+                ReplySeparator::Data => {
+                    push_data_line(&mut data_lines, content)?;
                     loop {
-                        line_buf.clear();
-                        let n = self.reader.read_line(&mut line_buf).await?;
-                        if n == 0 {
-                            return Err(TorControlError::ProtocolError(
-                                "connection closed during multi-line response".into(),
-                            ));
-                        }
-                        let dot_line = line_buf.trim_end_matches(['\r', '\n']);
-                        if dot_line == "." {
+                        let dot_line = self.read_capped_line(&mut budget).await?;
+                        if dot_line == b"." {
                             break;
                         }
                         // Strip leading dot-escape
-                        let unescaped = dot_line.strip_prefix('.').unwrap_or(dot_line);
-                        data_lines.push(unescaped.to_string());
+                        let unescaped = dot_line.strip_prefix(b".").unwrap_or(&dot_line);
+                        push_data_line(&mut data_lines, utf8_content(unescaped)?)?;
                     }
-                }
-                _ => {
-                    return Err(TorControlError::ProtocolError(format!(
-                        "unexpected separator '{}' in: '{}'",
-                        separator as char, line
-                    )));
                 }
             }
         }
     }
+
+    /// Read one line, without its CR LF, charging its bytes to `budget`.
+    ///
+    /// Fails if the line is longer than [`MAX_LINE`], if it would take the
+    /// reply past `budget`, or if the connection closes before the line ends.
+    async fn read_capped_line(&mut self, budget: &mut usize) -> Result<Vec<u8>, TorControlError> {
+        let limit = MAX_LINE.min(*budget);
+        let mut line = Vec::new();
+        let n = (&mut self.reader)
+            .take(limit as u64)
+            .read_until(b'\n', &mut line)
+            .await?;
+
+        if line.last() != Some(&b'\n') {
+            if n < limit {
+                return Err(TorControlError::ProtocolError(
+                    "control port connection closed".into(),
+                ));
+            }
+            return Err(TorControlError::ProtocolError(if limit < MAX_LINE {
+                format!("control port reply longer than {} bytes", MAX_REPLY)
+            } else {
+                format!("control port reply line longer than {} bytes", MAX_LINE)
+            }));
+        }
+
+        *budget -= n;
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        Ok(line)
+    }
+}
+
+/// Where a reply line sits in its reply, from the byte after the status code.
+enum ReplySeparator {
+    /// `-`: a data line, more lines follow.
+    Mid,
+    /// ` `: the final line.
+    End,
+    /// `+`: dot-encoded data lines follow, ended by a lone `.`.
+    Data,
+}
+
+/// Split a reply line into its status code, separator and content.
+///
+/// The code must be three ASCII digits and the separator one of `-`, ` `
+/// or `+`; the content must be UTF-8.
+fn parse_reply_line(line: &[u8]) -> Result<(u16, ReplySeparator, String), TorControlError> {
+    if line.len() < 4 {
+        return Err(TorControlError::ProtocolError(format!(
+            "response line too short: '{}'",
+            shown(line)
+        )));
+    }
+
+    let digits = &line[..3];
+    if !digits.iter().all(u8::is_ascii_digit) {
+        return Err(TorControlError::ProtocolError(format!(
+            "invalid response code in: '{}'",
+            shown(line)
+        )));
+    }
+    let code = digits
+        .iter()
+        .fold(0u16, |acc, d| acc * 10 + u16::from(d - b'0'));
+
+    let separator = match line[3] {
+        b'-' => ReplySeparator::Mid,
+        b' ' => ReplySeparator::End,
+        b'+' => ReplySeparator::Data,
+        _ => {
+            return Err(TorControlError::ProtocolError(format!(
+                "unexpected separator in: '{}'",
+                shown(line)
+            )));
+        }
+    };
+
+    Ok((code, separator, utf8_content(&line[4..])?))
+}
+
+/// Take a reply line's content as UTF-8, or fail with a protocol error.
+fn utf8_content(bytes: &[u8]) -> Result<String, TorControlError> {
+    std::str::from_utf8(bytes).map(str::to_string).map_err(|_| {
+        TorControlError::ProtocolError(format!("reply content is not UTF-8: '{}'", shown(bytes)))
+    })
+}
+
+/// Add a data line to a reply, refusing more than [`MAX_DATA_LINES`].
+fn push_data_line(data_lines: &mut Vec<String>, line: String) -> Result<(), TorControlError> {
+    if data_lines.len() >= MAX_DATA_LINES {
+        return Err(TorControlError::ProtocolError(format!(
+            "control port reply has more than {} data lines",
+            MAX_DATA_LINES
+        )));
+    }
+    data_lines.push(line);
+    Ok(())
+}
+
+/// Render the start of a line from the port for an error message: at most
+/// 64 bytes, with anything outside printable ASCII escaped.
+fn shown(line: &[u8]) -> String {
+    line[..line.len().min(64)].escape_ascii().to_string()
 }
 
 /// Parsed control port response.
@@ -447,14 +750,14 @@ struct ControlResponse {
 // ============================================================================
 
 /// Read a Tor control cookie file (32 bytes of raw binary).
-fn read_cookie_file(path: &Path) -> Result<Vec<u8>, TorControlError> {
-    let data = std::fs::read(path).map_err(|e| {
+fn read_cookie_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, TorControlError> {
+    let data = Zeroizing::new(std::fs::read(path).map_err(|e| {
         TorControlError::AuthFailed(format!(
             "failed to read cookie file '{}': {}",
             path.display(),
             e
         ))
-    })?;
+    })?);
 
     if data.len() != 32 {
         return Err(TorControlError::AuthFailed(format!(
@@ -465,6 +768,12 @@ fn read_cookie_file(path: &Path) -> Result<Vec<u8>, TorControlError> {
     }
 
     Ok(data)
+}
+
+/// Whether a TCP peer is on this host's loopback, counting an IPv4 loopback
+/// address carried in an IPv4-mapped IPv6 address.
+fn is_loopback_peer(peer: &SocketAddr) -> bool {
+    peer.ip().to_canonical().is_loopback()
 }
 
 // ============================================================================
@@ -500,6 +809,10 @@ mod hex {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+#[path = "tests/control.rs"]
+mod control_tests;
 
 #[cfg(test)]
 mod tests {
@@ -615,7 +928,7 @@ mod tests {
         std::fs::write(&path, &cookie_data).unwrap();
 
         let loaded = read_cookie_file(&path).unwrap();
-        assert_eq!(loaded, cookie_data);
+        assert_eq!(*loaded, cookie_data);
     }
 
     #[test]
@@ -647,7 +960,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_authenticate_cookie() {
-        let mock = MockTorControlServer::start().await;
+        let mock = MockTorControlServer::start_with_options(mock_control::MockOptions {
+            cookie: Some([0xAA; 32]),
+            ..Default::default()
+        })
+        .await;
 
         // Create a cookie file
         let dir = TempDir::new().unwrap();
@@ -679,6 +996,7 @@ mod tests {
     async fn test_auth_failure() {
         let mock = MockTorControlServer::start_with_options(mock_control::MockOptions {
             reject_auth: true,
+            ..Default::default()
         })
         .await;
         let mut client = TorControlClient::connect(&mock.addr().to_string())

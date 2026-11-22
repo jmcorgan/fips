@@ -85,6 +85,12 @@ class SimTopology:
     # edge's /24, so the two ends of a lane share one segment with the other
     # lanes and an answer can arrive on a lane other than its probe's.
     edge_lanes: dict[tuple[str, str], int] = field(default_factory=dict)
+    # Explicit ``udp`` or ``tcp`` edges declared ``{dial: both}``: each end
+    # lists the other as a static peer, so both dial at startup, and the
+    # runner starts every daemon after the initial netem holds these edges at
+    # a delay, so the two handshakes cross (sim/netem.py, CROSS_HOLD_MS).
+    # ``directed_outbound`` names both ends.
+    both_dial: set[tuple[str, str]] = field(default_factory=set)
     # Suffix scoping globally-visible names to this run and scenario; empty
     # outside the CI harness, which keeps a bare run's names unchanged.
     name_suffix: str = ""
@@ -101,6 +107,10 @@ class SimTopology:
     def is_dual(self, a: str, b: str) -> bool:
         """Whether the edge also carries a UDP static-peer link."""
         return _make_edge(a, b) in self.dual_edges
+
+    def is_both_dial(self, a: str, b: str) -> bool:
+        """Whether the edge is dialed from both ends."""
+        return _make_edge(a, b) in self.both_dial
 
     def is_veth(self, transport: str) -> bool:
         """Whether edges of this transport run over a dedicated veth pair."""
@@ -286,19 +296,23 @@ class SimTopology:
         return name
 
     def directed_outbound(self) -> dict[str, list[str]]:
-        """Assign each static-config edge to exactly one node for outbound connection.
+        """Assign each static-config edge to the node or nodes that dial it.
 
         Returns a mapping from node_id to the list of peers that node
         should connect to (outbound only). Every edge appears in exactly
         one direction, ensuring auto-reconnect is testable — if B goes
-        down, only A (the outbound owner) will attempt to reconnect.
+        down, only A (the outbound owner) will attempt to reconnect —
+        except an edge in ``both_dial``, which appears in both, so that
+        its two ends dial each other at once and their handshakes cross.
 
         Ethernet edges are excluded — they use beacon discovery instead
         of static peer configuration. UDP and TCP edges use static config.
 
         Strategy: BFS spanning tree edges go parent→child. Non-tree
         edges go from the lower node ID to the higher. This guarantees
-        every node is reachable via at least one inbound connection.
+        every node is reachable via at least one inbound connection. A
+        ``both_dial`` edge then gains the reverse direction, so every
+        other edge keeps the one dialer it had.
         """
         # Consider all edges that use static peer config (not Ethernet/discovery)
         static_edges = {
@@ -334,6 +348,11 @@ class SimTopology:
         for a, b in sorted(static_edges):
             if (a, b) not in tree_edges and (b, a) not in tree_edges:
                 outbound[a].append(b)  # a < b by _make_edge convention
+
+        for a, b in sorted(self.both_dial):
+            for node, peer in ((a, b), (b, a)):
+                if peer not in outbound[node]:
+                    outbound[node].append(peer)
 
         return outbound
 
@@ -393,7 +412,7 @@ def generate_topology(
         adjacency = config.params.get("adjacency")
         if not adjacency:
             raise ValueError("explicit topology requires params.adjacency")
-        edges, edge_transport, dual_edges, edge_lanes = _generate_explicit(
+        edges, edge_transport, dual_edges, edge_lanes, both_dial = _generate_explicit(
             adjacency, config.default_transport
         )
         # Validate all referenced nodes exist
@@ -410,6 +429,7 @@ def generate_topology(
         edge_transport = _assign_edge_transports(edges, config, rng)
         dual_edges = set()
         edge_lanes = {}
+        both_dial = set()
 
     # Build peer lists from edges
     for a, b in edges:
@@ -424,6 +444,7 @@ def generate_topology(
         edge_transport=edge_transport,
         dual_edges=dual_edges,
         edge_lanes=edge_lanes,
+        both_dial=both_dial,
         name_suffix=name_suffix(),
     )
 
@@ -502,7 +523,13 @@ def _generate_erdos_renyi(
 
 def _generate_explicit(
     adjacency: list, default_transport: str = "udp"
-) -> tuple[set[tuple[str, str]], dict[tuple[str, str], str], set[tuple[str, str]]]:
+) -> tuple[
+    set[tuple[str, str]],
+    dict[tuple[str, str], str],
+    set[tuple[str, str]],
+    dict[tuple[str, str], int],
+    set[tuple[str, str]],
+]:
     """Build edges from an explicit adjacency list.
 
     Each entry is a 2-element list ``[nodeA, nodeB]`` (uses default
@@ -514,17 +541,22 @@ def _generate_explicit(
     end) and UDP over the bridge.
 
     A ``udp-veth`` entry may carry a fourth element ``{lanes: n}``: its
-    veth pair then carries ``n`` lanes (``SimTopology.lane_links``).
+    veth pair then carries ``n`` lanes (``SimTopology.lane_links``). A
+    ``udp`` or ``tcp`` entry may carry ``{dial: both}``: both ends dial it
+    (``SimTopology.directed_outbound``). The scenario loader checks which
+    entry may carry which.
 
-    Returns ``(edges, edge_transport, dual_edges, edge_lanes)`` where
-    ``edge_transport`` maps each edge to its transport type (``ethernet``
-    for a dual edge), ``dual_edges`` is the set of dual edges and
-    ``edge_lanes`` the lane count of each laned edge.
+    Returns ``(edges, edge_transport, dual_edges, edge_lanes, both_dial)``
+    where ``edge_transport`` maps each edge to its transport type
+    (``ethernet`` for a dual edge), ``dual_edges`` is the set of dual
+    edges, ``edge_lanes`` the lane count of each laned edge and
+    ``both_dial`` the set of edges dialed from both ends.
     """
     edges = set()
     edge_transport: dict[tuple[str, str], str] = {}
     dual_edges: set[tuple[str, str]] = set()
     edge_lanes: dict[tuple[str, str], int] = {}
+    both_dial: set[tuple[str, str]] = set()
     for i, entry in enumerate(adjacency):
         if not isinstance(entry, (list, tuple)) or len(entry) not in (2, 3, 4):
             raise ValueError(
@@ -534,13 +566,16 @@ def _generate_explicit(
         edge = _make_edge(str(entry[0]), str(entry[1]))
         edges.add(edge)
         transport = str(entry[2]) if len(entry) >= 3 else default_transport
-        if len(entry) == 4:
-            edge_lanes[edge] = int(entry[3]["lanes"])
+        opts = entry[3] if len(entry) == 4 else {}
+        if "lanes" in opts:
+            edge_lanes[edge] = int(opts["lanes"])
+        if opts.get("dial") == "both":
+            both_dial.add(edge)
         if transport in ("ethernet+udp", f"{UDP_VETH}+udp"):
             transport = transport[: -len("+udp")]
             dual_edges.add(edge)
         edge_transport[edge] = transport
-    return edges, edge_transport, dual_edges, edge_lanes
+    return edges, edge_transport, dual_edges, edge_lanes, both_dial
 
 
 def _assign_edge_transports(

@@ -949,6 +949,16 @@ The primary stability mechanisms are implemented:
   switches (parent loss, root change) bypass dampening. The flap counter
   resets when the window expires and again when a dampening episode lapses,
   so each episode requires a fresh threshold of switches within one window.
+- **Parent confirmation**: a new parent must send a frame within one
+  heartbeat interval plus the longest MMP report interval (15s at
+  defaults). Otherwise the node switches to another candidate, if one
+  exists, as a mandatory switch, and keeps the silent peer out of parent
+  candidacy until it is heard from, unless it is the only candidate on the
+  smallest root the node sees. This ends a loop formed when two nodes
+  pick each other across a link that has gone silent, each on the other's
+  coordinate from before the silence, without waiting for the link dead
+  timeout. A node with no other candidate keeps its parent until a frame
+  crosses the link or the link is declared dead.
 
 These mechanisms compose to bound announcement traffic even under rapid link
 flapping. The hold-down timer limits the rate of parent switches (at most

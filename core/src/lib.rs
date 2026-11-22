@@ -10,8 +10,9 @@
 extern crate alloc;
 
 // Tests run on the host, where the standard library is available. So do
-// the root crate's tests, the only builds that enable `test-hooks`; the
-// per-thread DH counter it exposes (`noise::dh_ops`) needs `std`.
+// the builds that enable `test-hooks`, the root crate's tests and its chaos
+// break image; the per-thread DH counter it exposes (`noise::dh_ops`) needs
+// `std`.
 #[cfg(any(test, feature = "test-hooks"))]
 extern crate std;
 

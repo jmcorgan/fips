@@ -304,6 +304,44 @@ pub fn warn_legacy_etc_unused(loaded: &[PathBuf], identity: &IdentitySource) {
     }
 }
 
+/// Warn about each config file a root start read from a user location.
+///
+/// `explicit` is whether `--config` named the file; `loaded` is the list of
+/// config files the start read. This only warns: the search still reads
+/// those files. Packaged starts pass `--config` and see no warning.
+#[cfg(unix)]
+pub fn warn_reads(explicit: bool, loaded: &[PathBuf]) {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    warn_for(unsafe { libc::geteuid() }, explicit, loaded);
+}
+
+/// Warn about each file among `loaded` outside the system config paths: the
+/// user config directory, `~/.fips.yaml` or the working directory.
+///
+/// Silent unless `euid` is root and the config came from the search rather
+/// than from `--config` (`explicit`). A root process reading those places
+/// takes settings, the node identity included, from files another account
+/// may be able to write.
+///
+/// Logged at ERROR because the daemon's log filter comes from the merged
+/// config: a file planted in one of those places could set
+/// `node.log_level: error` and hide a WARN about itself.
+#[cfg(unix)]
+fn warn_for(euid: libc::uid_t, explicit: bool, loaded: &[PathBuf]) {
+    if explicit || euid != 0 {
+        return;
+    }
+    let system = Config::system_paths();
+    for path in loaded.iter().filter(|path| !system.contains(path)) {
+        tracing::error!(
+            path = %path.display(),
+            "Config read from the user config directory, HOME or the working directory \
+             while running as root; another account may be able to change it. Pass \
+             --config to name the file to use"
+        );
+    }
+}
+
 /// Find an identity key stranded at the legacy system config directory.
 ///
 /// Adding a second system config directory to the search path moves the
@@ -443,6 +481,44 @@ fn resolve_default_socket_with(
     format!("/tmp/fips-{filename}")
 }
 
+/// The socket path a root process uses: always the private runtime directory.
+///
+/// `/run/fips/<filename>`, or `/var/run/fips/<filename>` where the policy
+/// consults `/var/run/fips` (macOS and FreeBSD) and `/run/fips` is absent. The
+/// directory need not exist: the daemon creates it at bind, mode 0750, and a
+/// client finds no socket there rather than one some other account bound.
+#[cfg(unix)]
+fn privileged_socket(
+    filename: &str,
+    var_run_policy: VarRunPolicy,
+    is_dir: impl Fn(&Path) -> bool,
+) -> String {
+    if var_run_policy.consult_existing && !is_dir(Path::new("/run/fips")) {
+        return format!("/var/run/fips/{filename}");
+    }
+    format!("/run/fips/{filename}")
+}
+
+/// Pure choice between the root and non-root socket paths for `euid`.
+///
+/// Root takes [`privileged_socket`] and never the XDG or `/tmp` fallbacks,
+/// which another account may be able to write. Any other uid takes
+/// [`resolve_default_socket_with`].
+#[cfg(unix)]
+fn resolve_for(
+    euid: libc::uid_t,
+    filename: &str,
+    var_run_policy: VarRunPolicy,
+    xdg_runtime_dir: Option<&Path>,
+    is_dir: impl Fn(&Path) -> bool,
+) -> String {
+    if euid == 0 {
+        privileged_socket(filename, var_run_policy, is_dir)
+    } else {
+        resolve_default_socket_with(filename, var_run_policy, xdg_runtime_dir, is_dir)
+    }
+}
+
 /// Return whether `parent` is one of the private runtime directories used by
 /// the default Unix socket resolver.
 ///
@@ -468,9 +544,20 @@ pub(crate) fn is_managed_socket_parent(parent: &Path) -> bool {
     is_managed_socket_parent_with(parent, default_var_run_policy(), xdg_runtime_dir.as_deref())
 }
 
-/// Resolve a default Unix-socket path under the canonical order:
+/// Resolve a default Unix-socket path.
+///
+/// A root process always takes the private runtime directory:
+/// `/run/fips/<filename>`, or `/var/run/fips/<filename>` on macOS and FreeBSD
+/// when `/run/fips` is absent, whether or not the directory exists yet. Root
+/// never falls back to `XDG_RUNTIME_DIR` or `/tmp`, where another account
+/// could bind the socket first.
+///
+/// Any other process uses the canonical order:
 /// `/run/fips/<filename>` → `/var/run/fips/<filename>` on macOS/FreeBSD →
-/// `$XDG_RUNTIME_DIR/fips/<filename>` → `/tmp/fips-<filename>`.
+/// `$XDG_RUNTIME_DIR/fips/<filename>` → `/tmp/fips-<filename>`. The clients
+/// check who is listening before they send anything
+/// (`crate::utils::sockpeer`), which is what keeps the development fallbacks
+/// safe for a non-root client.
 ///
 /// `/run/fips` is the packaged Linux convention. FreeBSD's rc.d service
 /// creates `/var/run/fips` before starting the daemon. A privileged macOS
@@ -497,7 +584,9 @@ pub(crate) fn is_managed_socket_parent(parent: &Path) -> bool {
 #[cfg(unix)]
 pub(crate) fn resolve_default_socket(filename: &str) -> String {
     let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
-    resolve_default_socket_with(
+    resolve_for(
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        unsafe { libc::geteuid() },
         filename,
         default_var_run_policy(),
         xdg_runtime_dir.as_deref(),
@@ -1966,20 +2055,7 @@ impl Config {
 
     /// Get the standard search paths in priority order (lowest to highest).
     pub fn search_paths() -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-
-        // System config — /etc/fips is always probed so existing installs
-        // keep working after an upgrade.
-        paths.push(PathBuf::from(LEGACY_SYSTEM_CONFIG_DIR).join(CONFIG_FILENAME));
-
-        // macOS and FreeBSD packaging install config under /usr/local/etc/fips,
-        // and the Windows service installer under C:\ProgramData\fips; probe
-        // it after /etc/fips so the packaged file wins over a stale /etc/fips
-        // leftover. Read from SYSTEM_CONFIG_DIR rather than a second literal,
-        // so this path and the directory `fipsctl keygen` writes into cannot
-        // drift apart.
-        #[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
-        paths.push(PathBuf::from(SYSTEM_CONFIG_DIR).join(CONFIG_FILENAME));
+        let mut paths = Self::system_paths();
 
         // User config directory
         if let Some(config_dir) = dirs::config_dir() {
@@ -1993,6 +2069,26 @@ impl Config {
 
         // Current directory (highest priority)
         paths.push(PathBuf::from(".").join(CONFIG_FILENAME));
+
+        paths
+    }
+
+    /// The system config files [`Config::search_paths`] probes first, lowest
+    /// priority first.
+    fn system_paths() -> Vec<PathBuf> {
+        // System config — /etc/fips is always probed so existing installs
+        // keep working after an upgrade.
+        let mut paths = vec![PathBuf::from(LEGACY_SYSTEM_CONFIG_DIR).join(CONFIG_FILENAME)];
+
+        // macOS and FreeBSD packaging install config under /usr/local/etc/fips,
+        // and the Windows service installer under C:\ProgramData\fips; probe
+        // it after /etc/fips so the packaged file wins over a stale /etc/fips
+        // leftover. Read from SYSTEM_CONFIG_DIR rather than a second literal,
+        // so this path and the directory `fipsctl keygen` writes into cannot
+        // drift apart.
+        if cfg!(any(target_os = "macos", target_os = "freebsd", windows)) {
+            paths.push(PathBuf::from(SYSTEM_CONFIG_DIR).join(CONFIG_FILENAME));
+        }
 
         paths
     }
@@ -2105,6 +2201,29 @@ impl Config {
         self.peers.iter().filter(|p| p.is_auto_connect())
     }
 
+    /// Refuse a Tor `control_auth` password holding CR or LF. Sent to the
+    /// control port, the line break would end the AUTHENTICATE command early
+    /// and the rest of the password would run as a second command. The error
+    /// names the transport, never the password.
+    fn validate_tor_auth(&self) -> Result<(), ConfigError> {
+        for (name, cfg) in self.transports.tor.iter() {
+            let password = cfg
+                .control_auth
+                .as_deref()
+                .and_then(|auth| auth.strip_prefix("password:"));
+            if password.is_some_and(|p| p.contains(['\r', '\n'])) {
+                let key = match name {
+                    Some(name) => format!("transports.tor.{name}.control_auth"),
+                    None => "transports.tor.control_auth".to_string(),
+                };
+                return Err(ConfigError::Validation(format!(
+                    "{key}: the password contains a line break"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate cross-field configuration invariants.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.validate_ethernet_interfaces()?;
@@ -2114,6 +2233,7 @@ impl Config {
         self.validate_ble_instances(cfg!(all(target_os = "macos", not(test))))?;
         self.validate_ble_peer_addresses(cfg!(all(target_os = "macos", not(test))))?;
         self.validate_rendezvous()?;
+        self.validate_tor_auth()?;
         self.validate_paths()
     }
 
@@ -2730,6 +2850,18 @@ mod path_tests;
 #[cfg(test)]
 #[path = "tests/native_flows.rs"]
 mod native_flows;
+
+#[cfg(test)]
+#[path = "tests/tor_auth.rs"]
+mod tor_auth;
+
+#[cfg(all(test, unix))]
+#[path = "tests/socket_path.rs"]
+mod socket_path;
+
+#[cfg(all(test, unix))]
+#[path = "tests/root_search.rs"]
+mod root_search;
 
 #[cfg(test)]
 mod tests {
