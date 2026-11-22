@@ -679,10 +679,7 @@ impl Node {
         // No peers are excluded from parent candidacy on this branch; the
         // non-full/leaf skip is a next-only shell refinement.
         let skip: BTreeSet<NodeAddr> = BTreeSet::new();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let timestamp = Self::now_ms() / 1000;
         let old_root = *self.tree_state.root();
         let Some(outcome) =
             self.tree_state
