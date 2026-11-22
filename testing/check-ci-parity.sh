@@ -20,9 +20,10 @@
 #                    shows that edge_agreement reds under a switch and is
 #                    green without it. It proves the guard rather than
 #                    running it: GitHub runs the assertion itself in
-#                    tcp-mesh, as it runs every chaos scenario. On next it
-#                    is opt-in on both runners, off in local CI's default
-#                    run until next's crossing is settled (ci-local.sh's
+#                    tcp-mesh, as it runs every chaos scenario. On next
+#                    local CI's default run leaves it out too, until next's
+#                    crossing is settled, so it runs only when named with
+#                    ci-local.sh --only or --rerun (ci-local.sh's
 #                    AGREEMENT_BREAK_SUITES).
 #
 # Deliberate nightly-only (in neither runner's push-started set), with reason:

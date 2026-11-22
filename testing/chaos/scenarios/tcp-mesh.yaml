@@ -91,8 +91,12 @@ assertions:
   #
   # Every edge here is one-way, so none is expected to cross, and no
   # min_crossings floor is set: one-way edges cross nothing, and a floor
-  # would red as observing nothing. The crossing clause is still judged on
-  # any edge whose logs show a crossing.
+  # would red as observing nothing. The crossing clause still reads any
+  # swap or keep line the logs show, but on next it may find none even
+  # where edges cross: with the both-dial edges restored (2026-11-22, one
+  # run at each multipath setting), next's crossings logged only
+  # "Cross-connection detected", which the clause does not read, and it
+  # recorded no crossed edge.
   edge_agreement:
     within_secs: 90
 
