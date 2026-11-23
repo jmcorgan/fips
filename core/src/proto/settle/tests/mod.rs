@@ -6,23 +6,26 @@
 //!
 //! The scans below read the settlement sources through the rekey
 //! machine's code reader, so comments and string literals never count.
+//! The world, the parties, the drive, the joint world, the legacy models,
+//! the starts, the switch tables and the scan helpers are open to the
+//! crate's tests, for a handshake flow's tests outside this directory.
 
 #[cfg(feature = "slow-tests")]
 mod candidates;
 mod cmp;
-mod drive;
+pub(crate) mod drive;
 mod explore;
-mod faults;
-mod joint;
-mod legacy;
+pub(crate) mod faults;
+pub(crate) mod joint;
+pub(crate) mod legacy;
 mod oracle;
-mod party;
+pub(crate) mod party;
 mod regress;
 mod shadow;
 mod shapes;
 mod sim;
-mod starts;
-mod world;
+pub(crate) mod starts;
+pub(crate) mod world;
 
 use alloc::format;
 use alloc::string::String;
@@ -36,6 +39,7 @@ use crate::proto::rekey::{code_idents, code_text};
 const SOURCES: &[(&str, &str)] = &[
     ("mod.rs", include_str!("../mod.rs")),
     ("faults.rs", include_str!("../faults.rs")),
+    ("flow.rs", include_str!("../flow.rs")),
     ("gates.rs", include_str!("../gates.rs")),
     ("input.rs", include_str!("../input.rs")),
     ("join.rs", include_str!("../join.rs")),
@@ -81,7 +85,7 @@ const MODEL: &[(&str, &str)] = &[
 
 /// The core's modules, which no model source may name.
 const CORE_MODULES: &[&str] = &[
-    "links", "legs", "gates", "table", "input", "output", "params",
+    "links", "legs", "gates", "table", "input", "output", "params", "flow",
 ];
 
 /// The one line of the core that names the model: its declaration.
@@ -95,7 +99,7 @@ fn dir(rel: &str) -> std::path::PathBuf {
 }
 
 /// The contents of the `.rs` files in `path`, and below it when `deep`.
-fn files(path: &std::path::Path, deep: bool) -> Vec<String> {
+pub(crate) fn files(path: &std::path::Path, deep: bool) -> Vec<String> {
     let mut out = Vec::new();
     let mut entries: Vec<_> = std::fs::read_dir(path)
         .expect("the directory reads")
@@ -116,7 +120,7 @@ fn files(path: &std::path::Path, deep: bool) -> Vec<String> {
 }
 
 /// Whether `source` declares the wildcard-arm deny at its root.
-fn fenced(source: &str) -> bool {
+pub(crate) fn fenced(source: &str) -> bool {
     code_text(source)
         .lines()
         .any(|l| l.trim() == "#![deny(clippy::wildcard_enum_match_arm)]")
@@ -134,7 +138,7 @@ fn the_wildcard_arm_fence_is_declared_at_the_settlement_root() {
 }
 
 /// The lines of `source` that define a setter, by its `set_` name.
-fn setters(source: &str) -> Vec<usize> {
+pub(crate) fn setters(source: &str) -> Vec<usize> {
     code_idents(source)
         .windows(2)
         .filter(|w| w[0].1 == "fn" && w[1].1.starts_with("set_"))
@@ -156,19 +160,16 @@ fn no_core_source_defines_a_setter_and_the_scan_finds_a_planted_one() {
 }
 
 /// The lines of the core source `name` that name the model, other than
-/// its declaration in `mod.rs`. The model's items share names with the
-/// core's, so the scan looks for the module's name, which no core item
-/// takes.
-fn core_reaches(name: &str, source: &str) -> Vec<usize> {
+/// its declaration in `mod.rs`, the line `declaration`. The model's items
+/// share names with the core's, so the scan looks for the module's name,
+/// which no core item takes.
+pub(crate) fn core_reaches(name: &str, source: &str, declaration: &str) -> Vec<usize> {
     let lines: Vec<&str> = source.lines().collect();
     code_idents(source)
         .into_iter()
         .filter(|(n, w)| {
             w == "model"
-                && !(name == "mod.rs"
-                    && lines
-                        .get(n - 1)
-                        .is_some_and(|l| l.trim() == MODEL_DECLARATION))
+                && !(name == "mod.rs" && lines.get(n - 1).is_some_and(|l| l.trim() == declaration))
         })
         .map(|(n, _)| n)
         .collect()
@@ -183,12 +184,12 @@ fn no_core_source_reaches_into_the_model_and_the_scan_finds_a_planted_path() {
     ] {
         let planted = format!("{links}\n{plant}\n");
         assert!(
-            !core_reaches("links.rs", &planted).is_empty(),
+            !core_reaches("links.rs", &planted, MODEL_DECLARATION).is_empty(),
             "the scan finds {plant} planted in links.rs"
         );
     }
     for (name, source) in SOURCES {
-        let hits = core_reaches(name, source);
+        let hits = core_reaches(name, source, MODEL_DECLARATION);
         assert!(
             hits.is_empty(),
             "{name} names the model at lines {hits:?}; the core must stand without it"
@@ -219,9 +220,9 @@ fn group_idents(group: &str) -> Vec<&str> {
     group[..end].split(|c: char| !ident(c)).collect()
 }
 
-/// The core modules a model source names by a path through `super` or
-/// `settle`, alone or in a braced group.
-fn model_reaches(source: &str) -> Vec<String> {
+/// The modules of `modules` a model source names by a path through
+/// `super` or `settle`, alone or in a braced group.
+pub(crate) fn model_reaches(source: &str, modules: &[&str]) -> Vec<String> {
     let code: String = code_text(source)
         .chars()
         .filter(|c| !c.is_whitespace())
@@ -241,7 +242,7 @@ fn model_reaches(source: &str) -> Vec<String> {
             } else {
                 rest.split(|c: char| !ident(c)).take(1).collect()
             };
-            for m in CORE_MODULES {
+            for m in modules {
                 if named.contains(m) {
                     hits.push(format!("{base}{m}"));
                 }
@@ -260,12 +261,12 @@ fn no_model_source_reaches_into_the_core_and_the_scan_finds_a_planted_path() {
     ] {
         let planted = format!("{judge}\n{plant}\n");
         assert!(
-            !model_reaches(&planted).is_empty(),
+            !model_reaches(&planted, CORE_MODULES).is_empty(),
             "the scan finds {plant} planted in model/judge.rs"
         );
     }
     for (name, source) in MODEL {
-        let hits = model_reaches(source);
+        let hits = model_reaches(source, CORE_MODULES);
         assert!(
             hits.is_empty(),
             "{name} names the core through {hits:?}; the model must stand without it"
@@ -288,7 +289,7 @@ fn every_core_and_model_source_file_is_scanned() {
 }
 
 /// The names of the tests `source` defines.
-fn tests_in(source: &str) -> Vec<String> {
+pub(crate) fn tests_in(source: &str) -> Vec<String> {
     let code = code_text(source);
     let lines: Vec<&str> = code.lines().collect();
     let mut out = Vec::new();

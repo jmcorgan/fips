@@ -98,6 +98,7 @@ impl Node {
             | Input::Adopted { .. }
             | Input::Sent { .. }
             | Input::SendFailed { .. } => {}
+            Input::Flow(x) => match *x {},
         }
     }
 

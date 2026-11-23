@@ -488,16 +488,26 @@ pub const ROWS: &[Row] = &[
                 TABLE,
                 "a_reap_of_one_leg_reaps_only_that_leg_and_only_from_its_deadline",
             ),
+            (
+                LEGS,
+                "a_quieted_dial_resends_nothing_more_and_is_still_reaped_at_its_deadline",
+            ),
             SCRIPTED_OFF,
             SCRIPTED_ON,
         ],
     ),
     (
         Fault::ResendFresh,
-        &[(
-            LEGS,
-            "resends_follow_the_backoff_and_repeat_the_msg1_byte_for_byte",
-        )],
+        &[
+            (
+                LEGS,
+                "resends_follow_the_backoff_and_repeat_the_msg1_byte_for_byte",
+            ),
+            (
+                LEGS,
+                "the_resends_alone_ask_for_each_due_resend_byte_for_byte_and_reap_no_leg_past_its_deadline",
+            ),
+        ],
     ),
     (
         Fault::AnswerFresh,
@@ -514,6 +524,10 @@ pub const ROWS: &[Row] = &[
         Fault::PollAhead,
         &[
             (LEGS, "a_poll_before_the_next_wake_does_nothing"),
+            (
+                LEGS,
+                "the_resends_alone_ask_for_each_due_resend_byte_for_byte_and_reap_no_leg_past_its_deadline",
+            ),
             SCRIPTED_OFF,
             SCRIPTED_ON,
         ],
@@ -1686,8 +1700,48 @@ const LEGACY_RUN: &str = "the same oracles and list as the run on `IgnoreOwnDial
 /// Why a guard of the unpin a move reports is characterisation.
 const UNPIN_HAND: &str = "a guard of the pin a move ends where `UnpinOwnOnly` changes nothing, the link left being this node's dial or the dial made before the peer was held; its breaks, `unpin` true at every move and `unpin` without the link left being this node's dial, are scratch edits run by hand and logged with the commit";
 
+/// Why a test of the hold a flow outside settle makes, which no IK rule
+/// calls and no switch sits in, is characterisation.
+const HOLD_HAND: &str = "a test of `Ops::hold_answer`, which only a flow outside settle calls; its breaks, the peer installed on the answer's link and the answer's link left unretired, are scratch edits run by hand and logged with the commit";
+
+/// Why a test of the move a flow outside settle makes, which no IK rule
+/// calls and no switch sits in, is characterisation.
+const MOVE_HAND: &str = "a test of `Ops::move_answer`, which only a flow outside settle calls; its breaks, the peer left on the link it held and that link left unretired, are scratch edits run by hand and logged with the commit";
+
+/// Why the test that a move keeps the peering's liveness is
+/// characterisation.
+const MOVE_LIVE_HAND: &str = "a test of `Ops::move_answer`, which only a flow outside settle calls; its break, the peer seated as a fresh install with no liveness carried, is the scratch revert of the carry, run by hand and logged with the commit";
+
 /// The tests that characterise behaviour no switch breaks, each with why.
 pub const CHARACTERISATION: &[(&str, &str)] = &[
+    (
+        "moving_a_peer_onto_an_answers_link_keeps_whether_it_was_heard_its_install_instant_and_its_last_frame",
+        MOVE_LIVE_HAND,
+    ),
+    (
+        "moving_a_peer_onto_an_answers_link_installs_the_answers_lease_there_and_retires_the_link_it_held",
+        MOVE_HAND,
+    ),
+    (
+        "moving_a_peer_not_held_frees_the_answers_lease_and_retires_its_link",
+        MOVE_HAND,
+    ),
+    (
+        "holding_a_peer_on_its_link_with_an_answers_session_installs_the_answers_lease_there_and_retires_the_answers_link",
+        HOLD_HAND,
+    ),
+    (
+        "holding_a_peer_on_its_link_with_an_answers_session_rebuilds_from_the_carry_as_responder",
+        HOLD_HAND,
+    ),
+    (
+        "holding_a_peer_not_held_frees_the_answers_lease_and_retires_its_link",
+        HOLD_HAND,
+    ),
+    (
+        "holding_a_peer_on_a_link_known_capable_leaves_its_record_not_capable_as_the_renewed_bundle_is",
+        HOLD_HAND,
+    ),
     (
         "an_adopted_answer_on_a_link_the_peer_set_up_or_for_no_held_peer_changes_nothing",
         HAND,
@@ -1949,10 +2003,11 @@ pub fn rowless(all: &[Fault], rows: &[Row]) -> Vec<Fault> {
 }
 
 /// The names in `tests` that no row of `rows` or of `rekey` names and
-/// neither list holds.
-pub fn uncovered<'a>(
+/// neither list holds. A row's switch may be of any list's type: only its
+/// tests are read.
+pub fn uncovered<'a, F>(
     tests: &'a [String],
-    rows: &[Row],
+    rows: &[(F, &'static [Test])],
     rekey: &[RekeyRow],
     checked: &[&str],
     characterised: &[(&str, &str)],

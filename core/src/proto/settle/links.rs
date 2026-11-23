@@ -311,6 +311,14 @@ impl Links {
         }
     }
 
+    /// `link`'s bundle was renewed on a new session, which forgets that the
+    /// peer is capable until the renewed bundle finds it again.
+    pub fn renewed(&mut self, link: LinkNo) {
+        if let Some(r) = self.recs.get_mut(&link) {
+            r.capable = false;
+        }
+    }
+
     /// `link`'s bundle holds exactly `paths`, each in its state, and has
     /// found the peer capable exactly when `capable` says, whatever its
     /// record held: a shell's resync of a record whose bundle a test
@@ -351,7 +359,7 @@ impl Links {
     /// which for a handover to an acknowledged path that is not Live is
     /// acknowledged. Returns the connections a released path leaves to
     /// close; any other input changes nothing.
-    pub fn mirror(&mut self, input: &Input) -> Vec<Pair> {
+    pub fn mirror<X>(&mut self, input: &Input<X>) -> Vec<Pair> {
         match input {
             Input::Moved { link, from, to, .. } => self.moved(*link, from, to.clone()),
             Input::Switched { link, to, proven } => {
@@ -388,7 +396,8 @@ impl Links {
             | Input::Adopted { .. }
             | Input::Sent { .. }
             | Input::SendFailed { .. }
-            | Input::Unsendable { .. } => {}
+            | Input::Unsendable { .. }
+            | Input::Flow(_) => {}
             #[cfg(test)]
             Input::HeldFrame { .. } | Input::HoldLost { .. } => {}
         }

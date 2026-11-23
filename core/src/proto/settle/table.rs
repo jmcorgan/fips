@@ -88,9 +88,10 @@ use alloc::vec::Vec;
 
 #[cfg(test)]
 use super::faults::Candidate;
+use super::flow::{Flow, Ik, Outs};
 use super::gates::{Ask, Epoch, Gates, Liveness, Source};
 use super::input::{Dial, Hello, Input, Read};
-use super::legs::{Kind, LegOut, Legs, Start};
+use super::legs::{Kind, Leg, LegOut, Legs, Start};
 use super::links::{Dir, Holder, LinkNo, LinkRec, Links, Pair, Proven};
 use super::output::{Build, Denial, Install, Output, Transition, Why};
 use super::params::Params;
@@ -98,7 +99,7 @@ use super::params::Params;
 use super::params::deadline;
 use crate::identity::NodeAddr;
 use crate::proto::fmp::EphemeralDigest;
-use crate::proto::rekey::Arrival;
+use crate::proto::rekey::{Arrival, IndexLease};
 #[cfg(any(test, feature = "test-hooks"))]
 use crate::time::Duration;
 use crate::time::Instant;
@@ -185,9 +186,10 @@ struct Connect {
     held: Option<LinkNo>,
 }
 
-/// Every link, leg and held peer of one node, and the gates.
+/// Every link, leg and held peer of one node, and the gates, running the
+/// handshake flow `F` ([`Ik`] unless a profile names another).
 #[derive(Debug, PartialEq, Eq)]
-pub struct Table<I> {
+pub struct Table<I, F = Ik> {
     me: NodeAddr,
     params: Params,
     links: Links,
@@ -200,6 +202,8 @@ pub struct Table<I> {
     /// was answered.
     redials: BTreeMap<NodeAddr, (LinkNo, I)>,
     gates: Gates<I>,
+    /// The handshake flow and what it keeps.
+    flow: F,
     /// Test-only: the candidate rule this node runs, if any.
     #[cfg(test)]
     cand: Option<Candidate>,
@@ -209,8 +213,15 @@ pub struct Table<I> {
 }
 
 impl<I: Instant> Table<I> {
-    /// A node `me` holding nothing.
+    /// A node `me` holding nothing, running the IK flow.
     pub fn new(me: NodeAddr, params: Params) -> Self {
+        Self::flowing(me, params, Ik)
+    }
+}
+
+impl<I: Instant, F: Flow<I>> Table<I, F> {
+    /// A node `me` holding nothing, running `flow`.
+    pub fn flowing(me: NodeAddr, params: Params, flow: F) -> Self {
         Self {
             me,
             params,
@@ -222,6 +233,7 @@ impl<I: Instant> Table<I> {
             asked: BTreeMap::new(),
             redials: BTreeMap::new(),
             gates: Gates::new(),
+            flow,
             #[cfg(test)]
             cand: None,
             #[cfg(test)]
@@ -246,9 +258,28 @@ impl<I: Instant> Table<I> {
         &self.legs
     }
 
+    /// The link records, the legs and the restart gates, for a shell that
+    /// holds its one copy of each in this table while it still decides with
+    /// them itself, before the table decides.
+    #[doc(hidden)]
+    pub fn parts(&self) -> (&Links, &Legs<I>, &Gates<I>) {
+        (&self.links, &self.legs, &self.gates)
+    }
+
+    /// [`Table::parts`], to write.
+    #[doc(hidden)]
+    pub fn parts_mut(&mut self) -> (&mut Links, &mut Legs<I>, &mut Gates<I>) {
+        (&mut self.links, &mut self.legs, &mut self.gates)
+    }
+
     /// The peer held for `peer`.
     pub fn held(&self, peer: &NodeAddr) -> Option<&Held<I>> {
         self.held.get(peer)
+    }
+
+    /// The handshake flow and what it keeps.
+    pub fn flow(&self) -> &F {
+        &self.flow
     }
 
     /// Each identity held, for a shell's resync of a peer a test took out
@@ -414,7 +445,7 @@ impl<I: Instant> Table<I> {
     }
 
     /// Take one input at `now`.
-    pub fn step(&mut self, input: Input, now: I) -> Vec<Output> {
+    pub fn step(&mut self, input: Input<F::In>, now: I) -> Vec<Outs<I, F>> {
         let mut out = Vec::new();
         match input {
             Input::Dial(d) => self.dial(d, now, &mut out),
@@ -474,6 +505,7 @@ impl<I: Instant> Table<I> {
                 }
                 out.push(Output::Release { link, closes });
             }
+            Input::Flow(x) => F::step(&mut Ops { t: self }, x, now, &mut out),
             #[cfg(test)]
             Input::HeldFrame { peer, .. } => self.held_frame(peer, now, &mut out),
             #[cfg(test)]
@@ -483,7 +515,7 @@ impl<I: Instant> Table<I> {
     }
 
     /// The legs' resends and reaps due at `now`.
-    pub fn poll(&mut self, now: I) -> Vec<Output> {
+    pub fn poll(&mut self, now: I) -> Vec<Outs<I, F>> {
         let mut out = Vec::new();
         #[cfg(test)]
         self.expire(now, &mut out);
@@ -497,7 +529,7 @@ impl<I: Instant> Table<I> {
     /// reap, if it is past its deadline then, and no resend. For a shell
     /// that times its answers out at a sweep of its own
     /// ([`Legs::reap_one`]).
-    pub fn reap_leg(&mut self, link: LinkNo, now: I) -> Vec<Output> {
+    pub fn reap_leg(&mut self, link: LinkNo, now: I) -> Vec<Outs<I, F>> {
         let mut out = Vec::new();
         for o in self.legs.reap_one(link, now, &mut self.links) {
             self.leg_out(o, &mut out);
@@ -507,7 +539,7 @@ impl<I: Instant> Table<I> {
 
     /// Carry one of the legs' outputs into `out`: a resend as it is, and a
     /// reaped leg's lease handed back and its link retired.
-    fn leg_out(&mut self, o: LegOut, out: &mut Vec<Output>) {
+    fn leg_out(&mut self, o: LegOut, out: &mut Vec<Outs<I, F>>) {
         match o {
             LegOut::Resend { link, bytes } => out.push(Output::Resend { link, bytes }),
             LegOut::Reaped {
@@ -529,7 +561,7 @@ impl<I: Instant> Table<I> {
     /// Give everything back: every leg's lease, every held peer, every
     /// link an unanswered ask opened, and the connections the close rule
     /// closes.
-    pub fn close(&mut self, now: I) -> Vec<Output> {
+    pub fn close(&mut self, now: I) -> Vec<Outs<I, F>> {
         let mut out = Vec::new();
         let mut closed = self.legs.close(&mut self.links);
         self.answered.clear();
@@ -564,7 +596,7 @@ impl<I: Instant> Table<I> {
     /// A dial's leg starts, on the link a [`Input::Connecting`] opened for
     /// it or on one opened here. A dial naming a link no record holds gives
     /// its lease back and starts nothing.
-    fn dial(&mut self, d: Dial, now: I, out: &mut Vec<Output>) {
+    fn dial(&mut self, d: Dial, now: I, out: &mut Vec<Outs<I, F>>) {
         let (link, c, opened) = match d.link {
             None => {
                 let link = self.links.open(d.to, Dir::Outbound, Holder::Leg);
@@ -621,7 +653,7 @@ impl<I: Instant> Table<I> {
         peer: NodeAddr,
         to: Pair,
         resends: Option<u32>,
-        out: &mut Vec<Output>,
+        out: &mut Vec<Outs<I, F>>,
     ) {
         let link = self.links.open(to, Dir::Outbound, Holder::Leg);
         if fault!(ConnectingUnlinked) || node_fault!(ConnectingUnlinked) {
@@ -646,7 +678,7 @@ impl<I: Instant> Table<I> {
     /// retired alone, closing nothing, as the node closes nothing for a dial
     /// it gives up before its msg1: its connection failed or never opened,
     /// or its msg1 could not be built on it.
-    fn abandon(&mut self, link: LinkNo, out: &mut Vec<Output>) {
+    fn abandon(&mut self, link: LinkNo, out: &mut Vec<Outs<I, F>>) {
         if self.connects.remove(&link).is_some() {
             let closes = self.links.retire(link);
             let closes = if fault!(ConnectingCloses) || node_fault!(ConnectingCloses) {
@@ -668,26 +700,15 @@ impl<I: Instant> Table<I> {
     }
 
     /// The stored answer to `bytes` from `from`, if a responder leg there
-    /// holds one: one not yet sent answers any msg1 from that address, one
-    /// sent answers its own msg1 alone.
+    /// holds one, as the flow keeps it ([`Flow::stored`]).
     fn stored(&self, from: &Pair, bytes: &[u8]) -> Option<(LinkNo, Vec<u8>)> {
-        let any = fault!(StoredAnswersAny) || node_fault!(StoredAnswersAny);
-        self.links.at(from).find_map(|l| {
-            let unsent =
-                !fault!(StoredByBytes) && self.answered.get(&l).is_some_and(|a| !a.sent || any);
-            let msg2 = if unsent {
-                self.legs.msg2(l)
-            } else {
-                self.legs.stored(l, bytes)
-            };
-            msg2.map(|m| (l, m.to_vec()))
-        })
+        F::stored(self, from, bytes)
     }
 
-    /// Whether the answers in flight, built or asked for, have reached the
-    /// admission cap.
+    /// Whether the answers in flight the flow counts ([`Flow::pending`])
+    /// have reached the admission cap.
     fn full(&self) -> bool {
-        !fault!(CapLifted) && self.legs.answering() + self.asked.len() >= self.params.pending
+        !fault!(CapLifted) && F::pending(self) >= self.params.pending
     }
 
     /// Whether `peer` is not held and the peers held have reached the
@@ -701,7 +722,7 @@ impl<I: Instant> Table<I> {
 
     /// A completed handshake on `link` that the max-peers cap refuses:
     /// the leg's lease comes back and its link is retired.
-    fn refuse(&mut self, peer: NodeAddr, leg: super::legs::Leg<I>, out: &mut Vec<Output>) {
+    fn refuse(&mut self, peer: NodeAddr, leg: Leg<I>, out: &mut Vec<Outs<I, F>>) {
         let link = leg.link();
         self.answered.remove(&link);
         out.push(Output::Reject {
@@ -714,7 +735,7 @@ impl<I: Instant> Table<I> {
         out.push(Output::Retire { link, closes });
     }
 
-    fn arrived(&self, from: &Pair, bytes: &[u8], out: &mut Vec<Output>) {
+    fn arrived(&self, from: &Pair, bytes: &[u8], out: &mut Vec<Outs<I, F>>) {
         if let Some((link, msg2)) = self.stored(from, bytes) {
             out.push(Output::Answer {
                 link,
@@ -730,7 +751,7 @@ impl<I: Instant> Table<I> {
         }
     }
 
-    fn msg1(&mut self, read: Read, reachable: bool, now: I, out: &mut Vec<Output>) {
+    fn msg1(&mut self, read: Read, reachable: bool, now: I, out: &mut Vec<Outs<I, F>>) {
         if let Some((link, msg2)) = self.stored(&read.from, &read.bytes) {
             out.push(Output::Answer {
                 link,
@@ -792,7 +813,7 @@ impl<I: Instant> Table<I> {
     /// held peer, and ask for the answer. A replacement asked for an
     /// identity no longer held is a msg1 from an identity not held, and the
     /// max-peers cap refuses it as [`Table::msg1`] does, before any answer.
-    fn admit(&mut self, source: Source, read: Read, now: I, out: &mut Vec<Output>) {
+    fn admit(&mut self, source: Source, read: Read, now: I, out: &mut Vec<Outs<I, F>>) {
         let peer = read.peer;
         let held = self.held.get(&peer).map(Held::liveness);
         if held.is_none() && self.capped(&peer) {
@@ -851,7 +872,7 @@ impl<I: Instant> Table<I> {
     /// Open the link an admitted msg1 arrived on and ask the shell for its
     /// answer; `replaces` says the msg1 tore a held peer down. The link
     /// opened.
-    fn ask(&mut self, read: Read, replaces: bool, out: &mut Vec<Output>) -> LinkNo {
+    fn ask(&mut self, read: Read, replaces: bool, out: &mut Vec<Outs<I, F>>) -> LinkNo {
         let link = self.links.open(read.from, Dir::Inbound, Holder::Leg);
         let answered = Answered {
             ephemeral: read.ephemeral,
@@ -875,7 +896,7 @@ impl<I: Instant> Table<I> {
 
     /// The answer to an ask: its responder leg opens, holding the lease,
     /// and the msg2 goes out. An answer to no ask hands its lease back.
-    fn hello(&mut self, hello: Hello, now: I, out: &mut Vec<Output>) {
+    fn hello(&mut self, hello: Hello, now: I, out: &mut Vec<Outs<I, F>>) {
         let Some(asked) = self.asked.remove(&hello.link) else {
             out.push(Output::Free { lease: hello.lease });
             return;
@@ -884,20 +905,16 @@ impl<I: Instant> Table<I> {
         if asked.answered.redial {
             self.arm(asked.peer, asked.answered.ephemeral, now, out);
         }
-        let start = Start {
+        let peer = Some(asked.peer);
+        self.open_answer(
             link,
-            peer: Some(asked.peer),
-            msg1: asked.msg1,
-            lease: hello.lease,
-            resends: None,
-            held: None,
-        };
-        if let Some(old) = self
-            .legs
-            .answer(start, hello.msg2.clone(), now, &self.params)
-        {
-            out.push(Output::Free { lease: old.lease() });
-        }
+            peer,
+            asked.msg1,
+            hello.msg2.clone(),
+            hello.lease,
+            now,
+            out,
+        );
         let redial = asked.answered.redial;
         self.answered.insert(link, asked.answered);
         if redial {
@@ -919,9 +936,36 @@ impl<I: Instant> Table<I> {
         }
     }
 
+    /// Open the responder leg on `link` that answers `msg1` with `msg2`,
+    /// holding `lease`, for `peer` when the msg1 named one. A leg the link
+    /// held before hands its lease back.
+    #[allow(clippy::too_many_arguments)]
+    fn open_answer(
+        &mut self,
+        link: LinkNo,
+        peer: Option<NodeAddr>,
+        msg1: Vec<u8>,
+        msg2: Vec<u8>,
+        lease: IndexLease,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        let start = Start {
+            link,
+            peer,
+            msg1,
+            lease,
+            resends: None,
+            held: None,
+        };
+        if let Some(old) = self.legs.answer(start, msg2, now, &self.params) {
+            out.push(Output::Free { lease: old.lease() });
+        }
+    }
+
     /// The shell refused an asked msg1: the link it opened is retired, and
     /// a redial the ACL passed is noted in the redial memory.
-    fn unasked(&mut self, link: LinkNo, authorized: bool, now: I, out: &mut Vec<Output>) {
+    fn unasked(&mut self, link: LinkNo, authorized: bool, now: I, out: &mut Vec<Outs<I, F>>) {
         let Some(asked) = self.asked.remove(&link) else {
             return;
         };
@@ -942,7 +986,7 @@ impl<I: Instant> Table<I> {
     }
 
     /// A msg2 or a msg1 resend the shell was asked for went out.
-    fn sent(&mut self, link: LinkNo, now: I, out: &mut Vec<Output>) {
+    fn sent(&mut self, link: LinkNo, now: I, out: &mut Vec<Outs<I, F>>) {
         let Some(leg) = self.legs.get(link) else {
             return;
         };
@@ -951,7 +995,10 @@ impl<I: Instant> Table<I> {
                 self.legs.resent(link, now, &self.params);
                 return;
             }
-            (Kind::Answer { .. }, None) => return,
+            (Kind::Answer { .. }, None) => {
+                F::answer_sent(&mut Ops { t: self }, link);
+                return;
+            }
             (Kind::Answer { .. }, Some(peer)) => peer,
         };
         let redial = self.answered.get(&link).is_some_and(|a| a.redial);
@@ -988,22 +1035,27 @@ impl<I: Instant> Table<I> {
         ) else {
             return;
         };
+        self.install_answer(peer, leg, pair, a.epoch, a.ephemeral, a.replaces, now, out);
+    }
+
+    /// Install `peer` from the responder leg `leg`, set up at `pair`, from a
+    /// msg1 with `ephemeral` at `epoch`; `replaces` says the msg1 tore a
+    /// held peer down.
+    #[allow(clippy::too_many_arguments)]
+    fn install_answer(
+        &mut self,
+        peer: NodeAddr,
+        leg: Leg<I>,
+        pair: Pair,
+        epoch: Epoch,
+        ephemeral: EphemeralDigest,
+        replaces: bool,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        let link = leg.link();
         self.links.hold(link, Holder::Peer(peer));
-        self.held.insert(
-            peer,
-            Held {
-                link,
-                epoch: a.epoch,
-                current: pair.clone(),
-                heard: false,
-                installed: now,
-                last: None,
-                setup: Some(a.ephemeral),
-                sending: None,
-            },
-        );
-        self.gates
-            .promoted(peer, a.ephemeral, now, None, &self.params);
+        self.seat(peer, link, pair.clone(), epoch, ephemeral, now);
         out.push(Output::Install(Install {
             peer,
             link,
@@ -1012,7 +1064,7 @@ impl<I: Instant> Table<I> {
             initiator: false,
             lease: leg.lease(),
         }));
-        let transition = if a.replaces {
+        let transition = if replaces {
             Transition::Replace
         } else {
             Transition::Promote
@@ -1020,11 +1072,141 @@ impl<I: Instant> Table<I> {
         out.push(Output::Reset { peer, transition });
     }
 
+    /// Hold `peer` on `link`, at `pair`, as a responder leg's install
+    /// leaves it: unheard, installed `now`, from a msg1 with `ephemeral` at
+    /// `epoch`, which its replay memory takes.
+    fn seat(
+        &mut self,
+        peer: NodeAddr,
+        link: LinkNo,
+        pair: Pair,
+        epoch: Epoch,
+        ephemeral: EphemeralDigest,
+        now: I,
+    ) {
+        self.held.insert(
+            peer,
+            Held {
+                link,
+                epoch,
+                current: pair,
+                heard: false,
+                installed: now,
+                last: None,
+                setup: Some(ephemeral),
+                sending: None,
+            },
+        );
+        F::installed(&mut Ops { t: self }, peer);
+        self.gates
+            .promoted(peer, ephemeral, now, None, &self.params);
+    }
+
+    /// Keep the held `peer` on the link it holds and give it the session
+    /// of the responder leg `leg` instead, set up from a msg1 with
+    /// `ephemeral` at `epoch`, at `pair`: the peer is seated there as the
+    /// leg's install would seat it, its rekey machine rebuilt from the
+    /// closed one's carry with the leg's lease, and the leg's link retired,
+    /// closing nothing. Told as a move, at which the shell renews the
+    /// peer's bundle, so the held link's record no longer holds the peer
+    /// capable. A peer not held takes nothing: the leg's lease goes back
+    /// and its link is retired, closing nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn hold_answer(
+        &mut self,
+        peer: NodeAddr,
+        leg: Leg<I>,
+        pair: Pair,
+        epoch: Epoch,
+        ephemeral: EphemeralDigest,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        let link = leg.link();
+        if let Some(held) = self.held.get(&peer).map(|h| h.link) {
+            self.seat(peer, held, pair.clone(), epoch, ephemeral, now);
+            self.links.renewed(held);
+            out.push(Output::Install(Install {
+                peer,
+                link: held,
+                pair,
+                rekey: Build::FromCarry,
+                initiator: false,
+                lease: leg.lease(),
+            }));
+            out.push(Output::Reset {
+                peer,
+                transition: Transition::Move,
+            });
+        } else {
+            out.push(Output::Free { lease: leg.lease() });
+        }
+        let _ = self.links.retire(link);
+        out.push(Output::Retire {
+            link,
+            closes: Vec::new(),
+        });
+    }
+
+    /// Move the held `peer` onto the responder leg `leg`'s link and session,
+    /// set up from a msg1 with `ephemeral` at `epoch`, at `pair`: the peer
+    /// is seated on the leg's link as the leg's install would seat it, its
+    /// rekey machine rebuilt from the closed one's carry with the leg's
+    /// lease, told as a move, and the link it held retired, closing each of
+    /// that link's pairs no remaining link uses. The peering is the same
+    /// one, so it keeps whether it was heard, its install instant and its
+    /// last frame, which the gates read, as the dialer's move at its msg2
+    /// keeps them. A peer not held takes nothing: the leg's lease goes back
+    /// and its link is retired, closing nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn move_answer(
+        &mut self,
+        peer: NodeAddr,
+        leg: Leg<I>,
+        pair: Pair,
+        epoch: Epoch,
+        ephemeral: EphemeralDigest,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        let link = leg.link();
+        let Some((old, live)) = self.held.get(&peer).map(|h| (h.link, h.liveness())) else {
+            out.push(Output::Free { lease: leg.lease() });
+            let _ = self.links.retire(link);
+            out.push(Output::Retire {
+                link,
+                closes: Vec::new(),
+            });
+            return;
+        };
+        self.links.hold(link, Holder::Peer(peer));
+        self.seat(peer, link, pair.clone(), epoch, ephemeral, now);
+        if let Some(h) = self.held.get_mut(&peer) {
+            h.heard = live.heard;
+            h.installed = live.installed;
+            h.last = live.last;
+        }
+        out.push(Output::Install(Install {
+            peer,
+            link,
+            pair,
+            rekey: Build::FromCarry,
+            initiator: false,
+            lease: leg.lease(),
+        }));
+        out.push(Output::Reset {
+            peer,
+            transition: Transition::Move,
+        });
+        let closes = self.links.retire(old);
+        out.push(Output::Retire { link: old, closes });
+    }
+
     /// A redial: through the cap, the silent-session refusal, the slot rule
     /// and the rest of the gate, then asked for its answer as any admitted
     /// msg1 is. The held peer is left as it is; the answer ([`Table::hello`])
     /// opens the leg beside it.
-    fn redial(&mut self, read: Read, now: I, out: &mut Vec<Output>) {
+    fn redial(&mut self, read: Read, now: I, out: &mut Vec<Outs<I, F>>) {
         let peer = read.peer;
         let Some(held) = self.held.get(&peer).map(Held::liveness) else {
             // Gone since the machine asked: a msg1 from an identity not
@@ -1082,7 +1264,13 @@ impl<I: Instant> Table<I> {
     /// redial, which no frame proved, is abandoned, and the msg1's
     /// ephemeral goes into the redial memory. Run after the shell's checks,
     /// as the node notes a redial only once the ACL has passed it.
-    fn arm(&mut self, peer: NodeAddr, ephemeral: EphemeralDigest, now: I, out: &mut Vec<Output>) {
+    fn arm(
+        &mut self,
+        peer: NodeAddr,
+        ephemeral: EphemeralDigest,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
         if let Some((old, _)) = self.redials.get(&peer).copied() {
             self.abandon(old, out);
         }
@@ -1094,7 +1282,7 @@ impl<I: Instant> Table<I> {
     /// The operator disconnected `peer`: a held peer is removed, and its
     /// pending redial goes with it, as the node drops it, so no frame of
     /// the redial promotes the peer again.
-    fn admin(&mut self, peer: NodeAddr, now: I, out: &mut Vec<Output>) {
+    fn admin(&mut self, peer: NodeAddr, now: I, out: &mut Vec<Outs<I, F>>) {
         let held = self.held.contains_key(&peer);
         self.remove(peer, Why::Admin, now, out);
         if held
@@ -1115,7 +1303,7 @@ impl<I: Instant> Table<I> {
     /// record's setup pair is left as it is, and a later dial of this node
     /// for the peer is no longer its own dial on a link it dialed (Section
     /// 5.6), so the node address ordering decides it.
-    fn adopted(&mut self, peer: NodeAddr, out: &mut Vec<Output>) {
+    fn adopted(&mut self, peer: NodeAddr, out: &mut Vec<Outs<I, F>>) {
         let Some(link) = self.held.get(&peer).map(|h| h.link) else {
             return;
         };
@@ -1133,7 +1321,7 @@ impl<I: Instant> Table<I> {
     /// A frame authenticated under the redial's leg on `link`, from
     /// `from`: the peer holds the redial's keys, so the leg replaces the
     /// held peer, or installs the peer if none is held by now.
-    fn leg_heard(&mut self, link: LinkNo, from: Pair, now: I, out: &mut Vec<Output>) {
+    fn leg_heard(&mut self, link: LinkNo, from: Pair, now: I, out: &mut Vec<Outs<I, F>>) {
         let Some(peer) = self
             .redials
             .iter()
@@ -1156,7 +1344,7 @@ impl<I: Instant> Table<I> {
         link: LinkNo,
         from: Option<Pair>,
         now: I,
-        out: &mut Vec<Output>,
+        out: &mut Vec<Outs<I, F>>,
     ) {
         let (Some(leg), Some(a), Some(setup)) = (
             self.legs.take(link),
@@ -1187,6 +1375,7 @@ impl<I: Instant> Table<I> {
                 sending: None,
             },
         );
+        F::installed(&mut Ops { t: self }, peer);
         if at_once {
             self.gates.heard(&peer);
         } else {
@@ -1213,7 +1402,7 @@ impl<I: Instant> Table<I> {
     /// for the resend, and a teardown it caused is no longer part of one
     /// replacement. A dial's msg1 resend: it is tried again at the next
     /// poll.
-    fn unsent(&mut self, link: LinkNo, now: I, out: &mut Vec<Output>) {
+    fn unsent(&mut self, link: LinkNo, now: I, out: &mut Vec<Outs<I, F>>) {
         if matches!(self.legs.get(link).map(|l| l.kind()), Some(Kind::Dial)) {
             self.legs.unsent(link, now, &self.params);
             return;
@@ -1232,7 +1421,7 @@ impl<I: Instant> Table<I> {
     /// forgets such a link and leaves its connection to the transport. A
     /// redial's answer is no longer a pending redial, as the node forgets a
     /// redial with its leg's machine.
-    fn unsendable(&mut self, link: LinkNo, out: &mut Vec<Output>) {
+    fn unsendable(&mut self, link: LinkNo, out: &mut Vec<Outs<I, F>>) {
         if !matches!(
             self.legs.get(link).map(|l| l.kind()),
             Some(Kind::Answer { .. })
@@ -1256,7 +1445,7 @@ impl<I: Instant> Table<I> {
         out.push(Output::Retire { link, closes });
     }
 
-    fn msg2(&mut self, link: LinkNo, epoch: Epoch, from: Pair, now: I, out: &mut Vec<Output>) {
+    fn msg2(&mut self, link: LinkNo, epoch: Epoch, from: Pair, now: I, out: &mut Vec<Outs<I, F>>) {
         let peer = match self.legs.get(link).map(|l| (l.kind(), l.peer())) {
             Some((Kind::Dial, Some(peer))) => peer,
             Some((Kind::Dial, None) | (Kind::Answer { .. }, _)) | None => return,
@@ -1302,6 +1491,13 @@ impl<I: Instant> Table<I> {
             self.moveto(peer, link, from, own, out);
             return;
         }
+        self.keep(peer, link, out);
+    }
+
+    /// The held `peer` stays where it is, and this node's own completed
+    /// dial on `link` is given up: its lease returns and its link is
+    /// retired by the close rule.
+    fn keep(&mut self, peer: NodeAddr, link: LinkNo, out: &mut Vec<Outs<I, F>>) {
         let Some(leg) = self.legs.take(link) else {
             return;
         };
@@ -1324,7 +1520,7 @@ impl<I: Instant> Table<I> {
         from: Pair,
         transition: Transition,
         now: I,
-        out: &mut Vec<Output>,
+        out: &mut Vec<Outs<I, F>>,
     ) {
         let Some(leg) = self.legs.take(link) else {
             return;
@@ -1347,6 +1543,7 @@ impl<I: Instant> Table<I> {
                 sending: None,
             },
         );
+        F::installed(&mut Ops { t: self }, peer);
         out.push(Output::Install(Install {
             peer,
             link,
@@ -1370,7 +1567,7 @@ impl<I: Instant> Table<I> {
         link: LinkNo,
         from: Pair,
         own: bool,
-        out: &mut Vec<Output>,
+        out: &mut Vec<Outs<I, F>>,
     ) {
         let (Some(leg), Some(h)) = (self.legs.take(link), self.held.get_mut(&peer)) else {
             return;
@@ -1388,13 +1585,11 @@ impl<I: Instant> Table<I> {
         if !fault!(MoveKeepsOldPair) {
             h.current = from;
         }
-        // FRC-1201 Section 5.5: a peering this node set up as initiator is
-        // heard once that handshake completed, and the move holds this
-        // node's own dial.
         let unheard = !h.heard;
-        if !(fault!(MoveLeavesUnheard) || node_fault!(MoveLeavesUnheard)) {
-            h.heard = true;
-        }
+        F::moved(&mut Ops { t: self }, peer);
+        let Some(h) = self.held.get(&peer) else {
+            return;
+        };
         let first = unheard && h.heard;
         let pair = h.current.clone();
         self.links.hold(link, Holder::Peer(peer));
@@ -1471,7 +1666,7 @@ impl<I: Instant> Table<I> {
         }
     }
 
-    fn restarted(&mut self, peer: NodeAddr, epoch: Epoch, now: I, out: &mut Vec<Output>) {
+    fn restarted(&mut self, peer: NodeAddr, epoch: Epoch, now: I, out: &mut Vec<Outs<I, F>>) {
         let Some(h) = self.held.get(&peer) else {
             return;
         };
@@ -1504,13 +1699,13 @@ impl<I: Instant> Table<I> {
     /// `to`. A one-path roam (`roam`) resets the peer's data as a roam; a
     /// path the bundle moved at a path message resets nothing, as a switch
     /// does not, since the node runs that move as its own column, Follow.
-    fn moved(&mut self, link: LinkNo, from: Pair, to: Pair, roam: bool, out: &mut Vec<Output>) {
+    fn moved(&mut self, link: LinkNo, from: Pair, to: Pair, roam: bool, out: &mut Vec<Outs<I, F>>) {
         if fault!(MovedLeavesEntry) || node_fault!(MovedLeavesEntry) {
             // The defect's shape: the new pair is recorded beside the old,
             // which stays, and so stays in the index.
             self.links.path(link, to.clone(), Proven::Live);
         } else {
-            self.links.mirror(&Input::Moved {
+            self.links.mirror(&Input::<F::In>::Moved {
                 link,
                 from: from.clone(),
                 to: to.clone(),
@@ -1540,7 +1735,7 @@ impl<I: Instant> Table<I> {
     /// holds `proven`: the link's record takes the path in that state, and
     /// the peer held on the link is now there.
     fn switched(&mut self, link: LinkNo, to: Pair, proven: Proven) {
-        self.links.mirror(&Input::Switched {
+        self.links.mirror(&Input::<F::In>::Switched {
             link,
             to: to.clone(),
             proven,
@@ -1556,7 +1751,7 @@ impl<I: Instant> Table<I> {
     /// A frame of `peer` authenticated, from `from`: the peering is heard
     /// and the gates forget. Where the peer is moves only where its bundle
     /// moves it, at a path's move or switch, never with the frame alone.
-    fn heard(&mut self, peer: NodeAddr, from: Pair, kind: u8, now: I, out: &mut Vec<Output>) {
+    fn heard(&mut self, peer: NodeAddr, from: Pair, kind: u8, now: I, out: &mut Vec<Outs<I, F>>) {
         let Some(h) = self.held.get_mut(&peer) else {
             return;
         };
@@ -1599,6 +1794,7 @@ impl<I: Instant> Table<I> {
                 transition: Transition::Roam,
             });
         }
+        F::heard(&mut Ops { t: self }, peer);
     }
 
     /// Tear the held peer down and retire its link. Every teardown closes
@@ -1615,19 +1811,21 @@ impl<I: Instant> Table<I> {
     /// node removes through its link-dead path, and a restart, a
     /// replacement, an own-dial restart and a redial's swap, whose loss the
     /// node notes before the new session is promoted.
-    fn remove(&mut self, peer: NodeAddr, why: Why, now: I, out: &mut Vec<Output>) {
+    fn remove(&mut self, peer: NodeAddr, why: Why, now: I, out: &mut Vec<Outs<I, F>>) {
         let Some(h) = self.held.remove(&peer) else {
             return;
         };
+        F::removed(&mut Ops { t: self }, peer);
         // As the node: a session that carried no frame counts, whatever
         // its role, so this node's own dial, heard from its install, counts
-        // when it ends before the peer's first frame.
+        // when it ends before the peer's first frame, where the flow counts
+        // such a session at all.
         let silent = if fault!(SilentReadsHeard) || node_fault!(SilentReadsHeard) {
             !h.heard
         } else {
             h.last.is_none()
         };
-        if silent {
+        if silent && F::silent(self, &h) {
             self.gates
                 .ended(peer, Some(h.epoch), h.setup, now, None, &self.params);
         }
@@ -1694,7 +1892,7 @@ impl<I: Instant> Table<I> {
 /// The candidate rules, test-only. Each keeps the core's own rules and
 /// changes one decision, so the explorer can compare the two.
 #[cfg(test)]
-impl<I: Instant> Table<I> {
+impl<I: Instant, F: Flow<I>> Table<I, F> {
     /// How long a responder keeps a replaced unheard session.
     const KEPT_FOR: core::time::Duration = core::time::Duration::from_secs(15);
 
@@ -1718,7 +1916,7 @@ impl<I: Instant> Table<I> {
         peer: NodeAddr,
         before: Held<I>,
         own: bool,
-        out: &mut Vec<Output>,
+        out: &mut Vec<Outs<I, F>>,
     ) -> bool {
         let back = match self.cand {
             Some(Candidate::DialerSettle | Candidate::ResponderHold) => true,
@@ -1745,7 +1943,7 @@ impl<I: Instant> Table<I> {
     /// At a replacement of an unheard peering under the responder's
     /// candidate, keep the replaced session for a while, dropping any
     /// earlier kept one; the removal that follows then keeps its link.
-    fn hold_replaced(&mut self, peer: NodeAddr, source: Source, now: I, out: &mut Vec<Output>) {
+    fn hold_replaced(&mut self, peer: NodeAddr, source: Source, now: I, out: &mut Vec<Outs<I, F>>) {
         let Some(h) = self.held.get(&peer) else {
             return;
         };
@@ -1768,7 +1966,7 @@ impl<I: Instant> Table<I> {
 
     /// Drop the session kept for `peer`, if any, and retire its link,
     /// closing what the close rule closes when `close`.
-    fn unhold(&mut self, peer: NodeAddr, close: bool, out: &mut Vec<Output>) {
+    fn unhold(&mut self, peer: NodeAddr, close: bool, out: &mut Vec<Outs<I, F>>) {
         let Some(k) = self.holds.remove(&peer) else {
             return;
         };
@@ -1788,7 +1986,7 @@ impl<I: Instant> Table<I> {
     /// A frame of `peer` under the kept session: unless that session is
     /// receive-only, the peer is back on it, and the link it held instead
     /// is retired by the close rule.
-    fn held_frame(&mut self, peer: NodeAddr, now: I, out: &mut Vec<Output>) {
+    fn held_frame(&mut self, peer: NodeAddr, now: I, out: &mut Vec<Outs<I, F>>) {
         if !self.holds.get(&peer).is_some_and(|k| k.back) {
             return;
         }
@@ -1821,7 +2019,7 @@ impl<I: Instant> Table<I> {
     }
 
     /// Drop every kept session whose time is up.
-    fn expire(&mut self, now: I, out: &mut Vec<Output>) {
+    fn expire(&mut self, now: I, out: &mut Vec<Outs<I, F>>) {
         let due: Vec<NodeAddr> = self
             .holds
             .iter()
@@ -1831,6 +2029,275 @@ impl<I: Instant> Table<I> {
         for peer in due {
             self.unhold(peer, true, out);
         }
+    }
+}
+
+/// The table as a handshake flow reaches it: its reads, writers to its
+/// link records, legs and gates, which keep their own invariants, and the
+/// shared operations a flow's rules invoke. Only the table builds one, and
+/// hands it to each call of its flow ([`Flow`]). Each method is the
+/// table's own, so the IK flow's tests run every body.
+#[doc(hidden)]
+pub struct Ops<'a, I, F> {
+    t: &'a mut Table<I, F>,
+}
+
+impl<I: Instant, F: Flow<I>> Ops<'_, I, F> {
+    /// This node.
+    pub fn me(&self) -> NodeAddr {
+        self.t.me
+    }
+
+    /// The table's parameters.
+    pub fn params(&self) -> &Params {
+        &self.t.params
+    }
+
+    /// The peer held for `peer`.
+    pub fn held(&self, peer: &NodeAddr) -> Option<&Held<I>> {
+        self.t.held.get(peer)
+    }
+
+    /// The link records.
+    pub fn links(&self) -> &Links {
+        &self.t.links
+    }
+
+    /// The legs in flight.
+    pub fn legs(&self) -> &Legs<I> {
+        &self.t.legs
+    }
+
+    /// The restart gates' memory.
+    pub fn gates(&self) -> &Gates<I> {
+        &self.t.gates
+    }
+
+    /// What the flow keeps.
+    pub fn flow(&self) -> &F {
+        &self.t.flow
+    }
+
+    /// What the flow keeps, to change.
+    pub fn flow_mut(&mut self) -> &mut F {
+        &mut self.t.flow
+    }
+
+    /// The link records, through their writers.
+    pub fn links_mut(&mut self) -> &mut Links {
+        &mut self.t.links
+    }
+
+    /// The legs in flight, through their writers.
+    pub fn legs_mut(&mut self) -> &mut Legs<I> {
+        &mut self.t.legs
+    }
+
+    /// The restart gates' memory, through its writers.
+    pub fn gates_mut(&mut self) -> &mut Gates<I> {
+        &mut self.t.gates
+    }
+
+    /// Whether `peer` is not held and the max-peers cap is reached.
+    pub fn capped(&self, peer: &NodeAddr) -> bool {
+        self.t.capped(peer)
+    }
+
+    /// Refuse the completed handshake of `leg` at the max-peers cap.
+    pub fn refuse(&mut self, peer: NodeAddr, leg: Leg<I>, out: &mut Vec<Outs<I, F>>) {
+        self.t.refuse(peer, leg, out);
+    }
+
+    /// End the leg or the connecting dial on `link` unfinished.
+    pub fn abandon(&mut self, link: LinkNo, out: &mut Vec<Outs<I, F>>) {
+        self.t.abandon(link, out);
+    }
+
+    /// Install `peer` from this node's own completed dial on `link`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dialed(
+        &mut self,
+        peer: NodeAddr,
+        link: LinkNo,
+        epoch: Epoch,
+        from: Pair,
+        transition: Transition,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        self.t.dialed(peer, link, epoch, from, transition, now, out);
+    }
+
+    /// Move the held `peer` onto this node's own completed dial on `link`.
+    pub fn moveto(
+        &mut self,
+        peer: NodeAddr,
+        link: LinkNo,
+        from: Pair,
+        own: bool,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        self.t.moveto(peer, link, from, own, out);
+    }
+
+    /// Tear the held `peer` down for `why` and retire its link.
+    pub fn remove(&mut self, peer: NodeAddr, why: Why, now: I, out: &mut Vec<Outs<I, F>>) {
+        self.t.remove(peer, why, now, out);
+    }
+
+    /// Replace the peer held for `peer`, if any, by the leg on `link`.
+    pub fn swap(
+        &mut self,
+        peer: NodeAddr,
+        link: LinkNo,
+        from: Option<Pair>,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        self.t.swap(peer, link, from, now, out);
+    }
+
+    /// Add to `closes` the pair `link` was set up at when no live link uses
+    /// it once `old` is retired.
+    pub fn unused(&self, link: LinkNo, old: LinkNo, closes: &mut Vec<Pair>) {
+        self.t.unused(link, old, closes);
+    }
+
+    /// The paths of `r` its bundle does not keep at a teardown.
+    pub fn unkept(r: &LinkRec, active: Option<&Pair>) -> Vec<Pair> {
+        unkept(r, active)
+    }
+
+    /// What a removal closed of `r` before it read the bundle's keep.
+    pub fn removable(r: &LinkRec) -> Vec<Pair> {
+        removable(r)
+    }
+
+    /// Install `peer` from the responder leg `leg`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn install_answer(
+        &mut self,
+        peer: NodeAddr,
+        leg: Leg<I>,
+        pair: Pair,
+        epoch: Epoch,
+        ephemeral: EphemeralDigest,
+        replaces: bool,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        self.t
+            .install_answer(peer, leg, pair, epoch, ephemeral, replaces, now, out);
+    }
+
+    /// Keep the held `peer` on its link with the responder leg `leg`'s
+    /// session and lease, at `pair`, and retire the leg's link.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hold_answer(
+        &mut self,
+        peer: NodeAddr,
+        leg: Leg<I>,
+        pair: Pair,
+        epoch: Epoch,
+        ephemeral: EphemeralDigest,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        self.t
+            .hold_answer(peer, leg, pair, epoch, ephemeral, now, out);
+    }
+
+    /// Move the held `peer` onto the responder leg `leg`'s link and
+    /// session, at `pair`, and retire the link it held.
+    #[allow(clippy::too_many_arguments)]
+    pub fn move_answer(
+        &mut self,
+        peer: NodeAddr,
+        leg: Leg<I>,
+        pair: Pair,
+        epoch: Epoch,
+        ephemeral: EphemeralDigest,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        self.t
+            .move_answer(peer, leg, pair, epoch, ephemeral, now, out);
+    }
+
+    /// Keep the held `peer` where it is and give up the dial on `link`.
+    pub fn keep(&mut self, peer: NodeAddr, link: LinkNo, out: &mut Vec<Outs<I, F>>) {
+        self.t.keep(peer, link, out);
+    }
+
+    /// Open the responder leg on `link` that answers `msg1` with `msg2`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_answer(
+        &mut self,
+        link: LinkNo,
+        peer: Option<NodeAddr>,
+        msg1: Vec<u8>,
+        msg2: Vec<u8>,
+        lease: IndexLease,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        self.t.open_answer(link, peer, msg1, msg2, lease, now, out);
+    }
+}
+
+impl<I: Instant> Flow<I> for Ik {
+    type In = core::convert::Infallible;
+    type Out = core::convert::Infallible;
+    type Deny = core::convert::Infallible;
+
+    fn step(_: &mut Ops<'_, I, Self>, input: Self::In, _: I, _: &mut Vec<Outs<I, Self>>) {
+        match input {}
+    }
+
+    /// One not yet sent answers any msg1 from that address, one sent
+    /// answers its own msg1 alone.
+    fn stored(table: &Table<I, Self>, from: &Pair, bytes: &[u8]) -> Option<(LinkNo, Vec<u8>)> {
+        let any = fault!(StoredAnswersAny) || node_fault!(StoredAnswersAny);
+        table.links.at(from).find_map(|l| {
+            let unsent =
+                !fault!(StoredByBytes) && table.answered.get(&l).is_some_and(|a| !a.sent || any);
+            let msg2 = if unsent {
+                table.legs.msg2(l)
+            } else {
+                table.legs.stored(l, bytes)
+            };
+            msg2.map(|m| (l, m.to_vec()))
+        })
+    }
+
+    /// The answers built and those asked for.
+    fn pending(table: &Table<I, Self>) -> usize {
+        table.legs.answering() + table.asked.len()
+    }
+
+    fn answer_sent(_: &mut Ops<'_, I, Self>, _: LinkNo) {}
+
+    fn installed(_: &mut Ops<'_, I, Self>, _: NodeAddr) {}
+
+    /// FRC-1201 Section 5.5: a peering this node set up as initiator is
+    /// heard once that handshake completed, and the move holds this node's
+    /// own dial.
+    fn moved(ops: &mut Ops<'_, I, Self>, peer: NodeAddr) {
+        if fault!(MoveLeavesUnheard) || node_fault!(MoveLeavesUnheard) {
+            return;
+        }
+        if let Some(h) = ops.t.held.get_mut(&peer) {
+            h.heard = true;
+        }
+    }
+
+    fn heard(_: &mut Ops<'_, I, Self>, _: NodeAddr) {}
+
+    fn removed(_: &mut Ops<'_, I, Self>, _: NodeAddr) {}
+
+    /// Every session that carried no frame counts, whatever its role.
+    fn silent(_: &Table<I, Self>, _: &Held<I>) -> bool {
+        true
     }
 }
 

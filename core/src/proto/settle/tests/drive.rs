@@ -656,6 +656,7 @@ impl Drive {
                 | Output::Retry { .. }
                 | Output::Hold { .. }
                 | Output::Settle { .. } => {}
+                Output::Flow(x) => match *x {},
             }
         }
         self.effects(out, did);

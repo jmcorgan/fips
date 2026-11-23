@@ -359,3 +359,58 @@ fn close_returns_every_lease_and_retires_every_link() {
     drop(legs);
     assert_eq!(leaked(), before, "no lease leaked");
 }
+
+#[test]
+fn a_quieted_dial_resends_nothing_more_and_is_still_reaped_at_its_deadline() {
+    let p = Params::default();
+    let mut links = Links::new();
+    let mut legs = Legs::new();
+    let link = dialed(&mut legs, &mut links, 11, 0, &p);
+    legs.unsent(link, t(500), &p);
+    legs.quiet(link);
+    assert!(
+        release(legs.poll(t(29_999), &mut links)).is_empty(),
+        "defect: a quieted dial was resent"
+    );
+    assert_eq!(legs.get(link).map(Leg::sent), Some(0));
+    let out = legs.poll(t(30_000), &mut links);
+    assert!(
+        matches!(out.as_slice(), [LegOut::Reaped { dialed: true, .. }]),
+        "reaped at its deadline, got {out:?}"
+    );
+    release(out);
+}
+
+#[test]
+fn the_resends_alone_ask_for_each_due_resend_byte_for_byte_and_reap_no_leg_past_its_deadline() {
+    let p = Params::default();
+    let mut links = Links::new();
+    let mut legs = Legs::new();
+    let link = dialed(&mut legs, &mut links, 13, 0, &p);
+    assert!(
+        legs.resends(t(999)).is_empty(),
+        "defect: a resend was asked for before it was due"
+    );
+    assert_eq!(
+        legs.resends(t(1_000)),
+        [LegOut::Resend {
+            link,
+            bytes: MSG1.to_vec(),
+        }],
+        "defect: the due resend is not the dial's msg1, byte for byte"
+    );
+    assert_eq!(
+        legs.resends(t(30_000)),
+        [LegOut::Resend {
+            link,
+            bytes: MSG1.to_vec(),
+        }],
+        "still due at the deadline, which only a reap acts on"
+    );
+    assert!(legs.get(link).is_some(), "no leg is reaped");
+    assert_eq!(links.index().len(), 1, "no link is retired");
+    let closed = legs.close(&mut links);
+    closed.leases.into_iter().for_each(|l| {
+        l.release();
+    });
+}

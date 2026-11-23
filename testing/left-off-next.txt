@@ -90,7 +90,6 @@ test          replaced   test_responder_identity_discovery  core/src/noise/tests
 test          replaced   test_wrong_role_errors  core/src/noise/tests/mod.rs  test_wrong_state_errors
 test          replaced   ik_profile_writes_and_reads_the_deployed_handshake_and_frames_byte_for_byte  core/src/proto/fmp/rekey/tests/ik.rs  xx_profile_writes_and_reads_the_handshake_and_frames_next_sends_byte_for_byte
 test          replaced   routing_signals_with_a_reserved_sig_flags_bit_set_are_refused  core/src/proto/routing/tests/wire.rs  routing_signals_are_read_whatever_their_reserved_sig_flags_byte_holds
-test          replaced   the_stub_profile_selects_the_rows_the_link_profile_does  core/src/proto/settle/tests/joint/names.rs  the_stub_profile_selects_the_rows_the_link_profile_does_but_those_of_a_third_message
 test          replaced   test_acl_rejected_msg1_leaves_no_registry_trace  src/node/tests/acl.rs  test_acl_rejected_msg3_leaves_no_registry_trace
 test          replaced   test_inbound_msg1_denied_by_acl  src/node/tests/acl.rs  test_inbound_msg3_denied_triggers_disconnect
 test          replaced   test_outbound_msg2_acl_reject_reschedules_a_configured_peer  src/node/tests/acl.rs  test_outbound_msg2_acl_reject_reschedules_dial

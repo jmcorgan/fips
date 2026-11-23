@@ -22,6 +22,7 @@
 //! plain pairs, and its finding that the peer is capable.
 
 use alloc::vec::Vec;
+use core::convert::Infallible;
 
 use super::gates::Epoch;
 use super::links::{LinkNo, Pair, Proven};
@@ -77,9 +78,11 @@ pub struct Hello {
     pub lease: IndexLease,
 }
 
-/// One input.
+/// One input. `X` is the input a handshake flow adds
+/// ([`Flow::In`](super::flow::Flow::In)), which the IK flow, the default,
+/// has none of.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Input {
+pub enum Input<X = Infallible> {
     /// This node dials, with its msg1 built.
     Dial(Dial),
     /// This node dials on a connection it must open first, and builds its
@@ -304,6 +307,9 @@ pub enum Input {
         /// Its state now.
         proven: Proven,
     },
+    /// An input of the table's handshake flow, which the flow classifies
+    /// ([`Flow::step`](super::flow::Flow::step)).
+    Flow(X),
     /// Test-only, for a candidate rule: a frame of `peer` authenticated
     /// under the session an [`Output::Hold`](super::output::Output::Hold)
     /// kept.

@@ -33,8 +33,9 @@ builds, and changes no line of the core, the machine or the bundle.
   bytes a joint end writes and makes the session of its handshake, that
   a frame opens only under its own handshake's session and direction,
   and that the stub profile selects the rows the link profile does but
-  those a third message sets: this line's link runs three messages and the
-  stub two, so the joint world explores a two-message link here.
+  those a third message sets: where the link runs two messages, as the
+  stub does, every row is the same; on a line whose link runs three, the
+  joint world explores a two-message link.
 
 - `facts.rs`: what a joint node's bundles read about the world: the
   facts of the world's transports (a stream or BLE transport is
@@ -510,7 +511,8 @@ builds, and changes no line of the core, the machine or the bundle.
 - A change to the link profile's constants reds
   `the_stub_profile_selects_the_rows_the_link_profile_does_but_those_of_a_third_message`:
   the joint world stands for the link only in the rows the stub selects
-  alike, and on this line those leave out the third message's.
+  alike, which on a line of a three-message link leave out the third
+  message's.
 - A pin asserts what the node does, fails today at an assertion whose
   message starts `defect:`, and checks the shape it needs with
   `precondition:` assertions; it lands with its `known-defect` line and
