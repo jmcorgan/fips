@@ -21,10 +21,12 @@
 #                    green without it. It proves the guard rather than
 #                    running it: GitHub runs the assertion itself in
 #                    tcp-mesh, as it runs every chaos scenario. On next
-#                    local CI's default run leaves it out too, until next's
-#                    crossing is settled, so it runs only when named with
-#                    ci-local.sh --only or --rerun (ci-local.sh's
-#                    AGREEMENT_BREAK_SUITES).
+#                    local CI's default run leaves it out too, until it has
+#                    a switch that breaks next's crossing in the shape its
+#                    judge expects (direction and crossing red together),
+#                    so it runs only when named with ci-local.sh --only or
+#                    --rerun
+#                    (ci-local.sh's AGREEMENT_BREAK_SUITES).
 #
 # Deliberate nightly-only (in neither runner's push-started set), with reason:
 #   dual-udp-flap, two-bound-udp-bulk, churn-mixed-10, congestion-stress —
@@ -393,9 +395,9 @@ NIGHTLY_ONLY = {
         "binding is also exercised by forward-only and two-bound-udp",
     "two-bound-udp-bulk": "its finds came from repeated stability runs, not "
         "from a per-push gate",
-    "churn-mixed-10": "a pass means only that the mesh formed and nobody "
-        "errored, on thresholds calibrated from 14 runs; its finds came from "
-        "development runs",
+    "churn-mixed-10": "beyond both ends of each edge agreeing, a pass means "
+        "only that the mesh formed and nobody errored, on thresholds "
+        "calibrated from 14 runs; its finds came from development runs",
     "congestion-stress": "176 recorded runs met none of its criteria, cause "
         "unknown",
 }

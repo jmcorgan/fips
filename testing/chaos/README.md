@@ -43,11 +43,10 @@ below are defaults rather than fixed sizes.
   policies; link flaps (max 3 down, 10-30s, connectivity protected); node
   churn (max 5 down, 30-90s, partitions allowed); bandwidth tiers
   (1/10/100/1000 Mbps). Carries baseline assertions, so a run in which the
-  mesh never formed cannot report success. On master it also carries
-  `edge_agreement` with no floor: both ends of each edge agree on the link
-  at the end, and an Ethernet edge that crossed at startup (found by beacon
-  at both ends) ends with the smaller node on its own dial. Next leaves that
-  block out until its crossing is settled. The nightly run's chaos batch
+  mesh never formed cannot report success, and `edge_agreement` with no
+  floor: both ends of each edge agree on the link at the end, and an
+  Ethernet edge that crossed at startup (found by beacon at both ends) ends
+  with the smaller node on its own dial. The nightly run's chaos batch
   runs it as `churn-mixed --nodes 10 --duration 120` (`churn-mixed-10`),
   which is the invocation its thresholds are calibrated for; no run a push
   starts takes it.
@@ -111,7 +110,7 @@ Explicit topologies exercising non-UDP transports.
 | ------------- | ----- | -------------- | ----- | -------- | ----- | ---------- | ------------------------------------------ |
 | ethernet-only | 4     | Ethernet       | Ring  | 30s      | yes   | --         | By hand: AF_PACKET transport with beacon discovery |
 | ethernet-mesh | 6     | UDP + Ethernet | Mesh  | 120s     | yes   | yes        | Mixed UDP/Ethernet, netem mutation + flaps |
-| tcp-mesh      | 6     | UDP + TCP      | Mesh  | 120s     | yes   | yes        | Mixed UDP/TCP, netem mutation + flaps; every edge one-way on next |
+| tcp-mesh      | 6     | UDP + TCP      | Mesh  | 120s     | yes   | yes        | Mixed UDP/TCP, netem mutation + flaps; four edges dialed from both ends cross |
 | dual-path-flap | 2    | Ethernet + UDP | Pair  | 180s     | yes   | yes        | Two paths; netem flaps of the cable, K-timeout switch |
 | dual-udp-flap | 2     | UDP + UDP      | Pair  | 180s     | yes   | yes        | Two interface-bound UDP paths; the same flaps |
 | dual-path-carrier | 2 | Ethernet + UDP | Pair  | 180s     | yes   | scheduled  | Two paths; the cable taken down at one end; signalled switch in 1 s |
@@ -134,14 +133,13 @@ Explicit topologies exercising non-UDP transports.
   payload sizes, and checks that n04 has no peer on another transport.
 - **tcp-mesh**: 6-node mesh with 4 UDP and 3 TCP edges. Both transports use
   static peer config. Netem mutation (30% fraction, every 20-40s) and link
-  flaps (1 link max, 10-20s down). On master three UDP edges and one TCP
-  edge are dialed from both ends (`{dial: both}`), so their handshakes cross
-  at startup, and `min_crossings: 2` requires at least two edges' logs to
-  show a crossing. On next every edge keeps one dialer and no floor is set,
-  until next's crossing is settled. Its `edge_agreement` checks that both
-  ends of each edge agree on the link at the end, and the smaller node on
-  its own dial after any crossing the logs show. It runs at `debug`, which
-  the crossing lines need.
+  flaps (1 link max, 10-20s down). Three UDP edges and one TCP edge are
+  dialed from both ends (`{dial: both}`), so their handshakes cross at
+  startup; the other three keep one dialer. Its `edge_agreement` checks that
+  both ends of each edge agree on the link at the end, the smaller node on
+  its own dial after a crossing, and with `min_crossings: 2` that at least
+  two edges' logs show a crossing (all four are expected to). It runs at
+  `debug`, which the crossing lines need.
 - **dual-path-flap**: two nodes joined by a raw-Ethernet veth and by UDP over
   the bridge (`[n01, n02, ethernet+udp]`), multipath on. Only the cable
   flaps, by 100% netem loss with carrier kept, so neither end has a signal:
@@ -872,10 +870,11 @@ result directory; the image and the context copy are removed at the end.
 `testing/lib/agreement-break-test.sh` runs it on planted directories, one per
 outcome, with no container. Local CI on master runs the lane as its
 `agreement-break` suite, after the chaos scenarios and skipped with them,
-with the defaults above; on next it is off in the default run, since
-tcp-mesh's edges there are one-way (`testing/ci-local.sh --only
-agreement-break` runs it alone). GitHub CI runs the assertion in the
-scenarios and not the lane.
+with the defaults above; on next it is off in the default run, since its
+switch acts at the move at a dial's msg2 and next's tcp-mesh crossings
+settle at the peer's msg3, so the switch run stays green
+(`testing/ci-local.sh --only agreement-break` runs it alone). GitHub CI runs
+the assertion in the scenarios and not the lane.
 
 The sim passes `FIPS_NODE_FAULTS` to every node when it is set in the sim's
 own environment, and nothing when it is not (`sim/compose.py`). Only the

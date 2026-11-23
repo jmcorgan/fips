@@ -183,12 +183,40 @@ pub(super) async fn seed_mtu(node: &mut Node, r: &mut Run) {
     }
 }
 
-/// Log the move: at a dial's msg2, the replays suppressed during it too.
+/// Whether `link` is this node's own dial, by its record's direction.
+fn own_dial(node: &Node, link: &LinkId) -> bool {
+    node.links
+        .get(link)
+        .is_some_and(|l| l.direction() == crate::transport::LinkDirection::Outbound)
+}
+
+/// Log the move: at a dial's msg2, the replays suppressed during it too. At
+/// the msg3 a crossing logs master's keeping line instead, and a move from
+/// a link the peer dialed (the same-side rule) logs its own line.
 pub(super) async fn move_note(node: &mut Node, r: &mut Run) {
     let peer = node.peer_display_name(&r.peer);
     let leg = at_leg(&r.t);
+    let epoch = node
+        .peers
+        .get(&r.peer)
+        .and_then(|p| p.noise_session().map(diag::epoch_tag));
     let f = r.crossing();
     if leg {
+        if f.loser.is_some_and(|left| own_dial(node, &left)) {
+            // A crossing, the link left this node's own dial: the larger
+            // node ends on the peer's dial, as master's larger node does when
+            // it keeps its inbound session, so it logs master's line, the
+            // one the chaos harness's crossing clause reads.
+            debug!(
+                peer = %peer,
+                kept_their_index = %OrNone(f.theirs),
+                transport_id = %OrNone(f.to.as_ref().map(|(tid, _)| *tid)),
+                remote_addr = %OrNone(f.to.as_ref().map(|(_, addr)| addr)),
+                epoch = %OrNone(epoch),
+                "Cross-connection: keeping inbound session and original their_index (peer outbound wins)"
+            );
+            return;
+        }
         debug!(
             peer = %peer,
             new_our_index = %OrNone(f.ours),
@@ -250,19 +278,31 @@ pub(super) async fn leg_machine_removed(node: &mut Node, r: &mut Run) {
     }
 }
 
-/// Log the crossing kept on the session the peer holds.
+/// Log the crossing kept on the session the peer holds. At the msg3 the
+/// smaller node logs master's swap line, since it ends as master's smaller
+/// node does.
 pub(super) async fn keep_note(node: &mut Node, r: &mut Run) {
     let name = node.peer_display_name(&r.peer);
-    if at_leg(&r.t) {
-        debug!(
-            peer = %name,
-            "Simultaneous-init (msg3): keeping outbound session (our outbound wins)"
-        );
-        return;
-    }
     let Some(peer) = node.peers.get(&r.peer) else {
         return;
     };
+    if at_leg(&r.t) {
+        // Only the address order keeps at the msg3, so this is a crossing
+        // and the smaller node stays on its own dial, as master's smaller
+        // node ends when it swaps to its outbound session: it logs master's
+        // line, the one the chaos harness's crossing clause reads.
+        let to = node.peer_link(&r.peer);
+        debug!(
+            peer = %name,
+            new_our_index = %OrNone(peer.our_index()),
+            new_their_index = %OrNone(peer.their_index()),
+            transport_id = %OrNone(to.as_ref().map(|(tid, _)| *tid)),
+            remote_addr = %OrNone(to.as_ref().map(|(_, addr)| addr)),
+            epoch = %OrNone(peer.noise_session().map(diag::epoch_tag)),
+            "Cross-connection: swapped to outbound session (our outbound wins)"
+        );
+        return;
+    }
     let f = r.crossing();
     debug!(
         peer = %name,

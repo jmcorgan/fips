@@ -130,8 +130,9 @@ check "--list names agreement-break" \
 check "run_suite has an arm for agreement-break" \
     "$(sed -n '/^run_suite() {$/,/^}$/p' "$CI_LOCAL" | grep -qE '^        agreement-break\)' && echo 0 || echo 1)"
 # The plan is printed by print_plan, apart from what runs, so the stage itself
-# is read. On next the lane is off until next's crossing is settled
-# (AGREEMENT_BREAK_SUITES in ci-local.sh): run_integration must not call it,
+# is read. On next the lane is off until a switch breaks next's crossing in
+# the shape its judge expects (AGREEMENT_BREAK_SUITES in ci-local.sh):
+# run_integration must not call it,
 # and the chaos scenarios must still run there.
 check "run_integration leaves agreement-break out on next and still runs the chaos scenarios" \
     "$(body=$(sed -n '/^run_integration() {$/,/^}$/p' "$CI_LOCAL"); grep -qx '        run_chaos_set "\${CHAOS_SUITES\[@\]}"' <<<"$body" && ! grep -qE '^[[:space:]]*run_agreement_break([[:space:]]|$)' <<<"$body" && echo 0 || echo 1)"

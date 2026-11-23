@@ -159,7 +159,8 @@
 #   nostr-open-discovery  the Nostr open-discovery startup scenario; run by
 #                         hand when the Nostr rendezvous code changes
 #   agreement-break       the chaos agreement break lane; off on next until
-#                         next's crossing is settled (AGREEMENT_BREAK_SUITES)
+#                         a switch breaks next's crossing in the shape its
+#                         judge expects (AGREEMENT_BREAK_SUITES)
 #
 # Deliberately not run by either runner, with the reason for each. Recorded
 # here so that "not in the suite list" stops being indistinguishable from
@@ -489,12 +490,13 @@ TOR_SUITES=(tor-socks5 tor-directory)
 # itself.
 #
 # Off on next: known to --only and --rerun, left out of the default run and
-# the plan. On master it runs after the chaos scenarios. Next has the lane's
-# switch (MoveKeepsInboundLink) but not the crossing rule the lane's healthy
-# run relies on: tcp-mesh's edges are one-way here, so nothing crosses for
-# the switch to break, and with both-dial edges restored a crossed edge ends
-# with both ends outbound on next, so the healthy run would red as well. It
-# returns to the default run when next's crossing is settled.
+# the plan. On master it runs after the chaos scenarios. On next tcp-mesh's
+# both-dial edges cross and the healthy run is green, but the lane's switch
+# (MoveKeepsInboundLink) acts at the move at a dial's msg2, and next's
+# tcp-mesh crossings settle at the peer's msg3: in the runs of 2026-11-22
+# every crossing did, so the switch run stayed green too and the lane
+# reported a miss. It returns to the default run when it has a switch that
+# breaks next's crossing in the shape its judge expects.
 AGREEMENT_BREAK_SUITES=(agreement-break)
 
 # ── Colors ─────────────────────────────────────────────────────────────────

@@ -53,8 +53,10 @@ in the `node-synthetic` group with the rest of `settle`.
   Handshakes here are three messages: a responder promotes at the msg3, a
   restart replaces a peer at the msg3 or at this node's own msg2, and a
   crossing settles at the msg2 of a node's own dial or at the msg3 of the
-  peer's (`crossing.rs` drives each order, `to_msg2` and `to_msg3`). A
-  same-epoch replacement and an own or later dial answered over a held
+  peer's (`crossing.rs` drives each order, `to_msg2` and `to_msg3`).
+  `crossing.rs` also checks that a crossing settled at the msg3 logs
+  master's swap or keeping line, the line the chaos harness's crossing
+  clause reads. A same-epoch replacement and an own or later dial answered over a held
   peering have no site on this line, and so no test.
   `paths.rs` also holds `assert_steps`, for one step of the path machine
   that made two transitions, as a handover releases the active path and

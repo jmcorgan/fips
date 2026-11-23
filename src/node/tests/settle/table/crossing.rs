@@ -4,7 +4,9 @@
 //! it completed or keeping the session held, on TCP, on loopback and on BLE,
 //! each test a plain one and its `_with_multipath_on` sibling. A node that
 //! answers its own dial over a held peering does what the tie-break says, so
-//! its own dial on an aged link is a crossing won here too.
+//! its own dial on an aged link is a crossing won here too. A crossing
+//! settled at the msg3 logs master's swap or keeping line for the same
+//! outcome, which the chaos harness's crossing clause reads.
 //!
 //! Each test stops its driver just before the site: the node holds the peer
 //! from the other handshake, and the message that settles the crossing is
@@ -746,6 +748,113 @@ async fn a_crossing_settled_at_the_msg3_on_loopback_keeps_the_smaller_node_as_th
 async fn a_crossing_settled_at_the_msg3_on_loopback_keeps_the_smaller_node_as_the_table_says_with_multipath_on()
  {
     settled_at_msg3_kept(loopback_dialled(true).await, false).await;
+}
+
+// ---------------------------------------------------------------------------
+// The lines a crossing settled at the msg3 logs
+// ---------------------------------------------------------------------------
+
+/// The tag of the session node `i` of `x` holds its peer on.
+fn held_epoch(x: &Dialled, i: usize) -> String {
+    let peer = *x.nodes[1 - i].node.node_addr();
+    let session = x.nodes[i]
+        .node
+        .get_peer(&peer)
+        .and_then(|p| p.noise_session())
+        .expect("the node holds its peer on a session");
+    crate::node::tests::link_setup_diag::session_tag(session)
+}
+
+/// Node `at` of loopback crossed dials, multipath set as `on`, takes the
+/// msg3 that settles the crossing there, holding its peer from its own dial,
+/// and logs `message`, master's crossing line for the same outcome, which
+/// the chaos harness's crossing clause reads. The line names the peer and
+/// the session `at` holds afterwards, the smaller node's dial's.
+async fn msg3_crossing_logs(on: bool, smaller: bool, message: &str) {
+    let mut x = loopback_dialled(on).await;
+    let at = if smaller { x.s } else { x.l };
+    let peer = *x.nodes[1 - at].node.node_addr();
+    let (msg3, _) = to_msg3(&mut x, at).await;
+    let before = if smaller {
+        held_epoch(&x, at)
+    } else {
+        held_epoch(&x, 1 - at)
+    };
+    let (logs, guard) = crate::testutil::capture_logs_scoped();
+    hand(&mut x.nodes[at].node, msg3).await;
+    drop(guard);
+    let line = logs.line(message).unwrap_or_else(|| {
+        panic!(
+            "defect: no line {message:?} at the {} node's msg3 crossing in {:#?}",
+            if smaller { "smaller" } else { "larger" },
+            logs.lines()
+        )
+    });
+    let name = x.nodes[at].node.peer_display_name(&peer);
+    assert_eq!(
+        crate::testutil::log_field(&line, "peer"),
+        Some(name.as_str()),
+        "{line}"
+    );
+    let after = held_epoch(&x, at);
+    assert_eq!(
+        after, before,
+        "precondition: the node holds the smaller node's dial's session"
+    );
+    assert_eq!(
+        crate::testutil::log_field(&line, "epoch"),
+        Some(after.as_str()),
+        "{line}"
+    );
+    cleanup_nodes(&mut x.nodes).await;
+}
+
+/// The smaller node's keep at a msg3 crossing logs master's swap line.
+#[tokio::test]
+async fn a_crossing_kept_at_the_msg3_logs_the_swap_line_the_crossing_clause_reads() {
+    msg3_crossing_logs(
+        false,
+        true,
+        "Cross-connection: swapped to outbound session (our outbound wins)",
+    )
+    .await;
+}
+
+/// [`a_crossing_kept_at_the_msg3_logs_the_swap_line_the_crossing_clause_reads`] with multipath
+/// on.
+#[tokio::test]
+async fn a_crossing_kept_at_the_msg3_logs_the_swap_line_the_crossing_clause_reads_with_multipath_on()
+ {
+    msg3_crossing_logs(
+        true,
+        true,
+        "Cross-connection: swapped to outbound session (our outbound wins)",
+    )
+    .await;
+}
+
+/// The larger node's move at a msg3 crossing logs master's keeping line.
+#[tokio::test]
+async fn a_crossing_moved_at_the_msg3_logs_the_keeping_line_the_crossing_clause_reads() {
+    msg3_crossing_logs(
+        false,
+        false,
+        "Cross-connection: keeping inbound session and original their_index (peer outbound wins)",
+    )
+    .await;
+}
+
+/// [`a_crossing_moved_at_the_msg3_logs_the_keeping_line_the_crossing_clause_reads`] with
+/// multipath on.
+#[tokio::test]
+async fn a_crossing_moved_at_the_msg3_logs_the_keeping_line_the_crossing_clause_reads_with_multipath_on()
+ {
+    msg3_crossing_logs(
+        true,
+        false,
+        "Cross-connection: keeping inbound session and original their_index (peer outbound wins)",
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------

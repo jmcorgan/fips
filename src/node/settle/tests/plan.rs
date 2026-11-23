@@ -202,7 +202,7 @@ const MOVE_LEG: &[(Effect, &str)] = &[
     ),
     (
         Effect::MoveNote,
-        "debug!(.., \"Simultaneous-init (msg3): swapped to inbound session (our inbound wins)\")",
+        "debug!(.., \"Cross-connection: keeping inbound session and original their_index (peer outbound wins)\") at a crossing, else debug!(.., \"Simultaneous-init (msg3): swapped to inbound session (our inbound wins)\")",
     ),
     (Effect::LoserClose, "self.close_unused(left).await"),
     (Effect::LoserRemoved, "self.remove_link(&left)"),
@@ -245,7 +245,7 @@ const KEEP_LEG: &[(Effect, &str)] = &[
     ),
     (
         Effect::KeepNote,
-        "debug!(.., \"Simultaneous-init (msg3): keeping outbound session (our outbound wins)\")",
+        "debug!(.., \"Cross-connection: swapped to outbound session (our outbound wins)\")",
     ),
     (Effect::LoserClose, "self.close_unused(link).await"),
     (Effect::LoserRemoved, "self.remove_link(&link)"),

@@ -631,8 +631,10 @@ set empty with a green no-switch run. The judge is
 planted result directories. Local CI on master runs the lane as the
 `agreement-break` suite, after the chaos scenarios and skipped with them
 (`--skip-chaos`), at tier 2 and above, with its default switch and scenario;
-on next the lane is left out of the default run until next's crossing is
-settled (`ci-local.sh`'s `AGREEMENT_BREAK_SUITES` says why).
+on next the lane is left out of the default run until it has a switch that
+breaks next's crossing in the shape its judge expects, the direction and
+crossing clauses red together (`ci-local.sh`'s `AGREEMENT_BREAK_SUITES` says
+why).
 `ci-local.sh --only agreement-break` or `--rerun agreement-break` runs it
 alone. GitHub CI does
 not run it (`check-ci-parity.sh` lists it as local-only, with the reason): it

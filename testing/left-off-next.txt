@@ -20,14 +20,21 @@
 # A merge into next that brings an item adds it here or carries it; a merge that carries one
 # removes its line. The check cannot say a reason is true: the merge's review does.
 #
-# Left off next and outside the check's kinds, so recorded here as comments only: master's
-# chaos edge agreement on crossed edges. tcp-mesh dials four edges from both ends on master
-# and keeps every edge one-way on next, with no min_crossings floor; churn-mixed's
-# edge_agreement block is not on next; and the agreement break lane (agreement-break in
-# testing/ci-local.sh) is off in next's default run. On next a crossed edge has been seen to
-# end with both ends listing it outbound, and the crossing clause's rule, the smaller node on
-# its own dial, is not next's after a refusal. All three return when next's crossing is
-# settled.
+# Left off next and outside the check's kinds, so recorded here as a comment only: the
+# agreement break lane (agreement-break in testing/ci-local.sh) is off in next's default run.
+# tcp-mesh's both-dial edges and churn-mixed's edge_agreement block are on next, and the
+# lane's healthy run is green, but its switch, MoveKeepsInboundLink, acts at the move at a
+# dial's msg2, and next's tcp-mesh crossings settle at the peer's msg3, so its switch run
+# stays green and the lane reports a miss. It returns with a switch that breaks next's
+# crossing in the shape the lane's judge expects.
+#
+# Also a comment only: testing/chaos/scenarios/tcp-mesh.yaml and churn-mixed.yaml are master's
+# text byte for byte, kept so that later merges take master's edits to them. Their comments
+# state master's facts: tcp-mesh cites FRC-1201 Section 5.6 where next follows FRC-2201
+# Section 5.7, names the adoption of a rekey answer on the msg1's connection, which next does
+# not have, and both quote master's 20-run crossing measurements. On next one run per setting
+# was made on 2026-11-22: tcp-mesh recorded 4 crossed edges at both settings, and
+# churn-mixed-10 recorded 0 with multipath off and 2 with it on, every clause green.
 
 
 # The real-node explorer, its world, oracle and parity runs. next builds none of it:
