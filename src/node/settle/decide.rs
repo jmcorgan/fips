@@ -33,7 +33,7 @@ use crate::node::settle::links::current;
 use crate::peer::ActivePeer;
 use crate::peer::PeerInstant;
 use crate::proto::fmp::RekeyClaim;
-use crate::proto::fmp::flow::{AnonDial, In, Out, Xx};
+use crate::proto::fmp::flow::{AnonDial, Deny, In, Out, Xx};
 use crate::proto::rekey::IndexLease;
 use crate::proto::settle::flow::Outs;
 use crate::proto::settle::gates::Source;
@@ -110,6 +110,34 @@ pub(in crate::node) fn opened(out: &[XxOut]) -> Option<LinkNo> {
     out.iter().find_map(|o| match o {
         Output::Opened { link } | Output::Flow(Out::Ask { link }) => Some(*link),
         _ => None,
+    })
+}
+
+/// Whether the core refused the peer a step's outputs `out` were decided
+/// for at the max-peers cap.
+pub(in crate::node) fn capped(out: &[XxOut]) -> bool {
+    out.iter().any(|o| {
+        matches!(
+            o,
+            Output::Reject {
+                why: Denial::Cap,
+                ..
+            }
+        )
+    })
+}
+
+/// Whether the core refused the peer a step's outputs `out` were decided
+/// for because this node is a leaf already holding another peer.
+pub(in crate::node) fn leafed(out: &[XxOut]) -> bool {
+    out.iter().any(|o| {
+        matches!(
+            o,
+            Output::Reject {
+                why: Denial::Flow(Deny::Leaf),
+                ..
+            }
+        )
     })
 }
 

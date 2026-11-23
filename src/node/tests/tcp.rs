@@ -1112,11 +1112,9 @@ async fn settle_for(nodes: &mut [TestNode], span: Duration) {
 
 /// A node at a peer cap of one dials two nodes over TCP and both answer:
 /// the first answer read installs its peer, and the second, refused at the
-/// cap at the dialer's msg2, should close the dial's connection, since no
-/// other link uses it. On next it stays open: the refusal drops the leg and
-/// leaves the connection as it was.
+/// cap at the dialer's msg2, closes the dial's connection, since no other
+/// link uses it.
 #[tokio::test]
-#[ignore = "known defect: a dial refused at the peer cap keeps its TCP connection"]
 async fn a_dial_refused_at_the_peer_cap_closes_its_tcp_connection() {
     let mut config = Config::new();
     config.node.limits.max_peers = 1;
@@ -1161,11 +1159,10 @@ async fn a_dial_refused_at_the_peer_cap_closes_its_tcp_connection() {
 }
 
 /// A responder whose ACL denies the initiator learns its identity at the
-/// msg3 and refuses it there. It should close the inbound TCP connection the
-/// handshake ran on, as nothing else uses it; on next the responder's pool
-/// still holds it a second later.
+/// msg3 and refuses it there. It closes the inbound TCP connection the
+/// handshake ran on, as nothing else uses it, so a second later the
+/// responder's pool no longer holds it.
 #[tokio::test]
-#[ignore = "known defect: a msg3 refused by the ACL keeps its inbound TCP connection"]
 async fn an_acl_refusal_at_msg3_closes_its_inbound_tcp_connection() {
     let mut nodes = vec![make_test_node_tcp().await, make_test_node_tcp().await];
     let (a, b) = nodes.split_at_mut(1);
@@ -1204,14 +1201,170 @@ async fn an_acl_refusal_at_msg3_closes_its_inbound_tcp_connection() {
     );
 }
 
-/// A responder that can draw no session index refuses a fresh inbound msg1
-/// at the msg1, before it knows who sent it. It should close the inbound TCP
-/// connection the msg1 came on, as nothing else uses it; on next the
-/// refusal returns without a close, and the responder's pool still holds the
-/// connection a second later. Only the responder runs after the dial, so the
-/// initiator neither resends nor closes.
+/// Run `nodes` until `done` holds, for up to two seconds; whether it held.
+async fn run_until(nodes: &mut [TestNode], done: impl Fn(&[TestNode]) -> bool) -> bool {
+    for _ in 0..200 {
+        if done(nodes) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(nodes).await;
+    }
+    done(nodes)
+}
+
+/// Node `held` dials node `first` over TCP and both install the peering.
+async fn hold_first(nodes: &mut [TestNode], held: usize, first: usize) -> bool {
+    initiate_handshake(nodes, held, first).await;
+    run_until(nodes, |n| {
+        n[held].node.peer_count() == 1 && n[first].node.peer_count() == 1
+    })
+    .await
+}
+
+/// A responder at a peer cap of one, holding a peer it dialed, learns a
+/// further initiator's identity at its msg3 and refuses it at the cap. It
+/// closes the inbound TCP connection the handshake ran on, as nothing else
+/// uses it.
 #[tokio::test]
-#[ignore = "known defect: a msg1 refused for want of a session index keeps its inbound TCP connection"]
+async fn a_msg3_refused_at_the_peer_cap_closes_its_inbound_tcp_connection() {
+    let mut config = Config::new();
+    config.node.limits.max_peers = 1;
+    let mut nodes = vec![
+        make_test_node_tcp().await,
+        make_test_node_tcp_with(config).await,
+        make_test_node_tcp().await,
+    ];
+    let first = hold_first(&mut nodes, 1, 2).await;
+    let capped = nodes[1].node.stats().handshake.max_peers;
+    initiate_handshake(&mut nodes, 0, 1).await;
+    let addr = nodes[0].addr.clone();
+    let mut seen = 0;
+    for _ in 0..200 {
+        seen = seen.max(pooled(&nodes[1], &addr).1);
+        if seen > 0 && nodes[1].node.stats().handshake.max_peers > capped {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    let refused = nodes[1].node.stats().handshake.max_peers > capped;
+    let held = nodes[1].node.get_peer(nodes[0].node.node_addr()).is_some();
+    settle_for(&mut nodes, Duration::from_secs(1)).await;
+    let after = pooled(&nodes[1], &addr).1;
+    cleanup_nodes(&mut nodes).await;
+
+    assert!(
+        first,
+        "precondition: the responder holds the peer it dialed"
+    );
+    assert_eq!(
+        seen, 1,
+        "precondition: the dial's connection is pooled inbound"
+    );
+    assert!(
+        refused,
+        "precondition: the responder refused the msg3 at the cap"
+    );
+    assert!(
+        !held,
+        "precondition: the responder does not hold the initiator"
+    );
+    assert_eq!(
+        after, 0,
+        "defect: the responder's pool still holds the connection of the msg3 it refused at the cap"
+    );
+}
+
+/// A leaf holding a peer it dialed is dialed by a second node over TCP; it
+/// learns the second's identity at the msg3 and refuses it, holding one
+/// peer at most. It closes the inbound TCP connection the handshake ran on,
+/// as nothing else uses it.
+#[tokio::test]
+async fn a_msg3_a_leaf_refuses_for_a_second_peer_closes_its_inbound_tcp_connection() {
+    let mut config = Config::new();
+    config.node.leaf_only = true;
+    let mut nodes = vec![
+        make_test_node_tcp().await,
+        make_test_node_tcp_with(config).await,
+        make_test_node_tcp().await,
+    ];
+    let first = hold_first(&mut nodes, 1, 2).await;
+    initiate_handshake(&mut nodes, 0, 1).await;
+    let addr = nodes[0].addr.clone();
+    let mut seen = 0;
+    for _ in 0..200 {
+        seen = seen.max(pooled(&nodes[1], &addr).1);
+        if seen > 0 && nodes[1].node.connection_count() == 0 && nodes[0].node.peer_count() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    let held = nodes[1].node.get_peer(nodes[0].node.node_addr()).is_some();
+    let holds = nodes[1].node.peer_count();
+    settle_for(&mut nodes, Duration::from_secs(1)).await;
+    let after = pooled(&nodes[1], &addr).1;
+    cleanup_nodes(&mut nodes).await;
+
+    assert!(first, "precondition: the leaf holds the peer it dialed");
+    assert_eq!(
+        seen, 1,
+        "precondition: the dial's connection is pooled inbound"
+    );
+    assert!(!held, "precondition: the leaf refused the second peer");
+    assert_eq!(holds, 1, "precondition: the leaf holds one peer");
+    assert_eq!(
+        after, 0,
+        "defect: the leaf's pool still holds the connection of the msg3 it refused"
+    );
+}
+
+/// A leaf holding a peer it dialed dials a second node over TCP; it
+/// refuses the second at that dial's msg2, holding one peer at most. It
+/// closes the dial's connection, as nothing else uses it.
+#[tokio::test]
+async fn a_leafs_second_dial_refused_at_its_msg2_closes_its_tcp_connection() {
+    let mut config = Config::new();
+    config.node.leaf_only = true;
+    let mut nodes = vec![
+        make_test_node_tcp_with(config).await,
+        make_test_node_tcp().await,
+        make_test_node_tcp().await,
+    ];
+    let first = hold_first(&mut nodes, 0, 1).await;
+    initiate_handshake(&mut nodes, 0, 2).await;
+    let addr = nodes[2].addr.clone();
+    let dialled = pooled(&nodes[0], &addr).0;
+    let settled = run_until(&mut nodes, |n| n[0].node.connection_count() == 0).await;
+    settle_for(&mut nodes, Duration::from_millis(500)).await;
+    let held = nodes[0].node.peer_count();
+    let second = nodes[0].node.get_peer(nodes[2].node.node_addr()).is_some();
+    let after = pooled(&nodes[0], &addr).0;
+    cleanup_nodes(&mut nodes).await;
+
+    assert!(first, "precondition: the leaf holds the peer it dialed");
+    assert_eq!(
+        dialled,
+        ConnectionState::Connected,
+        "precondition: the second dial holds a connection"
+    );
+    assert!(settled, "precondition: the leaf read the second answer");
+    assert_eq!(held, 1, "precondition: the leaf holds one peer");
+    assert!(!second, "precondition: the second dial was refused");
+    assert_eq!(
+        after,
+        ConnectionState::None,
+        "defect: the leaf's second dial, refused at its msg2, left its connection open"
+    );
+}
+
+/// A responder that can draw no session index refuses a fresh inbound msg1
+/// at the msg1, before it knows who sent it. It closes the inbound TCP
+/// connection the msg1 came on, as nothing else uses it, so a second later
+/// the responder's pool no longer holds it. Only the responder runs after
+/// the dial, so the initiator neither resends nor closes.
+#[tokio::test]
 async fn a_msg1_refused_for_want_of_a_session_index_closes_its_inbound_tcp_connection() {
     let mut nodes = vec![make_test_node_tcp().await, make_test_node_tcp().await];
     nodes[1].node.index_allocator = crate::utils::index::IndexAllocator::with_max_attempts(0);

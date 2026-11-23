@@ -123,7 +123,8 @@ pub enum In {
         learned: Option<NodeAddr>,
     },
     /// The shell refused the handshake on `link`: the leg and its link go
-    /// at once, closing nothing, and `retry` is asked for when it names
+    /// at once, with no close in the retire, since the node closes the
+    /// connection by its own rule, and `retry` is asked for when it names
     /// someone.
     Refused {
         /// The leg's link.

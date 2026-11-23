@@ -296,9 +296,10 @@ fn fresh<I: Instant>(ops: &mut Ops<'_, I, Xx>, peer: NodeAddr) {
     flow.framed.remove(&peer);
 }
 
-/// End the leg or ask on `link` at once, closing nothing, as next's shell
-/// drops a refused handshake: the lease comes back and the link is
-/// retired.
+/// End the leg or ask on `link` at once: the lease comes back and the
+/// link is retired, with no close in the retire. Which connection a
+/// refused handshake closes, the node decides by its own rule (the
+/// README's section on closes).
 fn end<I: Instant>(ops: &mut Ops<'_, I, Xx>, link: LinkNo, out: &mut Vec<Outs<I, Xx>>) {
     ops.flow_mut().forget(link);
     if let Some(leg) = ops.legs_mut().take(link) {
@@ -317,8 +318,8 @@ fn end<I: Instant>(ops: &mut Ops<'_, I, Xx>, link: LinkNo, out: &mut Vec<Outs<I,
 /// an answer's at msg3 when `answer` says so and a dial's at msg2
 /// otherwise: a leaf holding another peer, which removes the link at once,
 /// or the max-peers cap, which leaves a dial's leg for its reap and removes
-/// an answer's link at once, closing nothing, as next's inbound promote
-/// failure does. The refusal goes to `out`.
+/// an answer's link at once, with no close in the retire, as `end` does.
+/// The refusal goes to `out`.
 fn barred<I: Instant>(
     ops: &mut Ops<'_, I, Xx>,
     peer: NodeAddr,
@@ -357,8 +358,8 @@ fn barred<I: Instant>(
 }
 
 /// The shell refused the handshake on `link`: the leg, or the ask, and its
-/// link go at once, closing nothing, and `retry` is asked for. A link the
-/// flow holds nothing for is left alone.
+/// link go at once, with no close in the retire, and `retry` is asked for.
+/// A link the flow holds nothing for is left alone.
 fn refused<I: Instant>(
     ops: &mut Ops<'_, I, Xx>,
     link: LinkNo,

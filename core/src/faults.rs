@@ -622,6 +622,28 @@ faults! {
     /// the peer's first frame counts toward the peer's silent-session
     /// back-off.
     OwnDialCountsSilent,
+    /// The node: the ACL's refusal at an answer's msg3 leaves open the
+    /// inbound connection the handshake ran on, though no other link uses
+    /// it.
+    AclRefusalKeepsConnection,
+    /// The node: a msg1 refused for want of a session index leaves open the
+    /// inbound connection it came over, though no other link uses it.
+    IndexRefusalKeepsConnection,
+    /// The node: a dial refused at the peer cap at its msg2 leaves its
+    /// connection open until the leg is reaped, though no other link uses
+    /// it.
+    CapRefusalKeepsConnection,
+    /// The node: an answer refused at the peer cap at its msg3 leaves open
+    /// the inbound connection the handshake ran on, though no other link
+    /// uses it.
+    CapMsg3KeepsConnection,
+    /// The node: a leaf's refusal of a second peer at an answer's msg3
+    /// leaves open the inbound connection the handshake ran on, though no
+    /// other link uses it.
+    LeafMsg3KeepsConnection,
+    /// The node: a leaf's refusal of a second peer at its own dial's msg2
+    /// leaves the dial's connection open, though no other link uses it.
+    LeafMsg2KeepsConnection,
     /// The XX flow and the node: a move keeps the frame heard under the
     /// session it leaves, so a dial in flight at the move is no longer
     /// beside the node's own unheard dial and sends its msg3.

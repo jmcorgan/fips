@@ -22,7 +22,8 @@ the IK flow.
   anonymous answers and dials, the msg2 decisions parked on their dials,
   the failed legs, and the per-peer marks next's msg2 rule reads),
   `params`, the XX parameters of a table, the `xx_fault!` macro, the rules
-  every message shares (the shell's refusals, which close nothing; next's
+  every message shares (the shell's refusals, whose connections the node
+  closes by its own rule; next's
   promote refusals, the leaf rule and the max-peers cap; the failed legs
   and their sweep; the retry a dial past its deadline asks for, and an
   identified dial's at a failed connection), and the flow's implementation
@@ -78,6 +79,22 @@ the IK flow.
   mark master's node tests. `src/node/settle/tests/rules.rs` checks the two
   against each other and the tests' doc lines.
 - `tests/`: the unit tests; its README describes them.
+
+## The closes this flow decides
+
+On next the node carries out none of the connection closes the core
+decides. It reads a `Retire` only for the link it names
+(`src/node/settle/decide.rs`), drops every close the core's link records
+return (`let _closes` in `src/node/settle/links.rs`), and closes a
+connection by its own rule, `Node::in_use` in `src/node/mod.rs`. So the
+closes this flow writes are checked only by the core's tests: the strip in
+`msg2.rs`'s `swap` and its switch `MoveClosesDial`, the "closing nothing"
+of `end` and of the refusals, and the closes of `Ops::move_answer`. They
+state next's close rule in the core's terms and agree with what the node
+does, but a change to them changes nothing in a running node. Making the
+node carry out `Retire.closes`, or dropping the core's close decisions on
+next, is a design change left for its own decision; until then a fix to
+which connections next closes goes in the node.
 
 ## Rules for changing it
 

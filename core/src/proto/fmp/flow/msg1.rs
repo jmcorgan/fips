@@ -4,7 +4,8 @@
 //! next draws the session index and builds the msg2 after the Noise read,
 //! with no identity gate, ACL or peer cap (`handshake.rs`, the comment
 //! before the index draw), so nothing here judges the msg1. A msg1 whose
-//! index cannot be drawn is refused by the shell, which closes nothing.
+//! index cannot be drawn is refused by the shell, and the node closes its
+//! connection.
 
 use alloc::vec::Vec;
 

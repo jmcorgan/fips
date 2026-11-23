@@ -156,7 +156,7 @@ fn install<I: Instant>(
 }
 
 /// The msg3 on `link` is refused: no msg2 goes back, and the answer and
-/// its link go, closing nothing.
+/// its link go, with no close in the retire.
 fn deny<I: Instant>(
     ops: &mut Ops<'_, I, Xx>,
     link: LinkNo,

@@ -509,6 +509,14 @@ impl Node {
             if let Some(link) = asked {
                 self.core_unasked(link);
             }
+            // Nothing will answer on the connection the msg1 came over, so
+            // it is closed unless another live link uses it: over TCP the
+            // pooled inbound connection would otherwise hold an inbound slot
+            // until the initiator gives up on it.
+            if !node_fault!(IndexRefusalKeepsConnection) {
+                self.close_at(packet.transport_id, &packet.remote_addr, link_id)
+                    .await;
+            }
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -1346,13 +1354,29 @@ impl Node {
 
         // The decision the node carries out: the core's, made at the msg2
         // and the msg3's send.
+        let mut decided = msg2_out;
+        decided.append(&mut sent_out);
         let decision = if withhold {
             Some(Msg2Decision::Keep)
         } else {
-            let mut decided = msg2_out;
-            decided.append(&mut sent_out);
             crate::node::settle::decide::outbound(&decided)
         };
+        // A dial refused at the peer cap will never be used: its connection
+        // is closed now, unless another live link uses it, rather than held
+        // open until its leg is reaped. The promotion below still refuses
+        // the peer and ends the dial's entry.
+        if crate::node::settle::decide::capped(&decided) && !node_fault!(CapRefusalKeepsConnection)
+        {
+            self.close_unused(link_id).await;
+        }
+        // A dial a leaf refuses for a second peer is ended at once, its link
+        // retired: its connection is closed unless another live link uses
+        // it, and its pending dial goes with the link (below).
+        let leafed = crate::node::settle::decide::leafed(&decided);
+        if leafed && !node_fault!(LeafMsg2KeepsConnection) {
+            self.close_at(packet.transport_id, &packet.remote_addr, link_id)
+                .await;
+        }
         let Some(decision) = decision else {
             debug!(
                 link_id = %link_id,
@@ -1664,6 +1688,11 @@ impl Node {
             .cancel(link_id, TimerKind::HandshakeRetransmit);
         self.handshakes.cancel(link_id, TimerKind::HandshakeTimeout);
         self.promote(link_id, &ambient, carried).await;
+        if leafed {
+            // The leaf's refusal in the promotion removed the dial's link,
+            // so no pending dial may name it.
+            self.pending_outbound.forget(&key);
+        }
     }
 
     /// Handle handshake message 3 (phase 0x3).
@@ -1965,7 +1994,13 @@ impl Node {
             }
             // The leg's lease is released after the send: the reject signal is
             // built from state on the machine and is this arm's user-visible
-            // behaviour.
+            // behaviour. The connection the handshake ran on is closed after
+            // the send too, unless another live link uses it: the refused
+            // peer has no use for it, and a TCP connection left in the pool
+            // would hold an inbound slot until the peer gives up on it.
+            if !node_fault!(AclRefusalKeepsConnection) {
+                self.close_unused(link_id).await;
+            }
             self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Refused {
                 link,
                 retry: None,
@@ -2038,17 +2073,22 @@ impl Node {
         // The settlement core decides the msg3. A link the core does not
         // number, which only a test makes, or a msg3 the core decides
         // nothing for, ends the answer's leg.
-        let decided = self
-            .core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Msg3 {
-                link,
-                peer: peer_node_addr,
-                epoch: remote_epoch.unwrap_or_default(),
-                claim: rekey_claim,
-                from: crate::node::settle::decide::pair(packet.transport_id, &packet.remote_addr),
-            })
-            .and_then(|out| {
-                crate::node::settle::decide::inbound(&out, stored_msg2, rekey_claim, peer_node_addr)
-            });
+        let out = self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Msg3 {
+            link,
+            peer: peer_node_addr,
+            epoch: remote_epoch.unwrap_or_default(),
+            claim: rekey_claim,
+            from: crate::node::settle::decide::pair(packet.transport_id, &packet.remote_addr),
+        });
+        let capped = out
+            .as_deref()
+            .is_some_and(crate::node::settle::decide::capped);
+        let leafed = out
+            .as_deref()
+            .is_some_and(crate::node::settle::decide::leafed);
+        let decided = out.and_then(|out| {
+            crate::node::settle::decide::inbound(&out, stored_msg2, rekey_claim, peer_node_addr)
+        });
         let Some(decision) = decided else {
             debug!(
                 link_id = %link_id,
@@ -2059,6 +2099,19 @@ impl Node {
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         };
+        // An answer refused at the peer cap will never be used: the
+        // connection its handshake ran on is closed, unless another live link
+        // uses it. The promotion below still refuses the peer and ends the
+        // answer's entry.
+        if capped && !node_fault!(CapMsg3KeepsConnection) {
+            self.close_at(packet.transport_id, &packet.remote_addr, link_id)
+                .await;
+        }
+        // So is one a leaf refuses for a second peer.
+        if leafed && !node_fault!(LeafMsg3KeepsConnection) {
+            self.close_at(packet.transport_id, &packet.remote_addr, link_id)
+                .await;
+        }
         if !self.handshakes.contains_key(&link_id) {
             // The entry was read a few lines above and nothing between
             // removes it. Were it gone, the lease on the leg's index went

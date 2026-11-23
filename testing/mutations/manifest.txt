@@ -386,6 +386,12 @@ SilentRefusalAnyEpoch	red	fips-mesh	node::tests::silent_backoff::a_new_epoch_msg
 OwnDialCountsSilent	red	fips-core	proto::fmp::flow::tests::msg2::a_dialed_session_that_ends_unheard_is_not_counted_silent_and_an_answered_one_is
 OwnDialCountsSilent	red	fips-mesh	node::tests::silent_backoff::a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_against_the_refuser
 OwnDialCountsSilent	red	fips-mesh	node::tests::silent_backoff::a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_against_the_refuser_with_multipath_on
+AclRefusalKeepsConnection	red	fips-mesh	node::tests::tcp::an_acl_refusal_at_msg3_closes_its_inbound_tcp_connection
+IndexRefusalKeepsConnection	red	fips-mesh	node::tests::tcp::a_msg1_refused_for_want_of_a_session_index_closes_its_inbound_tcp_connection
+CapRefusalKeepsConnection	red	fips-mesh	node::tests::tcp::a_dial_refused_at_the_peer_cap_closes_its_tcp_connection
+CapMsg3KeepsConnection	red	fips-mesh	node::tests::tcp::a_msg3_refused_at_the_peer_cap_closes_its_inbound_tcp_connection
+LeafMsg3KeepsConnection	red	fips-mesh	node::tests::tcp::a_msg3_a_leaf_refuses_for_a_second_peer_closes_its_inbound_tcp_connection
+LeafMsg2KeepsConnection	red	fips-mesh	node::tests::tcp::a_leafs_second_dial_refused_at_its_msg2_closes_its_tcp_connection
 MoveKeepsFramed	red	fips-core	proto::fmp::flow::tests::msg2::a_dial_in_flight_at_the_smaller_nodes_move_is_beside_its_new_own_dial_though_the_peer_was_heard_before
 MoveKeepsFramed	red	fips-mesh	node::tests::double_dial::a_frame_heard_before_a_move_does_not_let_a_second_dial_cross_the_ends	both ends hold one session
 MoveKeepsFramed	red	fips-mesh	node::tests::double_dial::a_frame_heard_before_a_move_does_not_let_a_second_dial_cross_the_ends_with_multipath_on	both ends hold one session

@@ -3253,8 +3253,21 @@ impl Node {
         let Some(link) = self.links.get(&link_id) else {
             return;
         };
-        let transport_id = link.transport_id();
-        let addr = link.remote_addr();
+        self.close_at(link.transport_id(), link.remote_addr(), link_id)
+            .await;
+    }
+
+    /// Close the transport connection at `(transport_id, addr)`, which a
+    /// handshake on `link_id` ran on, unless a live link other than
+    /// `link_id` uses it ([`Self::in_use`]). `link_id` need not be in the
+    /// link table: a msg1 refused before its link was added names the link
+    /// it would have had.
+    pub(in crate::node) async fn close_at(
+        &self,
+        transport_id: TransportId,
+        addr: &TransportAddr,
+        link_id: LinkId,
+    ) {
         if self.in_use(transport_id, addr, link_id) {
             tracing::debug!(
                 link_id = %link_id,
