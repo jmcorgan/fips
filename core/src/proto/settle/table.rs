@@ -1110,7 +1110,10 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
     /// closing nothing. Told as a move, at which the shell renews the
     /// peer's bundle, so the held link's record no longer holds the peer
     /// capable. A peer not held takes nothing: the leg's lease goes back
-    /// and its link is retired, closing nothing.
+    /// and its link is retired, closing nothing. Its one caller is a test
+    /// switch's defect shape, so only the builds that can turn a switch
+    /// have it.
+    #[cfg(any(test, feature = "test-hooks"))]
     #[allow(clippy::too_many_arguments)]
     fn hold_answer(
         &mut self,
@@ -2191,7 +2194,9 @@ impl<I: Instant, F: Flow<I>> Ops<'_, I, F> {
     }
 
     /// Keep the held `peer` on its link with the responder leg `leg`'s
-    /// session and lease, at `pair`, and retire the leg's link.
+    /// session and lease, at `pair`, and retire the leg's link. Test
+    /// builds and the test hooks only.
+    #[cfg(any(test, feature = "test-hooks"))]
     #[allow(clippy::too_many_arguments)]
     pub fn hold_answer(
         &mut self,
