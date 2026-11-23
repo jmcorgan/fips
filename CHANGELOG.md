@@ -1843,18 +1843,51 @@ with v0.5.x or earlier peers.
 #### Peer and link state
 
 - A peer that changes address while its node keeps running and dials again
-  is answered at once. The responder keeps the old peering until the peer's
-  first frame on the new session, then moves the peering to the new address,
-  keeping the peer's tree and filter state and re-opening the end-to-end
-  session; before, the dial was refused until the old peering timed out
-  (about 45 s at the defaults). A dial to a second address of a peer whose
-  link has gone quiet now moves the peering to that address the same way
-  instead of being refused, and crossed TCP dials whose second msg1 reaches
-  the larger node on its own connection now settle both ends on the smaller
-  node's dial. A replayed handshake message cannot end or move a peering:
-  the responder answers it once, to the address it came from, and discards
-  that pending state after the handshake timeout. Nothing on the wire
-  changes.
+  over a link it had dialed itself is now settled at the redial's msg3
+  whichever node has the smaller address: the responder moves the peering
+  onto the new link and retires the old one. Before, a redialler with the
+  larger address sat on a session the responder did not pair with until the
+  responder timed out the old peering (about 40 s at the defaults). A node
+  that withdrew a peer and dials it again is settled the same way. Where the
+  responder had dialed the old link and the redialler has the larger
+  address, the redial is still refused until the old link is declared dead.
+  Nothing on the wire changes.
+
+- Crossed dials settled at the peer's msg3 now end on one link at both ends,
+  the one the smaller node dialed: the larger node moves onto it and closes
+  the connection of its own dial unless a live link uses it, and the smaller
+  node closes the other. Before, the larger node took the new session but
+  stayed on the link it had dialed, both ends listed their link as outbound,
+  the larger node's link record named a connection the smaller node had
+  closed, and over TCP each node could keep a second connection open with no
+  link on it.
+
+- A handshake refused part-way now closes the transport connection it ran
+  on, unless another live link uses it: a msg3 the ACL refuses, a msg1
+  refused for want of a session index, a peer refused at the peer cap at the
+  dialer's msg2 or the responder's msg3, and a second peer a leaf refuses at
+  its msg2 or msg3. Over TCP each such connection stayed open until the
+  initiator gave up on it or the handshake timed out, holding a pool entry
+  meanwhile. A leaf's dial refused at its msg2 also no longer leaves its
+  pending dial naming the removed link.
+
+- The cap on inbound handshakes in flight (`node.limits.max_pending_inbound`)
+  now counts an answered handshake until its msg3, a failure or its timeout
+  ends it. An answer waits for the initiator's msg3 after its msg2 is sent,
+  and that wait was not counted, so the handshakes that stay open longest
+  were not bounded by the cap.
+
+- A node that ends a later dial of its own at the msg2 without sending a
+  msg3 now resends, byte for byte, the msg3 of the dial that installed the
+  session it holds, while nothing has been heard under that session. When
+  that first msg3 was lost, the peer held no session for the dialer until
+  the link-dead timeout.
+
+- A node whose msg3 a peer refused during the peer's silent-session back-off
+  no longer counts the session it promoted at its msg2 toward its own
+  back-off for that peer when the link-dead timeout removes it unheard. A
+  removed session that carried no frame now counts against a peer only when
+  the peer dialed it.
 
 - With multipath enabled, a dial to a peer that times out after the peer came
   up on another link now leaves its address as a path candidate, where before
