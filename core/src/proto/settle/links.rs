@@ -351,7 +351,7 @@ impl Links {
     /// which for a handover to an acknowledged path that is not Live is
     /// acknowledged. Returns the connections a released path leaves to
     /// close; any other input changes nothing.
-    pub fn mirror(&mut self, input: &Input) -> Vec<Pair> {
+    pub fn mirror<X>(&mut self, input: &Input<X>) -> Vec<Pair> {
         match input {
             Input::Moved { link, from, to, .. } => self.moved(*link, from, to.clone()),
             Input::Switched { link, to, proven } => {
@@ -388,7 +388,8 @@ impl Links {
             | Input::Adopted { .. }
             | Input::Sent { .. }
             | Input::SendFailed { .. }
-            | Input::Unsendable { .. } => {}
+            | Input::Unsendable { .. }
+            | Input::Flow(_) => {}
             #[cfg(test)]
             Input::HeldFrame { .. } | Input::HoldLost { .. } => {}
         }

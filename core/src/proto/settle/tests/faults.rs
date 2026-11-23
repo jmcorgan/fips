@@ -1846,7 +1846,7 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     ),
     ("an_abstract_frame_opens_only_under_its_handshake", HAND),
     (
-        "the_stub_profile_selects_the_rows_the_link_profile_does",
+        "the_stub_profile_selects_the_rows_the_link_profile_does_but_those_of_a_third_message",
         HAND,
     ),
     (
@@ -1949,10 +1949,11 @@ pub fn rowless(all: &[Fault], rows: &[Row]) -> Vec<Fault> {
 }
 
 /// The names in `tests` that no row of `rows` or of `rekey` names and
-/// neither list holds.
-pub fn uncovered<'a>(
+/// neither list holds. A row's switch may be of any list's type: only its
+/// tests are read.
+pub fn uncovered<'a, F>(
     tests: &'a [String],
-    rows: &[Row],
+    rows: &[(F, &'static [Test])],
     rekey: &[RekeyRow],
     checked: &[&str],
     characterised: &[(&str, &str)],

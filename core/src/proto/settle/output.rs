@@ -11,6 +11,7 @@
 //! keep comes back in an [`Output::Free`].
 
 use alloc::vec::Vec;
+use core::convert::Infallible;
 
 use super::gates::{Refusal, Source};
 use super::links::{Dir, LinkNo, Pair};
@@ -73,9 +74,11 @@ pub enum Why {
     Closed,
 }
 
-/// Why a msg1 or msg2 was refused.
+/// Why a msg1 or msg2 was refused. `X` is the refusal a handshake flow
+/// adds ([`Flow::Deny`](super::flow::Flow::Deny)), which the IK flow, the
+/// default, has none of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Denial {
+pub enum Denial<X = Infallible> {
     /// A restart gate refused it.
     Gate(Refusal),
     /// The admission cap on answers in flight is reached.
@@ -86,6 +89,8 @@ pub enum Denial {
     /// The max-peers cap is reached, and the msg1 or the completed dial
     /// is from an identity not held.
     Cap,
+    /// A refusal of the table's handshake flow.
+    Flow(X),
 }
 
 /// A peer installed.
@@ -105,9 +110,12 @@ pub struct Install {
     pub lease: IndexLease,
 }
 
-/// One output.
+/// One output. `X` is the output a handshake flow adds
+/// ([`Flow::Out`](super::flow::Flow::Out)) and `D` its refusal
+/// ([`Flow::Deny`](super::flow::Flow::Deny)), which the IK flow, the
+/// default, has none of.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Output {
+pub enum Output<X = Infallible, D = Infallible> {
     /// A dial's link, for the shell to name it by.
     Opened {
         /// The link.
@@ -222,8 +230,10 @@ pub enum Output {
         /// What asked the gate, for a gate's refusal.
         source: Option<Source>,
         /// Why.
-        why: Denial,
+        why: Denial<D>,
     },
+    /// An output of the table's handshake flow.
+    Flow(X),
     /// Test-only, for a candidate rule: keep the session of `link`, the
     /// one the peer held until now, decryptable beside the one it holds
     /// next, until an [`Output::Settle`] ends it.

@@ -118,6 +118,7 @@ impl Node {
             | Input::Sent { .. }
             | Input::SendFailed { .. }
             | Input::Unsendable { .. } => {}
+            Input::Flow(x) => match *x {},
         }
     }
 

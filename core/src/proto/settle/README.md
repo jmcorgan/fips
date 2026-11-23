@@ -85,8 +85,24 @@ so it reaches no normal or release build.
   of one leg alone at a given instant, through the same reap a poll
   makes, for a shell asking whether the core reaps a leg the shell is
   reaping.
+- `flow.rs`: the handshake flow a table runs, the `Flow` trait. A flow
+  classifies a handshake's messages; the table's shared rules (the
+  records, the legs, the gates, the held peers, removal, the path inputs
+  and the close rule) hold for every flow. A flow adds its own inputs,
+  outputs and refusals through one extension variant of each enum
+  (`Input::Flow`, `Output::Flow`, `Denial::Flow`), whose payloads are its
+  associated types, keeps its own state as the value of its type in the
+  table, and is called back at the hooks where a flow may differ: the
+  stored answer, the count the admission cap reads, an answer sent with
+  no peer named, and an install, move, frame or removal of a held peer.
+  `Ik`, the flow of FMP's IK handshake, is every rule the table's own
+  inputs carry: its payloads are `Infallible`, the enums' and the table's
+  type parameters default to it, and each hook's body, in `table.rs`, is
+  the table's own rule. Another flow lives outside this directory and
+  reaches the table only through `table::Ops`.
 - `table.rs`: the judgements. `Table` holds the links, the legs, the peer
-  held for each identity and the gates; `step` takes one input and
+  held for each identity, the gates and its flow (`Table::new` runs `Ik`,
+  `Table::flowing` another); `step` takes one input and
   returns the outputs, `poll` runs the legs' timers, `reap_leg` reaps one
   leg alone and `close` gives everything back. `gates` lends the gates'
   memory for a shell's reads;
@@ -94,7 +110,15 @@ so it reaches no normal or release build.
   count of the msg1s a silent-session back-off refused, for its log,
   `drop_leg` ends a leg for a cause the table has no input for, with the
   answer and the redial it carried, and `open_link` opens a record for a
-  link a shell adds outside any handshake. Under the test hooks `plant`, `plant_leg` and
+  link a shell adds outside any handshake. `Ops`, hidden from the docs, is
+  the table as a flow reaches it, which only the table builds: its reads,
+  writers to the records, legs and gates, and the shared operations a
+  flow's rules invoke, each a one-line call of the table's own, so the IK
+  flow's tests run every body. Three of them are the table's own steps,
+  taken out of the inputs that run them: `install_answer` (a responder
+  leg's install, from `Sent`), `keep` (the larger node's keep of its held
+  peer at its own dial's msg2) and `open_answer` (a responder leg's
+  opening, from `Hello`). Under the test hooks `plant`, `plant_leg` and
   `records` write a held peer, a leg and the link records outright, for a
   shell that resyncs into its copy of the table what a test planted past
   its writers (a responder's leg planted as an answer whose send failed,

@@ -376,18 +376,49 @@ fn an_abstract_frame_opens_only_under_its_handshake() {
     );
 }
 
+/// The joint world's nodes run the stub IK profile, a link of two messages.
+/// Where the link profile runs two messages too, every row is the same. A
+/// line whose link runs three differs from the stub in the rows the third
+/// message sets: how many messages, where the handshake commits, when the
+/// initiator cuts over, and where dampening opens. Every other row is the
+/// same, and the joint world there explores a two-message link, not that
+/// line's own.
 #[test]
-fn the_stub_profile_selects_the_rows_the_link_profile_does() {
+fn the_stub_profile_selects_the_rows_the_link_profile_does_but_those_of_a_third_message() {
     use crate::proto::fmp::rekey::FmpProfile;
+    use crate::proto::rekey::{Commit, DampenAt, InitiatorCutover};
     type Link = FmpProfile<crate::testutil::SeededEntropy>;
+    if Link::MESSAGES == Ik::MESSAGES {
+        assert_eq!(Ik::COMMIT, Link::COMMIT, "COMMIT");
+        assert_eq!(
+            Ik::INITIATOR_CUTOVER,
+            Link::INITIATOR_CUTOVER,
+            "INITIATOR_CUTOVER"
+        );
+        assert_eq!(Ik::DAMPEN_AT, Link::DAMPEN_AT, "DAMPEN_AT");
+    } else {
+        assert_eq!(
+            (Ik::MESSAGES, Link::MESSAGES),
+            (2, 3),
+            "MESSAGES: the stub's and the link's"
+        );
+        assert_eq!(
+            (Ik::COMMIT, Link::COMMIT),
+            (Commit::AtAnswer, Commit::AtFinal),
+            "COMMIT: the stub's and the link's"
+        );
+        assert_eq!(
+            (Ik::INITIATOR_CUTOVER, Link::INITIATOR_CUTOVER),
+            (InitiatorCutover::OnProof, InitiatorCutover::AfterDelay),
+            "INITIATOR_CUTOVER: the stub's and the link's"
+        );
+        assert_eq!(
+            (Ik::DAMPEN_AT, Link::DAMPEN_AT),
+            (DampenAt::Answer, DampenAt::Completion),
+            "DAMPEN_AT: the stub's and the link's"
+        );
+    }
     assert_eq!(Ik::LAYER, Link::LAYER, "LAYER");
-    assert_eq!(Ik::MESSAGES, Link::MESSAGES, "MESSAGES");
-    assert_eq!(Ik::COMMIT, Link::COMMIT, "COMMIT");
-    assert_eq!(
-        Ik::INITIATOR_CUTOVER,
-        Link::INITIATOR_CUTOVER,
-        "INITIATOR_CUTOVER"
-    );
     assert_eq!(
         Ik::RESPONDER_CUTOVER,
         Link::RESPONDER_CUTOVER,
@@ -395,7 +426,6 @@ fn the_stub_profile_selects_the_rows_the_link_profile_does() {
     );
     assert_eq!(Ik::CANDIDATES, Link::CANDIDATES, "CANDIDATES");
     assert_eq!(Ik::PER_CARRIER, Link::PER_CARRIER, "PER_CARRIER");
-    assert_eq!(Ik::DAMPEN_AT, Link::DAMPEN_AT, "DAMPEN_AT");
     assert_eq!(Ik::SELECT, Link::SELECT, "SELECT");
     assert_eq!(Ik::SILENCE, Link::SILENCE, "SILENCE");
     assert_eq!(Ik::SETUP_RTT, Link::SETUP_RTT, "SETUP_RTT");

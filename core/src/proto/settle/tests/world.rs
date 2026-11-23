@@ -29,6 +29,7 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::convert::Infallible;
 use core::hash::{Hash, Hasher};
 
 use crate::proto::path::Source;
@@ -75,8 +76,10 @@ pub enum Kind {
 /// ephemeral, as the model names it. A party that writes real messages
 /// also carries their bytes, as `wire`: an index into [`Net::wires`], 0
 /// for none. Equal bytes take one index, so a resend equals its original.
+/// `X` is the packets a handshake flow's parties add ([`Pkt::Flow`]),
+/// which the IK flow, the default, has none of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Pkt {
+pub enum Pkt<X = Infallible> {
     /// A msg1 from identity `id`.
     Msg1 {
         /// The sender's identity.
@@ -112,12 +115,56 @@ pub enum Pkt {
     },
     /// The far end closed the connection.
     Eof,
+    /// A packet of a handshake flow's parties, which the world delivers as
+    /// it delivers the others and the routing passes through untouched.
+    Flow(X),
 }
 
-impl Pkt {
+/// What the world reads of a handshake flow's packet ([`Pkt::Flow`]).
+pub trait Extra: Copy + core::fmt::Debug + Eq + 'static {
+    /// Whether it is a handshake message.
+    fn handshake(&self) -> bool;
+    /// Whether it opens a handshake, as a msg1 does, so an attacker that
+    /// recorded it can replay it.
+    fn opens(&self) -> bool;
+    /// The index of its bytes in [`Net::wires`]; 0 for none.
+    fn wire(&self) -> u32;
+    /// The same packet with no bytes named.
+    fn bare(self) -> Self;
+}
+
+impl Extra for Infallible {
+    fn handshake(&self) -> bool {
+        match *self {}
+    }
+    fn opens(&self) -> bool {
+        match *self {}
+    }
+    fn wire(&self) -> u32 {
+        match *self {}
+    }
+    fn bare(self) -> Self {
+        match self {}
+    }
+}
+
+impl<X: Extra> Pkt<X> {
     /// Whether this is a handshake message.
     pub fn handshake(&self) -> bool {
-        matches!(self, Self::Msg1 { .. } | Self::Msg2 { .. })
+        match self {
+            Self::Msg1 { .. } | Self::Msg2 { .. } => true,
+            Self::Frame { .. } | Self::Eof => false,
+            Self::Flow(x) => x.handshake(),
+        }
+    }
+
+    /// Whether this opens a handshake, as a msg1 does.
+    fn opens(&self) -> bool {
+        match self {
+            Self::Msg1 { .. } => true,
+            Self::Msg2 { .. } | Self::Frame { .. } | Self::Eof => false,
+            Self::Flow(x) => x.opens(),
+        }
     }
 
     /// The index of its bytes in [`Net::wires`]; 0 for none.
@@ -125,6 +172,7 @@ impl Pkt {
         match self {
             Self::Msg1 { wire, .. } | Self::Msg2 { wire, .. } | Self::Frame { wire, .. } => *wire,
             Self::Eof => 0,
+            Self::Flow(x) => x.wire(),
         }
     }
 
@@ -152,6 +200,7 @@ impl Pkt {
             },
             Self::Frame { id, hs, .. } => Self::Frame { id, hs, wire: 0 },
             Self::Eof => Self::Eof,
+            Self::Flow(x) => Self::Flow(x.bare()),
         }
     }
 }
@@ -180,7 +229,7 @@ pub struct End {
 
 /// A connection; end 0 dialed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Conn {
+pub struct Conn<X = Infallible> {
     /// Its number.
     pub id: u32,
     /// Its transport's model.
@@ -190,14 +239,14 @@ pub struct Conn {
     /// Its state.
     pub state: State,
     /// What each end sent inside the connect window, by end.
-    pub queued: Vec<(usize, Pkt)>,
+    pub queued: Vec<(usize, Pkt<X>)>,
     /// The BLE verified mark, per end.
     pub verified: [bool; 2],
 }
 
 /// A packet in flight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Flight {
+pub struct Flight<X = Infallible> {
     /// Its number, unique in one world.
     pub id: u64,
     /// The receiving node.
@@ -209,7 +258,7 @@ pub struct Flight {
     /// The connection it travels on, if any.
     pub conn: Option<u32>,
     /// The content.
-    pub pkt: Pkt,
+    pub pkt: Pkt<X>,
     /// A copy the explorer made.
     pub copy: bool,
 }
@@ -262,7 +311,7 @@ pub enum PathEv {
 
 /// One input to a party.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Input {
+pub enum Input<X = Infallible> {
     /// A packet arrived. Frames arrive only once the stub crypto opened
     /// them.
     Packet {
@@ -273,7 +322,7 @@ pub enum Input {
         /// Its connection.
         conn: Option<u32>,
         /// The content.
-        pkt: Pkt,
+        pkt: Pkt<X>,
         /// The wall clock at arrival, as a packet stamp carries it.
         stamp: i64,
         /// A copy the explorer made (a duplicate, a replay or a forgery),
@@ -471,9 +520,9 @@ pub fn ends<T>(x: usize, a: T, y: usize, b: T) -> (T, T) {
 }
 
 /// A node, as the world drives it.
-pub trait Party {
+pub trait Party<X = Infallible> {
     /// Take one input, acting on the world through `net`.
-    fn input(&mut self, net: &mut Net, inp: Input);
+    fn input(&mut self, net: &mut Net<X>, inp: Input<X>);
     /// The earliest instant this party has something to do.
     fn wake(&self) -> Option<Ms>;
     /// The earliest instant this party has something to do that is not a
@@ -528,7 +577,7 @@ pub trait Party {
 
 /// What lies between the nodes.
 #[derive(Clone, Debug)]
-pub struct Net {
+pub struct Net<X = Infallible> {
     /// The monotonic clock.
     pub now: Ms,
     /// How far the wall clock runs ahead of the monotonic one.
@@ -538,11 +587,11 @@ pub struct Net {
     /// Each node's addresses.
     pub addrs: Vec<Vec<Addr>>,
     /// Every connection opened.
-    pub conns: Vec<Conn>,
+    pub conns: Vec<Conn<X>>,
     /// Packets in flight, in send order.
-    pub flight: Vec<Flight>,
+    pub flight: Vec<Flight<X>>,
     /// Every msg1 that entered flight, for the replay act.
-    pub captured: Vec<Flight>,
+    pub captured: Vec<Flight<X>>,
     /// The bytes packets carry, each distinct value once, by the index a
     /// [`Pkt`]'s `wire` names; index 0 is the empty value, for none.
     pub wires: Vec<Vec<u8>>,
@@ -566,6 +615,14 @@ pub struct Net {
 impl Net {
     /// A world with no traffic: `kinds` by transport, `addrs` by node.
     pub fn new(kinds: &[(u8, Kind)], addrs: Vec<Vec<Addr>>) -> Self {
+        Self::flowing(kinds, addrs)
+    }
+}
+
+impl<X: Extra> Net<X> {
+    /// A world with no traffic for a handshake flow's parties: `kinds` by
+    /// transport, `addrs` by node.
+    pub fn flowing(kinds: &[(u8, Kind)], addrs: Vec<Vec<Addr>>) -> Self {
         Self {
             now: 0,
             wall: 0,
@@ -642,7 +699,7 @@ impl Net {
     /// `pkt` as the digest prints it: its abstract fields and its bytes,
     /// never the index, which depends on the order values were first sent
     /// in.
-    pub fn shown(&self, pkt: &Pkt) -> String {
+    pub fn shown(&self, pkt: &Pkt<X>) -> String {
         if fault!(WireByNumber) {
             // The defect's shape: the index printed in place of the bytes.
             return format!("{pkt:?}");
@@ -675,7 +732,15 @@ impl Net {
     }
 
     /// Put a packet in flight.
-    fn push(&mut self, to: usize, local: Addr, src: Addr, conn: Option<u32>, pkt: Pkt, copy: bool) {
+    fn push(
+        &mut self,
+        to: usize,
+        local: Addr,
+        src: Addr,
+        conn: Option<u32>,
+        pkt: Pkt<X>,
+        copy: bool,
+    ) {
         let id = self.next;
         self.next += 1;
         let f = Flight {
@@ -687,14 +752,14 @@ impl Net {
             pkt,
             copy,
         };
-        if matches!(pkt, Pkt::Msg1 { .. }) && !copy {
+        if pkt.opens() && !copy {
             self.captured.push(f);
         }
         self.flight.push(f);
         if fault!(FlightByHash) {
             // The defect's shape: the flight rebuilt from a hash map, whose
             // order a fresh random state picks.
-            let map: std::collections::HashMap<u64, Flight> =
+            let map: std::collections::HashMap<u64, Flight<X>> =
                 self.flight.drain(..).map(|f| (f.id, f)).collect();
             self.flight = map.into_values().collect();
         }
@@ -702,7 +767,7 @@ impl Net {
 
     /// Put a forged packet in flight to node `to` at its address `local`,
     /// from `src`.
-    pub fn inject(&mut self, to: usize, local: Addr, src: Addr, pkt: Pkt) {
+    pub fn inject(&mut self, to: usize, local: Addr, src: Addr, pkt: Pkt<X>) {
         self.push(to, local, src, None, pkt, true);
     }
 
@@ -784,7 +849,7 @@ impl Net {
 
     /// Send `pkt` from `me` to `to`, from `me`'s address `from` on a
     /// connectionless transport. False when there is no way to send.
-    pub fn send(&mut self, me: usize, from: Option<Addr>, to: Addr, pkt: Pkt) -> bool {
+    pub fn send(&mut self, me: usize, from: Option<Addr>, to: Addr, pkt: Pkt<X>) -> bool {
         self.note(|| format!("n{me} sends {pkt:?} to {to:?}"));
         match self.kind(to.transport) {
             Kind::Datagram => {
@@ -866,7 +931,7 @@ impl Net {
 
     /// Whether flight entry `f` may be delivered now: each direction of a
     /// connection delivers in order.
-    pub fn deliverable(&self, f: &Flight) -> bool {
+    pub fn deliverable(&self, f: &Flight<X>) -> bool {
         match f.conn {
             None => true,
             Some(c) => {
@@ -880,14 +945,15 @@ impl Net {
     }
 }
 
-/// The world: the parties and what lies between them.
-pub struct World {
+/// The world: the parties and what lies between them, whose packets
+/// include those of the handshake flow `X` ([`Pkt::Flow`]).
+pub struct World<X = Infallible> {
     /// The nodes, by index.
-    pub parties: Vec<Box<dyn Party>>,
+    pub parties: Vec<Box<dyn Party<X>>>,
     /// Their identities, by index.
     pub ids: Vec<Node>,
     /// The transports, connections, flight and clocks.
-    pub net: Net,
+    pub net: Net<X>,
     /// Path events the start makes available, each usable once.
     pub paths: Vec<(usize, PathEv)>,
     /// Which of them have been used.
@@ -907,6 +973,14 @@ pub struct World {
 impl World {
     /// A world of `parties` with identities `ids` over `net`.
     pub fn new(parties: Vec<Box<dyn Party>>, ids: Vec<Node>, net: Net) -> Self {
+        Self::flowing(parties, ids, net)
+    }
+}
+
+impl<X: Extra> World<X> {
+    /// A world of a handshake flow's `parties` with identities `ids` over
+    /// `net`.
+    pub fn flowing(parties: Vec<Box<dyn Party<X>>>, ids: Vec<Node>, net: Net<X>) -> Self {
         Self {
             parties,
             ids,
@@ -949,7 +1023,7 @@ impl World {
 
     /// What node `x`'s delivery of `pkt` could turn out to be, judged
     /// before it is handed over, and the session that decides it.
-    fn suspect(&self, x: usize, pkt: Pkt) -> Option<(Shape, Hs, Option<Hs>)> {
+    fn suspect(&self, x: usize, pkt: Pkt<X>) -> Option<(Shape, Hs, Option<Hs>)> {
         let loose = fault!(ShapeLoose);
         let me = self.ids[x];
         match pkt {
@@ -997,7 +1071,7 @@ impl World {
                     Some(p.cur),
                 ))
             }
-            Pkt::Eof => None,
+            Pkt::Eof | Pkt::Flow(_) => None,
         }
     }
 
@@ -1008,7 +1082,7 @@ impl World {
     /// its session, which `before` was not; a dial left a responder
     /// pending on its handshake. Each is kept with what it left, read just
     /// after the delivery ([`Left`]).
-    fn witness(&mut self, x: usize, pkt: Pkt, shape: Shape, hs: Hs, before: Option<Hs>) {
+    fn witness(&mut self, x: usize, pkt: Pkt<X>, shape: Shape, hs: Hs, before: Option<Hs>) {
         let (Pkt::Frame { id, .. } | Pkt::Msg1 { id, .. } | Pkt::Msg2 { id, .. }) = pkt else {
             return;
         };
@@ -1044,7 +1118,7 @@ impl World {
 
     /// Hand `inp` to node `x`, noting each peer its liveness timer removed
     /// while the peer held it on another session.
-    pub fn input(&mut self, x: usize, inp: Input) {
+    pub fn input(&mut self, x: usize, inp: Input<X>) {
         let World {
             parties,
             net,
@@ -1108,14 +1182,16 @@ impl World {
                     .note(|| format!("n{} cannot open {:?}", f.to, f.pkt));
                 return;
             }
-            Pkt::Msg1 { .. } | Pkt::Msg2 { .. } | Pkt::Frame { .. } => Input::Packet {
-                src: f.src,
-                local: f.local,
-                conn: f.conn,
-                pkt: f.pkt,
-                stamp: self.net.wallnow(),
-                copy: f.copy,
-            },
+            Pkt::Msg1 { .. } | Pkt::Msg2 { .. } | Pkt::Frame { .. } | Pkt::Flow(_) => {
+                Input::Packet {
+                    src: f.src,
+                    local: f.local,
+                    conn: f.conn,
+                    pkt: f.pkt,
+                    stamp: self.net.wallnow(),
+                    copy: f.copy,
+                }
+            }
         };
         let suspect = self.suspect(f.to, f.pkt);
         self.input(f.to, inp);

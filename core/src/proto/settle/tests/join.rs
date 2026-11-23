@@ -467,7 +467,7 @@ fn a_roam_is_moved_and_a_bind_is_a_live_path() {
     .iter()
     .map(shown)
     .collect();
-    let moved = In::Moved {
+    let moved: In = In::Moved {
         link: LINK,
         from,
         to: to.clone(),
@@ -483,7 +483,7 @@ fn a_roam_is_moved_and_a_bind_is_a_live_path() {
     .iter()
     .map(shown)
     .collect();
-    let live = In::State {
+    let live: In = In::State {
         link: LINK,
         pair: to,
         proven: Proven::Live,
@@ -510,7 +510,7 @@ fn a_standby_paths_roam_is_moved_and_not_marked_a_roam() {
     .iter()
     .map(shown)
     .collect();
-    let moved = In::Moved {
+    let moved: In = In::Moved {
         link: LINK,
         from,
         to,
@@ -536,7 +536,10 @@ fn a_steps_outputs_come_back_in_order() {
     ];
     let expected = [
         format!("rekey {:?}", out[0]),
-        format!("core {:?}", In::Ended { peer: peer() }),
+        format!(
+            "core {:?}",
+            In::<core::convert::Infallible>::Ended { peer: peer() }
+        ),
         format!("rekey {:?}", out[2]),
         format!("rekey {:?}", out[3]),
     ];
@@ -556,7 +559,7 @@ fn a_steps_outputs_come_back_in_order() {
         format!("path {:?}", out[0]),
         format!(
             "core {:?}",
-            In::Moved {
+            In::<core::convert::Infallible>::Moved {
                 link: LINK,
                 from: pair(&path(1)),
                 to: pair(&path(3)),
@@ -564,9 +567,15 @@ fn a_steps_outputs_come_back_in_order() {
             }
         ),
         format!("path {:?}", out[1]),
-        format!("core {:?}", In::Capable { link: LINK }),
+        format!(
+            "core {:?}",
+            In::<core::convert::Infallible>::Capable { link: LINK }
+        ),
         format!("path {:?}", out[2]),
-        format!("core {:?}", In::Orphaned { peer: peer() }),
+        format!(
+            "core {:?}",
+            In::<core::convert::Infallible>::Orphaned { peer: peer() }
+        ),
     ];
     let got: Vec<String> = joined(Event::Paths {
         out,

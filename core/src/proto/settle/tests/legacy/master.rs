@@ -122,9 +122,10 @@ struct Leg {
     answer: Answered,
 }
 
-/// A pending redial (`RedialMap`, `handlers/redial.rs`): the inbound leg
-/// answering a fresh same-epoch msg1 off the held peer's established link,
-/// beside the held peering, which its first frame replaces.
+/// A pending redial (`RedialMap` and `handlers/redial.rs` on `master`): the
+/// inbound leg answering a fresh same-epoch msg1 off the held peer's
+/// established link, beside the held peering, which its first frame
+/// replaces.
 #[derive(Debug)]
 struct Redialing {
     hs: Hs,

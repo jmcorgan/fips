@@ -1713,6 +1713,7 @@ fn kinds(out: &[Output]) -> Vec<&'static str> {
             Output::Reject { .. } => "Reject",
             Output::Hold { .. } => "Hold",
             Output::Settle { .. } => "Settle",
+            Output::Flow(x) => match *x {},
         })
         .collect()
 }

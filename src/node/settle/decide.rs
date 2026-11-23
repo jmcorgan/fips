@@ -95,6 +95,7 @@ fn kind_of(input: &Input) -> &'static str {
         Input::Released { .. } => "Released",
         Input::Capable { .. } => "Capable",
         Input::State { .. } => "State",
+        Input::Flow(x) => match *x {},
     }
 }
 

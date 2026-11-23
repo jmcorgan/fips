@@ -6,7 +6,9 @@
 //! link records ([`links`]), the restart gates ([`gates`]) and the
 //! handshake legs ([`legs`]), with the intervals they read ([`params`]),
 //! and the judgements over them ([`table`]), which take an [`input`] and
-//! return [`output`]s. One function ([`join`]) joins a peer's rekey
+//! return [`output`]s. How a handshake's messages are classified is the
+//! table's [`flow`]: the IK flow, or another a profile outside this
+//! directory adds. One function ([`join`]) joins a peer's rekey
 //! machine and path bundle to the core: it makes their builds, moves and
 //! closes, and says which of their outputs are core inputs. The reference
 //! model (`model`) beside it
@@ -37,6 +39,7 @@ macro_rules! fault {
 
 #[cfg(test)]
 mod faults;
+pub mod flow;
 pub mod gates;
 pub mod input;
 #[doc(hidden)]
@@ -52,4 +55,4 @@ pub mod parity;
 pub mod table;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

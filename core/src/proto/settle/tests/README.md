@@ -19,6 +19,14 @@ can rebuild any state by replaying the path that reached it.
   rekey machine, and no test naming the rekey machine's transcription or
   the stand-in core's party, both retired once a joint node ran the real
   machine. Each scan also plants its own break and shows it is found.
+  The world, the parties, the drive, the joint world, the legacy models,
+  the starts and the switch tables are declared `pub(crate)`, as are the
+  scan helpers (`files`, `fenced`, `setters`, `core_reaches`,
+  `model_reaches`, `tests_in`), so a handshake flow's tests outside this
+  directory reuse them: the model's declaration and the forbidden module
+  list are parameters of `core_reaches` and `model_reaches`, which the
+  scans here pass as `MODEL_DECLARATION` and `CORE_MODULES`, and
+  `faults::uncovered` takes rows of any switch type.
 - `faults.rs`: the table of every switch in `../faults.rs` and the tests
   it must turn red, a second table of the rekey machine's switches that
   a joint node's tests red, by their variants' names, the tests that
@@ -53,7 +61,13 @@ can rebuild any state by replaying the path that reached it.
   its abstract fields, as an index into `Net.wires`, where equal bytes
   take one index (0 for none, which every party here sends), so a resend
   equals its original; the digest prints the bytes, never the index
-  (switch `WireByNumber`). A start may hold a candidate act, a feed's report of a peer's address
+  (switch `WireByNumber`). The packet, connection, flight, input, party,
+  net and world types take a default type parameter, the packets a
+  handshake flow's parties add (`Pkt::Flow`), `Infallible` for the IK
+  flow every party here runs, so the world delivers a flow's packets as
+  it delivers the others, and reads of each only what `Extra` says
+  (whether it is a handshake message, whether it opens a handshake for
+  the replay act, its bytes' index, and the packet with none named). A start may hold a candidate act, a feed's report of a peer's address
   with the node's own address it is reached from, and the acts of a
   node's transport losing or regaining carrier and being removed, which
   only a node with a real bundle takes; and a NAT's rebinding of a node's
