@@ -1240,7 +1240,8 @@ async fn crossed_on_two_links() -> (Vec<TestNode>, TransportAddr, TransportAddr)
 
 /// [`crossed_on_two_links`]: node 1 keeps L2 pooled, holds node 0 on L2,
 /// where the msg3 came from, verifies L2 as node 0's link, and no longer
-/// verifies L1 as node 0's, which node 0's move closed.
+/// pools L1, the link it left, which node 0's move closed and its own move
+/// closes too.
 #[tokio::test(start_paused = true)]
 async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link() {
     let (mut nodes, a0, a0x) = crossed_on_two_links().await;
@@ -1264,21 +1265,19 @@ async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification
         Some(true),
         "node 1 verifies L2 as node 0's link"
     );
-    assert_ne!(
+    assert_eq!(
         verified_at(&nodes[1], &a0).await,
-        Some(true),
-        "node 1's L1 is no longer node 0's link"
+        None,
+        "node 1 no longer pools L1, the link it left"
     );
     assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
 /// [`crossed_on_two_links`]: node 1, which settled the crossing at node 0's
-/// msg3, holds node 0 on a link that is still pooled. On this line it does
-/// not: node 1 moved onto node 0's dial's session on L2 but stays held on
-/// L1, the link it dialed, and node 0's move closed L1.
+/// msg3, holds node 0 on a link that is still pooled: L2, node 0's dial, and
+/// not L1, the link node 1 dialed, which node 0's move closed.
 #[tokio::test(start_paused = true)]
-#[ignore = "known defect on next: a crossing the larger node settles at the peer's msg3 leaves it held on the link it dialed, whose connection the smaller node's move at its msg2 closes"]
 async fn a_crossed_dial_won_on_a_second_link_leaves_the_larger_node_on_a_pooled_link() {
     let (mut nodes, _a0, _a0x) = crossed_on_two_links().await;
     let n0 = *nodes[0].node.node_addr();

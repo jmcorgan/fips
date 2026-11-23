@@ -159,12 +159,13 @@ pub(super) fn expect(cell: Cell) -> Expect {
         | Cell::OldClosedNewAdopted
         | Cell::DialClosed
         | Cell::DialHeldLeftClosed
+        | Cell::LegHeldLeftClosed
         | Cell::FromDial
         | Cell::FromLeg
         | Cell::OldDroppedFromDial
         | Cell::OldDroppedFromLeg
         | Cell::LeftDroppedDialNamed
-        | Cell::LegDroppedHeldNamed
+        | Cell::LeftDroppedLegNamed
         | Cell::DialDropped
         | Cell::LegDropped
         | Cell::Followed
@@ -202,13 +203,14 @@ pub(super) fn expect(cell: Cell) -> Expect {
         | Cell::OldRemovedLegSurvives
         | Cell::DialRemovedPeerStepped
         | Cell::LegRemoved
+        | Cell::LegRemovedPeerRekeyed
         | Cell::DialRemovedPeerRekeyed
         | Cell::SteppedThenRemoved
         | Cell::UnkeptQueued
         | Cell::UnkeptQueuedCurrentClosed
         | Cell::DialClosedUnlessProven
         | Cell::LeftClosedReleasedQueued
-        | Cell::ReleasedQueued
+        | Cell::LegClosedUnlessProven
         | Cell::QueuedDrained
         | Cell::Marked
         | Cell::MarkedAtFirstFrame

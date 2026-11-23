@@ -194,8 +194,8 @@ field, at once.
   caught with its lease. The last clause, `links-mirror`, holds
   each held peer's core link record to its bundle, holding its paths,
   each in the state the bundle holds it, a switched-to path too, and its
-  capable flag to the bundle's. A crossing at the msg3 that keeps the peer
-  on its link renews the bundle there, and the renewal tells the record
+  capable flag to the bundle's. A crossing at the msg3 that moves the peer
+  onto the leg's link renews the bundle there, and the renewal tells the record
   (`Node::run_renewed`, through `LinkTable::renewed`). It skips a peer a test
   mutator of the peer's paths changed past the feed
   (`ActivePeer::past_feed`, test builds only), and records each skip in

@@ -377,12 +377,15 @@ impl Node {
                 // releases every index the old machine held. Both
                 // ends converge on the link the smaller node dialed
                 // (FRC-2201, Section 5.7), which this msg3 came over,
-                // so the peer is taken at the msg3's transport and
-                // source address, and the rebuilt machine records the
-                // leg's binding on that transport. The path machine
-                // starts again with that pair as the new link's
+                // so the peer is held on the leg's link, taken at the
+                // msg3's transport and source address, and the rebuilt
+                // machine records the leg's binding on that transport.
+                // The link it held, its own dial's, is torn down and its
+                // connection closed unless a live link uses it. The path
+                // machine starts again with that pair as the new link's
                 // original path (multipath v1 draft, Section 5.4).
                 let prior = self.peer_link(&peer);
+                let held = self.peers.get(&peer).map(|p| p.link_id());
                 let local = self.session_node_keys();
                 let me = *self.identity().node_addr();
                 let params = crate::node::handlers::rekey::link_params(&self.config().node);
@@ -442,6 +445,9 @@ impl Node {
                 // The machine was rebuilt exactly when the peer is
                 // on the leg's index.
                 let built = peer_ref.our_index() == Some(ours);
+                // A rebuilt move holds the peer on the leg's link, and the
+                // link it held, its own dial's, is the one torn down.
+                let left = held.filter(|held| built && peer_ref.link_id() != *held);
                 // The rest of the move, in its order: the machine's
                 // outputs, the waiver, the path feeds, what follows
                 // a move to another pair, the note, and the leg.
@@ -460,6 +466,7 @@ impl Node {
                 facts.paths = paths;
                 facts.ours = Some(our_index);
                 facts.theirs = Some(their_index);
+                facts.loser = left;
                 facts.to = Some((ambient.transport_id, ambient.remote_addr.clone()));
                 facts.key = Some(crate::ipv6tun::link::PeerKey::from_xonly(
                     &ambient.verified_identity.pubkey(),

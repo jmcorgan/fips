@@ -644,6 +644,14 @@ faults! {
     /// The node: a leaf's refusal of a second peer at its own dial's msg2
     /// leaves the dial's connection open, though no other link uses it.
     LeafMsg2KeepsConnection,
+    /// The XX flow and the node: the larger node of a crossing settled at
+    /// the peer's msg3 takes the inbound leg's session on the link it
+    /// dialed and stays held there, and the leg's link is the one retired.
+    Msg3MoveKeepsHeldLink,
+    /// The node: the smaller node of a crossing settled at the peer's msg3
+    /// keeps its own dial and leaves the inbound leg's connection open,
+    /// though no other link uses it.
+    Msg3KeepLeavesLegOpen,
     /// The XX flow and the node: a move keeps the frame heard under the
     /// session it leaves, so a dial in flight at the move is no longer
     /// beside the node's own unheard dial and sends its msg3.

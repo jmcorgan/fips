@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::proto::settle::gates::Refusal;
+use crate::proto::settle::links::Holder;
 use crate::proto::settle::output::{Build, Denial, Transition, Why};
 
 /// Whether `out` refuses with `why`.
@@ -126,6 +127,56 @@ fn a_restart_at_msg3_is_refused_inside_the_interval_from_the_install_when_no_fra
     );
 }
 
+/// The larger node at a msg3 crossing that moves `small()` onto its
+/// answer at 30 s, with the peering on its own dial heard at 1 s.
+fn moved_at_a_crossing() -> T {
+    let mut l = node(large(), false);
+    held_by_dial(&mut l, small(), E1, 1, 1, 0);
+    frame(&mut l, small(), 1, 1_000);
+    let link = answered(&mut l, 2, 2, None, 30_000);
+    let out = xx(&mut l, msg3(link, small(), E1, RekeyClaim::None, 2), 30_000);
+    assert!(
+        out.iter().any(|o| matches!(
+            o,
+            Output::Reset {
+                transition: Transition::Move,
+                ..
+            }
+        )),
+        "precondition: the larger node moves onto the answer: {out:?}"
+    );
+    l
+}
+
+/// The move at a msg3 crossing changes the peer's session, not its
+/// peering, as next's move does: a restart after it is gated from the
+/// peering's last frame, as with no move, not from the move.
+#[test]
+fn a_restart_after_the_larger_nodes_move_at_a_msg3_crossing_is_gated_from_the_peerings_last_frame()
+{
+    let mut l = moved_at_a_crossing();
+    let link = answered(&mut l, 3, 3, None, 35_000);
+    let out = xx(&mut l, msg3(link, small(), E2, RekeyClaim::None, 3), 35_000);
+    assert!(
+        installs(&out, small()),
+        "defect: the move started the gate's floor again, refusing a restart 34 s after the last frame: {out:?}"
+    );
+}
+
+/// The same peering removed before its next frame was heard before the
+/// move, so it is not counted as a silent session.
+#[test]
+fn a_peering_heard_before_the_larger_nodes_move_at_a_msg3_crossing_is_not_counted_silent_at_its_removal()
+ {
+    let mut l = moved_at_a_crossing();
+    go(&mut l, Input::Dead { peer: small() }, 31_000);
+    assert_eq!(
+        l.gates().silent(&small()),
+        None,
+        "defect: the move left the peering unheard, so its removal counted it silent"
+    );
+}
+
 #[test]
 fn a_msg3_claiming_a_session_not_held_repeats_the_stored_msg2_and_leaves_the_peer() {
     let mut a = node(small(), false);
@@ -175,18 +226,17 @@ fn a_msg3_claiming_the_session_held_hands_the_leg_and_its_lease_to_the_peers_rek
 fn a_crossing_at_msg3_moves_the_larger_node_onto_its_inbound_session_and_keeps_the_smaller_on_its_own()
  {
     // The larger node holds the peer on its own dial and moves onto the
-    // answer's session, which it takes on the link it holds.
+    // answer's link and session, retiring the link it held.
     let mut b = node(large(), false);
     let own = held_by_dial(&mut b, small(), E1, 1, 1, 0);
-    let record = b.links().get(own).cloned();
     let link = answered(&mut b, 2, 3, None, 10);
     let out = xx(&mut b, msg3(link, small(), E1, RekeyClaim::None, 4), 20);
     assert!(
         out.iter().any(|o| matches!(
             o,
-            Output::Install(i) if i.link == own && i.pair == pair(4) && !i.initiator && i.rekey == Build::FromCarry
+            Output::Install(i) if i.link == link && i.pair == pair(4) && !i.initiator && i.rekey == Build::FromCarry
         )),
-        "the larger node takes the answer's session on the link it holds, at the msg3's pair: {out:?}"
+        "defect: the larger node does not take the answer's session on the answer's link, at the msg3's pair: {out:?}"
     );
     assert!(
         out.iter().any(|o| matches!(
@@ -199,26 +249,31 @@ fn a_crossing_at_msg3_moves_the_larger_node_onto_its_inbound_session_and_keeps_t
         "as a move, the column next's node runs: {out:?}"
     );
     assert!(
-        retires_quietly(&out, link),
-        "the answer's link goes, closing nothing: {out:?}"
+        out.iter()
+            .any(|o| matches!(o, Output::Retire { link: l, closes } if *l == own && closes.contains(&pair(1)))),
+        "defect: its own dial's link is not retired with its connection: {out:?}"
     );
     assert!(
         !out.iter()
-            .any(|o| matches!(o, Output::Retire { link: l, .. } if *l == own)),
-        "its own dial's link stays: {out:?}"
+            .any(|o| matches!(o, Output::Retire { link: l, .. } if *l == link)),
+        "the answer's link stays, as the peer's: {out:?}"
     );
-    assert_eq!(b.held(&small()).map(|h| h.link), Some(own));
+    assert_eq!(
+        b.held(&small()).map(|h| h.link),
+        Some(link),
+        "defect: the larger node is not held on the answer's link"
+    );
     assert_eq!(
         b.held(&small()).map(|h| h.current.clone()),
         Some(pair(4)),
         "at the msg3's pair"
     );
+    assert!(b.links().get(own).is_none(), "its own dial's record goes");
     assert_eq!(
-        b.links().get(own).cloned(),
-        record,
-        "the held link's record is unchanged"
+        b.links().get(link).map(|r| r.holder),
+        Some(Holder::Peer(small())),
+        "the answer's record is the peer's"
     );
-    assert!(b.links().get(link).is_none());
     // The smaller node keeps its own dial and drops the answer.
     let mut a = node(small(), false);
     let own = held_by_dial(&mut a, large(), E1, 1, 1, 0);
@@ -227,7 +282,7 @@ fn a_crossing_at_msg3_moves_the_larger_node_onto_its_inbound_session_and_keeps_t
     assert!(!installs(&out, large()), "nothing installed: {out:?}");
     assert!(
         retires_quietly(&out, link),
-        "the answer goes, closing nothing"
+        "the answer goes, closing nothing in the core: the node closes its connection"
     );
     assert!(
         out.iter().any(|o| matches!(

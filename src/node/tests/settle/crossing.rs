@@ -2,10 +2,9 @@
 //! each end is left on.
 //!
 //! - Crossed TCP dials between two real TCP nodes on 127.0.0.1: one working
-//!   session on one connection, by the audit (a known difference on this
-//!   line, which settles them at each end's msg3 and closes neither node's
-//!   second connection); the smaller node's link record, which is the link
-//!   it dialed; and a control that redials after a single dial.
+//!   session on one connection, by the audit; the smaller node's link
+//!   record, which is the link it dialed; and a control that redials after
+//!   a single dial.
 //! - A larger node's dial on the aged link after the smaller node's rekey,
 //!   read inside the heard floor: one session.
 //! - Two dials to one address with no peer held, the first reaped: the
@@ -24,9 +23,8 @@
 //!   smaller node settles at its msg2 leave it holding its dial's connection
 //!   alone; on loopback, a dial still in flight at the left link's pair keeps
 //!   that connection open. The larger node, which settles the same crossing
-//!   at the peer's msg3, is left held on the link it dialed, whose connection
-//!   the smaller node closed: a known defect on this line, pinned once per
-//!   order and setting.
+//!   at the peer's msg3, is left held on the leg's link, whose connection is
+//!   open, once per order and setting.
 //!
 //! The master line's crossings won on another pair, its late second dials,
 //! its second own dials, its dials on a quiet peer's aged link, its redials
@@ -125,26 +123,22 @@ async fn working_session(on: bool, zero_smaller: bool) {
 }
 
 #[tokio::test]
-#[ignore = "known difference on next: crossed TCP dials settled at the peer's msg3 at both ends leave each node both its connections open with one in use, which the audit flags as ConnectionsInUse"]
 async fn crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first() {
     working_session(false, true).await;
 }
 
 #[tokio::test]
-#[ignore = "known difference on next: crossed TCP dials settled at the peer's msg3 at both ends leave each node both its connections open with one in use, which the audit flags as ConnectionsInUse"]
 async fn crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first_with_multipath_on()
  {
     working_session(true, true).await;
 }
 
 #[tokio::test]
-#[ignore = "known difference on next: crossed TCP dials settled at the peer's msg3 at both ends leave each node both its connections open with one in use, which the audit flags as ConnectionsInUse"]
 async fn crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first() {
     working_session(false, false).await;
 }
 
 #[tokio::test]
-#[ignore = "known difference on next: crossed TCP dials settled at the peer's msg3 at both ends leave each node both its connections open with one in use, which the audit flags as ConnectionsInUse"]
 async fn crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first_with_multipath_on()
  {
     working_session(true, false).await;
@@ -1162,9 +1156,8 @@ async fn a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first
 
 /// After [`moved_at_msg2_over_tcp`], the larger node, which settled the
 /// crossing at the peer's msg3, holds the smaller on a link with an open
-/// connection. On this line it does not: it moved onto the smaller node's
-/// dial's session but stays held on the link it dialed, and the connection
-/// of that link is the one the smaller node's move closed.
+/// connection: the leg's, the link the smaller node dialed, and not its own
+/// dial's, whose connection the smaller node's move closed.
 async fn larger_record_open(on: bool, zero_smaller: bool) {
     let (mut nodes, s, l) = moved_at_msg2_over_tcp(on, zero_smaller).await;
     let s_addr = *nodes[s].node.node_addr();
@@ -1193,28 +1186,24 @@ async fn larger_record_open(on: bool, zero_smaller: bool) {
 }
 
 #[tokio::test]
-#[ignore = "known defect on next: a crossing the larger node settles at the peer's msg3 leaves it held on the link it dialed, whose connection the smaller node's move at its msg2 closes"]
 async fn a_crossing_settled_at_the_larger_nodes_msg3_leaves_it_on_a_link_with_an_open_connection_smaller_first()
  {
     larger_record_open(false, true).await;
 }
 
 #[tokio::test]
-#[ignore = "known defect on next: a crossing the larger node settles at the peer's msg3 leaves it held on the link it dialed, whose connection the smaller node's move at its msg2 closes"]
 async fn a_crossing_settled_at_the_larger_nodes_msg3_leaves_it_on_a_link_with_an_open_connection_smaller_first_with_multipath_on()
  {
     larger_record_open(true, true).await;
 }
 
 #[tokio::test]
-#[ignore = "known defect on next: a crossing the larger node settles at the peer's msg3 leaves it held on the link it dialed, whose connection the smaller node's move at its msg2 closes"]
 async fn a_crossing_settled_at_the_larger_nodes_msg3_leaves_it_on_a_link_with_an_open_connection_larger_first()
  {
     larger_record_open(false, false).await;
 }
 
 #[tokio::test]
-#[ignore = "known defect on next: a crossing the larger node settles at the peer's msg3 leaves it held on the link it dialed, whose connection the smaller node's move at its msg2 closes"]
 async fn a_crossing_settled_at_the_larger_nodes_msg3_leaves_it_on_a_link_with_an_open_connection_larger_first_with_multipath_on()
  {
     larger_record_open(true, false).await;

@@ -151,6 +151,13 @@ pub(crate) const ROWS: &[(Fault, &[Test])] = &[
         )],
     ),
     (
+        Fault::Msg3MoveKeepsHeldLink,
+        &[(
+            MSG3,
+            "a_crossing_at_msg3_moves_the_larger_node_onto_its_inbound_session_and_keeps_the_smaller_on_its_own",
+        )],
+    ),
+    (
         Fault::MoveKeepsFramed,
         &[(
             MSG2,
@@ -190,6 +197,14 @@ pub(crate) const CHARACTERISATION: &[(&str, &str)] = &[
     ),
     (
         "a_failed_dial_past_its_deadline_asks_for_a_retry_of_the_identity_its_failure_noted",
+        RULE,
+    ),
+    (
+        "a_restart_after_the_larger_nodes_move_at_a_msg3_crossing_is_gated_from_the_peerings_last_frame",
+        RULE,
+    ),
+    (
+        "a_peering_heard_before_the_larger_nodes_move_at_a_msg3_crossing_is_not_counted_silent_at_its_removal",
         RULE,
     ),
     (
@@ -302,10 +317,6 @@ pub(crate) const CHARACTERISATION: &[(&str, &str)] = &[
     ),
     (
         "a_msg3_from_an_identity_not_held_installs_it_as_responder",
-        RULE,
-    ),
-    (
-        "a_crossing_at_msg3_moves_the_larger_node_onto_its_inbound_session_and_keeps_the_smaller_on_its_own",
         RULE,
     ),
     ("a_msg3_for_no_anonymous_answer_changes_nothing", RULE),

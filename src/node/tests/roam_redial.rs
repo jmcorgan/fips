@@ -770,9 +770,9 @@ fn refusals(r: &HandshakeStatsSnapshot) -> u64 {
 /// from its new address reaches B 5 s after the change, and B answers it.
 /// B learns that the dial is A's only at its msg3, which arrives on a link
 /// other than the one B holds A on and declares no rekey, so B settles it
-/// as a crossing by node-address order: with A the smaller, B takes the
-/// dial's session. Both ends hold it 5 s after the change, B on the link it
-/// held A on under a new index (`How::Rekeyed`). One msg1 and one msg2
+/// as a crossing by node-address order: with A the smaller, B moves onto the
+/// dial's session and link. Both ends hold it 5 s after the change, B on
+/// the dial's link (`How::NewLink`). One msg1 and one msg2
 /// pass, none of them stale, B refuses nothing and never drops A, and A,
 /// which withdrew B at the detach, dropped it at the change.
 fn smaller_settles_at_its_msg3(o: &Outcome) -> bool {
@@ -784,7 +784,7 @@ fn smaller_settles_at_its_msg3(o: &Outcome) -> bool {
         && o.a_dropped == Some(0.0)
         && o.b_dropped.is_none()
         && o.settled == Some(5.0)
-        && o.how == Some(How::Rekeyed)
+        && o.how == Some(How::NewLink)
         && o.works
 }
 

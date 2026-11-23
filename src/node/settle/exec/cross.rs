@@ -2,9 +2,9 @@
 //! handshake with it, or kept on the session it holds with the other
 //! handshake's link closed. The other handshake is this node's own dial,
 //! settled at its msg2, or an inbound leg the peer's msg3 completed, settled
-//! there. A move onto this node's own dial holds the peer on the dial's link
-//! and closes the link it left; a move onto the inbound leg keeps the peer on
-//! the link it dialed.
+//! there. A move holds the peer on the other handshake's link and closes the
+//! link it left: at the msg2 the dial's link, and at the msg3 the leg's, the
+//! link the smaller node dialed. A keep at the msg3 closes the leg.
 //!
 //! The sites, `handle_msg2`'s crossing arm and `Node::cross_inbound` at the
 //! peer's msg3, make a move themselves with `adopt_dial`, which also
@@ -53,9 +53,9 @@ pub(in crate::node) struct Facts {
     /// The session index of the handshake a kept crossing ends, freed when
     /// run.
     pub(in crate::node) lease: Option<IndexLease>,
-    /// The link the crossing tears down at a dial's msg2: at a move that
-    /// holds the peer on the dial's link, the link it left; otherwise the
-    /// dial's. At the peer's msg3 it is unset, and the leg is the loser.
+    /// The link the crossing tears down: at a move that holds the peer on
+    /// the other handshake's link, the link it left; unset otherwise, and
+    /// the other handshake's link is the loser.
     pub(in crate::node) loser: Option<LinkId>,
 }
 
@@ -107,9 +107,9 @@ pub(super) async fn link_outputs(node: &mut Node, r: &mut Run) {
     node.run_link_outputs(&r.peer, out);
 }
 
-/// The link a move left for the dial's, if it held the peer on the dial's
-/// link; `None` at a keep, at a move refused or kept on its link, and at
-/// the peer's msg3.
+/// The link a move left for the other handshake's, if it held the peer on
+/// that handshake's link; `None` at a keep and at a move refused or kept on
+/// its link.
 fn left(r: &mut Run) -> Option<LinkId> {
     let dial = other(&r.t).map(|(link, _)| link);
     r.crossing().loser.filter(|loser| Some(*loser) != dial)
@@ -131,10 +131,11 @@ pub(super) async fn renewed(node: &mut Node, r: &mut Run) {
     node.run_renewed(&r.peer, left, paths);
 }
 
-/// Hold the peer on the dial's link, if the move left another: the core's
-/// record of the dial's link is the peer's, and the handshake entry, its
-/// timers and the carrier readings are keyed under the dial's link, which
-/// every later read of the peer's link names.
+/// Hold the peer on the other handshake's link, the dial's or the leg's, if
+/// the move left another: the core's record of that link is the peer's, and
+/// the peer's handshake entry, its timers and the carrier readings are keyed
+/// under it, which every later read of the peer's link names. At the msg3
+/// the leg's own entry is dropped first.
 pub(super) async fn hold_dial(node: &mut Node, r: &mut Run) {
     let (Some(left), Some((dial, _))) = (left(r), other(&r.t)) else {
         return;
@@ -216,12 +217,17 @@ pub(super) async fn move_note(node: &mut Node, r: &mut Run) {
     );
 }
 
-/// Close the losing link's connection, the link a move left or the dial's:
-/// a separate socket on TCP, a no-op when connectionless, and left open
-/// while a live link uses it, such as the very connection the peer runs on
-/// (BLE), where closing would take the msg3 just queued, and the link, with
-/// it.
+/// Close the losing link's connection, the link a move left or the other
+/// handshake's: a separate socket on TCP, a no-op when connectionless, and
+/// left open while a live link uses it, such as the very connection the peer
+/// runs on (BLE), where closing would take the msg3 just queued, and the
+/// link, with it.
 pub(super) async fn loser_close(node: &mut Node, r: &mut Run) {
+    // The mutation lane's break: a keep at the peer's msg3 leaves the leg's
+    // connection open.
+    if node_fault!(Msg3KeepLeavesLegOpen) && matches!(r.t, Transition::Keep { inbound: true, .. }) {
+        return;
+    }
     if let Some(link) = loser(r) {
         node.close_unused(link).await;
     }

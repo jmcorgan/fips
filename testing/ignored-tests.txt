@@ -93,55 +93,12 @@ helper        fips-mesh  node::tests::settle::lane::a_planted_switch_reds_at_its
 helper        fips-mesh  nostr::tests::fixtures::capture_the_v044_fixtures  src/nostr/tests/fixtures.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
 known-defect  fips-mesh  node::tests::restart_dial::a_larger_node_still_hearing_a_restarted_peer_settles_on_one_session_when_both_dial_and_the_peer_reads_its_own_answer_first  src/node/tests/restart_dial.rs
-# The next six are known differences on next, each pin once with multipath
-# off and once with it on: crossed TCP dials that this line settles at each
-# end's msg3 leave each node both its connections open with one in use,
-# which the audit flags as ConnectionsInUse. See
-# src/node/tests/settle/README.md, "On this line".
-known-defect  fips-mesh  node::tests::settle::audit::the_audit_finds_no_breach_at_the_smaller_node_after_crossed_tcp_dials  src/node/tests/settle/audit.rs
-known-defect  fips-mesh  node::tests::settle::audit::the_audit_finds_no_breach_at_the_smaller_node_after_crossed_tcp_dials_with_multipath_on  src/node/tests/settle/audit.rs
-known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first_with_multipath_on  src/node/tests/settle/crossing.rs
-# The next five are one known defect on next: a crossing the larger node
-# settles at the peer's msg3 leaves it held on the link it dialed, whose
-# connection the smaller node's move at its own msg2 closes. Over TCP once
-# per order and setting, and on the BLE mock.
-known-defect  fips-mesh  node::tests::settle::crossing::a_crossing_settled_at_the_larger_nodes_msg3_leaves_it_on_a_link_with_an_open_connection_smaller_first  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_crossing_settled_at_the_larger_nodes_msg3_leaves_it_on_a_link_with_an_open_connection_smaller_first_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_crossing_settled_at_the_larger_nodes_msg3_leaves_it_on_a_link_with_an_open_connection_larger_first  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_crossing_settled_at_the_larger_nodes_msg3_leaves_it_on_a_link_with_an_open_connection_larger_first_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::ble::a_crossed_dial_won_on_a_second_link_leaves_the_larger_node_on_a_pooled_link  src/node/tests/ble.rs
 # The next two are issue 130 on this line, with multipath off and on: a
 # redial from a new address by the larger node settles only after the
 # responder reaps the old peering. The smaller node's redial settles at its
 # msg3, and its target tests run.
 known-defect  fips-mesh  node::tests::roam_redial::a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering  src/node/tests/roam_redial.rs
 known-defect  fips-mesh  node::tests::roam_redial::a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering_with_multipath_on  src/node/tests/roam_redial.rs
-# The next three are one known defect on next, at its own refusal points: a
-# connection refused after the handshake read it stays open, where master
-# closes it when nothing else uses it. A dial refused at the peer cap at the
-# dialer's msg2, an inbound initiator the responder's ACL refuses at the msg3,
-# and a fresh inbound msg1 refused at the msg1 for want of a session index.
-# The next twelve are one known defect on next: a crossing the larger node settles
-# at the peer's msg3 moves it onto the inbound leg's session and connection but
-# leaves it held on the link record of the link it dialed, so both ends list the
-# link outbound. Crossed TCP dials in each order, a redial by either end after a
-# crossing or a single dial, and the smaller node's redial after the mixed-schedule
-# crossing, each with multipath off and on.
-known-defect  fips-mesh  node::tests::settle::redialed::crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_smaller_first  src/node/tests/settle/redialed.rs
-known-defect  fips-mesh  node::tests::settle::redialed::crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_smaller_first_with_multipath_on  src/node/tests/settle/redialed.rs
-known-defect  fips-mesh  node::tests::settle::redialed::crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_larger_first  src/node/tests/settle/redialed.rs
-known-defect  fips-mesh  node::tests::settle::redialed::crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_larger_first_with_multipath_on  src/node/tests/settle/redialed.rs
-known-defect  fips-mesh  node::tests::settle::redialed::a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_ends_after_the_smaller_nodes_reap_on_one_session_held_outbound_at_one_end_and_inbound_at_the_other  src/node/tests/settle/redialed.rs
-known-defect  fips-mesh  node::tests::settle::redialed::a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_ends_after_the_smaller_nodes_reap_on_one_session_held_outbound_at_one_end_and_inbound_at_the_other_with_multipath_on  src/node/tests/settle/redialed.rs
-known-defect  fips-mesh  node::tests::settle::redialed::a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_one_session_on_the_smaller_nodes_dial  src/node/tests/settle/redialed.rs
-known-defect  fips-mesh  node::tests::settle::redialed::a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_one_session_on_the_smaller_nodes_dial_with_multipath_on  src/node/tests/settle/redialed.rs
-known-defect  fips-mesh  node::tests::settle::redialed::the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_smaller_first  src/node/tests/settle/redialed.rs
-known-defect  fips-mesh  node::tests::settle::redialed::the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_smaller_first_with_multipath_on  src/node/tests/settle/redialed.rs
-known-defect  fips-mesh  node::tests::settle::redialed::the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_larger_first  src/node/tests/settle/redialed.rs
-known-defect  fips-mesh  node::tests::settle::redialed::the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_larger_first_with_multipath_on  src/node/tests/settle/redialed.rs
 # The next two, with multipath off and on: a smaller node's two concurrent dials,
 # the first dial's msg3 lost and the second's withheld by the own-dial keep, leave
 # the larger node holding no session for the smaller until the link-dead timeout.

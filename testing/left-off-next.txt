@@ -429,8 +429,8 @@ test          next-rule  a_redial_over_tcp_refused_by_the_acl_closes_its_connect
 # core's record turn (Input::Adopted, AdoptedKeepsDir) comes with the core and its table test.
 # next's counterparts, in its redialed.rs, settle the redial at the keeper's msg3, and the larger
 # redialer's after the smaller keeper's reap, as FRC-2201 has it where the keeper dialed the old
-# link. Both reach the both-outbound state, by the msg3 crossing's stale link record, and are
-# known defects there.
+# link. Both end one outbound and one inbound once the larger node's msg3 crossing holds it on
+# the link the smaller node dialed.
 test          replaced   a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_is_held_outbound_at_one_end_and_inbound_at_the_other  src/node/tests/settle/redialed.rs  a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_ends_after_the_smaller_nodes_reap_on_one_session_held_outbound_at_one_end_and_inbound_at_the_other
 test          replaced   a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_is_held_outbound_at_one_end_and_inbound_at_the_other_with_multipath_on  src/node/tests/settle/redialed.rs  a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_ends_after_the_smaller_nodes_reap_on_one_session_held_outbound_at_one_end_and_inbound_at_the_other_with_multipath_on
 test          replaced   a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_the_smaller_nodes_dial  src/node/tests/settle/redialed.rs  a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_one_session_on_the_smaller_nodes_dial

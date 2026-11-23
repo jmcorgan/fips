@@ -199,13 +199,14 @@ fn rekey<I: Instant>(
 }
 
 /// A fresh dial crossing this node's at msg3. The larger node's inbound
-/// wins: it keeps the peer on the link it holds and takes the answer's
-/// session and lease there, at the msg3's pair, a move whose rekey machine
-/// is rebuilt from the closed one's carry, and retires the answer's link,
-/// closing nothing, as next keeps both connections. The smaller node keeps
-/// its own and drops the answer, a keep. Each is told as the column next's
-/// node runs for it (`Transition::Move` and `Transition::Keep`, both
-/// `inbound`, in `src/node/settle/table.rs`).
+/// wins: it moves the peer onto the answer's link, session and lease, at
+/// the msg3's pair, a move whose rekey machine is rebuilt from the closed
+/// one's carry, and retires the link it held, its own dial's, whose
+/// connection the smaller node's keep closes at the other end. The smaller
+/// node keeps its own and drops the answer, a keep. Both end on the link
+/// the smaller node dialed (FRC-2201 Section 5.7). Each is told as the
+/// column next's node runs for it (`Transition::Move` and
+/// `Transition::Keep`, both `inbound`, in `src/node/settle/table.rs`).
 #[allow(clippy::too_many_arguments)]
 fn cross<I: Instant>(
     ops: &mut Ops<'_, I, Xx>,
@@ -229,5 +230,13 @@ fn cross<I: Instant>(
     let Some(leg) = ops.legs_mut().take(link) else {
         return;
     };
-    ops.hold_answer(peer, leg, from, epoch, answer.ephemeral, now, out);
+    // The defect's shape: the peer stays held on its own dial's link and
+    // the answer's link is retired. Only a build that can turn the switch
+    // compiles it, so the hold it calls reaches no release build.
+    #[cfg(any(test, feature = "test-hooks"))]
+    if xx_fault!(Msg3MoveKeepsHeldLink) || node_fault!(Msg3MoveKeepsHeldLink) {
+        ops.hold_answer(peer, leg, from, epoch, answer.ephemeral, now, out);
+        return;
+    }
+    ops.move_answer(peer, leg, from, epoch, answer.ephemeral, now, out);
 }

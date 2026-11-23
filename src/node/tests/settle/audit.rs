@@ -621,10 +621,10 @@ fn at_node(breaches: &[Breach], node: usize) -> Vec<&Breach> {
 /// peer's active path, which the audit counts. Before a move held the
 /// dialed link, the record was the inbound link it was promoted on, at
 /// another pair, which the audit flags. On this line these crossings settle
-/// at the peer's msg3 at both ends, where no connection is closed, so each
-/// node keeps both its connections open with one in use, which the audit's
-/// `ConnectionsInUse` flags at both: a known difference, pinned once per
-/// setting.
+/// at the peer's msg3 at both ends: the larger node moves onto the leg, the
+/// link the smaller node dialed, and closes its own dial's connection, and
+/// the smaller node keeps its dial and closes the leg's, so neither keeps a
+/// connection no link uses.
 async fn crossing_clean(on: bool) {
     let (mut nodes, s, _) = crossed_tcp(on, true).await;
     let breaches = audit(&mut nodes).await;
@@ -638,14 +638,12 @@ async fn crossing_clean(on: bool) {
 
 /// [`crossing_clean`] with multipath off.
 #[tokio::test]
-#[ignore = "known difference on next: crossed TCP dials settled at the peer's msg3 at both ends leave each node both its connections open with one in use, which the audit flags as ConnectionsInUse"]
 async fn the_audit_finds_no_breach_at_the_smaller_node_after_crossed_tcp_dials() {
     crossing_clean(false).await;
 }
 
 /// [`crossing_clean`] with multipath on.
 #[tokio::test]
-#[ignore = "known difference on next: crossed TCP dials settled at the peer's msg3 at both ends leave each node both its connections open with one in use, which the audit flags as ConnectionsInUse"]
 async fn the_audit_finds_no_breach_at_the_smaller_node_after_crossed_tcp_dials_with_multipath_on() {
     crossing_clean(true).await;
 }

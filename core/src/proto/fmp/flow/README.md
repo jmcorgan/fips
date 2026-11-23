@@ -45,12 +45,19 @@ the IK flow.
   identity's silent sessions refuse it; the restart, through next's one
   floor and the dampener; the repeat of the stored msg2 for a claim of a
   session not held; the crossing, which the larger node's inbound wins,
-  the larger node keeping the peer on the link it holds with the answer's
-  session and lease (`Ops::hold_answer`), as next's node does;
+  the larger node moving the peer onto the answer's link, session and
+  lease and retiring the link it held (`Ops::move_answer`), so both ends
+  settle on the link the smaller node dialed (FRC-2201 Section 5.7);
   and the rekey handed to the peer's machine with the leg's lease.
 - `faults.rs`: the flow's test-only switches, read from
   `FIPS_SETTLE_XX_FAULTS`; each is a variant of the node's list too
   (`crate::faults`), and a site reads `xx_fault!(X) || node_fault!(X)`.
+  `Msg3MoveKeepsHeldLink` puts back the crossing next settled before: the
+  larger node keeps the peer on its own dial's link with the answer's
+  session (`Ops::hold_answer`). That defect shape is the only caller of
+  `hold_answer`, which stays in the core's facade for it; the call is
+  compiled only in builds that can turn the switch (tests and
+  `test-hooks`).
 - `input.rs`: `In`, the flow's inputs: the anonymous msg1 and its answer,
   the anonymous dial, the msg2 with the identity it taught, the outcome of
   the msg3 send, the shell's refusals and failures, the msg3, the sweep,

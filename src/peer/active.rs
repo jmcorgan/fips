@@ -779,10 +779,11 @@ impl ActivePeer {
     /// `own` says the dial answered was this node's own or a later one
     /// rather than a crossing won on the tie-break, and `inbound` that the
     /// handshake is an inbound leg the peer's msg3 completed rather than this
-    /// node's own dial. A move onto this node's own dial that rebuilt the
-    /// machine holds the peer on `dial`, the link it dialed (FRC-1201,
-    /// Section 5.6), and the caller tears down the link it left. A move onto
-    /// an inbound leg keeps the peer on the link it holds. A move that
+    /// node's own dial. A move that rebuilt the machine holds the peer on
+    /// `dial`, the link of the handshake it moved onto: this node's own dial
+    /// at its msg2 (FRC-1201, Section 5.6), or at the peer's msg3 the
+    /// inbound leg, the link the smaller node dialed (FRC-2201, Section
+    /// 5.7). The caller tears down the link it left. A move that
     /// rebuilt the machine records `caps.mark` as the session's install mark
     /// ([`predates`](Self::predates)).
     ///
@@ -816,12 +817,15 @@ impl ActivePeer {
         caps: &mut LinkCaps<'_>,
     ) -> (LinkOutputs, Outputs<UdpSlot>) {
         let (out, paths, built) = self.rebuild(session, ours, theirs, to, caps);
-        // The mutation lane's break: the peer stays on the link it was held
-        // on, and the dial's link is the one torn down.
-        let kept = node_fault!(MoveKeepsInboundLink);
+        // The mutation lane's break: at its own dial's msg2 the peer stays on
+        // the link it was held on, and the dial's link is the one torn down.
+        let kept = !inbound && node_fault!(MoveKeepsInboundLink);
         // The mutation lane's break of the pair keeps that link with it.
         let old = node_fault!(MoveKeepsOldPair);
-        if built && !inbound && !kept && !old {
+        // The mutation lane's break: at the peer's msg3 the peer stays held
+        // on the link it dialed.
+        let held = inbound && node_fault!(Msg3MoveKeepsHeldLink);
+        if built && !kept && !old && !held {
             self.set_link_id(dial);
         }
         if built {

@@ -171,10 +171,15 @@ const MOVE_DIAL: &[(Effect, &str)] = &[
 ];
 
 /// `Node::cross_inbound` when the peer moves onto the inbound
-/// leg's session, after `adopt_dial`.
+/// leg's session, after `adopt_dial`, which holds it on the leg's link.
 const MOVE_LEG: &[(Effect, &str)] = &[
     (Effect::RunLinkOutputs, "self.run_link_outputs(&peer, out)"),
-    (Effect::RunRenewed, "self.run_renewed(&peer, None, paths)"),
+    (Effect::RunRenewed, "self.run_renewed(&peer, left, paths)"),
+    (Effect::LegMachineRemoved, "self.remove_handshake(link)"),
+    (
+        Effect::HoldDial,
+        "if left: self.links.hold(&link, peer); self.handshakes.rekey(left, link); self.rekey_carrier(left, link)",
+    ),
     (
         Effect::PathsRenewed,
         "Box::pin(self.paths_renewed(&peer)).await",
@@ -199,8 +204,8 @@ const MOVE_LEG: &[(Effect, &str)] = &[
         Effect::MoveNote,
         "debug!(.., \"Simultaneous-init (msg3): swapped to inbound session (our inbound wins)\")",
     ),
-    (Effect::LoserRemoved, "self.remove_link(&link)"),
-    (Effect::LegMachineRemoved, "self.remove_handshake(link)"),
+    (Effect::LoserClose, "self.close_unused(left).await"),
+    (Effect::LoserRemoved, "self.remove_link(&left)"),
 ];
 
 /// The tail of `handle_msg2`'s crossing arm when the peer keeps its inbound
@@ -242,6 +247,7 @@ const KEEP_LEG: &[(Effect, &str)] = &[
         Effect::KeepNote,
         "debug!(.., \"Simultaneous-init (msg3): keeping outbound session (our outbound wins)\")",
     ),
+    (Effect::LoserClose, "self.close_unused(link).await"),
     (Effect::LoserRemoved, "self.remove_link(&link)"),
     (Effect::LegMachineRemoved, "self.remove_handshake(link)"),
 ];

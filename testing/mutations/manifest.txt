@@ -29,10 +29,6 @@ MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_ano
 MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path
 MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path_with_multipath_on
 MoveKeepsInboundLink	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	node 0 closed L1, the link it left for the one it dialed
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_smaller_first	defect: the smaller node holds a connection besides its dial's
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_smaller_first_with_multipath_on	defect: the smaller node holds a connection besides its dial's
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first	defect: the smaller node holds a connection besides its dial's
-MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first_with_multipath_on	defect: the smaller node holds a connection besides its dial's
 MoveKeepsInboundLink	red	fips-core	proto::settle::table::tests::a_crossing_moves_the_smaller_node_and_retires_the_inbound_link	the inbound link is retired and its connection closed
 MachineLeftBehind	red	fips-mesh	node::tests::settle::crossing::a_moved_peers_control_machine_moves_with_it	audit_live: handle_msg2: carrier
 MachineLeftBehind	red	fips-mesh	node::tests::settle::crossing::a_moved_peers_control_machine_moves_with_it_with_multipath_on	audit_live: handle_msg2: carrier
@@ -393,6 +389,13 @@ CapRefusalKeepsConnection	red	fips-mesh	node::tests::tcp::a_dial_refused_at_the_
 CapMsg3KeepsConnection	red	fips-mesh	node::tests::tcp::a_msg3_refused_at_the_peer_cap_closes_its_inbound_tcp_connection
 LeafMsg3KeepsConnection	red	fips-mesh	node::tests::tcp::a_msg3_a_leaf_refuses_for_a_second_peer_closes_its_inbound_tcp_connection
 LeafMsg2KeepsConnection	red	fips-mesh	node::tests::tcp::a_leafs_second_dial_refused_at_its_msg2_closes_its_tcp_connection
+Msg3MoveKeepsHeldLink	red	fips-core	proto::fmp::flow::tests::msg3::a_crossing_at_msg3_moves_the_larger_node_onto_its_inbound_session_and_keeps_the_smaller_on_its_own
+Msg3MoveKeepsHeldLink	red	fips-mesh	node::tests::settle::redialed::crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_smaller_first
+Msg3MoveKeepsHeldLink	red	fips-mesh	node::tests::settle::crossing::a_crossing_settled_at_the_larger_nodes_msg3_leaves_it_on_a_link_with_an_open_connection_smaller_first
+Msg3MoveKeepsHeldLink	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_settled_at_the_msg3_over_tcp_moves_the_larger_node_as_the_table_says
+Msg3MoveKeepsHeldLink	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_leaves_the_larger_node_on_a_pooled_link
+Msg3KeepLeavesLegOpen	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_settled_at_the_msg3_over_tcp_keeps_the_smaller_node_as_the_table_says
+Msg3KeepLeavesLegOpen	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_settled_at_the_msg3_over_tcp_keeps_the_smaller_node_as_the_table_says_with_multipath_on
 MoveKeepsFramed	red	fips-core	proto::fmp::flow::tests::msg2::a_dial_in_flight_at_the_smaller_nodes_move_is_beside_its_new_own_dial_though_the_peer_was_heard_before
 MoveKeepsFramed	red	fips-mesh	node::tests::double_dial::a_frame_heard_before_a_move_does_not_let_a_second_dial_cross_the_ends	both ends hold one session
 MoveKeepsFramed	red	fips-mesh	node::tests::double_dial::a_frame_heard_before_a_move_does_not_let_a_second_dial_cross_the_ends_with_multipath_on	both ends hold one session

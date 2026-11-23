@@ -30,11 +30,10 @@
 //!   one working session, the smaller node holding the link `Outbound` and
 //!   the larger `Inbound`.
 //!
-//! Every test here fails today, at one cause: a crossing the larger node
-//! settles at the peer's msg3 moves it onto the inbound leg's session and
-//! connection but leaves it held on the link record of the link it dialed,
-//! so it lists the link `Outbound` beside the smaller node's `Outbound`.
-//! Each is a known defect until the msg3 crossing is rewritten.
+//! Each of these turns on the msg3 crossing: the larger node that settles
+//! one at the peer's msg3 moves onto the inbound leg's link, the link the
+//! smaller node dialed, so it lists the link `Inbound` beside the smaller
+//! node's `Outbound`.
 //!
 //! Each test is run once per setting of `node.path.enabled`: a test's plain
 //! name runs multipath off, and its `_with_multipath_on` sibling runs it on,
@@ -92,28 +91,24 @@ async fn crossed(on: bool, zero_smaller: bool) {
 }
 
 #[tokio::test]
-#[ignore = "known defect on next: the larger node's msg3 crossing keeps it on the link record of its own dial, so both ends list the link Outbound"]
 async fn crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_smaller_first() {
     crossed(false, true).await;
 }
 
 /// [`crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_smaller_first`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect on next: the larger node's msg3 crossing keeps it on the link record of its own dial, so both ends list the link Outbound"]
 async fn crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_smaller_first_with_multipath_on()
  {
     crossed(true, true).await;
 }
 
 #[tokio::test]
-#[ignore = "known defect on next: the larger node's msg3 crossing keeps it on the link record of its own dial, so both ends list the link Outbound"]
 async fn crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_larger_first() {
     crossed(false, false).await;
 }
 
 /// [`crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_larger_first`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect on next: the larger node's msg3 crossing keeps it on the link record of its own dial, so both ends list the link Outbound"]
 async fn crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_larger_first_with_multipath_on()
  {
     crossed(true, false).await;
@@ -250,7 +245,6 @@ async fn lone_drop(on: bool) {
 }
 
 #[tokio::test]
-#[ignore = "known defect on next: the larger node's msg3 crossing keeps it on the link record of its own dial, so both ends list the link Outbound"]
 async fn a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_ends_after_the_smaller_nodes_reap_on_one_session_held_outbound_at_one_end_and_inbound_at_the_other()
  {
     lone_drop(false).await;
@@ -258,7 +252,6 @@ async fn a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_ends_after_t
 
 /// [`a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_ends_after_the_smaller_nodes_reap_on_one_session_held_outbound_at_one_end_and_inbound_at_the_other`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect on next: the larger node's msg3 crossing keeps it on the link record of its own dial, so both ends list the link Outbound"]
 async fn a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_ends_after_the_smaller_nodes_reap_on_one_session_held_outbound_at_one_end_and_inbound_at_the_other_with_multipath_on()
  {
     lone_drop(true).await;
@@ -314,7 +307,6 @@ async fn dial_after(on: bool) {
 }
 
 #[tokio::test]
-#[ignore = "known defect on next: the larger node's msg3 crossing keeps it on the link record of its own dial, so both ends list the link Outbound"]
 async fn a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_one_session_on_the_smaller_nodes_dial()
  {
     dial_after(false).await;
@@ -322,7 +314,6 @@ async fn a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_a
 
 /// [`a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_one_session_on_the_smaller_nodes_dial`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect on next: the larger node's msg3 crossing keeps it on the link record of its own dial, so both ends list the link Outbound"]
 async fn a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_one_session_on_the_smaller_nodes_dial_with_multipath_on()
  {
     dial_after(true).await;
@@ -401,7 +392,6 @@ async fn mixed_redial(on: bool, zero_smaller: bool) {
 }
 
 #[tokio::test]
-#[ignore = "known defect on next: the larger node's msg3 crossing keeps it on the link record of its own dial, so both ends list the link Outbound"]
 async fn the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_smaller_first()
  {
     mixed_redial(false, true).await;
@@ -409,14 +399,12 @@ async fn the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_se
 
 /// [`the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_smaller_first`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect on next: the larger node's msg3 crossing keeps it on the link record of its own dial, so both ends list the link Outbound"]
 async fn the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_smaller_first_with_multipath_on()
  {
     mixed_redial(true, true).await;
 }
 
 #[tokio::test]
-#[ignore = "known defect on next: the larger node's msg3 crossing keeps it on the link record of its own dial, so both ends list the link Outbound"]
 async fn the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_larger_first()
  {
     mixed_redial(false, false).await;
@@ -424,7 +412,6 @@ async fn the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_se
 
 /// [`the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_larger_first`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect on next: the larger node's msg3 crossing keeps it on the link record of its own dial, so both ends list the link Outbound"]
 async fn the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_larger_first_with_multipath_on()
  {
     mixed_redial(true, false).await;

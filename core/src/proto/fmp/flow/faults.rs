@@ -75,6 +75,10 @@ pub(crate) enum Fault {
     /// smaller node, as at the larger, where next moves the smaller node
     /// onto its dial.
     CrossedRunsKeep,
+    /// The larger node of a crossing settled at the peer's msg3 takes the
+    /// answer's session on the link it dialed and stays held there, and the
+    /// answer's link is the one retired.
+    Msg3MoveKeepsHeldLink,
     /// A move keeps the frame heard under the session it leaves, where
     /// next's `heard_on_session` starts afresh, so a dial in flight at the
     /// move is no longer beside this node's own unheard dial and sends its
@@ -101,6 +105,7 @@ impl Fault {
         Self::SilentRefusalAnyEpoch,
         Self::OwnDialCountsSilent,
         Self::CrossedRunsKeep,
+        Self::Msg3MoveKeepsHeldLink,
         Self::MoveKeepsFramed,
     ];
 

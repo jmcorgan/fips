@@ -64,8 +64,9 @@ fn by(changed: bool) -> Outcome {
 /// The outcome of each cell of `Move` that turns on the script.
 fn move_outcomes(s: MoveScript) -> Vec<(Row, Outcome)> {
     let rows = vec![
-        // At the dial's msg2 the peer holds the dial's link record and the one
-        // it left goes; at the msg3 the leg's goes and the peer keeps its own.
+        // The peer holds the link record of the handshake it moved onto, the
+        // dial's at its msg2 and the leg's at the msg3, and the one it left
+        // goes.
         (Row::Link, Outcome::Changed),
         // The link the peer left, or the leg, is named nowhere, and the
         // peer's link where the peer is.
@@ -285,14 +286,7 @@ async fn run_site(
     let to = at(msg2.transport_id, &msg2.remote_addr);
     let pairs = covering(node, peer, also);
     dirty(node, peer).await;
-    if matches!(
-        t,
-        Transition::Move {
-            built: true,
-            inbound: false,
-            ..
-        }
-    ) {
+    if matches!(t, Transition::Move { built: true, .. }) {
         dial_aside(node, peer);
     }
     if let Some(addr) = marked {
@@ -518,9 +512,10 @@ async fn crossing_lost(mut x: Dialled, closed: bool, shared: bool) {
 
 /// The larger node takes the msg3 that completes the smaller node's dial,
 /// holding the smaller from its own dial, and moves onto the inbound leg's
-/// session at the msg3's pair. The leg's connection is the one the peer
-/// moves onto and stays; no link is capable yet, so the released pair keeps
-/// its own: nothing is closed, at either setting.
+/// session and link at the msg3's pair. The link it left, its own dial, is
+/// torn down, and its connection closed where no live link uses it, which is
+/// where the pair `moved`, at either setting; no link is capable yet, so
+/// nothing is queued.
 async fn settled_at_msg3_moved(mut x: Dialled, on: bool, moved: bool) {
     let (s, l) = (x.s, x.l);
     let s_addr = *x.nodes[s].node.node_addr();
@@ -536,7 +531,7 @@ async fn settled_at_msg3_moved(mut x: Dialled, on: bool, moved: bool) {
         moved,
         reseeded: false,
         offers: false,
-        closed: false,
+        closed: moved,
         queued: false,
     };
     let mut also = links_of(&x, l);
@@ -547,12 +542,9 @@ async fn settled_at_msg3_moved(mut x: Dialled, on: bool, moved: bool) {
     others.retain(|(row, _)| {
         !matches!(
             row,
-            Row::Dials | Row::FilterSend | Row::Tree | Row::LookupBackoff | Row::Connection
+            Row::Dials | Row::FilterSend | Row::Tree | Row::LookupBackoff
         )
     });
-    // No link is capable yet, so the released pair keeps its connection, and
-    // the leg's is the one the peer moves onto.
-    others.push((Row::Connection, Outcome::Kept));
     let [before, after] =
         run_site(&mut x.nodes[l].node, &s_addr, msg3, &also, None, t, &others).await;
     check_held_at(before, after);
@@ -561,8 +553,10 @@ async fn settled_at_msg3_moved(mut x: Dialled, on: bool, moved: bool) {
 
 /// The smaller node takes the msg3 that completes the larger node's dial,
 /// holding the larger from its own dial, and keeps the session it holds; the
-/// inbound leg's link is closed and its connection left open.
-async fn settled_at_msg3_kept(mut x: Dialled) {
+/// inbound leg's link is closed, and its connection with it where no live
+/// link uses it: `closed` says the leg's pair is not the one the peer runs
+/// on.
+async fn settled_at_msg3_kept(mut x: Dialled, closed: bool) {
     let (s, l) = (x.s, x.l);
     let l_addr = *x.nodes[l].node.node_addr();
     let (msg3, leg) = to_msg3(&mut x, s).await;
@@ -579,6 +573,7 @@ async fn settled_at_msg3_kept(mut x: Dialled) {
         // holds; the peer's machine and its bound indices stay.
         (Row::RekeyMachine, Outcome::Kept),
         (Row::ControlMachine, Outcome::Changed),
+        (Row::Connection, by(closed)),
     ];
     run_site(&mut x.nodes[s].node, &l_addr, msg3, &also, None, t, &others).await;
     cleanup_nodes(&mut x.nodes).await;
@@ -653,7 +648,7 @@ async fn a_crossing_settled_at_the_msg3_over_tcp_moves_the_larger_node_as_the_ta
 /// A crossing settled at the msg3 over TCP keeps the smaller node's session.
 #[tokio::test]
 async fn a_crossing_settled_at_the_msg3_over_tcp_keeps_the_smaller_node_as_the_table_says() {
-    settled_at_msg3_kept(tcp_dialled(false, true).await).await;
+    settled_at_msg3_kept(tcp_dialled(false, true).await, true).await;
 }
 
 /// [`a_crossing_settled_at_the_msg3_over_tcp_keeps_the_smaller_node_as_the_table_says`] with
@@ -661,7 +656,7 @@ async fn a_crossing_settled_at_the_msg3_over_tcp_keeps_the_smaller_node_as_the_t
 #[tokio::test]
 async fn a_crossing_settled_at_the_msg3_over_tcp_keeps_the_smaller_node_as_the_table_says_with_multipath_on()
  {
-    settled_at_msg3_kept(tcp_dialled(true, true).await).await;
+    settled_at_msg3_kept(tcp_dialled(true, true).await, true).await;
 }
 
 /// Two loopback nodes, multipath set as `on`, each with a second loopback
@@ -742,7 +737,7 @@ async fn a_crossing_settled_at_the_msg3_on_loopback_moves_the_larger_node_as_the
 /// smaller node's session.
 #[tokio::test]
 async fn a_crossing_settled_at_the_msg3_on_loopback_keeps_the_smaller_node_as_the_table_says() {
-    settled_at_msg3_kept(loopback_dialled(false).await).await;
+    settled_at_msg3_kept(loopback_dialled(false).await, false).await;
 }
 
 /// [`a_crossing_settled_at_the_msg3_on_loopback_keeps_the_smaller_node_as_the_table_says`]
@@ -750,7 +745,7 @@ async fn a_crossing_settled_at_the_msg3_on_loopback_keeps_the_smaller_node_as_th
 #[tokio::test]
 async fn a_crossing_settled_at_the_msg3_on_loopback_keeps_the_smaller_node_as_the_table_says_with_multipath_on()
  {
-    settled_at_msg3_kept(loopback_dialled(true).await).await;
+    settled_at_msg3_kept(loopback_dialled(true).await, false).await;
 }
 
 // ---------------------------------------------------------------------------

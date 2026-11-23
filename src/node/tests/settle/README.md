@@ -63,7 +63,7 @@ named for off. The other files run off, which is what they test.
   `crate::time::step_wall` and advance the monotonic one with
   `crate::time::advance`, so they run safely beside other tests.
 - `crossing.rs`: crossed dials and a dialer's second dial. Crossed TCP dials
-  (one working session by the audit, a known difference on this line; the
+  (one working session on one connection by the audit; the
   smaller node's link record, which is the link it dialed; a single-dial
   redial control); a larger node's dial on the aged link after the smaller
   node's own rekey, read inside the heard floor; two dials to one address
@@ -75,10 +75,9 @@ named for off. The other files run off, which is what they test.
   released while its link lives, and where a link's one path roamed to the
   pair of a dial the crossing tears down; and what a move at the msg2 closes
   of the link it left: on TCP, the left link's connection, and on loopback,
-  nothing a dial still in flight uses. The same TCP crossing pins, as a
-  known defect, the larger node that settles it at the peer's msg3 held on
-  the link it dialed, whose connection the smaller node's move closed. Each
-  two-order case is one test per order. It holds copies of private helpers
+  nothing a dial still in flight uses. The same TCP crossing leaves the
+  larger node, which settles it at the peer's msg3, held on a link whose
+  connection is open. Each two-order case is one test per order. It holds copies of private helpers
   of `control.rs`, each naming its original.
 - `explore/`: the real-node explorer and its world: two or three real nodes
   on the loopback, TCP or the BLE mock, driven by a schedule written as data,
@@ -143,10 +142,10 @@ named for off. The other files run off, which is what they test.
   peer the smaller node alone drops and redials must stay, through the
   larger node's later dial, on one session on the smaller node's dial; and
   the smaller node's redial after the mixed-schedule crossing of
-  `crossing.rs` must leave it `Outbound` and the larger `Inbound`. Every
-  test is a known defect on this line, at one cause: the larger node's msg3
-  crossing keeps the link record of its own dial. They are the counterparts
-  of master's `redialed.rs`, which answers a redial at the msg1.
+  `crossing.rs` must leave it `Outbound` and the larger `Inbound`. Each
+  turns on the larger node's msg3 crossing, which holds it on the link the
+  smaller node dialed. They are the counterparts of master's `redialed.rs`,
+  which answers a redial at the msg1.
 - `withheld.rs`: a lost first msg3 beside a withheld one. The smaller node
   dials on two loopback transports at once, the second dial's msg3 is
   withheld by the own-dial keep, and the first dial's msg3 is lost: the
@@ -197,20 +196,10 @@ claim cases and the five cell characterisations are not here.
 
 A move at this node's dial's msg2 holds the link it dialed and closes the
 one it left, as on master. A move at the peer's msg3, which the larger node
-makes, keeps the link it was held on, its own dial's, and closes nothing.
-Two known shapes follow, each ignored with its reason and listed as
-`known-defect` in `testing/ignored-tests.txt`, so the lane sees a change in
-them:
-
-- Crossed TCP dials that settle at each end's msg3 leave each node both its
-  connections open with one in use, which the audit flags as
-  `ConnectionsInUse`: the two crossed TCP dial tests of `crossing.rs` and the
-  two crossing tests of `audit.rs`, each with multipath off and on.
-- A crossing the smaller node settles at its msg2 and the larger at the
-  peer's msg3 leaves the larger node held on the link it dialed, whose
-  connection the smaller node's move closed: pinned over TCP in
-  `crossing.rs`, once per order and setting, and on the BLE mock in
-  `node::tests::ble`.
+makes, holds the inbound leg's link, the link the smaller node dialed, and
+closes the one it left, its own dial's, unless a live link uses it; the
+smaller node's keep at the peer's msg3 closes the leg's connection the same
+way. Both ends settle on the smaller node's dial (FRC-2201 Section 5.7).
 
 ## No exemptions
 

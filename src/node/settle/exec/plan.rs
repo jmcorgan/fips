@@ -210,20 +210,23 @@ const MOVE_DIAL: &[Effect] = &[
 ];
 
 /// A crossing settled at the peer's msg3 by moving onto the inbound leg it
-/// completed: the rekey machine moved onto the leg's session, the path
-/// machine renewed, what follows a move to another pair, the note, and the
-/// leg ends. The peer stays held on the link it dialed.
+/// completed: the rekey machine moved onto the leg's session and the path
+/// machine renewed, the leg's entry dropped and the peer held on the leg's
+/// link, what follows a move to another pair, the note, and the link the
+/// peer held, its own dial's, ends with its connection.
 const MOVE_LEG: &[Effect] = &[
     Effect::RunLinkOutputs,
     Effect::RunRenewed,
+    Effect::LegMachineRemoved,
+    Effect::HoldDial,
     Effect::PathsRenewed,
     Effect::MovedRead,
     Effect::ClearUdpIfMoved,
     Effect::SeedMtuIfMoved,
     Effect::RelinkIfMoved,
     Effect::MoveNote,
+    Effect::LoserClose,
     Effect::LoserRemoved,
-    Effect::LegMachineRemoved,
 ];
 
 /// A crossing lost at this node's dial's msg2: the peer kept on the session
@@ -240,10 +243,12 @@ const KEEP_DIAL: &[Effect] = &[
 ];
 
 /// A crossing settled at the peer's msg3 by keeping the session the peer
-/// holds: the leg's index freed, the note, and the leg ends.
+/// holds: the leg's index freed, the note, and the leg ends with its
+/// connection.
 const KEEP_LEG: &[Effect] = &[
     Effect::LeaseFreed,
     Effect::KeepNote,
+    Effect::LoserClose,
     Effect::LoserRemoved,
     Effect::LegMachineRemoved,
 ];

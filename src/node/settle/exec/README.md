@@ -47,16 +47,17 @@ statements at its site.
   The move itself, `adopt_dial`, stays at each site, and so does the
   decision between a move and a keep, which at the msg2 is the settlement
   core's (the mutation lane's `CrossedRunsKeep` is read on the core's tie
-  term). A move at the msg2
-  that rebuilt the machine holds the peer on the dial's link:
+  term). A move that rebuilt the machine holds the peer on the other
+  handshake's link, at the msg2 the dial's and at the msg3 the leg's:
   `adopt_dial` sets the peer's link id, and `HoldDial` holds the core's
   record of that link and keys the handshake entry, its timers and the
   carrier readings under it. `Facts.loser` names the link torn down, the
   one the move left or, at a refused move and a keep, the dial's, which
   `LoserClose` and `LoserRemoved` close by the close rule
   (`Node::close_unused`) and remove; the renewal's released paths go to the
-  link left. A move at the msg3 keeps the peer on the link it was held on,
-  its own dial's, and removes the leg it moved onto, closing nothing.
+  link left. At the msg3 the leg's own entry is dropped before `HoldDial`
+  keys the peer's under the leg's link, and a keep there closes the leg's
+  connection by the same rule.
 - `paths.rs`: a followed, switched or released path's effects, which are
   plain functions because a removal reaches a release where it cannot
   await, with `Node::run_now`, which walks such a plan without awaiting;

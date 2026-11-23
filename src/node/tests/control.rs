@@ -351,18 +351,21 @@ async fn alternate_path_for_quiet_peer(dialer_smaller: bool) {
         ),
         "the dialer's link must stay on the peer's primary address, on the dial's link where it moves (dialer smaller: {dialer_smaller})"
     );
+    // The peer settles the dial at its msg3: as the larger it moves onto
+    // the dial's link, the inbound leg, at the same pair, and as the
+    // smaller it keeps its link.
     assert_eq!(
         (
-            peer_after.link_id,
+            peer_after.link_id == peer_before.link_id,
             peer_after.transport_id,
             peer_after.current_addr.as_ref()
         ),
         (
-            peer_before.link_id,
+            !dialer_smaller,
             peer_before.transport_id,
             peer_before.current_addr.as_ref()
         ),
-        "the peer's link must stay where it was (dialer smaller: {dialer_smaller})"
+        "the peer's link must stay on its path, on the dial's link where it moves (dialer smaller: {dialer_smaller})"
     );
 
     // The msg2 consumed the dialer's leg.
@@ -1392,9 +1395,9 @@ async fn second_dial(nodes: &mut [TestNode], d: usize, p: usize, alternate: &Tra
 /// One orientation of the second-dial pin tests below: both ends pin their
 /// link, then the dialer dials the peer it holds again on a second address
 /// of the peer's. The peer answers the dial as a fresh leg and both ends
-/// settle it by address order, as a crossed handshake, so the peer's link
-/// is not replaced, and the dialer holds the dial's link where it moves to
-/// the dial's session and its own otherwise. Both pins are kept, whichever
+/// settle it by address order, as a crossed handshake: each end holds the
+/// dial's link where it moves to the dial's session, the dialer as the
+/// smaller and the peer, at its msg3, as the larger, and its own otherwise. Both pins are kept, whichever
 /// end dialled the peering and whether or not the dialer moves.
 async fn pin_across_a_second_dial(dialer_smaller: bool, dialer_dialled_first: bool) {
     let (mut nodes, d, p, alternate) = held_pair(dialer_smaller, dialer_dialled_first).await;
@@ -1412,8 +1415,9 @@ async fn pin_across_a_second_dial(dialer_smaller: bool, dialer_dialled_first: bo
     let dialer_after = link_view(&nodes[d], &peer_addr);
     let peer_after = link_view(&nodes[p], &dialer_addr);
     assert_eq!(
-        peer_after.link_id, peer_before.link_id,
-        "precondition: the peer did not replace the peering ({orientation})"
+        peer_after.link_id != peer_before.link_id,
+        dialer_smaller,
+        "precondition: the peer moved onto the dial's link only as the larger ({orientation})"
     );
     let moved = dialer_after.our_index != dialer_before.our_index;
     assert_eq!(
