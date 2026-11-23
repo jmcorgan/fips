@@ -127,7 +127,8 @@ so it reaches no normal or release build.
   taken out of the inputs that run them: `install_answer` (a responder
   leg's install, from `Sent`), `keep` (the larger node's keep of its held
   peer at its own dial's msg2) and `open_answer` (a responder leg's
-  opening, from `Hello`). Two no IK rule calls: `hold_answer` keeps a
+  opening, from `Hello`). Two no IK rule calls: `hold_answer`, under the
+  test hooks only, since its one caller is a switch's defect shape, keeps a
   held peer on the link it holds with a responder leg's session and
   lease, at a pair the flow names, and retires the leg's link; it seats
   the peer as `install_answer` does, through the same step, forgets the
