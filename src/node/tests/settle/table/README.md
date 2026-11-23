@@ -72,7 +72,7 @@ in the `node-synthetic` group with the rest of `settle`.
   script with multipath off and asserts there is no such output.
 - **A driver takes the setting as an argument**: `with_path`,
   `loopback_node`, `tcp_dialled(on, ..)`, `loopback_dialled(on)`,
-  `peered(on)`, `ble_pair(on)`.
+  `loopback_dialled_apart(on)`, `peered(on)`, `ble_pair(on)`.
 - **Dirty before the transition.** Read `before` after `dirty`, so a reset
   shows as a change. Run `dirty` after peering: a node audited before it is
   dirtied counts as audited, and the writers it uses leave the audit on. A
@@ -114,6 +114,6 @@ line and on reading the code, which has no `relink`, `mark_verified` or
 `clear_verified` at those sites but the one a frame makes on its own link.
 `assert_cells` reports such a row unread; it never counts it as kept.
 
-The mark's cells at a replacement have no BLE test on this line either: a
-restart is driven on loopback only. They stand on the golden line and on
-reading the teardown's `relink` to no link and the promotion's mark.
+The mark's cells at a replacement are tested on the BLE mock: a restart
+there is driven by a handshake run by hand as the restarted peer, whose
+msg3 replaces the peering (`replace.rs`, `ble_restart`).

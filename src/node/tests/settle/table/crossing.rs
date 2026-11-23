@@ -664,6 +664,50 @@ async fn a_crossing_settled_at_the_msg3_over_tcp_keeps_the_smaller_node_as_the_t
     settled_at_msg3_kept(tcp_dialled(true, true).await).await;
 }
 
+/// Two loopback nodes, multipath set as `on`, each with a second loopback
+/// transport, each having dialled the other: the smaller node on the first
+/// transport, the larger on the second, at the smaller node's address there.
+async fn loopback_dialled_apart(on: bool) -> Dialled {
+    use super::super::super::paths::{second_transport, t2};
+    let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
+    let (s, l) = if nodes[0].node.node_addr() < nodes[1].node.node_addr() {
+        (0, 1)
+    } else {
+        (1, 0)
+    };
+    let s2 = second_transport(&mut nodes[s], t2(), 1280);
+    second_transport(&mut nodes[l], t2(), 1280);
+    initiate_handshake(&mut nodes, s, l).await;
+    let s_id = PeerIdentity::from_pubkey_full(nodes[s].node.identity().pubkey_full());
+    nodes[l]
+        .node
+        .initiate_connection(t2(), s2, Some(s_id))
+        .await
+        .expect("precondition: the larger node's dial on the second transport starts");
+    Dialled {
+        nodes,
+        s,
+        l,
+        held: [Vec::new(), Vec::new()],
+    }
+}
+
+/// A crossing lost on loopback at the larger node's msg2, its dial on
+/// another transport than the smaller node's: the larger node holds the
+/// smaller from the smaller's dial, on the first transport, and keeps it.
+/// Its dial went to a pair the peer holds no path at, so the dial's
+/// connection is closed.
+#[tokio::test]
+async fn a_crossing_lost_on_another_transport_does_what_the_keep_cells_say() {
+    crossing_lost(loopback_dialled_apart(false).await, true, false).await;
+}
+
+/// [`a_crossing_lost_on_another_transport_does_what_the_keep_cells_say`] with multipath on.
+#[tokio::test]
+async fn a_crossing_lost_on_another_transport_does_what_the_keep_cells_say_with_multipath_on() {
+    crossing_lost(loopback_dialled_apart(true).await, true, false).await;
+}
+
 /// A crossing lost on loopback, one transport, at the larger node's msg2:
 /// its dial went to the pair the peer's msg1 came from, which the peer
 /// proves, so the connection is left open, and the pair's one index entry

@@ -35,6 +35,10 @@ it out. Handshake message bytes are opaque here.
   without an authenticated frame, and the handshake refusal it drives,
   applied at msg3, where the XX handshake first names the initiator.
 - `limits.rs`: the connection-retry backoff arithmetic.
+- `flow/`: the XX handshake flow of the settlement core
+  (`proto::settle`), a profile of its one table that classifies next's
+  msg1, msg2 and msg3 as next's shell does. Hidden from the docs; nothing
+  in the node runs it yet. Its README describes it.
 - `rekey/`: the link's profile of the shared rekey machine
   (`proto::rekey`) over Noise XX, and the node-level read of an inbound
   leg's msg3. Hidden from the docs; the root crate's active peers hold

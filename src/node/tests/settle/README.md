@@ -135,6 +135,23 @@ named for off. The other files run off, which is what they test.
   records a switch to an acknowledged path Live, which `links-mirror` lets
   off for the active path alone; a record off its bundle fails the clause.
   Tests that need the audit to run carry `#[cfg(debug_assertions)]`.
+- `redialed.rs`: which direction each end holds its link in. After crossed
+  TCP dials the smaller node must hold it `Outbound` and the larger
+  `Inbound`; a crossed peer the larger node alone drops and redials must
+  end, after the smaller node's link-dead reap and reconnect, on one
+  working session held `Outbound` at one end and `Inbound` at the other; a
+  peer the smaller node alone drops and redials must stay, through the
+  larger node's later dial, on one session on the smaller node's dial; and
+  the smaller node's redial after the mixed-schedule crossing of
+  `crossing.rs` must leave it `Outbound` and the larger `Inbound`. Every
+  test is a known defect on this line, at one cause: the larger node's msg3
+  crossing keeps the link record of its own dial. They are the counterparts
+  of master's `redialed.rs`, which answers a redial at the msg1.
+- `withheld.rs`: a lost first msg3 beside a withheld one. The smaller node
+  dials on two loopback transports at once, the second dial's msg3 is
+  withheld by the own-dial keep, and the first dial's msg3 is lost: the
+  larger node must still hold the smaller on the smaller's session. A known
+  defect on this line, with multipath off and on.
 - `table/`: the transition table checked on real nodes. Its `mod.rs` is
   the harness: a reading of every row of a peer's state on one node
   (`Seen`), a writer that makes every row it can reach differ from a fresh

@@ -349,3 +349,18 @@ CapNotCounted	red	fips-core	proto::settle::table::tests::a_dial_completing_to_a_
 CapNotCounted	red	fips-core	proto::settle::table::tests::a_replacement_for_an_identity_not_held_at_the_peer_cap_is_refused_before_any_answer
 OutboundGated	red	fips-core	proto::settle::gates::tests::an_own_msg2_restart_goes_through_the_gate_and_is_accepted_inside_its_floors	core/src/proto/settle/tests/gates.rs:154
 IntervalTen	red	fips-core	proto::settle::gates::tests::the_default_intervals_are_the_frcs	core/src/proto/settle/tests/gates.rs:438
+# The XX flow of the settlement core (core/src/proto/fmp/flow): each switch
+# is read there as xx_fault!(X) || node_fault!(X), and its core tests red
+# through the node half until a root test reaches the site.
+AnonLegNamed	red	fips-core	proto::fmp::flow::tests::msg1::an_anonymous_answer_installs_nothing_at_its_send_and_waits_for_its_msg3_after_the_peer_at_its_source_is_gone
+PendingCountsSentAnswers	red	fips-core	proto::fmp::flow::tests::msg1::the_admission_cap_counts_an_anonymous_answer_only_until_its_msg2_is_sent
+AnonDialNamed	red	fips-core	proto::fmp::flow::tests::msg2::an_anonymous_dial_completes_under_the_identity_its_msg2_taught
+BesideOwnSendsFinal	red	fips-core	proto::fmp::flow::tests::msg2::a_msg2_beside_this_nodes_own_dial_is_kept_at_once_with_no_msg3_and_offers_its_pair
+FinalBeforeSendOutcome	red	fips-core	proto::fmp::flow::tests::msg2::a_msg2_installs_nothing_until_its_msg3_is_sent
+LeafKeepsLink	red	fips-core	proto::fmp::flow::tests::msg2::a_leaf_refuses_a_second_peer_at_msg2_and_removes_the_link_at_once
+LeafKeepsLink	red	fips-core	proto::fmp::flow::tests::msg3::a_leaf_refuses_a_second_peer_at_msg3_and_removes_the_link_at_once
+Msg3RestartUngated	red	fips-core	proto::fmp::flow::tests::msg3::a_restart_at_msg3_is_refused_while_the_peering_was_heard_inside_the_interval_and_accepted_after
+Msg3RestartUngated	red	fips-core	proto::fmp::flow::tests::msg3::a_restart_at_msg3_is_refused_inside_the_interval_from_the_install_when_no_frame_was_heard
+MismatchClaimTearsDown	red	fips-core	proto::fmp::flow::tests::msg3::a_msg3_claiming_a_session_not_held_repeats_the_stored_msg2_and_leaves_the_peer
+MatchesReadAsCross	red	fips-core	proto::fmp::flow::tests::msg3::a_msg3_claiming_the_session_held_hands_the_leg_and_its_lease_to_the_peers_rekey
+SilentRefusalAnyEpoch	red	fips-core	proto::fmp::flow::tests::msg3::a_silent_identitys_msg3_is_refused_at_the_epoch_it_counted_and_promoted_at_another

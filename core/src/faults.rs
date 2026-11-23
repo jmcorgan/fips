@@ -571,6 +571,37 @@ faults! {
     /// refuses. The node half of the core parameters' switch of the same
     /// name.
     IntervalTen,
+    /// The XX flow (`proto/fmp/flow`): an anonymous answer's leg names the
+    /// peer held on the link at the msg1's source, so the table's send rule
+    /// takes it for that peer's answer.
+    AnonLegNamed,
+    /// The XX flow: the admission cap counts an anonymous answer whose msg2
+    /// was sent.
+    PendingCountsSentAnswers,
+    /// The XX flow: a msg2 completes under the identity its dial named, so
+    /// an anonymous dial never completes.
+    AnonDialNamed,
+    /// The XX flow: a msg2 beside this node's own dial goes to address order
+    /// and sends its msg3.
+    BesideOwnSendsFinal,
+    /// The XX flow: a msg2's decision runs before the outcome of its msg3
+    /// send.
+    FinalBeforeSendOutcome,
+    /// The XX flow: a leaf's refusal of a second peer leaves the leg for its
+    /// reap.
+    LeafKeepsLink,
+    /// The XX flow: a msg3 at a new epoch restarts the held peer with no
+    /// gate.
+    Msg3RestartUngated,
+    /// The XX flow: a msg3 that claims a session not held replaces the held
+    /// peer, where next repeats the stored msg2.
+    MismatchClaimTearsDown,
+    /// The XX flow: a msg3 that claims the session held is read as a
+    /// crossing.
+    MatchesReadAsCross,
+    /// The XX flow: the silent-session refusal at msg3 refuses an identity
+    /// at any epoch.
+    SilentRefusalAnyEpoch,
 }
 
 impl Fault {

@@ -1,0 +1,19 @@
+# The tests that record the current behaviour of a rule in rules.txt: one line per
+# test and rule, its crate, its path as `cargo test` lists it, and the rule's ID. A
+# test that asserts two incidental rules has a line for each. A test that also asserts
+# an outcome FRC-2201 requires, or a decision fixes, is listed under its incidental
+# rule alone, and its doc line names the part that is incidental and says its other
+# assertions are not.
+#
+# Each listed test carries the doc line "Records current behaviour (rule XX-NN ...):
+# open to change by decision", naming every rule it is listed under here and no other;
+# a test with that line naming an XX rule is listed here.
+# `src/node/settle/tests/rules.rs` checks both directions.
+fips-core  proto::fmp::flow::tests::msg2::a_later_dial_of_a_held_peer_is_settled_by_address_order_once_its_msg3_is_sent  XX-01
+fips-core  proto::fmp::flow::tests::msg3::a_restart_at_msg3_is_refused_inside_the_interval_from_the_install_when_no_frame_was_heard  XX-02
+fips-core  proto::fmp::flow::tests::chars::the_gates_count_silent_sessions_and_refuse_as_nexts_silent_sessions_record_does  XX-03
+fips-core  proto::fmp::flow::tests::msg3::a_silent_identitys_msg3_is_refused_at_the_epoch_it_counted_and_promoted_at_another  XX-03
+fips-core  proto::fmp::flow::tests::chars::the_retry_after_each_failure_at_msg2_goes_to_the_identity_the_leg_expects_by_then  XX-04
+fips-core  proto::fmp::flow::tests::msg2::a_leaf_refuses_a_second_peer_at_msg2_and_removes_the_link_at_once  XX-05
+fips-core  proto::fmp::flow::tests::msg3::a_leaf_refuses_a_second_peer_at_msg3_and_removes_the_link_at_once  XX-05
+fips-core  proto::fmp::flow::tests::msg2::a_msg2_beside_this_nodes_own_dial_is_kept_at_once_with_no_msg3_and_offers_its_pair  XX-06

@@ -350,6 +350,79 @@ async fn negotiation_reject_releases_its_lease() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// The held peer of a linked pair, with multipath set as `on`, completes a
+/// handshake whose msg3 declares a rekey in a declaration that does not
+/// decode (three bytes where an index takes four). The observed node, the
+/// larger by address when `larger`, must reject it: keep the peer on the
+/// session and link it held, and count a `BadState` reject. Read as no
+/// declaration, the msg3 would be a crossing, which moves the larger node
+/// onto the new session and leaves the smaller where it was, so only the
+/// reject count tells the reject from it at the smaller node.
+async fn malformed_declaration(larger: bool, on: bool) {
+    let config = || {
+        let mut c = rekey_config(REKEY_AFTER_SECS);
+        c.node.path.enabled = on;
+        c
+    };
+    let mut nodes = linked_pair(config(), config()).await;
+    let (a, b) = order(&nodes, larger);
+    let a_id = nodes[a].node.identity().clone();
+    let a_epoch = nodes[a].node.startup_epoch();
+    let a_addr = *nodes[a].node.node_addr();
+    let held = |nodes: &[TestNode]| {
+        nodes[b]
+            .node
+            .get_peer(&a_addr)
+            .map(|p| (p.link_id(), p.our_index(), p.their_index()))
+    };
+    let before = held(&nodes);
+    assert!(
+        before.is_some(),
+        "precondition ({larger}, {on}): the observed node holds its peer"
+    );
+    let rejects = nodes[b].node.stats().handshake.bad_state;
+    let malformed = NegotiationPayload::fmp(1, 1, NodeProfile::Full)
+        .with_tlv(TLV_REKEY_OF, vec![1, 2, 3])
+        .encode();
+    let dial = HandDial::open(&mut nodes, a, b, &a_id, a_epoch, 0x1D00_0301).await;
+    dial.finish(&mut nodes, a, b, &malformed).await;
+    let after = held(&nodes);
+    let counted = nodes[b].node.stats().handshake.bad_state - rejects;
+    exited(&nodes, b, a, "a malformed declaration");
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        (after, counted),
+        (before, 1),
+        "defect ({larger}, {on}): a malformed rekey declaration must leave the peer on its session and link and count one BadState reject; (link, ours, theirs) before {before:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_rekey_declaration_at_msg3_keeps_the_peers_session_and_link_and_counts_a_reject_at_the_larger_node()
+ {
+    malformed_declaration(true, false).await;
+}
+
+/// [`a_malformed_rekey_declaration_at_msg3_keeps_the_peers_session_and_link_and_counts_a_reject_at_the_larger_node`] with multipath on.
+#[tokio::test]
+async fn a_malformed_rekey_declaration_at_msg3_keeps_the_peers_session_and_link_and_counts_a_reject_at_the_larger_node_with_multipath_on()
+ {
+    malformed_declaration(true, true).await;
+}
+
+#[tokio::test]
+async fn a_malformed_rekey_declaration_at_msg3_keeps_the_peers_session_and_link_and_counts_a_reject_at_the_smaller_node()
+ {
+    malformed_declaration(false, false).await;
+}
+
+/// [`a_malformed_rekey_declaration_at_msg3_keeps_the_peers_session_and_link_and_counts_a_reject_at_the_smaller_node`] with multipath on.
+#[tokio::test]
+async fn a_malformed_rekey_declaration_at_msg3_keeps_the_peers_session_and_link_and_counts_a_reject_at_the_smaller_node_with_multipath_on()
+ {
+    malformed_declaration(false, true).await;
+}
+
 /// A msg3 that does not read leaves the leg as it was, its pending entry,
 /// its machine and the lease on its index, so the genuine msg3 still
 /// completes it: the receiver index it names travels in cleartext in msg2's

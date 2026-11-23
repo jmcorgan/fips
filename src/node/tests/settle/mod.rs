@@ -28,7 +28,9 @@ mod lane;
 mod links;
 mod live;
 pub(super) mod readings;
+mod redialed;
 mod table;
+mod withheld;
 
 use super::spanning_tree::{
     TestNode, add_loopback_alias, bridge_to_unbounded, cleanup_nodes, loopback_tap,

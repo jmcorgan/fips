@@ -127,3 +127,36 @@ known-defect  fips-mesh  node::tests::roam_redial::a_redial_from_a_new_address_b
 known-defect  fips-mesh  node::tests::tcp::a_dial_refused_at_the_peer_cap_closes_its_tcp_connection  src/node/tests/tcp.rs
 known-defect  fips-mesh  node::tests::tcp::an_acl_refusal_at_msg3_closes_its_inbound_tcp_connection  src/node/tests/tcp.rs
 known-defect  fips-mesh  node::tests::tcp::a_msg1_refused_for_want_of_a_session_index_closes_its_inbound_tcp_connection  src/node/tests/tcp.rs
+# The next two, with multipath off and on: a dialer whose msg3 the peer
+# refuses during its silent-session back-off promotes at its msg2 and holds
+# a session the peer never installed; when its reaper removes that session
+# unheard, it counts it toward its own back-off for the refuser.
+known-defect  fips-mesh  node::tests::silent_backoff::a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_against_the_refuser  src/node/tests/silent_backoff.rs
+known-defect  fips-mesh  node::tests::silent_backoff::a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_against_the_refuser_with_multipath_on  src/node/tests/silent_backoff.rs
+# The next twelve are one known defect on next: a crossing the larger node settles
+# at the peer's msg3 moves it onto the inbound leg's session and connection but
+# leaves it held on the link record of the link it dialed, so both ends list the
+# link outbound. Crossed TCP dials in each order, a redial by either end after a
+# crossing or a single dial, and the smaller node's redial after the mixed-schedule
+# crossing, each with multipath off and on.
+known-defect  fips-mesh  node::tests::settle::redialed::crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_smaller_first  src/node/tests/settle/redialed.rs
+known-defect  fips-mesh  node::tests::settle::redialed::crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_smaller_first_with_multipath_on  src/node/tests/settle/redialed.rs
+known-defect  fips-mesh  node::tests::settle::redialed::crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_larger_first  src/node/tests/settle/redialed.rs
+known-defect  fips-mesh  node::tests::settle::redialed::crossed_tcp_dials_leave_the_smaller_node_outbound_and_the_larger_inbound_larger_first_with_multipath_on  src/node/tests/settle/redialed.rs
+known-defect  fips-mesh  node::tests::settle::redialed::a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_ends_after_the_smaller_nodes_reap_on_one_session_held_outbound_at_one_end_and_inbound_at_the_other  src/node/tests/settle/redialed.rs
+known-defect  fips-mesh  node::tests::settle::redialed::a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_ends_after_the_smaller_nodes_reap_on_one_session_held_outbound_at_one_end_and_inbound_at_the_other_with_multipath_on  src/node/tests/settle/redialed.rs
+known-defect  fips-mesh  node::tests::settle::redialed::a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_one_session_on_the_smaller_nodes_dial  src/node/tests/settle/redialed.rs
+known-defect  fips-mesh  node::tests::settle::redialed::a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_one_session_on_the_smaller_nodes_dial_with_multipath_on  src/node/tests/settle/redialed.rs
+known-defect  fips-mesh  node::tests::settle::redialed::the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_smaller_first  src/node/tests/settle/redialed.rs
+known-defect  fips-mesh  node::tests::settle::redialed::the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_smaller_first_with_multipath_on  src/node/tests/settle/redialed.rs
+known-defect  fips-mesh  node::tests::settle::redialed::the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_larger_first  src/node/tests/settle/redialed.rs
+known-defect  fips-mesh  node::tests::settle::redialed::the_smaller_nodes_redial_after_a_mixed_schedule_crossing_ends_on_one_session_held_outbound_by_the_smaller_node_larger_first_with_multipath_on  src/node/tests/settle/redialed.rs
+# The next two, with multipath off and on: a smaller node's two concurrent dials,
+# the first dial's msg3 lost and the second's withheld by the own-dial keep, leave
+# the larger node holding no session for the smaller until the link-dead timeout.
+known-defect  fips-mesh  node::tests::settle::withheld::a_lost_first_msg3_beside_a_withheld_second_dial_leaves_the_larger_node_holding_the_smaller  src/node/tests/settle/withheld.rs
+known-defect  fips-mesh  node::tests::settle::withheld::a_lost_first_msg3_beside_a_withheld_second_dial_leaves_the_larger_node_holding_the_smaller_with_multipath_on  src/node/tests/settle/withheld.rs
+# A known defect on next, on the BLE mock: a crossed dial answered over the peer's
+# own dial connection moves the smaller node onto its dial there and leaves the
+# connection it dialled open with no link using it.
+known-defect  fips-mesh  node::tests::ble::a_crossed_dial_answered_over_the_peers_dial_connection_closes_the_connection_it_dialled  src/node/tests/ble.rs

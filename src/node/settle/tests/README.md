@@ -52,6 +52,16 @@ tests.
   routine of `../exec/remove.rs`, by a scan of the node's code outside its
   tests for a peer taken out of the peer map, with its one exemption and a
   planted line.
+- `rules.rs`: the XX flow's incidental rules (`core/src/proto/fmp/flow/rules.txt`,
+  rule IDs `XX-NN`), the tests that record them (`current.txt` beside it),
+  and the doc line each such test carries, held together over both crates'
+  tests: every listed test exists and names in its doc line exactly the
+  rules it is listed under, every rule marked tested lists a test and none
+  marked untested does, and every test whose doc line names an XX rule is
+  listed. It lives in the root crate because the root crate's sources can
+  read the core's. The settlement core's own lists, with `S-NN` IDs, mark
+  master's node tests and are not checked here. Each check finds a planted
+  line.
 - `scans.rs`: that no code of the root crate outside its tests builds,
   renews or closes a link's rekey or path machine but through the
   settlement core's join, with each exemption's reason and a check that

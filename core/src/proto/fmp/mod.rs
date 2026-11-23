@@ -20,6 +20,10 @@
 //!   `poll_*`/`establish_inbound`/`establish_outbound`/`dial_outbound`
 //!   decisions, the [`cross_connection_winner`] tie-break helper, and the FMP
 //!   negotiation decision logic (version agreement, profile validation).
+//! - `flow/` — the XX handshake flow of the settlement core
+//!   (`proto::settle`): a profile of its table that classifies next's msg1,
+//!   msg2 and msg3 as the shell does; hidden from the docs, and run by
+//!   nothing in the node yet.
 //! - `limits.rs` — the pure connection-retry backoff math.
 //! - `rekey/` — the link profile of the shared rekey machine (Noise XX) and
 //!   the node-level msg3 read of an inbound leg; hidden from the docs.
@@ -38,6 +42,8 @@
 //!   the msg1/msg2/msg3 handshake framing.
 
 mod core;
+#[doc(hidden)]
+pub mod flow;
 mod limits;
 #[doc(hidden)]
 pub mod rekey;

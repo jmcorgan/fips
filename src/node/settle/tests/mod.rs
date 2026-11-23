@@ -15,6 +15,7 @@ mod defaults;
 mod links;
 mod plan;
 mod remove;
+mod rules;
 mod scans;
 
 /// An inbound machine for `link`, with no handshake started.

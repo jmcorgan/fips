@@ -429,11 +429,14 @@ test          next-rule  a_redial_over_tcp_refused_by_the_acl_closes_its_connect
 # turns the link inbound once the peer adopts that answer. next keeps its own handshake shell,
 # which has neither that answer route (answer_msg1 is not in its tree) nor the adoption; the
 # core's record turn (Input::Adopted, AdoptedKeepsDir) comes with the core and its table test.
-# Whether next's shell can reach the both-outbound state is not established.
-test          next-rule  a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_is_held_outbound_at_one_end_and_inbound_at_the_other  src/node/tests/settle/redialed.rs
-test          next-rule  a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_is_held_outbound_at_one_end_and_inbound_at_the_other_with_multipath_on  src/node/tests/settle/redialed.rs
-test          next-rule  a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_the_smaller_nodes_dial  src/node/tests/settle/redialed.rs
-test          next-rule  a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_the_smaller_nodes_dial_with_multipath_on  src/node/tests/settle/redialed.rs
+# next's counterparts, in its redialed.rs, settle the redial at the keeper's msg3, and the larger
+# redialer's after the smaller keeper's reap, as FRC-2201 has it where the keeper dialed the old
+# link. Both reach the both-outbound state, by the msg3 crossing's stale link record, and are
+# known defects there.
+test          replaced   a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_is_held_outbound_at_one_end_and_inbound_at_the_other  src/node/tests/settle/redialed.rs  a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_ends_after_the_smaller_nodes_reap_on_one_session_held_outbound_at_one_end_and_inbound_at_the_other
+test          replaced   a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_is_held_outbound_at_one_end_and_inbound_at_the_other_with_multipath_on  src/node/tests/settle/redialed.rs  a_crossed_tcp_peer_the_larger_node_alone_drops_and_redials_ends_after_the_smaller_nodes_reap_on_one_session_held_outbound_at_one_end_and_inbound_at_the_other_with_multipath_on
+test          replaced   a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_the_smaller_nodes_dial  src/node/tests/settle/redialed.rs  a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_one_session_on_the_smaller_nodes_dial
+test          replaced   a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_the_smaller_nodes_dial_with_multipath_on  src/node/tests/settle/redialed.rs  a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_one_session_on_the_smaller_nodes_dial_with_multipath_on
 # The failed mark and the shown handshake state of master's handshake entry. next's peer machine
 # keeps both under the same rule and strings, and its tests in src/peer/machine.rs, named in the
 # fifth field, cover them: a failed send marks the leg failed and shows "failed", and every
@@ -652,7 +655,6 @@ test          no-site    a_planted_peers_link_and_an_entrys_link_put_in_the_map_
 test          no-site    a_configured_backoff_gives_the_nodes_resend_schedule  src/node/settle/tests/params.rs
 test          no-site    a_configured_interval_leaves_the_first_resend_a_second_after_the_dial  src/node/settle/tests/params.rs
 test          no-site    the_default_configuration_gives_the_settlement_cores_defaults  src/node/settle/tests/params.rs
-test          no-site    the_incidental_rules_their_marked_tests_and_the_doc_lines_agree_and_the_check_finds_each_planted_line  src/node/settle/tests/rules.rs
 test          no-site    the_gate_constants_rekey_parameters_and_address_order_appear_only_on_the_exempt_list  src/node/settle/tests/scans.rs
 test          no-site    the_settlement_core_is_stepped_polled_reaped_and_closed_only_from_decide_and_the_two_path_feeds  src/node/settle/tests/scans.rs
 test          no-site    no_name_of_the_deleted_peer_control_machine_survives_and_the_scan_finds_each_one_put_back  src/node/tests/survivors.rs
@@ -694,12 +696,6 @@ test          no-site    nine_distinct_replayed_msg1s_within_15_s_draw_at_most_e
 test          no-site    redials_refused_for_want_of_a_session_index_fill_the_redial_memory_and_the_ninth_is_refused  src/node/tests/roam_replay.rs
 test          no-site    a_second_redial_over_tcp_on_a_pending_redials_connection_keeps_the_connection_and_is_answered  src/node/tests/tcp.rs
 
-# Not classed: the close of the connection a node dialled at a crossing answered over the peer's
-# own dial connection, which master makes once the move leaves it unused. Whether next's move at
-# the msg2 leaves the dialled connection open is not established; if it does, it is the same
-# missing close as the TCP refusals' known-defect tests, and wants one of its own.
-test          open       a_crossed_dial_answered_over_the_peers_dial_connection_closes_the_connection_it_dialled  src/node/tests/ble.rs
-
 # The stream reader's handshake sizes. next's reader states its own XX set (an exact msg1,
 # minimum msg2 and msg3) rather than master's two exact IK sizes from the FMP wire module.
 test          next-rule  stream_reader_constants_are_sourced_from_the_fmp_wire_module  src/transport/framing.rs
@@ -712,34 +708,13 @@ test          open       a_link_rekey_reset_leaves_the_receiver_reporting_the_ne
 test          open       a_session_rekey_reset_leaves_the_metrics_judging_the_new_sessions_reports_as_fresh_metrics_do  core/src/proto/mmp/tests/rekey_reset.rs
 test          open       a_session_rekey_reset_leaves_the_receiver_reporting_the_new_session_as_a_fresh_receiver_does  core/src/proto/mmp/tests/rekey_reset.rs
 
-# Not classed: the restart dampener's refusal inside the interval, on the node clock, which
-# master's test drives with IK msg1 restarts. next refuses an epoch change while the peering is
-# live or while the dampener has stamped the peer, and tests the two apart. At node level it
-# tests only the liveness floor: a_dampened_epoch_restart_leaves_the_peer_address_naming_the_peer_link
-# refuses a restart into a live peering that no stamp covers. It tests the dampener's refusal
-# only in the core, in establish_epoch_mismatch_is_refused_a_second_time_inside_the_interval,
-# with the snapshot's dampened flag set by hand. No node-level test on next has the node clock's
-# dampener refuse a restart, and a_second_epoch_restart_past_the_interval_on_the_node_clock_is_accepted
-# covers only the acceptance past the interval. It wants a node-level test written for next.
-test          open       a_second_epoch_restart_inside_the_interval_on_the_node_clock_is_refused_by_the_dampener_and_a_third_past_it_is_accepted  src/node/tests/handshake.rs
-
 # Not classed: the site and its rule are on next, next holds no test of its own there, and
 # master's test does not run on next as it is, since it drives a promotion at the msg1 or a
 # driver next lacks. Each wants a test written for next, or a ruling that it needs none.
-# The restart dampener is stamped on acceptance only, as at next's msg3 restart arm.
-test          open       a_refused_epoch_change_does_not_slide_the_dampening_window  src/node/tests/handshake.rs
 # The dual rekey tie-break's line, logged at next's rekey msg3, is never suppressed.
 test          open       every_msg1_dropped_by_winning_a_dual_rekey_initiation_is_logged  src/node/tests/handshake_lines.rs
 # show_peers reports the promotion time as a wall-clock reading.
 test          open       a_shown_authenticated_at_follows_a_wall_step  src/node/tests/settle/clock.rs
-# A crossing lost at the msg2 on another transport keeps the session held; next's crossing
-# driver gives only the smaller node's msg2 ordering there.
-test          open       a_crossing_lost_on_another_transport_does_what_the_keep_cells_say  src/node/tests/settle/table/crossing.rs
-test          open       a_crossing_lost_on_another_transport_does_what_the_keep_cells_say_with_multipath_on  src/node/tests/settle/table/crossing.rs
-# A restart on a BLE link clears the old mark and marks the new peering; the driver built a
-# msg1 that promotes, and next's table README records these cells as a coverage gap.
-test          open       a_restart_on_a_ble_link_clears_the_old_mark_and_marks_the_new_peering  src/node/tests/settle/table/replace.rs
-test          open       a_restart_on_a_ble_link_clears_the_old_mark_and_marks_the_new_peering_with_multipath_on  src/node/tests/settle/table/replace.rs
 # The standby roam's report to the core's record. The site and its rule are on next
 # (the frame accounting in src/node/dataplane/encrypted.rs tells the record the pair a standby
 # path left), but master's test reaches it through Node::resync, which next lacks, and next

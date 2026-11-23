@@ -353,3 +353,183 @@ async fn a_restart_seen_in_our_msg2_replaces_the_peer_as_the_table_says() {
 async fn a_restart_seen_in_our_msg2_replaces_the_peer_as_the_table_says_with_multipath_on() {
     own_restart(true).await;
 }
+
+/// A handshake run by hand as `initiator`'s dial of `responder` at
+/// `responder`'s BLE link `link`, whose msg2 reaches `initiator`: the msg1 at
+/// the initiator's own epoch is handed to the responder, and the msg3 that
+/// completes it, carrying a negotiation payload that declares no rekey, is
+/// returned unhanded.
+#[cfg(ble_available)]
+async fn ble_hand_dial(
+    nodes: &mut [TestNode],
+    initiator: usize,
+    responder: usize,
+    link: &TransportAddr,
+) -> ReceivedPacket {
+    use super::promote::next_packet;
+    use crate::proto::fmp::NodeProfile;
+    use crate::proto::fmp::wire::{
+        CommonPrefix, Msg2Header, NegotiationPayload, build_msg1, build_msg3,
+    };
+    let tid = nodes[responder].transport_id;
+    let mut hs =
+        crate::noise::HandshakeState::new_initiator(nodes[initiator].node.identity().keypair());
+    hs.set_local_epoch(nodes[initiator].node.startup_epoch());
+    let ours = SessionIndex::new(0x0B1E_0001);
+    let msg1 = build_msg1(
+        ours,
+        &hs.write_message_1().expect("precondition: the msg1 builds"),
+    );
+    nodes[responder]
+        .node
+        .handle_msg1(ReceivedPacket::with_timestamp(
+            tid,
+            link.clone(),
+            msg1,
+            Node::now_ms(),
+        ))
+        .await;
+    let msg2 = loop {
+        let p = next_packet(&mut nodes[initiator]).await;
+        let is_msg2 = CommonPrefix::parse(&p.data).map(|c| c.phase) == Some(PHASE_MSG2);
+        if is_msg2 && Msg2Header::parse(&p.data).is_some_and(|h| h.receiver_idx == ours) {
+            break p.data;
+        }
+    };
+    let header = Msg2Header::parse(&msg2).expect("precondition: a framed msg2");
+    let (mut fork, _) = hs
+        .fork_msg2(&msg2[header.noise_msg2_offset..])
+        .expect("precondition: the msg2 reads");
+    let mut msg3 = fork
+        .write_message_3()
+        .expect("precondition: the msg3 builds");
+    let payload = NegotiationPayload::fmp(1, 1, NodeProfile::Full).encode();
+    msg3.extend(
+        fork.encrypt_payload(&payload)
+            .expect("precondition: the payload seals"),
+    );
+    ReceivedPacket::with_timestamp(
+        tid,
+        link.clone(),
+        build_msg3(ours, header.sender_idx, &msg3),
+        Node::now_ms(),
+    )
+}
+
+/// On the BLE pair with multipath set as `on`, node 1 holds node 0 at an
+/// epoch other than node 0's own and last heard it a minute ago, its state
+/// dirtied and its link marked. Node 0's handshake at its own epoch reads as
+/// a restart at its msg3: node 1 replaces the peering, which clears the
+/// link's mark, and node 0's first frame on the new peering marks it again.
+#[cfg(ble_available)]
+async fn ble_restart(on: bool) {
+    use super::ble_pair;
+    use super::promote::mark_at;
+    let (mut nodes, _bank) = ble_pair(on).await;
+    let a = *nodes[0].node.node_addr();
+    let link = nodes[1].addr.clone();
+    let tid = nodes[1].transport_id;
+    dirty(&mut nodes[1].node, &a).await;
+    dial_of_its_own(&mut nodes[1].node, &a);
+    // `dirty` clears the mark at the peer's pair; a frame would mark it again.
+    nodes[1]
+        .node
+        .transports
+        .get(&tid)
+        .expect("precondition: node 1's BLE transport")
+        .mark_verified(&link, &a)
+        .await;
+    nodes[1]
+        .node
+        .get_peer_mut(&a)
+        .expect("precondition: node 1 holds node 0")
+        .set_remote_epoch(Some([0xAA; 8]));
+    quiet(&mut nodes[1].node, &a);
+    let old = nodes[1].node.get_peer(&a).map(|p| p.link_id());
+    let mut pairs = vec![PathRef {
+        transport: tid,
+        addr: link.clone(),
+    }];
+    unlike_new(&mut nodes[1].node, &a, &mut pairs);
+    // No stamp, so that a stamp shows.
+    nodes[1].node.restart_dampener.remove(&a);
+    let marked = mark_at(&nodes[1], &link).await;
+    let msg3 = ble_hand_dial(&mut nodes, 0, 1, &link).await;
+    let before = Seen::of(&nodes[1].node, &a, &pairs).await;
+    nodes[1].node.handle_msg3(msg3).await;
+    let after = Seen::of(&nodes[1].node, &a, &pairs).await;
+    let cleared = mark_at(&nodes[1], &link).await;
+    let new = nodes[1].node.get_peer(&a).map(|p| p.link_id());
+    let carried = reading_kept(&nodes[1].node, old);
+    // Node 0's first authenticated frame on the new peering, as the decrypt
+    // worker hands it on: a 4-byte inner timestamp, then a heartbeat.
+    nodes[1]
+        .node
+        .process_authentic_fmp_plaintext(
+            &a,
+            crate::node::dataplane::LinkSlot::Current,
+            tid,
+            &link,
+            Node::now_ms(),
+            64,
+            1_000_000,
+            false,
+            &[0, 0, 0, 0, 0x51],
+        )
+        .await;
+    let remarked = mark_at(&nodes[1], &link).await;
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        marked,
+        Some(true),
+        "precondition: node 1's link is marked before the restart"
+    );
+    let link_id = match (old, new) {
+        (Some(o), Some(n)) if o != n => n,
+        _ => panic!("precondition: node 1 replaced node 0's peering on the restart msg3"),
+    };
+    let t = Transition::Replace {
+        link: link_id,
+        initiator: false,
+        why: Why::Restart,
+    };
+    let mut others = common(on);
+    others.extend([
+        // With multipath on the old bundle held [`dirty`]'s candidate.
+        (Row::Capability, changed_if(on)),
+        // One path: nothing is unkept, so nothing is queued to close.
+        (Row::Connection, Outcome::Kept),
+        (Row::PathCloses, Outcome::Kept),
+        (Row::BleMark, Outcome::Changed),
+        (Row::Bootstrap, Outcome::Kept),
+        // The dampener is stamped at the restart it accepts, and the old
+        // peering, which frames reached, is not noted silent.
+        (Row::Dampener, Outcome::Changed),
+        (Row::Silent, Outcome::Kept),
+        (Row::Reconnect, Outcome::Changed),
+    ]);
+    assert_cells(&before, &after, &t, &others);
+    assert_reading_kept(carried);
+    assert_eq!(
+        (cleared, remarked),
+        (Some(false), Some(true)),
+        "defect: the restart does not clear the old mark, or the new peering's first frame does not mark it"
+    );
+}
+
+/// On a BLE link, with multipath off, a restart's msg3 clears the old
+/// peering's mark, the new peering's first frame marks it, and every other
+/// row is as the table says.
+#[cfg(ble_available)]
+#[tokio::test]
+async fn a_restart_on_a_ble_link_clears_the_old_mark_and_marks_the_new_peering() {
+    ble_restart(false).await;
+}
+
+/// [`a_restart_on_a_ble_link_clears_the_old_mark_and_marks_the_new_peering`]
+/// with multipath on.
+#[cfg(ble_available)]
+#[tokio::test]
+async fn a_restart_on_a_ble_link_clears_the_old_mark_and_marks_the_new_peering_with_multipath_on() {
+    ble_restart(true).await;
+}

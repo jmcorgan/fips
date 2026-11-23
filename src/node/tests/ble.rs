@@ -1296,6 +1296,116 @@ async fn a_crossed_dial_won_on_a_second_link_leaves_the_larger_node_on_a_pooled_
     );
 }
 
+/// [`crossed_on_two_links`] up to node 0's msg2: node 0, the smaller, dials
+/// over L2 and node 1 over L1; node 1 completes its own dial on node 0's
+/// msg2 over L1, and its msg3 over L1 completes node 0's inbound half, so
+/// node 0 holds node 1 on L1. Returns the nodes, node 1's msg2 answering
+/// node 0's dial, which came over L2 and is not handed, node 0's dial's
+/// index, and node 1's addresses of L1 and L2 at node 0.
+async fn crossed_to_msg2() -> (
+    Vec<TestNode>,
+    ReceivedPacket,
+    SessionIndex,
+    TransportAddr,
+    TransportAddr,
+) {
+    let mut nodes = vec![make_test_node_ble(1).await, make_test_node_ble(2).await];
+    smaller_first(&mut nodes);
+    let (_a0, a1, _a0x, a1x) = two_links(&nodes).await;
+    let (a1, a1x) = (a1.to_transport_addr(), a1x.to_transport_addr());
+    let t = nodes[0].transport_id;
+    let n1 = *nodes[1].node.node_addr();
+    let mut held = Vec::new();
+    dial_at(&mut nodes, 0, 1, a1x.clone()).await;
+    initiate_handshake(&mut nodes, 1, 0).await;
+    let outbound = {
+        let keys: Vec<_> = nodes[0].node.pending_outbound.keys().copied().collect();
+        assert_eq!(keys.len(), 1, "precondition: node 0 has one dial pending");
+        SessionIndex::new(keys[0].1)
+    };
+    let msg1 = next_packet(&mut nodes[1]).await;
+    assert_eq!(
+        phase(&msg1),
+        Some(PHASE_MSG1),
+        "precondition: node 0's msg1 reaches node 1"
+    );
+    hand(&mut nodes[1].node, msg1).await;
+    let (mut msg1, mut msg2) = (None, None);
+    while msg1.is_none() || msg2.is_none() {
+        let packet = next_packet(&mut nodes[0]).await;
+        match phase(&packet) {
+            Some(PHASE_MSG1) if msg1.is_none() => msg1 = Some(packet),
+            Some(PHASE_MSG2) if msg2.is_none() => msg2 = Some(packet),
+            other => panic!("precondition: an unexpected packet at node 0 ({other:?})"),
+        }
+    }
+    let (msg1, msg2) = (msg1.unwrap(), msg2.unwrap());
+    assert_eq!(
+        (msg2.transport_id, &msg2.remote_addr),
+        (t, &a1x),
+        "precondition: node 1's msg2 reaches node 0 over L2"
+    );
+    hand(&mut nodes[0].node, msg1).await;
+    let answer = next_phase(&mut nodes[1], PHASE_MSG2, &mut held).await;
+    hand(&mut nodes[1].node, answer).await;
+    let msg3 = next_phase(&mut nodes[0], PHASE_MSG3, &mut held).await;
+    hand(&mut nodes[0].node, msg3).await;
+    let at = nodes[0]
+        .node
+        .get_peer(&n1)
+        .and_then(|p| p.current_addr().cloned());
+    assert_eq!(
+        at,
+        Some(a1.clone()),
+        "precondition: node 0 installed node 1 on its msg3, holding it on L1"
+    );
+    drop(held);
+    (nodes, msg2, outbound, a1, a1x)
+}
+
+/// Crossed dials on two links as [`crossed_to_msg2`] sets them up, but node
+/// 1's answer to node 0's dial comes over L1, node 1's own dial connection,
+/// as a host that answers from the connection it dialled on sends it. Node 0
+/// moves node 1 onto its dial at L1 and keeps L1 open, since the peering now
+/// uses it; L2, the connection node 0 dialled, is then used by no link and
+/// no handshake, and node 0 must close it. On this line it does not: a known
+/// defect until the close rule reaches the move.
+#[tokio::test(start_paused = true)]
+#[ignore = "known defect on next: a move at the msg2 onto a dial answered over the peer's own dial connection leaves the connection it dialled open"]
+async fn a_crossed_dial_answered_over_the_peers_dial_connection_closes_the_connection_it_dialled() {
+    let (mut nodes, mut msg2, outbound, a1, a1x) = crossed_to_msg2().await;
+    let t = nodes[0].transport_id;
+    let n1 = *nodes[1].node.node_addr();
+    msg2.remote_addr = a1.clone();
+    hand(&mut nodes[0].node, msg2).await;
+    let (ours, at) = nodes[0]
+        .node
+        .get_peer(&n1)
+        .map(|p| (p.our_index(), (p.transport_id(), p.current_addr().cloned())))
+        .expect("precondition: node 0 holds node 1");
+    assert_eq!(
+        ours,
+        Some(outbound),
+        "precondition: node 0 swapped to its outbound session"
+    );
+    assert_eq!(
+        at,
+        (Some(t), Some(a1.clone())),
+        "precondition: node 0 holds node 1 on its dial at L1, where the msg2 came from"
+    );
+    let l1 = verified_at(&nodes[0], &a1).await;
+    let l2 = verified_at(&nodes[0], &a1x).await;
+    cleanup_nodes(&mut nodes).await;
+    assert!(
+        l1.is_some(),
+        "precondition: node 0 keeps L1, the connection its peering moved onto, pooled"
+    );
+    assert_eq!(
+        l2, None,
+        "defect: node 0 left L2, the connection it dialled, open with no link using it"
+    );
+}
+
 /// The decrypt worker's path moves the verification the same way, and marks
 /// a link again when a frame arrives at an unchanged address.
 #[tokio::test]

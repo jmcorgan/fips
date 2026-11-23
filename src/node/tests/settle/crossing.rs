@@ -1038,7 +1038,10 @@ fn take_phase(packets: &mut Vec<ReceivedPacket>, want: u8) -> ReceivedPacket {
 /// closes it. The larger node then reads the smaller's msg3, which settles
 /// the crossing at its end at the peer's msg3. Returns the nodes, the
 /// smaller node's index and the larger's, with each step asserted.
-async fn moved_at_msg2_over_tcp(on: bool, zero_smaller: bool) -> (Vec<TestNode>, usize, usize) {
+pub(super) async fn moved_at_msg2_over_tcp(
+    on: bool,
+    zero_smaller: bool,
+) -> (Vec<TestNode>, usize, usize) {
     let mut nodes = tcp_pair(on, zero_smaller).await;
     let (s, l) = if zero_smaller { (0, 1) } else { (1, 0) };
     let s_addr = *nodes[s].node.node_addr();

@@ -335,3 +335,77 @@ async fn sessions_that_carried_a_frame_never_count_toward_the_back_off() {
 
     cleanup_nodes(&mut nodes).await;
 }
+
+/// Node 0 dials node 1 while node 1 refuses node 0's msg3s, so node 0
+/// promotes at its msg2 and holds a session node 1 never installed; node
+/// 0's link-dead reaper then removes it unheard. The refusal was node 1's,
+/// and node 1's frames never had a session to arrive on, so the session
+/// must not count toward node 0's back-off for node 1. On next it does:
+/// a removal counts every peer it removes unheard, whoever dialed it.
+/// Multipath is set as `on`.
+async fn refused_dialer(on: bool) {
+    let mut nodes = vec![
+        spanning_tree::make_test_node_with_config(
+            super::settle::with_path(Config::new(), on),
+            1280,
+        )
+        .await,
+        spanning_tree::make_test_node_with_config(
+            super::settle::with_path(Config::new(), on),
+            1280,
+        )
+        .await,
+    ];
+    set_link_dead_timeout(&mut nodes[0].node, 0);
+    set_link_dead_timeout(&mut nodes[1].node, 0);
+    let a = *nodes[0].node.node_addr();
+    let b = *nodes[1].node.node_addr();
+    three_reaped(&mut nodes).await;
+    let (refused, _) = handshake_counts(&nodes[1]);
+
+    discard(&mut nodes[0]);
+    initiate_handshake(&mut nodes, 0, 1).await;
+    drain_all_packets(&mut nodes, false).await;
+    assert_eq!(
+        handshake_counts(&nodes[1]).0,
+        refused + 1,
+        "precondition: node 1 refused node 0's msg3"
+    );
+    assert!(
+        nodes[1].node.get_peer(&a).is_none(),
+        "precondition: node 1 holds no session with node 0"
+    );
+    assert!(
+        nodes[0].node.get_peer(&b).is_some_and(|p| !p.heard()),
+        "precondition: node 0 promoted at its msg2 and heard nothing"
+    );
+
+    nodes[0].node.check_link_heartbeats().await;
+    discard(&mut nodes[1]);
+    assert!(
+        nodes[0].node.get_peer(&b).is_none(),
+        "precondition: node 0's reaper removed the one-sided session"
+    );
+    let counted = nodes[0].node.silent_sessions.count(&b);
+
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        counted, None,
+        "defect: node 0's one-sided session, refused at node 1's msg3, was counted against node 1"
+    );
+}
+
+#[tokio::test]
+#[ignore = "known defect: a dialer's one-sided session refused at msg3 is counted against the refuser"]
+async fn a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_against_the_refuser()
+{
+    refused_dialer(false).await;
+}
+
+/// [`a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_against_the_refuser`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: a dialer's one-sided session refused at msg3 is counted against the refuser"]
+async fn a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_against_the_refuser_with_multipath_on()
+ {
+    refused_dialer(true).await;
+}
