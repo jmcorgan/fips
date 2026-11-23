@@ -84,7 +84,10 @@ so it reaches no normal or release build.
   next resend; and `reap_one` (through `Table::reap_leg`) is a poll's reap
   of one leg alone at a given instant, through the same reap a poll
   makes, for a shell asking whether the core reaps a leg the shell is
-  reaping.
+  reaping. For a shell that keeps its own handshake timing, which no IK
+  rule calls: `quiet` stops a dial's resends and leaves
+  it to be reaped at its deadline, and `resends` is a poll's resends
+  without its reap, for a shell that reaps its legs at sweeps of its own.
 - `flow.rs`: the handshake flow a table runs, the `Flow` trait. A flow
   classifies a handshake's messages; the table's shared rules (the
   records, the legs, the gates, the held peers, removal, the path inputs
@@ -109,8 +112,11 @@ so it reaches no normal or release build.
   hidden from the docs, `count_refused` and `take_refused` keep a shell's
   count of the msg1s a silent-session back-off refused, for its log,
   `drop_leg` ends a leg for a cause the table has no input for, with the
-  answer and the redial it carried, and `open_link` opens a record for a
-  link a shell adds outside any handshake. `Ops`, hidden from the docs, is
+  answer and the redial it carried, `open_link` opens a record for a
+  link a shell adds outside any handshake, and `parts` and `parts_mut`
+  lend the records, the legs and the gates together, to read and to
+  write, for a shell that holds its one copy of each in the table while
+  it still decides with them itself; no IK rule calls them. `Ops`, hidden from the docs, is
   the table as a flow reaches it, which only the table builds: its reads,
   writers to the records, legs and gates, and the shared operations a
   flow's rules invoke, each a one-line call of the table's own, so the IK

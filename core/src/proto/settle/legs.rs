@@ -365,6 +365,17 @@ impl<I: Instant> Legs<I> {
         leg.next = Some(deadline(now, params.retry));
     }
 
+    /// The dial on `link` sends no more resends and is left to be reaped
+    /// at its deadline, for a shell that stops a dial's resends at a step
+    /// of its own: its msg2 read, or its peer held on another link. No IK
+    /// rule calls it.
+    pub fn quiet(&mut self, link: LinkNo) {
+        if let Some(leg) = self.legs.get_mut(&link) {
+            leg.next = None;
+            leg.retry = false;
+        }
+    }
+
     /// How many responder legs are in flight.
     pub fn answering(&self) -> usize {
         self.legs
@@ -383,6 +394,16 @@ impl<I: Instant> Legs<I> {
     pub fn poll(&mut self, now: I, links: &mut Links) -> Vec<LegOut> {
         let mut out = Vec::new();
         self.reap(now, None, links, &mut out);
+        out.extend(self.resends(now));
+        out
+    }
+
+    /// The resends due at `now`, as [`Legs::poll`] asks for them, reaping
+    /// no leg: for a shell that reaps its legs at sweeps of its own, so a
+    /// leg past its deadline stays until the shell gives it up. No IK rule
+    /// calls it.
+    pub fn resends(&self, now: I) -> Vec<LegOut> {
+        let mut out = Vec::new();
         for leg in self.legs.values() {
             if leg.retry || leg.next.is_some_and(|n| due(n, now)) {
                 let mut bytes = leg.msg1.clone();

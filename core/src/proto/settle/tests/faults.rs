@@ -488,16 +488,26 @@ pub const ROWS: &[Row] = &[
                 TABLE,
                 "a_reap_of_one_leg_reaps_only_that_leg_and_only_from_its_deadline",
             ),
+            (
+                LEGS,
+                "a_quieted_dial_resends_nothing_more_and_is_still_reaped_at_its_deadline",
+            ),
             SCRIPTED_OFF,
             SCRIPTED_ON,
         ],
     ),
     (
         Fault::ResendFresh,
-        &[(
-            LEGS,
-            "resends_follow_the_backoff_and_repeat_the_msg1_byte_for_byte",
-        )],
+        &[
+            (
+                LEGS,
+                "resends_follow_the_backoff_and_repeat_the_msg1_byte_for_byte",
+            ),
+            (
+                LEGS,
+                "the_resends_alone_ask_for_each_due_resend_byte_for_byte_and_reap_no_leg_past_its_deadline",
+            ),
+        ],
     ),
     (
         Fault::AnswerFresh,
@@ -514,6 +524,10 @@ pub const ROWS: &[Row] = &[
         Fault::PollAhead,
         &[
             (LEGS, "a_poll_before_the_next_wake_does_nothing"),
+            (
+                LEGS,
+                "the_resends_alone_ask_for_each_due_resend_byte_for_byte_and_reap_no_leg_past_its_deadline",
+            ),
             SCRIPTED_OFF,
             SCRIPTED_ON,
         ],

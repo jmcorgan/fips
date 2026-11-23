@@ -258,6 +258,20 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         &self.legs
     }
 
+    /// The link records, the legs and the restart gates, for a shell that
+    /// holds its one copy of each in this table while it still decides with
+    /// them itself, before the table decides.
+    #[doc(hidden)]
+    pub fn parts(&self) -> (&Links, &Legs<I>, &Gates<I>) {
+        (&self.links, &self.legs, &self.gates)
+    }
+
+    /// [`Table::parts`], to write.
+    #[doc(hidden)]
+    pub fn parts_mut(&mut self) -> (&mut Links, &mut Legs<I>, &mut Gates<I>) {
+        (&mut self.links, &mut self.legs, &mut self.gates)
+    }
+
     /// The peer held for `peer`.
     pub fn held(&self, peer: &NodeAddr) -> Option<&Held<I>> {
         self.held.get(peer)
