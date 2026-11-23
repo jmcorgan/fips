@@ -92,7 +92,7 @@ fn map_sizes(node: &Node) -> [usize; 6] {
         node.pending_outbound.len(),
         node.links.len(),
         node.links.index().len(),
-        node.peer_machines.len(),
+        node.handshakes.len(),
     ]
 }
 

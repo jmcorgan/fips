@@ -12,8 +12,8 @@
 pub(crate) mod connected_udp;
 mod dispatch;
 mod encrypted;
+mod establish;
 mod forwarding;
-mod peer_actions;
 mod rx_loop;
 pub(in crate::node) mod wait;
 
@@ -21,4 +21,4 @@ pub(in crate::node) mod wait;
 pub(in crate::node) use encrypted::DECRYPT_FAILURE_THRESHOLD;
 #[cfg(test)]
 pub(in crate::node) use encrypted::LinkSlot;
-pub(in crate::node) use peer_actions::PeerActionCtx;
+pub(in crate::node) use establish::Ambient;

@@ -192,7 +192,7 @@ rows! {
     SetupRecord,
     /// The peer's identity and npub.
     Identity,
-    /// The handshake leg and the control machine.
+    /// The handshake leg and the handshake entry.
     ControlMachine,
     /// The transport's connection.
     Connection,
@@ -378,13 +378,13 @@ pub(crate) enum Cell {
     /// Carried across the rebuild.
     Carried,
 
-    /// The leg's machine survives as the peer's.
+    /// The leg's entry survives as the peer's.
     LegSurvives,
     /// The old peer's removed, then as [`Cell::LegSurvives`].
     OldRemovedLegSurvives,
     /// The dial's removed, the peer's told how the crossing resolved.
     DialRemovedPeerStepped,
-    /// The leg's machine removed; the peer's is not told.
+    /// The leg's entry removed; the peer's is not told.
     LegRemoved,
     /// The dial's removed, the peer's keyed under the dial's link with its
     /// timers and then told how the crossing resolved.

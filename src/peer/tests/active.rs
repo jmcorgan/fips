@@ -597,7 +597,7 @@ fn every_session_change_carries_the_withheld_handshake_lines_and_restarts_the_co
         path: crate::peer::test_caps(),
         mark: 0,
     };
-    let _ = b.peer.move_session(
+    let _ = b.peer.adopt_dial(
         next_recv,
         lease(7),
         SessionIndex::new(8),
@@ -923,7 +923,7 @@ fn cross_move(end: &mut End) {
         path: crate::peer::test_caps(),
         mark: 0,
     };
-    let (out, _) = end.peer.move_session(
+    let (out, _) = end.peer.adopt_dial(
         next_recv,
         lease(7),
         SessionIndex::new(8),
@@ -1124,7 +1124,7 @@ fn a_move_refused_for_a_session_of_another_key_rolls_the_counts_and_changes_noth
         path: crate::peer::test_caps(),
         mark: 0,
     };
-    let (out, paths) = b.peer.move_session(
+    let (out, paths) = b.peer.adopt_dial(
         session_of_another_key(),
         lease(7),
         SessionIndex::new(8),

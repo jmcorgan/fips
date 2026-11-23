@@ -69,7 +69,7 @@ async fn lan_node_with_connected_peer() -> (Node, PeerIdentity) {
     let mut node = lan_node().await;
     let link_id = LinkId::new(1);
     let peer = seed_completed_connection(&mut node, link_id, TransportId::new(1), 1000);
-    node.promote_connection(link_id, peer, 2000).unwrap();
+    node.install_handshake(link_id, peer, 2000).unwrap();
     assert!(node.peers.contains_key(peer.node_addr()));
     (node, peer)
 }

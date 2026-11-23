@@ -133,7 +133,7 @@ fn exited(nodes: &[TestNode], at: usize, peer: usize, exit: &str) {
     audit(node, exit);
     assert!(node.pending_inbound.is_empty(), "{exit}: no leg is pending");
     assert!(
-        node.peer_machines.values().all(|m| m.leg().is_none()),
+        node.handshakes.values().all(|m| m.leg().is_none()),
         "{exit}: no leg machine is left"
     );
     let peer_addr = *nodes[peer].node.node_addr();

@@ -38,12 +38,12 @@ pub(in crate::node) fn peer_link(node: &Node) -> Vec<LinkId> {
         .collect()
 }
 
-/// `link-named`: every link is named by a peer, a handshake machine, a
+/// `link-named`: every link is named by a peer, a handshake entry, a
 /// pending dial, or a pending connect, which is all an anonymous dial's link
 /// has until its connect resolves. The links no one names.
 pub(in crate::node) fn link_named(node: &Node) -> Vec<LinkId> {
     let mut named: HashSet<LinkId> = node.peers.values().map(|p| p.link_id()).collect();
-    named.extend(node.peer_machines.keys().copied());
+    named.extend(node.handshakes.keys().copied());
     named.extend(node.pending_outbound.values().copied());
     named.extend(node.peering.pending_connects.iter().map(|p| p.link_id));
     node.links
@@ -124,7 +124,7 @@ pub(in crate::node) fn held_entry(node: &Node) -> Vec<LinkId> {
 /// that pair names another live link. The legs' links that break it.
 pub(in crate::node) fn leg_entry(node: &Node) -> Vec<LinkId> {
     let mut bad = Vec::new();
-    for (link, machine) in node.peer_machines.iter() {
+    for (link, machine) in node.handshakes.iter() {
         if machine.leg().is_none() {
             continue;
         }
@@ -190,7 +190,7 @@ pub(in crate::node) fn index(node: &Node, step: &str) {
         leased += peer.link_bindings().len();
     }
     leased += node
-        .peer_machines
+        .handshakes
         .values()
         .filter(|machine| machine.our_index().is_some())
         .count();
@@ -220,12 +220,12 @@ pub(in crate::node) fn index(node: &Node, step: &str) {
     let _ = onworker;
 }
 
-/// `carrier`: every handshake machine has a live carrier, its own pending
+/// `carrier`: every handshake entry has a live carrier, its own pending
 /// connection, an active peer on its link, or a pending connect still
 /// resolving toward it. A machine with none is unreachable by every teardown
 /// path and has leaked. The links of the machines that break it.
 pub(in crate::node) fn carrier(node: &Node) -> Vec<LinkId> {
-    node.peer_machines
+    node.handshakes
         .iter()
         .filter(|(link, machine)| {
             machine.leg().is_none()
@@ -252,7 +252,7 @@ pub(in crate::node) fn leg_handshake(node: &Node) -> Vec<LinkId> {
                 // A leg on a record no link of the node's is numbered for.
                 return Some(LinkId::new(leg.link().0));
             };
-            node.peer_machines
+            node.handshakes
                 .get(&link)
                 .is_none_or(|machine| machine.leg().is_none())
                 .then_some(link)

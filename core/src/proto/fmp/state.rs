@@ -4,8 +4,7 @@
 //! connection — link/direction identity, learned peer identity and epoch,
 //! index/transport/address tracking, handshake-resend scheduling, and link
 //! statistics — extracted out of the async node shell. The handshake phase
-//! itself lives solely on the per-peer control machine
-//! (`PeerMachine`), not here.
+//! itself lives on the node's handshake entry (`Handshake`), not here.
 //!
 //! [`ConnectionState`] owns every **pure** field of the handshake-phase
 //! connection. The Noise crypto handles (`noise::HandshakeState`,

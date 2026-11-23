@@ -4,7 +4,7 @@
 use super::silent_backoff::{discard, from_node0, next_phase, node0_initiator, pair};
 use super::spanning_tree::{TestNode, cleanup_nodes};
 use super::*;
-use crate::peer::machine::PeerMachine;
+use crate::peer::handshake::Handshake;
 use crate::proto::fmp::NegotiationPayload;
 use crate::proto::fmp::wire::{Msg2Header, build_msg3};
 use crate::testutil::{LogCapture, capture_logs_scoped, log_field};
@@ -22,7 +22,7 @@ const SUMMARY: &str = "Suppressed repeated handshake lines";
 
 /// Node 0's framed msg3 under `index`, answering node 1's `msg2` on `leg`,
 /// optionally declaring the handshake a rekey of node 1's session `rekey_of`.
-fn msg3(leg: &mut PeerMachine, msg2: &[u8], index: u32, rekey_of: Option<SessionIndex>) -> Vec<u8> {
+fn msg3(leg: &mut Handshake, msg2: &[u8], index: u32, rekey_of: Option<SessionIndex>) -> Vec<u8> {
     let header = Msg2Header::parse(msg2).expect("msg2 header");
     let payload = NegotiationPayload::fmp(1, 1, crate::proto::fmp::NodeProfile::Full);
     let neg = match rekey_of {

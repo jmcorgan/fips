@@ -6,8 +6,8 @@
 //! and closes the link it left; a move onto the inbound leg keeps the peer on
 //! the link it dialed.
 //!
-//! The sites, `handle_msg2`'s crossing arm and the peer action executor's
-//! msg3 crossing arm, make a move themselves with `move_session`, which also
+//! The sites, `handle_msg2`'s crossing arm and `Node::cross_inbound` at the
+//! peer's msg3, make a move themselves with `adopt_dial`, which also
 //! settles the peer's record, then fill the run's [`Facts`] with what the
 //! move returned and what it read before it, and the executor runs the rest
 //! of the crossing from here.
@@ -18,7 +18,6 @@ use crate::node::Node;
 use crate::node::diag::{self, OrNone, Tag4};
 use crate::node::handlers::path_intake::Feed;
 use crate::node::settle::table::Transition;
-use crate::peer::machine::CrossConnOutcome;
 use crate::peer::{LinkOutputs, UdpSlot};
 use crate::proto::fmp::Msg1Digest;
 use crate::transport::{LinkId, TransportAddr, TransportId};
@@ -51,8 +50,6 @@ pub(in crate::node) struct Facts {
     pub(in crate::node) epoch: Option<Tag4>,
     /// The digest of the msg1 this node sent on the dial.
     pub(in crate::node) msg1: Option<Msg1Digest>,
-    /// How the crossing resolved, for the peer's control machine.
-    pub(in crate::node) outcome: Option<CrossConnOutcome>,
     /// The session index of the handshake a kept crossing ends, freed when
     /// run.
     pub(in crate::node) lease: Option<IndexLease>,
@@ -135,7 +132,7 @@ pub(super) async fn renewed(node: &mut Node, r: &mut Run) {
 }
 
 /// Hold the peer on the dial's link, if the move left another: the core's
-/// record of the dial's link is the peer's, and the control machine, its
+/// record of the dial's link is the peer's, and the handshake entry, its
 /// timers and the carrier readings are keyed under the dial's link, which
 /// every later read of the peer's link names.
 pub(super) async fn hold_dial(node: &mut Node, r: &mut Run) {
@@ -143,9 +140,9 @@ pub(super) async fn hold_dial(node: &mut Node, r: &mut Run) {
         return;
     };
     node.links.hold(node.core.parts_mut().0, &dial, r.peer);
-    // The mutation lane's break: the machine stays under the link left.
+    // The mutation lane's break: the entry stays under the link left.
     if !node_fault!(MachineLeftBehind) {
-        node.peer_machines.rekey(left, dial);
+        node.handshakes.rekey(left, dial);
     }
     // The mutation lane's break: the readings stay under the link left.
     if !node_fault!(CarrierLeftBehind) {
@@ -219,14 +216,6 @@ pub(super) async fn move_note(node: &mut Node, r: &mut Run) {
     );
 }
 
-/// Tell the peer's control machine how the crossing resolved, so its shadow
-/// session indices track the move (updated) or the keep (unchanged).
-pub(super) async fn machine_crossed(node: &mut Node, r: &mut Run) {
-    if let Some(outcome) = r.crossing().outcome {
-        node.observe_cross_conn_resolved(&r.peer, outcome);
-    }
-}
-
 /// Close the losing link's connection, the link a move left or the dial's:
 /// a separate socket on TCP, a no-op when connectionless, and left open
 /// while a live link uses it, such as the very connection the peer runs on
@@ -247,11 +236,11 @@ pub(super) async fn loser_removed(node: &mut Node, r: &mut Run) {
     }
 }
 
-/// Drop the control machine of the inbound leg the peer's msg3 completed,
+/// Drop the handshake entry of the inbound leg the peer's msg3 completed,
 /// with the connection it carries.
 pub(super) async fn leg_machine_removed(node: &mut Node, r: &mut Run) {
     if let Some((link, _)) = other(&r.t) {
-        node.remove_peer_machine(link);
+        node.remove_handshake(link);
     }
 }
 

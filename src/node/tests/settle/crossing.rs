@@ -658,7 +658,7 @@ async fn a_moved_links_address_is_the_one_dialed_and_the_msg2s_pair_is_its_path_
 /// link-dead, which finds the machine by the peer's link, reaches it and
 /// removes the peer with its machine.
 async fn machine_moves(on: bool) {
-    use crate::peer::machine::TimerKind;
+    use crate::peer::handshake::TimerKind;
     use crate::proto::settle::output::Why;
 
     let mut nodes = dialed_pair(on).await;
@@ -670,7 +670,7 @@ async fn machine_moves(on: bool) {
         .expect("precondition: node 0 holds node 1");
     nodes[0]
         .node
-        .peer_machines
+        .handshakes
         .arm(left, TimerKind::Liveness, u64::MAX / 2);
     own_dial(&mut nodes).await;
     let node = &nodes[0].node;
@@ -678,14 +678,14 @@ async fn machine_moves(on: bool) {
         .get_peer(&b)
         .map(|p| p.link_id())
         .expect("precondition: the move keeps the peer");
-    let machine = node.peer_machines.get(&held).map(|m| m.link_id());
+    let machine = node.handshakes.get(&held).map(|m| m.link_id());
     let timer = node
-        .peer_machines
+        .handshakes
         .timers()
         .get(&held)
         .is_some_and(|t| t.contains_key(&TimerKind::Liveness));
     let behind =
-        node.peer_machines.contains_key(&left) || node.peer_machines.timers().contains_key(&left);
+        node.handshakes.contains_key(&left) || node.handshakes.timers().contains_key(&left);
     nodes[0]
         .node
         .route_link_dead(b, Node::now_ms(), Why::Dead)
@@ -693,7 +693,7 @@ async fn machine_moves(on: bool) {
     let node = &nodes[0].node;
     let after = (
         node.get_peer(&b).is_some(),
-        node.peer_machines.contains_key(&held),
+        node.handshakes.contains_key(&held),
     );
     cleanup_nodes(&mut nodes).await;
     assert_ne!(

@@ -13,7 +13,7 @@ use super::super::crossed_dial::hand;
 use super::super::spanning_tree::{TestNode, cleanup_nodes, initiate_handshake};
 use super::super::*;
 use super::{loopback_node, pump, resolve_connect, tcp_dial, tcp_pair};
-use crate::peer::machine::DialOrigin;
+use crate::peer::handshake::DialOrigin;
 
 /// How many times the live audit has checked `tn`'s node.
 fn audits(tn: &TestNode) -> u64 {
@@ -288,13 +288,13 @@ async fn an_anonymous_connects_link_is_named_by_its_pending_connect_until_its_le
         .await
         .expect("precondition: the dial starts");
     let link = nodes[0].node.peering.pending_connects[0].link_id;
-    let machine = nodes[0].node.peer_machines.contains_key(&link);
+    let machine = nodes[0].node.handshakes.contains_key(&link);
     let pending = link_named(&nodes[0].node);
     let connects = std::mem::take(&mut nodes[0].node.peering.pending_connects);
     let dropped = link_named(&nodes[0].node);
     nodes[0].node.peering.pending_connects = connects;
     resolve_connect(&mut nodes[0]).await;
-    let leg = nodes[0].node.peer_machines.contains_key(&link);
+    let leg = nodes[0].node.handshakes.contains_key(&link);
     let resolved = link_named(&nodes[0].node);
     let count = audits(&nodes[0]);
     cleanup_nodes(&mut nodes).await;

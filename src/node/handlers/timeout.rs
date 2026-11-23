@@ -5,7 +5,7 @@ use crate::NodeAddr;
 use crate::node::Node;
 use crate::node::handlers::path_intake::Feed;
 use crate::node::session::SessionInstant;
-use crate::peer::machine::{DialOrigin, TimerKind};
+use crate::peer::handshake::{DialOrigin, TimerKind};
 use crate::proto::fmp::flow::In;
 use crate::proto::settle::input::Input as CoreInput;
 use crate::proto::settle::legs::LegOut;
@@ -99,14 +99,14 @@ impl Node {
                 self.note_handshake_timeout(peer, peering_now);
             }
             // Log before cleanup (needs live connection state). The
-            // failure signal is now read from the control machine; the
+            // failure signal is now read from the handshake entry; the
             // leg still carries direction/idle for the log fields.
             let is_failed = self
-                .peer_machines
+                .handshakes
                 .get(&link)
                 .is_some_and(|machine| machine.is_failed());
             if let Some(machine) = self
-                .peer_machines
+                .handshakes
                 .get(&link)
                 .filter(|machine| machine.leg().is_some())
             {
@@ -144,13 +144,13 @@ impl Node {
         timeout_ms: u64,
     ) -> Vec<Stale> {
         let now = crate::time::mono_at(interval_now);
-        self.peer_machines
+        self.handshakes
             .iter()
             .filter(|(_, machine)| machine.leg().is_some())
             .filter(|(link_id, machine)| {
                 machine.is_failed()
                     || (!self
-                        .peer_machines
+                        .handshakes
                         .timers()
                         .get(*link_id)
                         .is_some_and(|timers| timers.contains_key(&TimerKind::HandshakeTimeout))
@@ -213,11 +213,11 @@ impl Node {
         // (the machine owns it), keeping it readable for the index/link
         // cleanup below. The machine shares the connection's `link_id` and
         // lifetime; dropping it here means a reaped handshake leg leaves no
-        // dangling machine. A no-op for promoted peers — `promote_connection`
+        // dangling machine. A no-op for promoted peers — `install_handshake`
         // already consumed their connection, so this reaper never runs for
         // them.
         let _detached_leg = match self
-            .peer_machines
+            .handshakes
             .get_mut(&link_id)
             .and_then(|machine| machine.take_leg())
         {
@@ -229,11 +229,11 @@ impl Node {
         // carrier, before disposing the machine (the leg no longer projects
         // them).
         self.core_drop_leg(link_id);
-        let (transport_id, our_index) = match self.peer_machines.get_mut(&link_id) {
+        let (transport_id, our_index) = match self.handshakes.get_mut(&link_id) {
             Some(machine) => (machine.conn_transport_id(), machine.take_our_index()),
             None => (None, None),
         };
-        self.remove_peer_machine(link_id);
+        self.remove_handshake(link_id);
 
         // Free session index and pending_outbound if allocated
         if let Some(lease) = our_index {
@@ -270,7 +270,7 @@ impl Node {
     /// Act on the handshake timers this tick.
     ///
     /// The sans-IO machine arms its `HandshakeTimeout` into the timer store
-    /// on [`peer_machines`](Node::peer_machines), whose presence marks an
+    /// on [`handshakes`](Node::handshakes), whose presence marks an
     /// outbound leg this driver reaps once idle-timed-out; the dial's leg in
     /// the settlement core's legs times the msg1 resends this driver sends,
     /// and is told what the driver did with each. The timeouts are driven before the
@@ -289,7 +289,7 @@ impl Node {
     /// after it.
     async fn timers_body(&mut self, interval_now: u64) {
         let _ = self.core_tick(interval_now, false);
-        if self.peer_machines.timers().is_empty() && self.legs().iter().next().is_none() {
+        if self.handshakes.timers().is_empty() && self.legs().iter().next().is_none() {
             return;
         }
         self.drive_handshake_timeouts(interval_now).await;
@@ -316,7 +316,7 @@ impl Node {
     async fn drive_handshake_timeouts(&mut self, now_ms: u64) {
         let timeout_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
         let timer_links: Vec<LinkId> = self
-            .peer_machines
+            .handshakes
             .timers()
             .iter()
             .filter(|(_, timers)| timers.contains_key(&TimerKind::HandshakeTimeout))
@@ -337,7 +337,7 @@ impl Node {
             let timed_out = if legged {
                 timed.is_some()
             } else {
-                self.peer_machines
+                self.handshakes
                     .get(&link)
                     .is_some_and(|machine| machine.conn_is_timed_out(now_ms, timeout_ms))
             };
@@ -345,11 +345,11 @@ impl Node {
                 true if timed_out && legged => (true, timed.flatten()),
                 true if timed_out => {
                     let retry_peer = if self
-                        .peer_machines
+                        .handshakes
                         .get(&link)
                         .is_some_and(|machine| machine.conn_is_outbound())
                     {
-                        self.peer_machines
+                        self.handshakes
                             .get(&link)
                             .and_then(|machine| machine.conn_expected_identity())
                             .map(|id| *id.node_addr())
@@ -362,7 +362,7 @@ impl Node {
                 true => (false, None),
                 false => {
                     // Orphan timer (connection already reaped elsewhere) — drop it.
-                    self.peer_machines.cancel(link, TimerKind::HandshakeTimeout);
+                    self.handshakes.cancel(link, TimerKind::HandshakeTimeout);
                     (false, None)
                 }
             };
@@ -389,7 +389,7 @@ impl Node {
         link: LinkId,
         peer: NodeAddr,
     ) -> Option<(NodeAddr, TransportId, TransportAddr, Source)> {
-        let machine = self.peer_machines.get(&link)?;
+        let machine = self.handshakes.get(&link)?;
         let source = match machine.dial_origin() {
             DialOrigin::Addressed => Source::Request,
             DialOrigin::MdnsAdvert => Source::Discovery,
@@ -474,7 +474,7 @@ impl Node {
             // Skip a resend whose target peer already promoted via the inbound
             // cross-connection path — resending msg1 would start a new handshake
             // (session mismatch).
-            if let Some(machine) = self.peer_machines.get(&link)
+            if let Some(machine) = self.handshakes.get(&link)
                 && machine.leg().is_some()
                 && machine
                     .conn_expected_identity()
@@ -484,7 +484,7 @@ impl Node {
                 self.tend(CoreInput::Flow(In::Quiet { link: no }), now);
                 continue;
             }
-            let Some(machine) = self.peer_machines.get(&link).filter(|machine| {
+            let Some(machine) = self.handshakes.get(&link).filter(|machine| {
                 machine.is_handshaking_sent_msg1()
                     && machine.resend_count() < machine.dial_origin().resend_limit(max_resends)
             }) else {
@@ -526,7 +526,7 @@ impl Node {
 
             if sent {
                 self.tend(CoreInput::Sent { link: no }, now);
-                if let Some(machine) = self.peer_machines.get_mut(&link) {
+                if let Some(machine) = self.handshakes.get_mut(&link) {
                     machine.record_resend(now_ms);
                     debug!(
                         link_id = %link,

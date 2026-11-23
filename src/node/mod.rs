@@ -81,7 +81,7 @@ use crate::cache::{CoordCache, Funding, Placed};
 use crate::hosts::HostMap;
 use crate::ipv6tun::tun::{TunError, TunOutboundTx, TunState, TunTx};
 use crate::node::session::SessionEntry;
-use crate::peer::machine::{DialOrigin, PeerMachine};
+use crate::peer::handshake::{DialOrigin, Handshake};
 use crate::peer::{ActivePeer, ConnectivityState};
 use crate::proto::bloom::{BloomFilter, BloomState};
 use crate::proto::fmp::wire::{
@@ -159,6 +159,13 @@ pub enum NodeError {
 
     #[error("max peers exceeded: {max}")]
     MaxPeersExceeded { max: usize },
+
+    /// A promotion of a link whose identity is already held as a peer.
+    ///
+    /// No caller reaches it: every crossing is resolved before the promotion
+    /// is asked for, so it refuses rather than overwrite the held peer.
+    #[error("identity already held as a peer; promotion of link {0} refused")]
+    IdentityHeld(LinkId),
 
     #[error("max links exceeded: {max}")]
     MaxLinksExceeded { max: usize },
@@ -386,7 +393,7 @@ struct PendingConnect {
     /// None for anonymous discovery connections where identity isn't
     /// known until the XX handshake completes.
     peer_identity: Option<PeerIdentity>,
-    /// Where the dial came from, copied from its control machine.
+    /// Where the dial came from, copied from its handshake entry.
     origin: DialOrigin,
 }
 
@@ -545,7 +552,7 @@ mod bound_log_tests {
 ///
 /// Peers go through two phases:
 /// 1. **Connection phase**: Handshake in progress; the pending connection is
-///    carried by its per-peer control machine (`peer_machines`), indexed by LinkId
+///    carried by its handshake entry (`handshakes`), indexed by LinkId
 /// 2. **Active phase** (`peers`): Authenticated, indexed by NodeAddr
 ///
 /// The links and the reverse lookup from `(transport, address)` to link are
@@ -655,31 +662,24 @@ pub struct Node {
     /// to the supervisor FSM.
     transport_presence_rx: Option<crate::transport::PresenceRx>,
 
-    // === Per-Peer Control Machines ===
-    /// Per-peer lifecycle control FSMs, keyed by the stable `LinkId` that spans
-    /// the handshake→active lifetime. Each machine owns its handshake crypto
-    /// carrier while the handshake is in progress — the single LinkId-keyed
-    /// per-peer map on `Node`; `peers`
-    /// stays byte-unchanged (hot path pristine).
-    /// Machines are inserted at dial and inbound msg1, and stepped in production
-    /// by the handshake handlers, the rekey-cadence and liveness-reap routers,
-    /// and the lifecycle paths, with the executor (`dataplane/peer_actions.rs`)
-    /// performing the returned actions. Timer FIRING decisions remain
-    /// shell-side: `PeerEvent::Timeout` is never dispatched in production.
+    // === Handshake Entries ===
+    /// The handshake entries (`crate::peer::handshake::Handshake`), keyed by
+    /// the stable `LinkId` that spans the handshake→active lifetime. Each
+    /// entry holds its handshake crypto while the handshake is in progress
+    /// and stays as the promoted peer's until the peer is removed; `peers`
+    /// stays byte-unchanged (hot path pristine). Entries are made at a dial
+    /// and an inbound msg1 and written by the handshake handlers as they
+    /// carry out the settlement core's decisions.
     ///
-    /// The same map holds the per-peer timer store, keyed by `LinkId` then
+    /// The same map holds the timer store, keyed by `LinkId` then
     /// `TimerKind`, holding each armed timer's absolute deadline (ms)
-    /// (`MachineMap::timers`). The sans-IO time-as-input backing
-    /// for `PeerEvent::Timeout`: populated/cleared by the machine's
-    /// `SetTimer`/`CancelTimer` actions (`dataplane/peer_actions.rs`) and dropped
-    /// alongside the machine through the `remove_peer_machine` choke-point. The
-    /// `HandshakeRetransmit`/`HandshakeTimeout` kinds are driven by
-    /// `drive_peer_timers` (the retransmit fires on the stored deadline; the
-    /// timeout reap keys on the timer's presence, with the threshold read from
-    /// config); the rekey/liveness kinds are still SHADOWS of their
-    /// own shell drivers, and the machine's `on_timeout` handlers stay dormant
-    /// (`PeerEvent::Timeout` is never dispatched in production).
-    peer_machines: settle::MachineMap,
+    /// (`HandshakeMap::timers`), armed at a dial (`Node::send_dial`) and
+    /// dropped alongside the entry through the `remove_handshake`
+    /// choke-point. `drive_peer_timers` reads the
+    /// `HandshakeRetransmit`/`HandshakeTimeout` kinds: the retransmit fires on
+    /// the stored deadline, and the timeout reap keys on the timer's
+    /// presence, with the threshold read from config.
+    handshakes: settle::HandshakeMap,
 
     // === Peers (Active Phase) ===
     /// Authenticated peers.
@@ -1147,7 +1147,7 @@ impl Node {
             child_exit_rx: None,
             transport_presence_tx: None,
             transport_presence_rx: None,
-            peer_machines: settle::MachineMap::default(),
+            handshakes: settle::HandshakeMap::default(),
             peers: settle::PeerMap::default(),
             sessions: HashMap::new(),
             identity_cache: identities::IdentityCache::new(),
@@ -1338,7 +1338,7 @@ impl Node {
             child_exit_rx: None,
             transport_presence_tx: None,
             transport_presence_rx: None,
-            peer_machines: settle::MachineMap::default(),
+            handshakes: settle::HandshakeMap::default(),
             peers: settle::PeerMap::default(),
             sessions: HashMap::new(),
             identity_cache: identities::IdentityCache::new(),
@@ -3146,7 +3146,7 @@ impl Node {
 
     /// Number of pending connections (handshake in progress).
     pub fn connection_count(&self) -> usize {
-        self.peer_machines
+        self.handshakes
             .values()
             .filter(|machine| machine.leg().is_some())
             .count()
@@ -3325,20 +3325,20 @@ impl Node {
         self.links.close(self.core.parts_mut().0, link_id)
     }
 
-    /// Single choke-point for dropping a per-peer control machine. Also drops the
-    /// machine's timer store so no armed `SetTimer` outlives it (the store and the
+    /// Single choke-point for dropping a handshake entry. Also drops the
+    /// entry's timer store so no armed `SetTimer` outlives it (the store and the
     /// machine share the `LinkId` lifetime), and releases the lease on a
     /// handshake leg's index that the machine, or the dial's leg in the
     /// settlement core's legs, still holds, so no exit of a leg leaks its
     /// index. Every teardown path routes machine removal here rather
-    /// than calling `peer_machines.remove` directly.
-    pub(in crate::node) fn remove_peer_machine(&mut self, link: LinkId) {
+    /// than calling `handshakes.remove` directly.
+    pub(in crate::node) fn remove_handshake(&mut self, link: LinkId) {
         self.core_drop_leg(link);
         let held = self
-            .peer_machines
+            .handshakes
             .drop(link)
             .as_mut()
-            .and_then(PeerMachine::take_our_index);
+            .and_then(Handshake::take_our_index);
         if let Some(lease) = held {
             self.free_lease(lease);
         }
@@ -3347,7 +3347,7 @@ impl Node {
     /// Debug-build coherence sweep over the peer-lifecycle maps, run once per
     /// rx-loop tick and invoked directly by unit tests.
     ///
-    /// Machine→carrier: every `peer_machines` entry must have a live carrier —
+    /// Machine→carrier: every `handshakes` entry must have a live carrier —
     /// its own embedded pending connection, an active peer on its link, or a
     /// pending connect still resolving toward it. A machine with none of these
     /// is unreachable by every teardown path and has leaked. (The pending
@@ -3364,55 +3364,55 @@ impl Node {
     }
 
     /// Operator-visible msg1 resend count for a pending handshake `link`, read
-    /// from the per-peer machine (the counter's home once the resend drive moved
+    /// from the handshake entry (the counter's home once the resend drive moved
     /// off the shell connection). A link with no machine reports 0, and inbound
     /// machines never resend, matching what the shell connection reported
     /// before the counter moved.
     pub(crate) fn connection_resend_count(&self, link: LinkId) -> u32 {
-        self.peer_machines
+        self.handshakes
             .get(&link)
             .map_or(0, |machine| machine.resend_count())
     }
 
     /// Operator-visible connection-start timestamp for a pending handshake
-    /// `link`, read from the per-peer machine carrier (the timing's home now
+    /// `link`, read from the handshake entry (the timing's home now
     /// that the leg no longer projects it). A link with no machine reports 0;
     /// every leg surfaced by `connections()` is embedded in a machine, so the
     /// lookup resolves.
     pub(crate) fn connection_started_at(&self, link: LinkId) -> u64 {
-        self.peer_machines
+        self.handshakes
             .get(&link)
             .map_or(0, |machine| machine.conn_started_at())
     }
 
     /// Operator-visible last-activity timestamp for a pending handshake `link`,
-    /// read from the per-peer machine carrier. A link with no machine reports 0;
+    /// read from the handshake entry. A link with no machine reports 0;
     /// every leg surfaced by `connections()` is embedded in a machine, so the
     /// lookup resolves.
     pub(crate) fn connection_last_activity(&self, link: LinkId) -> u64 {
-        self.peer_machines
+        self.handshakes
             .get(&link)
             .map_or(0, |machine| machine.conn_last_activity())
     }
 
     /// Operator-visible expected peer identity for a pending handshake `link`,
-    /// read from the per-peer machine carrier (the identity's telemetry home now
+    /// read from the handshake entry (the identity's telemetry home now
     /// that the leg no longer projects it). A link with no machine reports
     /// `None`; every leg surfaced by `connections()` is embedded in a machine, so
     /// the lookup resolves.
     pub(crate) fn connection_expected_identity(&self, link: LinkId) -> Option<PeerIdentity> {
-        self.peer_machines
+        self.handshakes
             .get(&link)
             .and_then(|machine| machine.conn_expected_identity().copied())
     }
 
     /// Operator-visible handshake-state string for a pending handshake `link`,
-    /// derived from the per-peer control machine (the phase's home now that the
+    /// derived from the handshake entry (the phase's home now that the
     /// leg no longer carries it). Every leg surfaced by `connections()` is
     /// embedded in a machine, so the lookup resolves; the `"initial"` default is
     /// unreachable in that view and only guards a missing machine.
     pub(crate) fn connection_handshake_state(&self, link: LinkId) -> &'static str {
-        self.peer_machines
+        self.handshakes
             .get(&link)
             .map_or("initial", |machine| machine.displayed_handshake_state())
     }
@@ -3434,7 +3434,7 @@ impl Node {
             .links
             .values()
             .any(|link| link.transport_id() == transport_id)
-            || self.peer_machines.values().any(|machine| {
+            || self.handshakes.values().any(|machine| {
                 machine.leg().is_some() && machine.conn_transport_id() == Some(transport_id)
             })
             || self.peers.values().any(|peer| peer.uses(transport_id))
@@ -3483,18 +3483,18 @@ impl Node {
     /// Whether `link_id` has a pending handshake, read through the control
     /// machine that carries it.
     fn has_pending_leg(&self, link_id: &LinkId) -> bool {
-        self.peer_machines
+        self.handshakes
             .get(link_id)
             .is_some_and(|machine| machine.leg().is_some())
     }
 
-    /// Test-support: seed a control machine for `seed.link_id` directly,
+    /// Test-support: seed a handshake entry for `seed.link_id` directly,
     /// without the caller having to stage a pending handshake by hand.
     ///
     /// The machine is chosen the way the establish paths choose it — outbound
     /// when the seed names a peer, inbound otherwise — and its carrier is
     /// seeded with every field a promotion reads. Built through
-    /// `MachineMap::ensure`, so an existing handshake-less machine
+    /// `HandshakeMap::ensure`, so an existing handshake-less machine
     /// keeps its constructor-side fields rather than being rebuilt.
     /// Post-construction `started_at` and the stored handshake bytes are not
     /// seeded; the establish paths write those at their own points.
@@ -3514,19 +3514,14 @@ impl Node {
 
         let started_at_ms = seed.started_at_ms;
         let expected_identity = seed.expected_identity;
-        let machine = self
-            .peer_machines
-            .ensure(link_id, || match expected_identity {
-                Some(_) => PeerMachine::new_outbound(
-                    link_id,
-                    expected_identity,
-                    crate::proto::fmp::LegStamp::at(started_at_ms),
-                ),
-                None => PeerMachine::new_inbound(
-                    link_id,
-                    crate::proto::fmp::LegStamp::at(started_at_ms),
-                ),
-            });
+        let machine = self.handshakes.ensure(link_id, || match expected_identity {
+            Some(_) => Handshake::new_outbound(
+                link_id,
+                expected_identity,
+                crate::proto::fmp::LegStamp::at(started_at_ms),
+            ),
+            None => Handshake::new_inbound(link_id, crate::proto::fmp::LegStamp::at(started_at_ms)),
+        });
         if let Some(index) = seed.our_index {
             let _ = machine.set_conn_our_index(index);
         }
@@ -3539,22 +3534,22 @@ impl Node {
         if let Some(addr) = seed.source_addr {
             machine.set_conn_source_addr(addr);
         }
-        machine.set_leg(crate::peer::machine::HandshakeCrypto::new());
+        machine.set_leg(crate::peer::handshake::HandshakeCrypto::new());
         Ok(())
     }
 
-    /// Iterate over the control machines that carry a pending connection.
+    /// Iterate over the handshake entries that carry a pending connection.
     ///
     /// Carrying a pending connection is what makes a machine handshake-phase,
     /// so the filter below is the membership rule. It is the same predicate
     /// that `connection_count` applies, and the one the stale-connection sweep
     /// narrows further.
     ///
-    /// Internal to the crate: this yields the control machine, which is not
+    /// Internal to the crate: this yields the handshake entry, which is not
     /// part of the published surface. Callers outside the crate that need a
     /// view of the pending handshakes go through the operator queries.
-    pub(crate) fn connections(&self) -> impl Iterator<Item = (&LinkId, &PeerMachine)> {
-        self.peer_machines
+    pub(crate) fn connections(&self) -> impl Iterator<Item = (&LinkId, &Handshake)> {
+        self.handshakes
             .iter()
             .filter(|(_, machine)| machine.leg().is_some())
     }
@@ -3575,11 +3570,11 @@ impl Node {
     ///
     /// Raw `pub` accessor with ZERO callers in the crate (production or test) —
     /// the production teardown path is [`remove_active_peer`](Self::remove_active_peer),
-    /// which drops the peer's `peer_machines` entry. This helper deliberately
-    /// does NOT touch `peer_machines`: it never runs against an established peer
+    /// which drops the peer's `handshakes` entry. This helper deliberately
+    /// does NOT touch `handshakes`: it never runs against an established peer
     /// in production, so it cannot orphan a machine. If it is ever
     /// wired to remove established peers, mirror the `remove_active_peer` cleanup
-    /// (`self.peer_machines.remove(&peer.link_id())`) here.
+    /// (`self.handshakes.remove(&peer.link_id())`) here.
     pub fn remove_peer(&mut self, node_addr: &NodeAddr) -> Option<ActivePeer> {
         self.peers.take(node_addr)
     }

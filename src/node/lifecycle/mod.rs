@@ -18,11 +18,10 @@ use super::peering::retry::MAX_RETRY_CONNECTIONS_PER_TICK;
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
 use crate::node::AddrKey;
 use crate::node::acl::PeerAclContext;
-use crate::node::dataplane::PeerActionCtx;
 use crate::node::settle::exec::Removed;
 use crate::nostr::{BootstrapEvent, NostrRendezvous};
 use crate::nostr::{BootstrapHandoffResult, EstablishedTraversal};
-use crate::peer::machine::{DialOrigin, HandshakeCrypto, PeerEvent, PeerMachine};
+use crate::peer::handshake::{DialOrigin, Handshake, HandshakeCrypto};
 use crate::peer::{Match, PathState};
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
@@ -517,7 +516,7 @@ impl Node {
         transport_id: TransportId,
         remote_addr: &TransportAddr,
     ) -> bool {
-        self.peer_machines.values().any(|machine| {
+        self.handshakes.values().any(|machine| {
             machine.leg().is_some()
                 && machine
                     .conn_expected_identity()
@@ -600,7 +599,7 @@ impl Node {
     }
 
     /// [`initiate_connection`](Self::initiate_connection), recording where
-    /// the dial came from on its control machine.
+    /// the dial came from on its handshake entry.
     pub(in crate::node) async fn initiate_connection_from(
         &mut self,
         transport_id: TransportId,
@@ -663,7 +662,7 @@ impl Node {
 
         match peer_identity {
             Some(identity) => {
-                // Identified dial: persist the outbound control machine at dial,
+                // Identified dial: persist the outbound handshake entry at dial,
                 // keyed by the same `link_id` as the (soon-to-be-built)
                 // connection. It parks in `Discovered` (inert to reap and rekey —
                 // absent from `peers`, never established) until `handle_msg2`
@@ -677,9 +676,9 @@ impl Node {
                 // (`prepare_outbound_msg1` / `poll_pending_connects`), mirroring
                 // the connection's lifetime.
                 let mut machine =
-                    PeerMachine::new_outbound(link_id, Some(identity), Self::leg_stamp());
+                    Handshake::new_outbound(link_id, Some(identity), Self::leg_stamp());
                 machine.set_dial_origin(origin);
-                self.peer_machines.add(link_id, machine);
+                self.handshakes.add(link_id, machine);
 
                 if !is_connection_oriented {
                     // Connectionless: no connect step. Prepare msg1 in the shell —
@@ -690,34 +689,16 @@ impl Node {
                     self.prepare_outbound_msg1(link_id, transport_id, &remote_addr, identity)?;
                 }
 
-                // Drive the machine: connection-oriented dials emit `OpenTransport`
-                // (the executor connects and pushes `PendingConnect`); connectionless
-                // dials emit `SendHandshake` (msg1) for the wire armed above.
-                let interval_ms = Self::interval_ms();
-                let ambient = PeerActionCtx {
-                    verified_identity: identity,
-                    transport_id,
-                    remote_addr: remote_addr.clone(),
-                    our_index: None,
-                    their_index: None,
-                    now_ms: Self::now_ms(),
-                    interval_ms,
-                    is_outbound: true,
-                    pending_outbound_key: None,
-                    why: None,
-                };
-                self.advance_peer_machine(
-                    link_id,
-                    PeerEvent::Dial {
-                        transport_id,
-                        remote_addr,
-                        peer_identity: identity,
-                        connection_oriented: is_connection_oriented,
-                    },
-                    interval_ms,
-                    &ambient,
-                )
-                .await;
+                // Carry out the dial: a connection-oriented dial connects
+                // and queues its `PendingConnect`; a connectionless dial
+                // sends the msg1 armed above.
+                if is_connection_oriented {
+                    self.open_dial(link_id, transport_id, remote_addr, identity)
+                        .await;
+                } else {
+                    self.send_dial(link_id, transport_id, &remote_addr, false)
+                        .await;
+                }
                 Ok(())
             }
             None => {
@@ -773,14 +754,14 @@ impl Node {
     /// Prepare an outbound Noise msg1 at dial for an IDENTIFIED leg: allocate the
     /// session index, run the Noise leaf, frame the wire, arm the shell-side
     /// resend, track `pending_outbound`, and embed the prepared connection on
-    /// the dial-time control machine. Returns `Err` on index-allocation or
+    /// the dial-time handshake entry. Returns `Err` on index-allocation or
     /// Noise failure (cleaning the partial leg, including the dial-time control
     /// machine), leaving the armed wire on the connection for
     /// `send_stored_msg1` to transmit. Does NOT send — so the fallible setup
     /// can propagate its error synchronously before any machine drive.
     /// Anonymous-discovery legs use the monolithic `start_handshake` instead,
     /// whose machine is born after its fallible setup — so this is the only
-    /// caller path whose Err arms clean up `peer_machines` (the dial-time
+    /// caller path whose Err arms clean up `handshakes` (the dial-time
     /// machine predates the failure).
     pub(in crate::node) fn prepare_outbound_msg1(
         &mut self,
@@ -793,17 +774,17 @@ impl Node {
 
         let at = Self::leg_stamp();
 
-        // The control machine drives the handshake, so it takes the crypto
+        // The handshake entry drives the handshake, so it takes the crypto
         // carrier before the crypto runs. The machine was born at dial and
         // persisted in `initiate_connection`, so every live caller already has
         // one; recover with a fresh one if a direct caller ever skips the dial.
         debug_assert!(
-            self.peer_machines.contains_key(&link_id),
+            self.handshakes.contains_key(&link_id),
             "outbound msg1 prepared for link {link_id} with no dial-time machine"
         );
-        self.peer_machines
+        self.handshakes
             .ensure(link_id, || {
-                PeerMachine::new_outbound(link_id, Some(peer_identity), at)
+                Handshake::new_outbound(link_id, Some(peer_identity), at)
             })
             .set_leg(HandshakeCrypto::new());
 
@@ -812,14 +793,14 @@ impl Node {
         let our_lease = match fips_core::proto::rekey::allocate(&mut self.index_allocator) {
             Some(lease) => lease,
             None => {
-                // Clean up the link and dial-time machine we just created
+                // Clean up the link and dial-time entry we just created
                 self.core_connect_failed(link_id);
                 self.links.forget(
                     self.core.parts_mut().0,
                     &link_id,
                     &(transport_id, remote_addr.clone()),
                 );
-                self.remove_peer_machine(link_id);
+                self.remove_handshake(link_id);
                 return Err(NodeError::IndexAllocationFailed(
                     crate::utils::index::IndexError::Exhausted.to_string(),
                 ));
@@ -833,7 +814,7 @@ impl Node {
         let mut our_keypair = self.identity().keypair();
         let startup_epoch = self.startup_epoch();
         let start_result = self
-            .peer_machines
+            .handshakes
             .get_mut(&link_id)
             .expect("dial-time machine carries the connection")
             .start_handshake(our_keypair, startup_epoch, at);
@@ -841,7 +822,7 @@ impl Node {
         let noise_msg1 = match start_result {
             Ok(msg) => msg,
             Err(e) => {
-                // Clean up the index, link, and dial-time machine
+                // Clean up the index, link, and dial-time entry
                 let _ = self
                     .index_allocator
                     .free(crate::utils::index::SessionIndex::new(our_lease.release()));
@@ -851,13 +832,13 @@ impl Node {
                     &link_id,
                     &(transport_id, remote_addr.clone()),
                 );
-                self.remove_peer_machine(link_id);
+                self.remove_handshake(link_id);
                 return Err(NodeError::HandshakeFailed(e.to_string()));
             }
         };
 
         // Set index and transport info on the connection
-        self.peer_machines
+        self.handshakes
             .get_mut(&link_id)
             .expect("dial-time machine carries the connection")
             .set_conn_source_addr(remote_addr.clone());
@@ -887,7 +868,7 @@ impl Node {
         // lease on its index until the core decides its msg2, with its msg1
         // as its resend source, capped as its origin caps its resends.
         let resends = self
-            .peer_machines
+            .handshakes
             .get(&link_id)
             .map(|machine| machine.dial_origin())
             .unwrap_or_default()
@@ -903,7 +884,7 @@ impl Node {
         );
 
         let machine = self
-            .peer_machines
+            .handshakes
             .get_mut(&link_id)
             .expect("dial-time machine carries the connection");
         // The dial-born machine carrier was stamped at dial; re-stamp it with the
@@ -926,7 +907,7 @@ impl Node {
 
     /// Start an outbound Noise handshake inline (allocate index, run the Noise
     /// leaf, arm the resend, track `pending_outbound`, persist the leg's
-    /// control machine, and send msg1). Used by the anonymous-discovery dial
+    /// handshake entry, and send msg1). Used by the anonymous-discovery dial
     /// paths (connectionless dial and the connection-oriented
     /// connect-resolution). Anonymous discovery (no `peer_identity`) leaves
     /// identity to be learned from the XX msg2, which crystallizes it onto the
@@ -939,7 +920,7 @@ impl Node {
         peer_identity: Option<PeerIdentity>,
         origin: DialOrigin,
     ) -> Result<(), NodeError> {
-        // Create the control machine in handshake phase. Anonymous discovery
+        // Create the handshake entry in handshake phase. Anonymous discovery
         // (no peer_identity) leaves identity to be learned from XX msg2.
         //
         // The machine drives the Noise crypto, so it is built before the leaf
@@ -948,7 +929,7 @@ impl Node {
         // it, leaving no registry trace and needing no disposal, exactly as the
         // pre-collapse local connection did.
         let at = Self::leg_stamp();
-        let mut machine = PeerMachine::new_outbound(link_id, peer_identity, at);
+        let mut machine = Handshake::new_outbound(link_id, peer_identity, at);
         machine.set_dial_origin(origin);
         machine.set_leg(HandshakeCrypto::new());
 
@@ -1023,7 +1004,7 @@ impl Node {
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
             .note((transport_id, our_index.as_u32()), link_id);
-        // The persistent control machine enters the registry here, after all
+        // The persistent handshake entry enters the registry here, after all
         // fallible setup. Both production callers dial anonymously (identified
         // dials persist their machine at dial and go through
         // `prepare_outbound_msg1`), so the machine starts identity-less;
@@ -1037,14 +1018,14 @@ impl Node {
         // this same stamp `at`, so its `started_at`/`last_activity` and its
         // interval-clock activity already carry the msg1-prep provenance.
         let named = machine.conn_expected_identity().map(|id| *id.node_addr());
-        self.peer_machines.add(link_id, machine);
+        self.handshakes.add(link_id, machine);
         // Its leg starts in the settlement core's legs, holding its lease
         // until the core decides its msg2, and sending no resend: this path
         // arms none.
         if let Some(lease) = self
-            .peer_machines
+            .handshakes
             .get_mut(&link_id)
-            .and_then(PeerMachine::take_our_index)
+            .and_then(Handshake::take_our_index)
         {
             self.core_dial(
                 link_id,
@@ -1080,23 +1061,15 @@ impl Node {
                         error = %e,
                         "Failed to send handshake message"
                     );
-                    // The machine marks its leg failed but retains it —
-                    // the stale-connection sweep reclaims it, and the
-                    // event loop can handle retry logic until then.
+                    // The entry is marked failed and kept: the
+                    // stale-connection sweep reclaims it, and the event
+                    // loop can handle retry logic until then.
                     self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Failed {
                         link,
                         learned: None,
                     });
-                    if let Some(machine) = self.peer_machines.get_mut(&link_id) {
-                        let actions = machine.step(
-                            PeerEvent::HandshakeSendFailed,
-                            at.interval_ms,
-                            &mut self.index_allocator,
-                        );
-                        debug_assert!(
-                            actions.is_empty(),
-                            "HandshakeSendFailed must emit no actions"
-                        );
+                    if let Some(entry) = self.handshakes.get_mut(&link_id) {
+                        entry.send_failed();
                     }
                 }
             }
@@ -1106,22 +1079,20 @@ impl Node {
     }
 
     /// Send the msg1 wire that `prepare_outbound_msg1` armed on the connection.
-    /// On send error, steps the machine with `HandshakeSendFailed` — the machine
-    /// marks its embedded leg failed and RETAINS it (the legacy resend tick
-    /// retries); a missing wire or transport is a no-op. This is the body of the
-    /// executor's `SendHandshake` msg1 action — reached on both the
-    /// connectionless dial and the connection-oriented connect-resolution path,
-    /// after `prepare_outbound_msg1` has armed the wire. `interval_now` is the
-    /// interval-clock reading (`Node::interval_ms`) the failure step takes.
+    /// On send error the handshake entry is marked failed and kept (the
+    /// stale-connection sweep reclaims it, and msg1 resends stay due until
+    /// then); a missing wire or transport is a no-op. Reached by
+    /// `Node::send_dial` on both the connectionless dial and the
+    /// connection-oriented connect-resolution path, after
+    /// `prepare_outbound_msg1` has armed the wire.
     pub(in crate::node) async fn send_stored_msg1(
         &mut self,
         link_id: LinkId,
         transport_id: TransportId,
         remote_addr: &TransportAddr,
-        interval_now: u64,
     ) {
         let wire_msg1 = match self
-            .peer_machines
+            .handshakes
             .get(&link_id)
             .and_then(|machine| machine.conn_handshake_msg1())
         {
@@ -1129,7 +1100,7 @@ impl Node {
             None => return,
         };
         let our_index = self
-            .peer_machines
+            .handshakes
             .get(&link_id)
             .filter(|machine| machine.leg().is_some())
             .and_then(|machine| machine.our_index());
@@ -1159,23 +1130,15 @@ impl Node {
                         error = %e,
                         "Failed to send handshake message"
                     );
-                    // The machine marks its leg failed but retains it —
-                    // the stale-connection sweep reclaims it, and the
-                    // event loop can handle retry logic until then.
+                    // The entry is marked failed and kept: the
+                    // stale-connection sweep reclaims it, and the event
+                    // loop can handle retry logic until then.
                     self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Failed {
                         link,
                         learned: None,
                     });
-                    if let Some(machine) = self.peer_machines.get_mut(&link_id) {
-                        let actions = machine.step(
-                            PeerEvent::HandshakeSendFailed,
-                            interval_now,
-                            &mut self.index_allocator,
-                        );
-                        debug_assert!(
-                            actions.is_empty(),
-                            "HandshakeSendFailed must emit no actions"
-                        );
+                    if let Some(entry) = self.handshakes.get_mut(&link_id) {
+                        entry.send_failed();
                     }
                 }
             }
@@ -2070,7 +2033,7 @@ impl Node {
                 match pending.peer_identity {
                     Some(identity) => {
                         // Identified leg: prepare msg1 now that the transport is
-                        // connected, then drive the dial-persisted machine to send
+                        // connected, then drive the dial's entry to send
                         // it. The prepare (index alloc, Noise leaf, wire arm) MUST
                         // run BEFORE the `TransportConnected` drive: the executor's
                         // `SendHandshake` msg1 branch only transmits the wire this
@@ -2087,42 +2050,25 @@ impl Node {
                                 error = %e,
                                 "Failed to start handshake after transport connect"
                             );
-                            // Clean up link and dial-time machine on handshake failure
+                            // Clean up link and dial-time entry on handshake failure
                             self.core_connect_failed(pending.link_id);
                             self.remove_link(&pending.link_id);
-                            self.remove_peer_machine(pending.link_id);
+                            self.remove_handshake(pending.link_id);
                         } else {
-                            // Drive the dial-persisted machine: `Connecting` →
-                            // `on_transport_connected` → `start_outbound_handshake`,
-                            // emitting `SendHandshake` (msg1) whose executor arm
-                            // sends the wire just armed. `our_index`/`their_index`
-                            // stay `None` so the executor takes the
-                            // `their_index == None` msg1 branch.
-                            let interval_ms = Self::interval_ms();
-                            let ambient = PeerActionCtx {
-                                verified_identity: identity,
-                                transport_id: pending.transport_id,
-                                remote_addr: pending.remote_addr.clone(),
-                                our_index: None,
-                                their_index: None,
-                                now_ms: Self::now_ms(),
-                                interval_ms,
-                                is_outbound: true,
-                                pending_outbound_key: None,
-                                why: None,
-                            };
-                            self.advance_peer_machine(
+                            // The connect resolved: send the msg1 just armed
+                            // and arm the dial's timers.
+                            self.send_dial(
                                 pending.link_id,
-                                PeerEvent::TransportConnected,
-                                interval_ms,
-                                &ambient,
+                                pending.transport_id,
+                                &pending.remote_addr,
+                                true,
                             )
                             .await;
                         }
                     }
                     None => {
                         // Anonymous-discovery leg: the inline handshake persists
-                        // the leg's control machine at leg birth. Its Err returns
+                        // the leg's handshake entry at leg birth. Its Err returns
                         // all precede that birth, so the cleanup below has no
                         // machine to dispose.
                         if let Err(e) = self
@@ -2156,7 +2102,7 @@ impl Node {
                     "Transport connect failed"
                 );
 
-                // Clean up link and, for identified legs, the dial-time machine,
+                // Clean up link and, for identified legs, the dial-time entry,
                 // then schedule the retry the settlement core asks for.
                 // Anonymous discovery connections (no expected identity) don't
                 // retry — they'll be rediscovered via the shared-medium beacon.
@@ -2169,7 +2115,7 @@ impl Node {
                 };
                 self.remove_link(&pending.link_id);
                 if pending.peer_identity.is_some() {
-                    self.remove_peer_machine(pending.link_id);
+                    self.remove_handshake(pending.link_id);
                 }
                 for peer in retries {
                     self.note_handshake_timeout(peer, Self::peering_now());

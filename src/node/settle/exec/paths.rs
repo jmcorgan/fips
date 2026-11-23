@@ -134,7 +134,7 @@ impl Node {
                 | Effect::ClearUdpIfMoved
                 | Effect::RelinkIfMoved
                 | Effect::SettleLink
-                | Effect::MachineResolved
+                | Effect::Established
                 | Effect::RelinkInitiator
                 | Effect::PromotedNote
                 | Effect::SetupNote
@@ -145,7 +145,6 @@ impl Node {
                 | Effect::MovedRead
                 | Effect::SeedMtuIfMoved
                 | Effect::MoveNote
-                | Effect::MachineCrossed
                 | Effect::LoserClose
                 | Effect::LoserRemoved
                 | Effect::LegMachineRemoved

@@ -72,7 +72,7 @@ async fn test_two_node_handshake_udp() {
     let our_keypair_a = node_a.identity().keypair();
     let startup_epoch_a = node_a.startup_epoch();
     let noise_msg1 = node_a
-        .peer_machines
+        .handshakes
         .get_mut(&link_id_a)
         .unwrap()
         .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
@@ -323,7 +323,7 @@ async fn test_run_rx_loop_handshake() {
     let our_keypair_a = node_a.identity().keypair();
     let startup_epoch_a = node_a.startup_epoch();
     let noise_msg1 = node_a
-        .peer_machines
+        .handshakes
         .get_mut(&link_id_a)
         .unwrap()
         .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
@@ -515,7 +515,7 @@ async fn test_cross_connection_both_initiate() {
     let our_keypair_a = node_a.identity().keypair();
     let startup_epoch_a = node_a.startup_epoch();
     let noise_msg1_a = node_a
-        .peer_machines
+        .handshakes
         .get_mut(&link_id_a_out)
         .unwrap()
         .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
@@ -555,7 +555,7 @@ async fn test_cross_connection_both_initiate() {
     let our_keypair_b = node_b.identity().keypair();
     let startup_epoch_b = node_b.startup_epoch();
     let noise_msg1_b = node_b
-        .peer_machines
+        .handshakes
         .get_mut(&link_id_b_out)
         .unwrap()
         .start_handshake(our_keypair_b, startup_epoch_b, LegStamp::at(1000))
@@ -758,7 +758,7 @@ async fn test_stale_connection_cleanup() {
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let _noise_msg1 = node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, Node::leg_stamp())
@@ -851,7 +851,7 @@ async fn test_failed_connection_cleanup() {
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let _noise_msg1 = node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, Node::leg_stamp())
@@ -877,16 +877,10 @@ async fn test_failed_connection_cleanup() {
     // longer carries a failed phase of its own).
     {
         let machine = node
-            .peer_machines
+            .handshakes
             .get_mut(&link_id)
             .expect("machine seeded by the handshake seeder");
-        let alloc = &mut node.index_allocator;
-        let actions = machine.step(
-            crate::peer::machine::PeerEvent::HandshakeSendFailed,
-            Node::interval_ms(),
-            alloc,
-        );
-        assert!(actions.is_empty());
+        machine.send_failed();
         assert!(machine.is_failed());
     }
 
@@ -988,34 +982,25 @@ async fn test_resend_scheduling() {
     // which also carries the pending connection. Dial it to `SentMsg1`
     // (connectionless: no connect step) and arm its retransmit timer at
     // now + 1000ms, mirroring what a real dial arms.
-    let mut machine = crate::peer::machine::PeerMachine::new_outbound(
+    let mut machine = crate::peer::handshake::Handshake::new_outbound(
         link_id,
         Some(peer_identity),
         LegStamp::at(now_ms),
     );
-    let _ = machine.step(
-        crate::peer::machine::PeerEvent::Dial {
-            transport_id,
-            remote_addr: remote_addr.clone(),
-            peer_identity,
-            connection_oriented: false,
-        },
-        now_ms,
-        &mut node.index_allocator,
-    );
+    let _ = machine.sending_msg1(false);
     // The msg1 wire lives on the machine's carrier (the retransmit driver's
     // resend source), mirroring `prepare_outbound_msg1`.
     machine.set_conn_handshake_msg1(wire_msg1, now_ms + 1000);
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
-    node.peer_machines.raw().insert(link_id, machine);
-    node.peer_machines
+    node.handshakes.raw().insert(link_id, machine);
+    node.handshakes
         .raw_timers()
         .entry(link_id)
         .or_default()
         .insert(
-            crate::peer::machine::TimerKind::HandshakeRetransmit,
+            crate::peer::handshake::TimerKind::HandshakeRetransmit,
             now_ms + 1000,
         );
 
@@ -1077,31 +1062,22 @@ async fn test_handshake_timeout_drive() {
 
     // Machine in SentMsg1, carrying the pending connection, with a
     // HandshakeTimeout timer armed at dial + 30s.
-    let mut machine = crate::peer::machine::PeerMachine::new_outbound(
+    let mut machine = crate::peer::handshake::Handshake::new_outbound(
         link_id,
         Some(peer_identity),
         LegStamp::at(dial_ms),
     );
-    let _ = machine.step(
-        crate::peer::machine::PeerEvent::Dial {
-            transport_id,
-            remote_addr: remote_addr.clone(),
-            peer_identity,
-            connection_oriented: false,
-        },
-        dial_ms,
-        &mut node.index_allocator,
-    );
+    let _ = machine.sending_msg1(false);
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
-    node.peer_machines.raw().insert(link_id, machine);
-    node.peer_machines
+    node.handshakes.raw().insert(link_id, machine);
+    node.handshakes
         .raw_timers()
         .entry(link_id)
         .or_default()
         .insert(
-            crate::peer::machine::TimerKind::HandshakeTimeout,
+            crate::peer::handshake::TimerKind::HandshakeTimeout,
             dial_ms + 30_000,
         );
 
@@ -1117,11 +1093,11 @@ async fn test_handshake_timeout_drive() {
     );
     assert_eq!(node.index_allocator.count(), 0, "Session index freed");
     assert!(
-        !node.peer_machines.contains_key(&link_id),
+        !node.handshakes.contains_key(&link_id),
         "Control machine dropped with the reaped connection"
     );
     assert!(
-        !node.peer_machines.timers().contains_key(&link_id),
+        !node.handshakes.timers().contains_key(&link_id),
         "Timer store dropped with the reaped connection"
     );
 }
@@ -1130,7 +1106,7 @@ async fn test_handshake_timeout_drive() {
 #[test]
 fn test_msg2_stored_on_connection() {
     let mut machine =
-        crate::peer::machine::PeerMachine::new_inbound(LinkId::new(1), LegStamp::at(1000));
+        crate::peer::handshake::Handshake::new_inbound(LinkId::new(1), LegStamp::at(1000));
 
     assert!(machine.conn_handshake_msg2().is_none());
 
@@ -1844,7 +1820,7 @@ async fn drive_to_msg3(
     let startup_epoch = initiator.node.startup_epoch();
     let noise_msg1 = initiator
         .node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, LegStamp::at(now_ms))
@@ -1930,7 +1906,7 @@ async fn drive_rekey_to_msg3(initiator: &mut HsNode, responder: &mut HsNode) -> 
 
 #[tokio::test]
 async fn test_inbound_machine_born_at_msg1_and_crystallized_at_promote() {
-    use crate::peer::machine::{HandshakePhase, PeerState};
+    use crate::peer::handshake::Phase;
 
     let mut initiator = make_hs_node(Config::new()).await;
     let mut responder = make_hs_node(Config::new()).await;
@@ -1946,16 +1922,10 @@ async fn test_inbound_machine_born_at_msg1_and_crystallized_at_promote() {
     {
         let machine = responder
             .node
-            .peer_machines
+            .handshakes
             .get(&leg_link)
             .expect("window leg carries a machine from msg1");
-        assert!(matches!(
-            machine.state(),
-            PeerState::Handshaking {
-                phase: HandshakePhase::SentMsg2,
-                ..
-            }
-        ));
+        assert!(machine.phase() == Phase::SentMsg2);
         assert_eq!(responder.node.handshake_index(leg_link), leg_index);
     }
     #[cfg(debug_assertions)]
@@ -1972,10 +1942,10 @@ async fn test_inbound_machine_born_at_msg1_and_crystallized_at_promote() {
     assert_eq!(peer_index, leg_index, "promote keeps the msg1 index");
     let machine = responder
         .node
-        .peer_machines
+        .handshakes
         .get(&leg_link)
         .expect("machine survives promotion");
-    assert_eq!(machine.state(), PeerState::Established { addr: peer_addr });
+    assert_eq!(machine.phase(), Phase::Established);
     assert_eq!(
         machine.our_index(),
         None,
@@ -1990,15 +1960,10 @@ async fn test_inbound_machine_born_at_msg1_and_crystallized_at_promote() {
     let init_link = initiator.node.get_peer(&responder_addr).unwrap().link_id();
     let init_machine = initiator
         .node
-        .peer_machines
+        .handshakes
         .get(&init_link)
         .expect("dial machine survives promotion");
-    assert_eq!(
-        init_machine.state(),
-        PeerState::Established {
-            addr: responder_addr
-        }
-    );
+    assert_eq!(init_machine.phase(), Phase::Established);
     #[cfg(debug_assertions)]
     initiator.node.debug_assert_peer_maps_coherent();
 
@@ -2017,7 +1982,7 @@ async fn a_msg3_whose_negotiation_payload_does_not_decrypt_leaves_the_leg_for_th
     let mut responder = make_hs_node(Config::new()).await;
 
     let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
-    assert_eq!(responder.node.peer_machines.len(), 1, "msg1-born machine");
+    assert_eq!(responder.node.handshakes.len(), 1, "msg1-born machine");
     assert_eq!(responder.node.index_allocator.count(), 1);
     let leg = responder.node.connections().next().unwrap().1.link_id();
     let index = responder.node.handshake_index(leg).unwrap();
@@ -2103,11 +2068,11 @@ async fn test_msg3_rekey_respond_disposes_leg_machine() {
     );
     let peer_link = peer.link_id();
     assert_eq!(
-        responder.node.peer_machines.len(),
+        responder.node.handshakes.len(),
         1,
         "the rekey window leg's machine is disposed with the leg"
     );
-    assert!(responder.node.peer_machines.contains_key(&peer_link));
+    assert!(responder.node.handshakes.contains_key(&peer_link));
     #[cfg(debug_assertions)]
     responder.node.debug_assert_peer_maps_coherent();
 
@@ -2346,7 +2311,7 @@ async fn a_crossed_handshake_resolved_at_msg3_offers_the_configured_addresses_ag
 
 #[tokio::test]
 async fn test_anonymous_dial_births_identityless_machine_at_leg_birth() {
-    use crate::peer::machine::PeerState;
+    use crate::peer::handshake::Phase;
 
     let mut initiator = make_hs_node(Config::new()).await;
     let responder = make_hs_node(Config::new()).await;
@@ -2363,7 +2328,7 @@ async fn test_anonymous_dial_births_identityless_machine_at_leg_birth() {
     let leg_link = initiator.node.connections().next().unwrap().1.link_id();
     let machine = initiator
         .node
-        .peer_machines
+        .handshakes
         .get(&leg_link)
         .expect("anonymous leg carries a machine from leg birth");
     assert!(
@@ -2371,8 +2336,8 @@ async fn test_anonymous_dial_births_identityless_machine_at_leg_birth() {
         "anonymous machine is born without an identity"
     );
     assert_eq!(
-        machine.state(),
-        PeerState::Discovered,
+        machine.phase(),
+        Phase::Dialing,
         "no event is dispatched on the inline dial path"
     );
     #[cfg(debug_assertions)]
@@ -2386,7 +2351,7 @@ async fn test_anonymous_dial_births_identityless_machine_at_leg_birth() {
 
 #[tokio::test]
 async fn test_anonymous_msg2_crystallizes_identity_and_promotes() {
-    use crate::peer::machine::PeerState;
+    use crate::peer::handshake::Phase;
 
     let mut initiator = make_hs_node(Config::new()).await;
     let mut responder = make_hs_node(Config::new()).await;
@@ -2419,7 +2384,7 @@ async fn test_anonymous_msg2_crystallizes_identity_and_promotes() {
     // the established state crystallized in place.
     let machine = initiator
         .node
-        .peer_machines
+        .handshakes
         .get(&leg_link)
         .expect("machine survives the anonymous promote");
     assert_eq!(
@@ -2427,12 +2392,7 @@ async fn test_anonymous_msg2_crystallizes_identity_and_promotes() {
         Some(responder_addr),
         "msg2 crystallized the learned identity onto the machine"
     );
-    assert_eq!(
-        machine.state(),
-        PeerState::Established {
-            addr: responder_addr
-        }
-    );
+    assert_eq!(machine.phase(), Phase::Established);
     #[cfg(debug_assertions)]
     initiator.node.debug_assert_peer_maps_coherent();
 
@@ -2473,7 +2433,7 @@ async fn test_anonymous_self_connect_drop_disposes_machine() {
         .await
         .expect("anonymous self dial");
     let leg_link = node.node.connections().next().unwrap().1.link_id();
-    assert_eq!(node.node.peer_machines.len(), 1);
+    assert_eq!(node.node.handshakes.len(), 1);
     let outbound_idx = node
         .node
         .handshake_index(leg_link)
@@ -2493,7 +2453,7 @@ async fn test_anonymous_self_connect_drop_disposes_machine() {
     // The inbound leg msg1 just parked: the one machine that is not the dial's.
     let inbound_link = *node
         .node
-        .peer_machines
+        .handshakes
         .keys()
         .find(|k| **k != leg_link)
         .expect("msg1 parks an inbound leg of its own");
@@ -2517,7 +2477,7 @@ async fn test_anonymous_self_connect_drop_disposes_machine() {
         "self-connect drop removes the outbound leg"
     );
     assert!(
-        !node.node.peer_machines.contains_key(&leg_link),
+        !node.node.handshakes.contains_key(&leg_link),
         "self-connect drop disposes the outbound leg's machine"
     );
 
@@ -3024,7 +2984,7 @@ async fn test_dial_msg2_foreign_static_rejected() {
     );
     let machine = initiator
         .node
-        .peer_machines
+        .handshakes
         .get(&leg_link)
         .expect("the attempt's machine is kept");
     assert!(
@@ -3138,7 +3098,7 @@ async fn test_dial_msg2_foreign_static_reschedules_dial() {
     assert_eq!(
         initiator
             .node
-            .peer_machines
+            .handshakes
             .get(&leg_link)
             .expect("the attempt is kept")
             .conn_expected_identity()
@@ -3157,11 +3117,11 @@ async fn test_dial_msg2_foreign_static_reschedules_dial() {
         .rate_limit
         .handshake_timeout_secs
         * 1000;
-    let deadline = initiator.node.peer_machines[&leg_link].conn_active_at() + timeout_ms;
+    let deadline = initiator.node.handshakes[&leg_link].conn_active_at() + timeout_ms;
     initiator.node.drive_peer_timers(deadline + 1).await;
 
     assert!(
-        !initiator.node.peer_machines.contains_key(&leg_link),
+        !initiator.node.handshakes.contains_key(&leg_link),
         "the attempt ends at its handshake timeout"
     );
     assert!(
@@ -3258,7 +3218,7 @@ async fn test_anonymous_dial_msg2_promotes_whoever_answers() {
     assert_eq!(
         initiator
             .node
-            .peer_machines
+            .handshakes
             .get(&leg_link)
             .unwrap()
             .conn_dialed_identity(),
@@ -3311,7 +3271,7 @@ async fn park_inbound_leg(
     transport_id: TransportId,
     remote_addr: &TransportAddr,
     sender_idx: SessionIndex,
-) -> (LinkId, SessionIndex, PeerMachine) {
+) -> (LinkId, SessionIndex, Handshake) {
     use crate::proto::fmp::wire::build_msg1;
 
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
@@ -3330,7 +3290,7 @@ async fn park_inbound_leg(
         .await;
 
     let link_id_b = *node_b
-        .peer_machines
+        .handshakes
         .keys()
         .next()
         .expect("msg1 parks a machine on the responder");
@@ -3346,13 +3306,13 @@ async fn park_inbound_leg(
 fn answer_with_msg3(
     node_b: &Node,
     link_id_b: LinkId,
-    conn_a: &mut PeerMachine,
+    conn_a: &mut Handshake,
     negotiation: Option<&[u8]>,
 ) -> Vec<u8> {
     use crate::proto::fmp::wire::Msg2Header;
 
     let wire_msg2 = node_b
-        .peer_machines
+        .handshakes
         .get(&link_id_b)
         .unwrap()
         .conn_handshake_msg2()
@@ -3373,7 +3333,7 @@ fn answer_with_msg3(
 /// link.
 ///
 /// The planted state is a `pending_inbound` entry whose link has lost its
-/// machine. It is produced through `remove_peer_machine`, the disposal
+/// machine. It is produced through `remove_handshake`, the disposal
 /// choke-point, which releases the lease on the leg's index with the
 /// machine, so the arm has no index of its own left to free and frees
 /// nothing by the value the msg3 names.
@@ -3405,7 +3365,7 @@ async fn test_msg3_orphaned_pending_inbound_frees_nothing_and_disposes_its_link(
 
     // The unaudited disposal this arm exists to survive: the machine goes, the
     // pending-inbound entry does not.
-    node_b.remove_peer_machine(link_id_b);
+    node_b.remove_handshake(link_id_b);
     assert!(
         node_b
             .pending_inbound
@@ -3463,7 +3423,7 @@ async fn wire_index_is_never_freed() {
         .expect("an index for the stand-in owner");
     let idx = SessionIndex::new(held.index());
     let dead_link = LinkId::new(4242);
-    assert!(!node.peer_machines.contains_key(&dead_link));
+    assert!(!node.handshakes.contains_key(&dead_link));
     node.pending_inbound
         .raw()
         .insert((transport_id, idx.as_u32()), dead_link);
@@ -3546,7 +3506,7 @@ async fn test_msg3_orphaned_entry_naming_live_peer_index_does_not_free() {
     // The aliasing state: a stale pending-inbound entry naming the LIVE index,
     // pointing at a link that has no machine.
     let dead_link = LinkId::new(4242);
-    assert!(!node_b.peer_machines.contains_key(&dead_link));
+    assert!(!node_b.handshakes.contains_key(&dead_link));
     node_b
         .pending_inbound
         .raw()
@@ -3578,7 +3538,7 @@ async fn test_msg3_orphaned_entry_naming_live_peer_index_does_not_free() {
     );
     assert_eq!(node_b.peer_count(), 1, "the victim peer survives");
     assert!(node_b.links.contains_key(&victim_link));
-    assert!(node_b.peer_machines.contains_key(&victim_link));
+    assert!(node_b.handshakes.contains_key(&victim_link));
 }
 
 /// S3/T2b — the same hostile shape against a victim `peers_by_index` cannot
@@ -3615,7 +3575,7 @@ async fn test_msg3_orphaned_entry_naming_pending_leg_index_does_not_free() {
     // Overwrite the victim's own pending-inbound entry with a machine-less
     // link. The point is a link with no machine, which is what selects the arm.
     let dead_link = LinkId::new(4242);
-    assert!(!node_b.peer_machines.contains_key(&dead_link));
+    assert!(!node_b.handshakes.contains_key(&dead_link));
     node_b
         .pending_inbound
         .raw()
@@ -3638,7 +3598,7 @@ async fn test_msg3_orphaned_entry_naming_pending_leg_index_does_not_free() {
     );
     assert_eq!(node_b.index_allocator.count(), baseline);
     assert!(
-        node_b.peer_machines.contains_key(&victim_link),
+        node_b.handshakes.contains_key(&victim_link),
         "the victim leg's machine survives"
     );
     assert!(node_b.links.contains_key(&victim_link));
@@ -3653,7 +3613,7 @@ async fn test_msg3_orphaned_entry_naming_pending_leg_index_does_not_free() {
 /// index up only on the transport the msg3 arrived on would find nothing
 /// holding it and hand a live session's index back to the allocator. The
 /// victim is an in-flight REKEY index, the one live index held by no
-/// `PeerMachine`: it is bound in `peers_by_index`, which is keyed by the
+/// `Handshake`: it is bound in `peers_by_index`, which is keyed by the
 /// index alone, and held by the peer's link rekey machine. The two controls
 /// below pin that.
 #[tokio::test]
@@ -3705,10 +3665,10 @@ async fn test_msg3_orphan_on_other_transport_does_not_free_live_index() {
     assert!(
         !initiator
             .node
-            .peer_machines
+            .handshakes
             .values()
             .any(|m| m.our_index() == Some(victim_idx)),
-        "control: no PeerMachine holds the rekey index, so only \
+        "control: no Handshake holds the rekey index, so only \
          peers_by_index and the peer's rekey machine can answer for it"
     );
 
@@ -3717,7 +3677,7 @@ async fn test_msg3_orphan_on_other_transport_does_not_free_live_index() {
     let other_transport = TransportId::new(99);
     assert_ne!(other_transport, initiator.transport_id);
     let dead_link = LinkId::new(4242);
-    assert!(!initiator.node.peer_machines.contains_key(&dead_link));
+    assert!(!initiator.node.handshakes.contains_key(&dead_link));
     initiator
         .node
         .pending_inbound
@@ -3828,7 +3788,7 @@ async fn test_msg3_negotiation_failure_frees_index() {
         0,
         "a failed negotiation never promotes"
     );
-    assert!(node_b.peer_machines.is_empty());
+    assert!(node_b.handshakes.is_empty());
     assert_eq!(node_b.link_count(), 0);
     assert_eq!(node_b.stats().handshake.bad_state, 1);
 }
@@ -4034,10 +3994,7 @@ async fn test_outbound_msg2_acl_reject_reschedules_dial() {
         1,
         "the denial is attributed to the handshake state-machine counter"
     );
-    assert!(
-        initiator.node.peer_machines.is_empty(),
-        "the leg is disposed"
-    );
+    assert!(initiator.node.handshakes.is_empty(), "the leg is disposed");
 
     assert!(
         initiator
@@ -4508,21 +4465,15 @@ fn unreadable_msg3(msg3: &ReceivedPacket) -> ReceivedPacket {
 /// machine parked at `SentMsg2` with `index`, its `pending_inbound` entry and
 /// its allocated index, with its activity stamp unchanged.
 fn assert_leg_pending(node: &HsNode, leg: LinkId, index: SessionIndex, activity: u64) {
-    use crate::peer::machine::{HandshakePhase, PeerState};
+    use crate::peer::handshake::Phase;
 
     assert!(node.node.links.contains_key(&leg), "the leg's link stays");
     let machine = node
         .node
-        .peer_machines
+        .handshakes
         .get(&leg)
         .expect("the leg's machine stays");
-    assert!(matches!(
-        machine.state(),
-        PeerState::Handshaking {
-            phase: HandshakePhase::SentMsg2,
-            ..
-        }
-    ));
+    assert!(machine.phase() == Phase::SentMsg2);
     assert_eq!(node.node.handshake_index(leg), Some(index));
     assert_eq!(
         node.node
@@ -4821,7 +4772,7 @@ fn seed_peer(
     node.links
         .raw_index()
         .insert((transport_id, addr.clone()), link);
-    node.promote_connection(link, identity, 2_000).unwrap();
+    node.install_handshake(link, identity, 2_000).unwrap();
     (*identity.node_addr(), link, index)
 }
 
@@ -4830,7 +4781,7 @@ fn seed_peer(
 /// entry, the address key naming it and its stored msg2. Returns the leg.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn deferred_leg(node: &Node, transport_id: TransportId, addr: &TransportAddr) -> LinkId {
-    use crate::peer::machine::{HandshakePhase, PeerState};
+    use crate::peer::handshake::Phase;
 
     let leg = node
         .links
@@ -4840,17 +4791,11 @@ fn deferred_leg(node: &Node, transport_id: TransportId, addr: &TransportAddr) ->
         .expect("the address key must name the kept leg");
     assert!(node.links.contains_key(&leg), "the leg's link stays");
     let machine = node
-        .peer_machines
+        .handshakes
         .get(&leg)
         .expect("a deferred msg2 must leave the leg's machine registered");
     assert!(
-        matches!(
-            machine.state(),
-            PeerState::Handshaking {
-                phase: HandshakePhase::SentMsg2,
-                ..
-            }
-        ),
+        machine.phase() == Phase::SentMsg2,
         "the leg waits for msg3 exactly as after a sent msg2"
     );
     let index = node.handshake_index(leg).expect("the leg holds its index");
@@ -5098,7 +5043,7 @@ mod dead_encrypt_worker {
         let keypair = node_a.identity().keypair();
         let epoch = node_a.startup_epoch();
         let msg1 = node_a
-            .peer_machines
+            .handshakes
             .get_mut(&link_id)
             .unwrap()
             .start_handshake(keypair, epoch, LegStamp::at(1000))
@@ -5285,7 +5230,7 @@ async fn an_answer_holds_its_lease_and_msg2_in_the_legs_from_its_msg2_until_its_
         .expect("the answer's link is numbered");
     let machine = responder
         .node
-        .peer_machines
+        .handshakes
         .get(&leg)
         .expect("the answer's machine");
     assert_eq!(
@@ -5344,7 +5289,7 @@ async fn an_unreadable_msg3_leaves_the_answers_leg_and_its_lease_in_the_legs() {
     assert_eq!(
         responder
             .node
-            .peer_machines
+            .handshakes
             .get(&leg)
             .and_then(|m| m.our_index()),
         None,

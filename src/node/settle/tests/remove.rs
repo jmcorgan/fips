@@ -7,19 +7,11 @@ use std::path::Path;
 
 /// Code that takes a peer out of the map other than the removal routine,
 /// as `(file, function, why it is not a removal)`.
-const EXEMPT: &[(&str, &str, &str)] = &[
-    (
-        "node/mod.rs",
-        "remove_peer",
-        "a public method every caller of which is a test, which hands the peer back unremoved",
-    ),
-    (
-        "node/handlers/handshake.rs",
-        "promote_connection",
-        "its tie-break replacement of a held peer, which no handshake reaches: both callers' \
-         decisions promote only with no peer held",
-    ),
-];
+const EXEMPT: &[(&str, &str, &str)] = &[(
+    "node/mod.rs",
+    "remove_peer",
+    "a public method every caller of which is a test, which hands the peer back unremoved",
+)];
 
 /// Each `peers.take` in the code of `source`, as `(line, function)`: the
 /// function is the last one whose `fn` came before it.
@@ -109,7 +101,7 @@ fn every_remove_path_runs_one_routine() {
     // node's tests out.
     for want in [
         "node/dataplane/dispatch.rs",
-        "node/dataplane/peer_actions.rs",
+        "node/dataplane/establish.rs",
         "node/handlers/mmp.rs",
         "node/handlers/rekey.rs",
         "node/lifecycle/mod.rs",

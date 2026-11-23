@@ -393,7 +393,7 @@ pub(super) async fn dial_at(
     let startup_epoch = initiator.node.startup_epoch();
     let noise_msg1 = initiator
         .node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, LegStamp::at(1000))

@@ -3,27 +3,26 @@
 //! peer a replacement starts with.
 //!
 //! [`Node::install`] is the part a promotion runs before its plan, which a
-//! test may call alone through `promote_connection`: it builds the peer's
-//! machines and puts the peer in the node's maps. The peer action executor's
-//! promotion arm then runs the plan of a [`Run::promotion`], whose effects
-//! here read the [`Facts`] it holds.
+//! test may call alone through `install_handshake`: it builds the peer's
+//! machines and puts the peer in the node's maps. `Node::promote` then runs
+//! the plan of a [`Run::promotion`], whose effects here read the [`Facts`]
+//! it holds.
 //!
 //! A replacement is not one step. Its plan is the removal's effects, then
-//! the promotion's, and between the two the old peer's control machine notes
-//! the loss, and `promote_connection` may then refuse the new peer, which
-//! stops the replacement with the removal done. So the executor's
-//! removal arm runs the first part, through [`Run::replacement`] and
-//! [`Node::run_removal`], and the promotion arm the second, through
-//! [`Node::run_promotion`]; a promotion's plan is all of the second kind.
+//! the promotion's, and between the two the old peer's loss is noted, and
+//! `install_handshake` may then refuse the new peer, which stops the
+//! replacement with the removal done. So `Node::replace_held` runs the
+//! first part, through [`Run::replacement`] and [`Node::run_removal`], and
+//! `Node::promote` the second, through [`Node::run_promotion`]; a
+//! promotion's plan is all of the second kind.
 
 use super::plan::{Effect, plan};
 use super::{Removed, Run};
 use crate::PeerIdentity;
-use crate::node::dataplane::PeerActionCtx;
+use crate::node::dataplane::Ambient;
 use crate::node::handlers::path::NodeFacts;
 use crate::node::settle::table::Transition;
 use crate::node::{AddrKey, Node, NodeError};
-use crate::peer::machine::{PeerAction, PeerEvent};
 use crate::peer::{ActivePeer, LinkCaps, LinkOutputs, PathCaps};
 use crate::proto::fmp::{NodeProfile, PromotionResult, cross_connection_winner};
 use crate::proto::settle::input::Input;
@@ -36,19 +35,14 @@ use tracing::info;
 /// What a promotion's effects read beyond the transition.
 #[derive(Debug, Default)]
 pub(in crate::node) struct Facts {
-    /// The promotion's outcome, which the leg's control machine is told.
+    /// The promotion's outcome.
     result: Option<PromotionResult>,
-    /// The interval clock's reading the control machine steps at.
-    interval_ms: u64,
     /// The pair the promoted link runs on, which the transport settles its
     /// connections at, and marks for a dial of this node's.
     at: Option<AddrKey>,
     /// The msg2 this node sent for an inbound leg, read off the leg before
-    /// `promote_connection` took it, which the setup note stores.
+    /// `install_handshake` took it, which the setup note stores.
     msg2: Option<Vec<u8>>,
-    /// What the control machine returned for the outcome, for the worklist
-    /// of the step that promoted.
-    follow: Vec<PeerAction>,
     /// The removal a replacement starts with, which its removal's effects
     /// read; `None` in the run of a promotion.
     removed: Option<Removed>,
@@ -62,7 +56,7 @@ impl Facts {
 }
 
 impl Run {
-    /// The run of a promotion of `link` that `promote_connection` answered
+    /// The run of a promotion of `link` that `install_handshake` answered
     /// with `result`, by a step whose facts are `ambient`: of this node's
     /// dial, answered by its msg2, when the step is outbound, and of an
     /// inbound leg the peer's msg3 completed otherwise, whose msg2 was
@@ -71,7 +65,7 @@ impl Run {
     pub(in crate::node) fn promotion(
         link: LinkId,
         result: PromotionResult,
-        ambient: &PeerActionCtx,
+        ambient: &Ambient,
         msg2: Option<Vec<u8>>,
     ) -> Self {
         // A dial's msg2 found it in the dial map under this key.
@@ -84,10 +78,8 @@ impl Run {
             dial,
             facts: super::Facts::Install(Facts {
                 result: Some(result),
-                interval_ms: ambient.interval_ms,
                 at: Some((ambient.transport_id, ambient.remote_addr.clone())),
                 msg2,
-                follow: Vec::new(),
                 removed: None,
             }),
         }
@@ -96,11 +88,7 @@ impl Run {
     /// The run of the replacement whose removal of the held peer, by a step
     /// whose facts are `ambient`, gave `removed`, and whose new peer is to be
     /// promoted on `link`.
-    pub(in crate::node) fn replacement(
-        link: LinkId,
-        removed: Removed,
-        ambient: &PeerActionCtx,
-    ) -> Self {
+    pub(in crate::node) fn replacement(link: LinkId, removed: Removed, ambient: &Ambient) -> Self {
         let t = transition(link, ambient);
         debug_assert!(
             matches!(t, Transition::Replace { .. }),
@@ -112,14 +100,6 @@ impl Run {
             ..Facts::default()
         });
         r
-    }
-
-    /// Take what the leg's control machine returned for the promotion's
-    /// outcome, which the step that promoted runs after the plan.
-    pub(in crate::node) fn follow(&mut self) -> Vec<PeerAction> {
-        facts(self)
-            .map(|f| std::mem::take(&mut f.follow))
-            .unwrap_or_default()
     }
 }
 
@@ -135,7 +115,7 @@ fn facts(r: &mut Run) -> Option<&mut Facts> {
 /// The transition of a step whose facts are `ambient` that installs a new
 /// peer on `link`: a replacement where the step says why it removed the
 /// held one, and a promotion otherwise.
-fn transition(link: LinkId, ambient: &PeerActionCtx) -> Transition {
+fn transition(link: LinkId, ambient: &Ambient) -> Transition {
     let initiator = ambient.is_outbound;
     match ambient.why {
         Some(why @ (Why::Restart | Why::Replacement | Why::Redial | Why::OwnRestart)) => {
@@ -252,7 +232,7 @@ impl Node {
             new_peer.set_last_tree_announce_sent_ms(Some(crate::time::mono_ms()));
         }
 
-        // The promoted leg's machine (born at msg1 for inbound, at dial for
+        // The promoted leg's entry (born at msg1 for inbound, at dial for
         // outbound) survives the promotion; the executor crystallizes it in
         // place via the `PromotionResolved` feedback after this returns.
         if node_fault!(OutputsBeforeInstall) {
@@ -366,25 +346,18 @@ impl Node {
     }
 }
 
-/// Feed the promotion's outcome to the leg's control machine, keeping what
-/// it returns for the step's worklist.
-pub(super) async fn machine_resolved(node: &mut Node, r: &mut Run) {
+/// Mark the promoted link's handshake entry as the new peer's.
+pub(super) async fn established(node: &mut Node, r: &mut Run) {
     let link = link(&r.t);
     let Some(f) = facts(r) else {
         return;
     };
-    let Some(result) = f.result else {
+    if !matches!(f.result, Some(PromotionResult::Promoted(_))) {
         return;
-    };
-    // Disjoint field borrow: the machine's map and the index allocator.
-    f.follow = match link.and_then(|link| node.peer_machines.get_mut(&link)) {
-        Some(machine) => machine.step(
-            PeerEvent::PromotionResolved { result },
-            f.interval_ms,
-            &mut node.index_allocator,
-        ),
-        None => Vec::new(),
-    };
+    }
+    if let Some(entry) = link.and_then(|link| node.handshakes.get_mut(&link)) {
+        entry.established();
+    }
 }
 
 /// Tell the transport which link the new peer uses. Only the initiator's

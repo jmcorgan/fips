@@ -28,8 +28,8 @@ pub(in crate::node) struct Removed {
     /// removal.
     pub(in crate::node) held: Option<AddrKey>,
     /// Whether the loss is noted for a reconnect by whoever decided the
-    /// removal: the peer's control machine, as its next action, or the
-    /// Disconnect handler, which cannot await. A cell that notes it then
+    /// removal: the link-dead reap and a restart's replacement, after the
+    /// removal, or the Disconnect handler, which cannot await. A cell that notes it then
     /// runs nothing here.
     pub(in crate::node) noted: bool,
     /// What the settlement core decided of the removal, which the run that
@@ -160,9 +160,9 @@ impl Node {
         }
         // Drop this peer's inert machine, keyed by the link_id
         // derived above (a peer's link_id is immutable, so the key never
-        // moved). Keeps peers <-> peer_machines in exact correspondence on
-        // teardown. NEUTRAL: nothing reads peer_machines yet.
-        self.remove_peer_machine(link_id);
+        // moved). Keeps peers <-> handshakes in exact correspondence on
+        // teardown. NEUTRAL: nothing reads handshakes yet.
+        self.remove_handshake(link_id);
         if let Some(transport_id) = transport_id {
             self.cleanup_bootstrap_transport_if_unused(transport_id);
         }
@@ -329,7 +329,7 @@ pub(super) async fn reconnect(node: &mut Node, r: &mut Run) {
     if c == Cell::NotedDeadThenRemoved {
         debug_assert!(
             removed.noted,
-            "a replacement's loss is noted by the old peer's control machine"
+            "a replacement's loss is noted by the handshake that replaced the peer"
         );
     } else if noted_dead {
         if !removed.noted {

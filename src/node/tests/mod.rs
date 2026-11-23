@@ -1,6 +1,6 @@
 use super::*;
 use crate::PeerIdentity;
-use crate::peer::machine::HandshakeCrypto;
+use crate::peer::handshake::HandshakeCrypto;
 use crate::proto::fmp::LegStamp;
 use crate::transport::{LinkDirection, ReceivedPacket, TransportAddr, packet_channel};
 use crate::utils::index::SessionIndex;
@@ -277,8 +277,8 @@ pub(super) fn outbound_leg(
     link_id: LinkId,
     expected_identity: PeerIdentity,
     current_time_ms: u64,
-) -> PeerMachine {
-    let mut machine = PeerMachine::new_outbound(
+) -> Handshake {
+    let mut machine = Handshake::new_outbound(
         link_id,
         Some(expected_identity),
         LegStamp::at(current_time_ms),
@@ -288,8 +288,8 @@ pub(super) fn outbound_leg(
 }
 
 /// The responder twin of [`outbound_leg`].
-pub(super) fn inbound_leg(link_id: LinkId, current_time_ms: u64) -> PeerMachine {
-    let mut machine = PeerMachine::new_inbound(link_id, LegStamp::at(current_time_ms));
+pub(super) fn inbound_leg(link_id: LinkId, current_time_ms: u64) -> Handshake {
+    let mut machine = Handshake::new_inbound(link_id, LegStamp::at(current_time_ms));
     machine.set_leg(HandshakeCrypto::new());
     machine
 }
@@ -354,7 +354,7 @@ pub(super) fn seed_completed_connection_from(
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let msg1 = node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, LegStamp::at(current_time_ms))
@@ -377,7 +377,7 @@ pub(super) fn seed_completed_connection_from(
 
     // Complete initiator handshake (XX: generates msg3)
     let (msg3, _neg) = node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .complete_handshake_accepting(&msg2, None, LegStamp::at(current_time_ms))

@@ -3,14 +3,16 @@
 The XX handshake flow of the settlement core (`proto::settle`): how
 next's three-message Noise XX handshake is classified, written as a
 profile of the one settlement table, as `rekey/` is next's profile of the
-one rekey machine. Nothing in the node runs it yet. Hidden from the docs.
+one rekey machine. The node's settlement table runs it, and the node
+carries out its decisions. Hidden from the docs.
 
 The table (`proto::settle::table`) keeps the rules every handshake shares:
 the link records, the legs, the gates' memory, the held peers, removal,
 the path inputs and the close rule. This flow decides what an XX msg1,
-msg2 and msg3 do, as next's shell decides them today
+msg2 and msg3 do, as next's shell decided them at `be5204f9e`
 (`src/node/handlers/handshake.rs`, and `establish_inbound` and
-`establish_outbound` in `../core.rs`). Next's code is the spec here, not
+`establish_outbound` in `../core.rs`, which the node no longer has: it
+carries out this flow's decisions instead). Next's code is the spec here, not
 FRC-2201; the module comment of `mod.rs` lists where the flow differs from
 the IK flow.
 

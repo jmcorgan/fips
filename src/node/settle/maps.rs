@@ -1,4 +1,4 @@
-//! The per-peer maps other than the link table: the handshake machines with
+//! The per-peer maps other than the link table: the handshake entries with
 //! their timers, the pending dials, the inbound legs awaiting msg3, the active
 //! peers and the session-index map.
 
@@ -6,48 +6,48 @@ use std::collections::HashMap;
 
 use crate::NodeAddr;
 use crate::peer::ActivePeer;
-use crate::peer::machine::{PeerMachine, TimerKind};
+use crate::peer::handshake::{Handshake, TimerKind};
 use crate::transport::{LinkId, TransportId};
 
-/// The per-peer control machines, keyed by the `LinkId` that spans a peer's
-/// handshake and active life, with each machine's timer store.
+/// The handshake entries, keyed by the `LinkId` that spans a peer's
+/// handshake and active life, with each entry's timer store.
 ///
-/// The two share a lifetime: a machine's timers are dropped with it, so no
-/// armed timer outlives its machine. The machines are reached by `Deref` for
-/// reads, and by `get_mut` for a change to a machine that leaves the map as it
+/// The two share a lifetime: an entry's timers are dropped with it, so no
+/// armed timer outlives its entry. The entries are reached by `Deref` for
+/// reads, and by `get_mut` for a change to an entry that leaves the map as it
 /// is.
 #[derive(Default)]
-pub(in crate::node) struct MachineMap {
-    machines: HashMap<LinkId, PeerMachine>,
+pub(in crate::node) struct HandshakeMap {
+    entries: HashMap<LinkId, Handshake>,
     timers: HashMap<LinkId, HashMap<TimerKind, u64>>,
     #[cfg(test)]
     planted: bool,
 }
 
-reads!(MachineMap, machines, HashMap<LinkId, PeerMachine>);
+reads!(HandshakeMap, entries, HashMap<LinkId, Handshake>);
 
-impl MachineMap {
-    /// A machine born at a dial or an inbound msg1, replacing any machine
+impl HandshakeMap {
+    /// An entry made at a dial or an inbound msg1, replacing any entry
     /// the link had.
-    pub(in crate::node) fn add(&mut self, link: LinkId, machine: PeerMachine) {
-        self.machines.insert(link, machine);
+    pub(in crate::node) fn add(&mut self, link: LinkId, entry: Handshake) {
+        self.entries.insert(link, entry);
     }
 
     /// The link's machine, made by `make` if the link has none.
     pub(in crate::node) fn ensure(
         &mut self,
         link: LinkId,
-        make: impl FnOnce() -> PeerMachine,
-    ) -> &mut PeerMachine {
-        self.machines.entry(link).or_insert_with(make)
+        make: impl FnOnce() -> Handshake,
+    ) -> &mut Handshake {
+        self.entries.entry(link).or_insert_with(make)
     }
 
-    /// The machine of the link `from` now controls the link `to`, onto which
-    /// its peer moved: the machine and its timers are keyed under `to`.
+    /// The entry of the link `from` now belongs to the link `to`, onto which
+    /// its peer moved: the entry and its timers are keyed under `to`.
     pub(in crate::node) fn rekey(&mut self, from: LinkId, to: LinkId) {
-        if let Some(mut machine) = self.machines.remove(&from) {
-            machine.relink(to);
-            self.machines.insert(to, machine);
+        if let Some(mut entry) = self.entries.remove(&from) {
+            entry.relink(to);
+            self.entries.insert(to, entry);
         }
         if let Some(timers) = self.timers.remove(&from) {
             self.timers.insert(to, timers);
@@ -56,14 +56,14 @@ impl MachineMap {
 
     /// Drop the link's machine and its timers, and return the machine, for
     /// the caller to release what it still holds.
-    pub(in crate::node) fn drop(&mut self, link: LinkId) -> Option<PeerMachine> {
+    pub(in crate::node) fn drop(&mut self, link: LinkId) -> Option<Handshake> {
         self.timers.remove(&link);
-        self.machines.remove(&link)
+        self.entries.remove(&link)
     }
 
     /// The link's machine, to step or update.
-    pub(in crate::node) fn get_mut(&mut self, link: &LinkId) -> Option<&mut PeerMachine> {
-        self.machines.get_mut(link)
+    pub(in crate::node) fn get_mut(&mut self, link: &LinkId) -> Option<&mut Handshake> {
+        self.entries.get_mut(link)
     }
 
     /// The timer store: each link's armed timers and their deadlines (ms).

@@ -51,8 +51,8 @@ const REMOVE: &[(Effect, &str)] = &[
     ),
 ];
 
-/// The tail of a promotion of this node's own dial, the executor's
-/// `PromoteToActive` arm's for an outbound step.
+/// The tail of a promotion of this node's own dial, `Node::promote`'s for
+/// an outbound step.
 const PROMOTE_OUT: &[(Effect, &str)] = &[
     (
         Effect::SettleLink,
@@ -79,18 +79,15 @@ const PROMOTE_OUT: &[(Effect, &str)] = &[
         Effect::RelinkInitiator,
         "if ambient.is_outbound: self.relink(&node_addr, None, Some(link)).await",
     ),
-    (
-        Effect::MachineResolved,
-        "machine.step(PeerEvent::PromotionResolved { result }, ..); queue.extend(follow)",
-    ),
+    (Effect::Established, "entry.established()"),
     (
         Effect::PathsRenewed,
         "Box::pin(self.paths_renewed(&node_addr)).await",
     ),
 ];
 
-/// The tail of a promotion of an inbound leg the peer's msg3 completed, the
-/// executor's `PromoteToActive` arm's for an inbound step.
+/// The tail of a promotion of an inbound leg the peer's msg3 completed,
+/// `Node::promote`'s for an inbound step.
 const PROMOTE_IN: &[(Effect, &str)] = &[
     (
         Effect::SettleLink,
@@ -106,10 +103,7 @@ const PROMOTE_IN: &[(Effect, &str)] = &[
         "self.bloom_state.mark_update_needed(node_addr)",
     ),
     (Effect::BackoffReset, "self.reset_lookup_backoff()"),
-    (
-        Effect::MachineResolved,
-        "machine.step(PeerEvent::PromotionResolved { result }, ..); queue.extend(follow)",
-    ),
+    (Effect::Established, "entry.established()"),
     (
         Effect::PathsRenewed,
         "Box::pin(self.paths_renewed(&node_addr)).await",
@@ -117,7 +111,7 @@ const PROMOTE_IN: &[(Effect, &str)] = &[
 ];
 
 /// The tail of `handle_msg2`'s crossing arm when the peer moves onto the
-/// dial's session, after `move_session`.
+/// dial's session, after `adopt_dial`.
 const MOVE_DIAL: &[(Effect, &str)] = &[
     (
         Effect::RunLinkOutputs,
@@ -129,7 +123,7 @@ const MOVE_DIAL: &[(Effect, &str)] = &[
     ),
     (
         Effect::HoldDial,
-        "if left: self.links.hold(&link_id, peer_node_addr); self.peer_machines.rekey(left, link_id); self.rekey_carrier(left, link_id)",
+        "if left: self.links.hold(&link_id, peer_node_addr); self.handshakes.rekey(left, link_id); self.rekey_carrier(left, link_id)",
     ),
     (
         Effect::PathsRenewed,
@@ -159,10 +153,6 @@ const MOVE_DIAL: &[(Effect, &str)] = &[
         Effect::MoveNote,
         "debug!(.., \"Suppressed replay detections during link transition\"); debug!(.., the swap line)",
     ),
-    (
-        Effect::MachineCrossed,
-        "self.observe_cross_conn_resolved(&peer_node_addr, outcome)",
-    ),
     (Effect::DialForget, "self.pending_outbound.forget(&key)"),
     (
         Effect::LoserClose,
@@ -180,8 +170,8 @@ const MOVE_DIAL: &[(Effect, &str)] = &[
     (Effect::BackoffReset, "self.reset_lookup_backoff()"),
 ];
 
-/// The executor's msg3 crossing arm when the peer moves onto the inbound
-/// leg's session, after `move_session`.
+/// `Node::cross_inbound` when the peer moves onto the inbound
+/// leg's session, after `adopt_dial`.
 const MOVE_LEG: &[(Effect, &str)] = &[
     (Effect::RunLinkOutputs, "self.run_link_outputs(&peer, out)"),
     (Effect::RunRenewed, "self.run_renewed(&peer, None, paths)"),
@@ -210,7 +200,7 @@ const MOVE_LEG: &[(Effect, &str)] = &[
         "debug!(.., \"Simultaneous-init (msg3): swapped to inbound session (our inbound wins)\")",
     ),
     (Effect::LoserRemoved, "self.remove_link(&link)"),
-    (Effect::LegMachineRemoved, "self.remove_peer_machine(link)"),
+    (Effect::LegMachineRemoved, "self.remove_handshake(link)"),
 ];
 
 /// The tail of `handle_msg2`'s crossing arm when the peer keeps its inbound
@@ -223,10 +213,6 @@ const KEEP_DIAL: &[(Effect, &str)] = &[
     (
         Effect::LeaseFreed,
         "self.index_allocator.free(SessionIndex::new(lease.release()))",
-    ),
-    (
-        Effect::MachineCrossed,
-        "self.observe_cross_conn_resolved(&peer_node_addr, outcome)",
     ),
     (Effect::DialForget, "self.pending_outbound.forget(&key)"),
     (
@@ -245,7 +231,7 @@ const KEEP_DIAL: &[(Effect, &str)] = &[
     (Effect::BackoffReset, "self.reset_lookup_backoff()"),
 ];
 
-/// The executor's msg3 crossing arm when the peer keeps the session it
+/// `Node::cross_inbound` when the peer keeps the session it
 /// holds.
 const KEEP_LEG: &[(Effect, &str)] = &[
     (
@@ -257,7 +243,7 @@ const KEEP_LEG: &[(Effect, &str)] = &[
         "debug!(.., \"Simultaneous-init (msg3): keeping outbound session (our outbound wins)\")",
     ),
     (Effect::LoserRemoved, "self.remove_link(&link)"),
-    (Effect::LegMachineRemoved, "self.remove_peer_machine(link)"),
+    (Effect::LegMachineRemoved, "self.remove_handshake(link)"),
 ];
 
 /// A restart found at a rekey, as `reset_restarted` ran it.

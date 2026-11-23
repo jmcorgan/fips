@@ -99,7 +99,7 @@ async fn dialled_pair() -> (Vec<TestNode>, ReceivedPacket) {
         .expect("node 0 holds its outbound leg");
     nodes[0]
         .node
-        .peer_machines
+        .handshakes
         .get_mut(&leg)
         .expect("the leg's machine")
         .set_conn_handshake_msg1(msg1.data.clone(), 0);
@@ -291,7 +291,7 @@ async fn crossed_at_msg2(r: usize) -> (Vec<TestNode>, LogCapture, Vec<u8>) {
             .expect("the dialling node holds its outbound leg");
         nodes[from]
             .node
-            .peer_machines
+            .handshakes
             .get_mut(&leg)
             .expect("the leg's machine")
             .set_conn_handshake_msg1(msg1.data.clone(), 0);

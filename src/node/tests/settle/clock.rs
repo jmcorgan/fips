@@ -232,7 +232,7 @@ async fn pending_inbound_leg_holding_its_msg2() -> (Node, LinkId) {
         .next()
         .expect("precondition: the msg1 left a pending inbound leg");
     assert!(
-        node.peer_machines[&link].conn_handshake_msg2().is_some(),
+        node.handshakes[&link].conn_handshake_msg2().is_some(),
         "precondition: the pending leg holds its msg2"
     );
     (node, link)
@@ -253,7 +253,7 @@ async fn an_inbound_leg_holding_a_stored_msg2_is_reaped_within_the_handshake_tim
     let (mut node, link) = pending_inbound_leg_holding_its_msg2().await;
     node.check_timeouts().await;
     assert!(
-        node.peer_machines.contains_key(&link),
+        node.handshakes.contains_key(&link),
         "precondition: a fresh inbound leg is not reaped"
     );
     let past = past_the_handshake_timeout(&node);
@@ -261,7 +261,7 @@ async fn an_inbound_leg_holding_a_stored_msg2_is_reaped_within_the_handshake_tim
     crate::time::advance(Duration::from_millis(past));
     node.check_timeouts().await;
     assert!(
-        !node.peer_machines.contains_key(&link),
+        !node.handshakes.contains_key(&link),
         "defect: an inbound leg idle past the handshake timeout was not reaped"
     );
 }
@@ -276,13 +276,13 @@ async fn a_stalled_inbound_handshake_is_reaped_at_its_timeout_across_a_backward_
     step_wall(-3_600_000);
     node.check_timeouts().await;
     assert!(
-        node.peer_machines.contains_key(&link),
+        node.handshakes.contains_key(&link),
         "defect: a stalled inbound handshake inside its timeout was reaped after a backward wall step"
     );
     crate::time::advance(Duration::from_millis(past_the_handshake_timeout(&node)));
     node.check_timeouts().await;
     assert!(
-        !node.peer_machines.contains_key(&link),
+        !node.handshakes.contains_key(&link),
         "defect: a stalled inbound handshake past its timeout was kept after a backward wall step"
     );
 }

@@ -10,7 +10,7 @@
 use super::spanning_tree::{TestNode, cleanup_nodes, make_test_node};
 use super::tcp::make_test_node_tcp;
 use super::*;
-use crate::peer::machine::DialOrigin;
+use crate::peer::handshake::DialOrigin;
 
 /// Drive `tn`'s pending connects until none is left, for at most about a
 /// second.
@@ -42,7 +42,7 @@ async fn origins_over_tcp(
     assert_eq!(pending.len(), 1, "one connection-oriented dial is pending");
     let (link, at_connect) = (pending[0].link_id, pending[0].origin);
     connect_pending(&mut nodes[0]).await;
-    let at_leg = nodes[0].node.peer_machines[&link].dial_origin();
+    let at_leg = nodes[0].node.handshakes[&link].dial_origin();
     cleanup_nodes(&mut nodes).await;
     (at_connect, at_leg)
 }

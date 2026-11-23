@@ -1,14 +1,9 @@
-//! The silent-session record, and where its refusal enters the inbound msg3
-//! classification.
+//! The silent-session record.
 
-use super::util::establish_snapshot;
 use crate::proto::fmp::silent::{
     ActiveBackoff, SILENT_BACKOFF_BASE_MS, SILENT_BACKOFF_CAP_MS, SILENT_SESSION_LIMIT,
 };
-use crate::proto::fmp::{
-    EphemeralDigest, EstablishSnapshot, Fmp, InboundDecision, InboundReject, RekeyClaim,
-    SilentSessions, WireOutcome,
-};
+use crate::proto::fmp::{EphemeralDigest, SilentSessions};
 use crate::testutil::make_node_addr;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -257,124 +252,4 @@ fn a_record_below_the_limit_is_pruned_a_cap_after_its_last_silent_session() {
     assert_eq!(record.count(&peer), Some(1));
     record.ended(other, Some(EPOCH), setup(2), 1_000 + SILENT_BACKOFF_CAP_MS);
     assert_eq!(record.count(&peer), None);
-}
-
-/// A refusal in force for sessions at [`EPOCH`].
-fn backoff() -> Option<ActiveBackoff> {
-    Some(ActiveBackoff {
-        epoch: Some(EPOCH),
-        silent: SILENT_SESSION_LIMIT,
-        remaining_ms: SILENT_BACKOFF_BASE_MS,
-    })
-}
-
-/// The address of the node the snapshots belong to.
-const OURS: u8 = 0x10;
-
-/// The address of the peer whose msg3 is classified.
-const PEER: u8 = 0x20;
-
-/// No peer entry for the sender, with a refusal in force for it.
-fn no_peer_snapshot() -> EstablishSnapshot {
-    let mut snap = establish_snapshot(OURS);
-    snap.has_existing_peer = false;
-    snap.existing_peer_epoch = None;
-    snap.has_session = false;
-    snap.silent_backoff = backoff();
-    snap
-}
-
-/// An existing peer at [`EPOCH`], with a refusal in force for it.
-fn existing_snapshot() -> EstablishSnapshot {
-    let mut snap = establish_snapshot(OURS);
-    snap.existing_peer_epoch = Some(EPOCH);
-    snap.silent_backoff = backoff();
-    snap
-}
-
-/// Classify a msg3 carrying `epoch` against `snap`.
-fn classify(snap: &EstablishSnapshot, epoch: Option<[u8; 8]>) -> InboundDecision {
-    let wire = WireOutcome {
-        peer_node_addr: make_node_addr(PEER),
-        remote_epoch: epoch,
-    };
-    Fmp::new().establish_inbound(snap, &wire)
-}
-
-fn is_silent_reject(decision: &InboundDecision) -> bool {
-    matches!(
-        decision,
-        InboundDecision::Reject {
-            reason: InboundReject::SilentBackoff
-        }
-    )
-}
-
-#[test]
-fn a_same_epoch_msg3_from_an_identity_with_no_peer_is_refused_during_the_back_off() {
-    let decision = classify(&no_peer_snapshot(), Some(EPOCH));
-    assert!(is_silent_reject(&decision), "got {decision:?}");
-}
-
-#[test]
-fn a_same_epoch_msg3_from_an_identity_with_no_peer_is_promoted_with_no_back_off() {
-    let mut snap = no_peer_snapshot();
-    snap.silent_backoff = None;
-    assert!(matches!(
-        classify(&snap, Some(EPOCH)),
-        InboundDecision::Promote
-    ));
-}
-
-#[test]
-fn a_msg3_with_no_epoch_counts_as_the_same_epoch() {
-    let decision = classify(&no_peer_snapshot(), None);
-    assert!(is_silent_reject(&decision), "got {decision:?}");
-}
-
-#[test]
-fn a_new_epoch_msg3_is_promoted_during_the_back_off() {
-    assert!(matches!(
-        classify(&no_peer_snapshot(), Some(OTHER_EPOCH)),
-        InboundDecision::Promote
-    ));
-}
-
-#[test]
-fn a_new_epoch_msg3_from_an_idle_existing_peer_restarts_it_during_the_back_off() {
-    let snap = existing_snapshot();
-    assert!(matches!(
-        classify(&snap, Some(OTHER_EPOCH)),
-        InboundDecision::RestartThenPromote { .. }
-    ));
-}
-
-#[test]
-fn a_duplicate_msg3_from_an_existing_peer_still_draws_the_stored_msg2_during_the_back_off() {
-    let mut snap = existing_snapshot();
-    snap.stored_msg2 = Some(vec![0x5E; 4]);
-    assert!(matches!(
-        classify(&snap, Some(EPOCH)),
-        InboundDecision::RepeatMsg2 { msg2: Some(_) }
-    ));
-}
-
-#[test]
-fn a_rekey_of_an_existing_peers_session_goes_to_its_machine_during_the_back_off() {
-    let mut snap = existing_snapshot();
-    snap.rekey_claim = RekeyClaim::Matches;
-    assert!(matches!(
-        classify(&snap, Some(EPOCH)),
-        InboundDecision::PeerRekey { .. }
-    ));
-}
-
-#[test]
-fn a_crossing_dial_from_an_existing_peer_is_resolved_during_the_back_off() {
-    let mut snap = existing_snapshot();
-    snap.different_link = true;
-    assert!(matches!(
-        classify(&snap, Some(EPOCH)),
-        InboundDecision::CrossConnect { .. }
-    ));
 }

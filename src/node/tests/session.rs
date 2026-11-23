@@ -1188,7 +1188,7 @@ fn test_identity_cache_populated_on_promote() {
 
     // Promote
     let result = node
-        .promote_connection(link_id, peer_identity, 2000)
+        .install_handshake(link_id, peer_identity, 2000)
         .unwrap();
     assert!(matches!(result, PromotionResult::Promoted(_)));
 

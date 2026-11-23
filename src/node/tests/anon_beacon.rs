@@ -85,11 +85,7 @@ async fn hear(nodes: &mut [TestNode], x: usize) -> bool {
 async fn hear_from(nodes: &mut [TestNode], x: usize, from: TransportAddr) -> bool {
     loopback(&nodes[x], t2()).inject_anonymous(from);
     nodes[x].node.poll_transport_discovery().await;
-    nodes[x]
-        .node
-        .peer_machines
-        .values()
-        .any(|m| m.leg().is_some())
+    nodes[x].node.handshakes.values().any(|m| m.leg().is_some())
 }
 
 /// What `nodes[x]` holds the other node's second-transport pair as.
@@ -213,11 +209,7 @@ async fn an_anonymous_beacon_at_a_proven_standby_of_a_live_capable_peer_is_not_d
     loopback(&nodes[s], t1).inject_anonymous(from);
     nodes[s].node.poll_transport_discovery().await;
     assert!(
-        !nodes[s]
-            .node
-            .peer_machines
-            .values()
-            .any(|m| m.leg().is_some()),
+        !nodes[s].node.handshakes.values().any(|m| m.leg().is_some()),
         "node {s} dialled a live capable peer at its proven standby"
     );
     cleanup_nodes(&mut nodes).await;
@@ -266,11 +258,7 @@ async fn an_anonymous_beacon_at_a_proven_dead_path_of_a_live_capable_peer_is_not
     loopback(&nodes[s], t1).inject_anonymous(from);
     nodes[s].node.poll_transport_discovery().await;
     assert!(
-        !nodes[s]
-            .node
-            .peer_machines
-            .values()
-            .any(|m| m.leg().is_some()),
+        !nodes[s].node.handshakes.values().any(|m| m.leg().is_some()),
         "node {s} dialled a live capable peer at its proven Dead path"
     );
     cleanup_nodes(&mut nodes).await;
@@ -1144,7 +1132,7 @@ async fn left_dialled_once(name: &str, cfg_s: fn() -> Config, cfg_l: fn() -> Con
         assert_eq!(tn.peers.len(), 1, "{name}: node {x} holds one peer");
         assert_eq!(tn.links.len(), 1, "{name}: node {x} holds one link");
         assert!(
-            !tn.peer_machines.values().any(|m| m.leg().is_some()),
+            !tn.handshakes.values().any(|m| m.leg().is_some()),
             "{name}: node {x} has a handshake in flight"
         );
     }

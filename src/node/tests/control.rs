@@ -14,7 +14,7 @@ use spanning_tree::{
 
 /// Count the in-flight handshake legs a node is running toward `peer`.
 fn outbound_leg_count(node: &Node, peer: &NodeAddr) -> usize {
-    node.peer_machines
+    node.handshakes
         .values()
         .filter(|machine| {
             machine.leg().is_some()
@@ -556,7 +556,7 @@ async fn test_api_connect_rejects_invalid_npub() {
         "the error should name the bad npub, got: {err}"
     );
     assert_eq!(node.peer_count(), 0);
-    assert!(node.peer_machines.is_empty());
+    assert!(node.handshakes.is_empty());
 }
 
 /// `connect` naming a transport the node does not have fails cleanly rather
@@ -580,7 +580,7 @@ async fn test_api_connect_without_a_matching_transport_fails_cleanly() {
 
     assert_eq!(node.peer_count(), 0, "no peer may be registered");
     assert!(
-        node.peer_machines.is_empty(),
+        node.handshakes.is_empty(),
         "no handshake leg may be left behind"
     );
     assert_eq!(outbound_leg_count(&node, &peer_addr), 0);
@@ -626,7 +626,7 @@ async fn test_api_disconnect_unknown_peer_changes_nothing() {
     let stranger = make_node();
 
     let peers_before = node.peer_count();
-    let machines_before = node.peer_machines.len();
+    let machines_before = node.handshakes.len();
     let links_before = node.links.len();
 
     let err = node
@@ -636,7 +636,7 @@ async fn test_api_disconnect_unknown_peer_changes_nothing() {
     assert!(err.contains("peer not found"), "unexpected error: {err}");
 
     assert_eq!(node.peer_count(), peers_before);
-    assert_eq!(node.peer_machines.len(), machines_before);
+    assert_eq!(node.handshakes.len(), machines_before);
     assert_eq!(node.links.len(), links_before);
 }
 
@@ -1120,10 +1120,10 @@ fn plant_lost_dial(
     peer: PeerIdentity,
     transport: TransportId,
     addr: &TransportAddr,
-    origin: crate::peer::machine::DialOrigin,
+    origin: crate::peer::handshake::DialOrigin,
     dial_ms: u64,
 ) -> LinkId {
-    use crate::peer::machine::{PeerEvent, PeerMachine, TimerKind};
+    use crate::peer::handshake::{Handshake, TimerKind};
     use crate::proto::fmp::LegStamp;
 
     let link_id = node.allocate_link_id();
@@ -1136,24 +1136,15 @@ fn plant_lost_dial(
             LegStamp::at(dial_ms),
         )
         .unwrap();
-    let mut machine = PeerMachine::new_outbound(link_id, Some(peer), LegStamp::at(dial_ms));
+    let mut machine = Handshake::new_outbound(link_id, Some(peer), LegStamp::at(dial_ms));
     machine.set_dial_origin(origin);
-    let _ = machine.step(
-        PeerEvent::Dial {
-            transport_id: transport,
-            remote_addr: addr.clone(),
-            peer_identity: peer,
-            connection_oriented: false,
-        },
-        dial_ms,
-        &mut node.index_allocator,
-    );
+    let _ = machine.sending_msg1(false);
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport);
     machine.set_conn_source_addr(addr.clone());
     machine.set_leg(conn.take_leg().unwrap());
-    node.peer_machines.raw().insert(link_id, machine);
-    node.peer_machines
+    node.handshakes.raw().insert(link_id, machine);
+    node.handshakes
         .raw_timers()
         .entry(link_id)
         .or_default()
@@ -1165,7 +1156,7 @@ fn plant_lost_dial(
 /// `origin` from A to B at another address time out, and return the
 /// candidate sources A then holds for that address.
 async fn lost_dial_sources(
-    origin: crate::peer::machine::DialOrigin,
+    origin: crate::peer::handshake::DialOrigin,
 ) -> Option<fips_core::proto::path::Sources> {
     use super::paths::{capable_at, enabled, sources_at};
     use super::rekey_parity::{linked_pair, pump};
@@ -1196,7 +1187,7 @@ async fn lost_dial_sources(
     nodes[0].node.drive_peer_timers(dial_ms + 100_000).await;
 
     assert!(
-        !nodes[0].node.peer_machines.contains_key(&link_id),
+        !nodes[0].node.handshakes.contains_key(&link_id),
         "the timed-out leg is reaped"
     );
     let sources = sources_at(&nodes[0], &b_addr, t1, &lost);
@@ -1211,7 +1202,7 @@ async fn lost_dial_sources(
 /// Mutation: drop the address with the timed-out dial.
 #[tokio::test]
 async fn a_dial_that_times_out_after_its_peer_came_up_elsewhere_leaves_a_path_candidate() {
-    let sources = lost_dial_sources(crate::peer::machine::DialOrigin::Addressed).await;
+    let sources = lost_dial_sources(crate::peer::handshake::DialOrigin::Addressed).await;
     assert!(
         sources.is_some_and(|s| s.has(fips_core::proto::path::Source::Request)),
         "the lost dial's address is held as a candidate: {sources:?}"
@@ -1223,7 +1214,7 @@ async fn a_dial_that_times_out_after_its_peer_came_up_elsewhere_leaves_a_path_ca
 /// Mutation: hold every lost dial's address as a connect request.
 #[tokio::test]
 async fn a_lost_mdns_advert_dial_leaves_its_address_as_a_discovery_candidate() {
-    let sources = lost_dial_sources(crate::peer::machine::DialOrigin::MdnsAdvert).await;
+    let sources = lost_dial_sources(crate::peer::handshake::DialOrigin::MdnsAdvert).await;
     assert!(
         sources.is_some_and(|s| s.has(fips_core::proto::path::Source::Discovery)),
         "the lost mDNS dial's address is held as a discovery candidate: {sources:?}"
@@ -1235,7 +1226,7 @@ async fn a_lost_mdns_advert_dial_leaves_its_address_as_a_discovery_candidate() {
 /// Mutation: hold a neighbour-claim dial's address too.
 #[tokio::test]
 async fn a_lost_neighbour_claim_dial_leaves_no_path_candidate() {
-    let sources = lost_dial_sources(crate::peer::machine::DialOrigin::NeighbourClaim).await;
+    let sources = lost_dial_sources(crate::peer::handshake::DialOrigin::NeighbourClaim).await;
     assert!(
         sources.is_none(),
         "the lost neighbour-claim dial's address is not held: {sources:?}"

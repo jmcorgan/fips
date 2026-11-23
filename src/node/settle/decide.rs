@@ -32,8 +32,8 @@ use crate::node::settle::links::current;
 #[cfg(test)]
 use crate::peer::ActivePeer;
 use crate::peer::PeerInstant;
+use crate::proto::fmp::RekeyClaim;
 use crate::proto::fmp::flow::{AnonDial, In, Out, Xx};
-use crate::proto::fmp::{InboundDecision, InboundReject, OutboundDecision};
 use crate::proto::rekey::IndexLease;
 use crate::proto::settle::flow::Outs;
 use crate::proto::settle::gates::Source;
@@ -138,13 +138,49 @@ pub(in crate::node) fn withholds(out: &[XxOut]) -> Option<bool> {
         .then_some(true)
 }
 
-/// The establish decision the machine's msg2 step carries out, from `out`,
-/// the outputs of the core's steps at a dial's msg2 and at its msg3's send:
-/// an install's `Promote`, a restart's `Replace`, a move, or a keep. A cap
-/// or leaf refusal is a promote, or after a restart's removal a restart,
-/// which next's promotion then refuses. `None` when the core decided none
-/// of these.
-pub(in crate::node) fn outbound(out: &[XxOut]) -> Option<OutboundDecision> {
+/// What the node does at a dial's msg2, as the settlement core decided at the
+/// msg2 and at its msg3's send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::node) enum Msg2Decision {
+    /// Install the peer as new.
+    Promote,
+    /// Remove the held peer, which restarted, then install the peer.
+    Restart,
+    /// A crossing the dial wins: move the held peer onto it.
+    Swap,
+    /// A crossing the dial loses, or the own-dial keep: keep the held peer
+    /// and end the dial.
+    Keep,
+}
+
+/// What the node does at an answer's msg3, as the settlement core decided.
+#[derive(Debug)]
+pub(in crate::node) enum Msg3Decision {
+    /// Install the peer as new.
+    Promote,
+    /// Remove `peer`, which restarted, then install the peer.
+    Restart { peer: NodeAddr },
+    /// A crossing: `wins` moves the held `peer` onto the answer, and
+    /// otherwise the held peer is kept and the answer ends.
+    Cross { peer: NodeAddr, wins: bool },
+    /// The msg3 declares a rekey of the link held with `peer`: the answer's
+    /// read goes to that link's rekey machine.
+    Rekey { peer: NodeAddr },
+    /// A repeated handshake: resend the held peer's stored msg2, if any.
+    Repeat { msg2: Option<Vec<u8>> },
+    /// The restart gate refused a new epoch.
+    Dampened,
+    /// The identity's recent sessions carried no frame and its back-off is
+    /// running.
+    Silent,
+}
+
+/// The decision at a dial's msg2, from `out`, the outputs of the core's
+/// steps at the msg2 and at its msg3's send: an install's `Promote`, a
+/// restart's `Replace`, a move, or a keep. A cap or leaf refusal is a
+/// promote, or after a restart's removal a restart, which the node's
+/// promotion then refuses. `None` when the core decided none of these.
+pub(in crate::node) fn outbound(out: &[XxOut]) -> Option<Msg2Decision> {
     let restart = out.iter().any(|o| {
         matches!(
             o,
@@ -156,34 +192,44 @@ pub(in crate::node) fn outbound(out: &[XxOut]) -> Option<OutboundDecision> {
     });
     out.iter().find_map(|o| match o {
         Output::Reset { transition, .. } => match transition {
-            Transition::Promote => Some(OutboundDecision::Promote),
-            Transition::Replace => Some(OutboundDecision::RestartThenPromote),
-            Transition::Move => Some(OutboundDecision::CrossConnectionSwap),
-            Transition::Keep => Some(OutboundDecision::CrossConnectionKeep),
+            Transition::Promote => Some(Msg2Decision::Promote),
+            Transition::Replace => Some(Msg2Decision::Restart),
+            Transition::Move => Some(Msg2Decision::Swap),
+            Transition::Keep => Some(Msg2Decision::Keep),
             Transition::Restarted | Transition::Roam => None,
         },
-        Output::Swapped { .. } => Some(OutboundDecision::CrossConnectionSwap),
+        Output::Swapped { .. } => Some(Msg2Decision::Swap),
         Output::Reject {
             why: Denial::Cap | Denial::Flow(_),
             ..
         } => Some(if restart {
-            OutboundDecision::RestartThenPromote
+            Msg2Decision::Restart
         } else {
-            OutboundDecision::Promote
+            Msg2Decision::Promote
         }),
         _ => None,
     })
 }
 
-/// The establish decision the machine's msg3 step carries out, from `out`,
-/// the outputs of the core's step at an answer's msg3, with `stored` the
-/// held peer's stored msg2 a repeat resends: an install's `Promote`, a
-/// restart's `Replace`, a move or a keep at a crossing, the peer's rekey,
-/// a repeat, or a gate's refusal, the restart gate's or the silent
-/// sessions'. A cap or leaf refusal is a promote, or after a restart's
-/// removal a restart, which next's promotion then refuses. `None` when the
-/// core decided none of these.
-pub(in crate::node) fn inbound(out: &[XxOut], stored: Option<Vec<u8>>) -> Option<InboundDecision> {
+/// The decision at an answer's msg3, from `out`, the outputs of the core's
+/// step at the msg3, with `stored` the held peer's stored msg2 a repeat
+/// resends and `claim` the msg3's rekey claim, made by `peer`: an install's
+/// `Promote`, a restart's `Replace`, a move or a keep at a crossing, the
+/// peer's rekey, a repeat, or a gate's refusal, the restart gate's or the
+/// silent sessions'. A cap or leaf refusal is a promote, or after a
+/// restart's removal a restart, which the node's promotion then refuses.
+///
+/// The core's rekey output carries the answer's lease, which the step has
+/// already given back onto the answer's read, so what is left of it in
+/// `out` is the answer's `Retire`: a retire under a matching claim, with
+/// nothing else decided, is the peer's rekey. `None` when the core decided
+/// none of these.
+pub(in crate::node) fn inbound(
+    out: &[XxOut],
+    stored: Option<Vec<u8>>,
+    claim: RekeyClaim,
+    peer: NodeAddr,
+) -> Option<Msg3Decision> {
     let restart = out.iter().any(|o| {
         matches!(
             o,
@@ -193,22 +239,21 @@ pub(in crate::node) fn inbound(out: &[XxOut], stored: Option<Vec<u8>>) -> Option
             }
         )
     });
-    out.iter().find_map(|o| match o {
+    let decided = out.iter().find_map(|o| match o {
         Output::Reset { peer, transition } => match transition {
-            Transition::Promote => Some(InboundDecision::Promote),
-            Transition::Replace => Some(InboundDecision::RestartThenPromote { peer: *peer }),
-            Transition::Move => Some(InboundDecision::CrossConnect {
+            Transition::Promote => Some(Msg3Decision::Promote),
+            Transition::Replace => Some(Msg3Decision::Restart { peer: *peer }),
+            Transition::Move => Some(Msg3Decision::Cross {
                 peer: *peer,
-                our_inbound_wins: true,
+                wins: true,
             }),
-            Transition::Keep => Some(InboundDecision::CrossConnect {
+            Transition::Keep => Some(Msg3Decision::Cross {
                 peer: *peer,
-                our_inbound_wins: false,
+                wins: false,
             }),
             Transition::Restarted | Transition::Roam => None,
         },
-        Output::Flow(Out::Rekey { peer, .. }) => Some(InboundDecision::PeerRekey { peer: *peer }),
-        Output::Flow(Out::Repeat { .. }) => Some(InboundDecision::RepeatMsg2 {
+        Output::Flow(Out::Repeat { .. }) => Some(Msg3Decision::Repeat {
             msg2: stored.clone(),
         }),
         Output::Reject {
@@ -216,12 +261,8 @@ pub(in crate::node) fn inbound(out: &[XxOut], stored: Option<Vec<u8>>) -> Option
             why: Denial::Gate(_),
             ..
         } => match source {
-            Source::Restart => Some(InboundDecision::Reject {
-                reason: InboundReject::EpochRestartDampened,
-            }),
-            Source::NotHeld => Some(InboundDecision::Reject {
-                reason: InboundReject::SilentBackoff,
-            }),
+            Source::Restart => Some(Msg3Decision::Dampened),
+            Source::NotHeld => Some(Msg3Decision::Silent),
             _ => None,
         },
         Output::Reject {
@@ -229,10 +270,14 @@ pub(in crate::node) fn inbound(out: &[XxOut], stored: Option<Vec<u8>>) -> Option
             why: Denial::Cap | Denial::Flow(_),
             ..
         } => Some(match peer {
-            Some(peer) if restart => InboundDecision::RestartThenPromote { peer: *peer },
-            _ => InboundDecision::Promote,
+            Some(peer) if restart => Msg3Decision::Restart { peer: *peer },
+            _ => Msg3Decision::Promote,
         }),
         _ => None,
+    });
+    decided.or_else(|| {
+        let retired = out.iter().any(|o| matches!(o, Output::Retire { .. }));
+        (claim == RekeyClaim::Matches && retired).then_some(Msg3Decision::Rekey { peer })
     })
 }
 
@@ -303,6 +348,15 @@ fn held(peer: &ActivePeer, link: LinkNo) -> Held<PeerInstant> {
     }
 }
 
+/// Quiet the leg of a dial on its link `link` in `core` once its msg2
+/// completed the handshake: the leg sends no more resends and keeps its
+/// lease until the core decides the msg2. The step changes only that leg's
+/// resend schedule, and nothing of it is carried out. It takes the table
+/// alone, because the msg2's site holds the dial's handshake entry.
+pub(in crate::node) fn quiet(core: &mut super::Core, link: LinkNo) {
+    let _ = core.step(Input::Flow(In::Quiet { link }), crate::peer::peer_now());
+}
+
 impl Node {
     /// Hand the core `input`, which a decision site built, now on the peer
     /// clock. Returns what the core decided that the site carries out: every
@@ -318,8 +372,9 @@ impl Node {
         self.decide_at(input, crate::time::mono_at(ms))
     }
 
-    /// [`Node::decide`] at `now`. The one caller, with [`Node::core_tick`],
-    /// of the table's [`step`](crate::proto::settle::table::Table::step).
+    /// [`Node::decide`] at `now`. The one caller, with [`Node::tend`],
+    /// [`Node::core_pathed`] and [`quiet`], of the table's
+    /// [`step`](crate::proto::settle::table::Table::step).
     #[inline(never)]
     pub(in crate::node) fn decide_at(&mut self, input: XxInput, now: PeerInstant) -> Vec<XxOut> {
         #[cfg(test)]
@@ -354,7 +409,7 @@ impl Node {
 
     /// Carry out the leases of `out`, one step's outputs, `leased` naming
     /// each lease's leg before the step: each lease handed back goes to its
-    /// leg's machine ([`Node::give_back`]). The link table's index is
+    /// leg's entry ([`Node::give_back`]). The link table's index is
     /// rebuilt when `rebuild` says so. Returns the rest of `out`, in order,
     /// for the decision site to carry out.
     fn stepped(
@@ -403,13 +458,13 @@ impl Node {
 
     /// Give `lease`, which the core handed back, to the machine of the leg
     /// `leased` says held it, which takes it where its handshake carries it
-    /// (`PeerMachine::give_lease`);
+    /// (`Handshake::give_lease`);
     /// a lease no machine takes goes back to the allocator.
     fn give_back(&mut self, leased: &HashMap<u32, LinkNo>, lease: IndexLease) {
         let id = leased
             .get(&lease.index())
             .and_then(|no| self.core_link(*no));
-        let rest = match id.and_then(|id| self.peer_machines.get_mut(&id)) {
+        let rest = match id.and_then(|id| self.handshakes.get_mut(&id)) {
             Some(machine) => machine.give_lease(lease),
             None => Some(lease),
         };
@@ -522,7 +577,7 @@ impl Node {
     /// Put `lease`, which no leg of the core's took, back on the machine of
     /// the node's link `id`, or the allocator.
     fn unled(&mut self, id: LinkId, lease: IndexLease) {
-        let rest = match self.peer_machines.get_mut(&id) {
+        let rest = match self.handshakes.get_mut(&id) {
             Some(machine) => machine.give_lease(lease),
             None => Some(lease),
         };
@@ -847,7 +902,7 @@ impl Node {
 
     /// Tell the core the node gave up the leg on its link `id` for a cause
     /// the core has no input for, the link's record left for the node to
-    /// retire with the link: the lease goes back to the leg's machine, or
+    /// retire with the link: the lease goes back to the leg's entry, or
     /// the allocator.
     pub(in crate::node) fn core_drop_leg(&mut self, id: LinkId) {
         let Some(no) = self.core_no(id) else {
@@ -931,17 +986,17 @@ impl Node {
     }
 
     /// The resync's legs: for each handshake a test planted, a leg holding
-    /// its machine's lease ([`Node::replant`]); with `timers` alone,
+    /// its entry's lease ([`Node::replant`]); with `timers` alone,
     /// only for each dial a test armed a msg1 resend timer for, on a link
     /// the core numbers or one a test put in the map, as before the table's
     /// first input, whose timers drive nothing else.
     fn replant_legs(&mut self, timers: bool) {
-        use crate::peer::machine::TimerKind;
+        use crate::peer::handshake::TimerKind;
         let max = self.config().node.rate_limit.handshake_max_resends;
         let params = super::params::xx_params(&self.config().node);
         if timers {
             let opened: Vec<(LinkId, Pair, Dir)> = self
-                .peer_machines
+                .handshakes
                 .timers()
                 .iter()
                 .filter(|(_, t)| t.contains_key(&TimerKind::HandshakeRetransmit))
@@ -962,13 +1017,13 @@ impl Node {
             }
         }
         let armed = |node: &Node, id: &LinkId| {
-            node.peer_machines
+            node.handshakes
                 .timers()
                 .get(id)
                 .is_some_and(|t| t.contains_key(&TimerKind::HandshakeRetransmit))
         };
         let planted: Vec<LinkId> = self
-            .peer_machines
+            .handshakes
             .iter()
             .filter(|(id, m)| m.leg().is_some() && !self.replanted.fed.contains(*id))
             .filter(|(id, _)| !timers || armed(self, id))
@@ -988,12 +1043,12 @@ impl Node {
                 continue;
             };
             let timer = self
-                .peer_machines
+                .handshakes
                 .timers()
                 .get(&id)
                 .and_then(|t| t.get(&TimerKind::HandshakeRetransmit))
                 .copied();
-            let Some(machine) = self.peer_machines.get_mut(&id) else {
+            let Some(machine) = self.handshakes.get_mut(&id) else {
                 continue;
             };
             let outbound = machine.conn_is_outbound();
@@ -1028,8 +1083,7 @@ impl Node {
             let next = timer.map(crate::time::mono_at);
             self.core.replant_leg(no, deadline, next);
             if timer.is_some() {
-                self.peer_machines
-                    .cancel(id, TimerKind::HandshakeRetransmit);
+                self.handshakes.cancel(id, TimerKind::HandshakeRetransmit);
             }
         }
     }

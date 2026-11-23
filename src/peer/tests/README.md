@@ -36,15 +36,17 @@ items.
   `settle` and `depart` each destructure the record naming every field the
   struct declares, with no rest pattern. The scans read `data.rs` with LF line
   endings, and a test runs both on a CRLF copy, as a Windows checkout has.
-- `machine.rs`: tests for `PeerMachine` (`src/peer/machine.rs`), declared as
-  `mod msg2_tests` because `machine.rs` already has an inline `tests` module.
-  They cover an initial (XX) dial receiving a msg2 that does not complete it:
-  one that does not read, one whose negotiation payload does not decrypt, and
-  one that reads under a static other than the one dialed. The machine
-  refuses each with the handshake kept and the carrier untouched, so the
-  genuine msg2 still completes the session.
+- `handshake.rs`: tests for `Handshake` (`src/peer/handshake.rs`), declared
+  from that file as `#[cfg(test)] #[path = "tests/handshake.rs"] mod tests;`.
+  They cover the Noise handshake operations on an entry with its crypto
+  attached (both directions, a full XX handshake, the session keys a taken
+  leg leaves behind, a failed handshake, and the wrong direction), and an
+  initial (XX) dial receiving a msg2 that does not complete it: one that
+  does not read, one whose negotiation payload does not decrypt, and one
+  that reads under a static other than the one dialed. The entry refuses
+  each with the handshake kept and the carrier untouched, so the genuine
+  msg2 still completes the session.
 
-`machine.rs` and `mod.rs` still carry older inline `mod tests` blocks. New
-tests go here rather than into those blocks; the inline blocks are not
-converted in passing. Node-level tests of peer behaviour live in
-`src/node/tests/`.
+`mod.rs` still carries an older inline `mod tests` block. New tests go here
+rather than into that block; the inline block is not converted in passing.
+Node-level tests of peer behaviour live in `src/node/tests/`.

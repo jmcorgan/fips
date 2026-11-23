@@ -545,10 +545,10 @@ fn read(
         Row::ControlMachine => {
             let machines: Vec<_> = covered(node, held)
                 .into_iter()
-                .filter(|id| node.peer_machines.contains_key(id))
+                .filter(|id| node.handshakes.contains_key(id))
                 .map(|id| {
                     let mut timers: Vec<String> = node
-                        .peer_machines
+                        .handshakes
                         .timers()
                         .get(&id)
                         .map(|t| t.iter().map(|(k, at)| format!("{k:?}@{at}")).collect())
@@ -1008,8 +1008,11 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
         }
         Row::ControlMachine => {
             if let Some(id) = node.get_peer(peer).map(ActivePeer::link_id) {
-                node.peer_machines
-                    .arm(id, crate::peer::machine::TimerKind::Liveness, u64::MAX / 2);
+                node.handshakes.arm(
+                    id,
+                    crate::peer::handshake::TimerKind::Liveness,
+                    u64::MAX / 2,
+                );
             }
         }
         Row::Connection => {

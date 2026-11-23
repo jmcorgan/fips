@@ -804,7 +804,7 @@ impl ActivePeer {
     /// original path ([`PeerBundle::renew`]); `caps.path` gives the facts it
     /// reads.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn move_session(
+    pub(crate) fn adopt_dial(
         &mut self,
         session: NoiseSession,
         ours: IndexLease,
@@ -836,7 +836,7 @@ impl ActivePeer {
         (out, paths)
     }
 
-    /// The machine part of [`move_session`](Self::move_session), through the
+    /// The machine part of [`adopt_dial`](Self::adopt_dial), through the
     /// settlement core's join: close the rekey machine, build it again on
     /// `session` from what it carried, and renew the bundle at `to`. Returns
     /// the outputs, the path outputs, and whether the machine was rebuilt;
@@ -1465,6 +1465,7 @@ impl ActivePeer {
 
     /// When an authenticated frame from this peer last arrived, on the peer
     /// clock; the promotion instant before the first.
+    #[cfg(test)]
     pub(crate) fn heard_at(&self) -> PeerInstant {
         self.data.heard_at
     }
@@ -1505,19 +1506,13 @@ impl ActivePeer {
             .map_or(0, |base| since(base).as_millis() as u32)
     }
 
-    /// Whether the dial on `dial` was already in flight when the session the
-    /// link holds now was installed: its link id is below the node's next
-    /// link id then.
-    pub(crate) fn predates(&self, dial: LinkId) -> bool {
-        dial.as_u64() < self.mark
-    }
-
     /// Whether a frame from this peer has authenticated under the session
     /// the link holds now, or one it rekeyed from. Unlike [`heard`], a
     /// cross-connection move starts this afresh: a frame heard under the
     /// session the move left shows only that the peer held that one.
     ///
     /// [`heard`]: ActivePeer::heard
+    #[cfg(test)]
     pub(crate) fn heard_on_session(&self) -> bool {
         self.rekey
             .as_ref()

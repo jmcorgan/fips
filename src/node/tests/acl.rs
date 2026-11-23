@@ -89,7 +89,7 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     let keypair_a = node_a.identity().keypair();
     let epoch_a = node_a.startup_epoch();
     let noise_msg1 = node_a
-        .peer_machines
+        .handshakes
         .get_mut(&link_id_a)
         .unwrap()
         .start_handshake(keypair_a, epoch_a, LegStamp::at(1000))
@@ -239,7 +239,7 @@ async fn test_inbound_msg3_denied_triggers_disconnect() {
     let our_keypair_a = node_a.identity().keypair();
     let startup_epoch_a = node_a.startup_epoch();
     let noise_msg1 = node_a
-        .peer_machines
+        .handshakes
         .get_mut(&link_id_a)
         .unwrap()
         .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
@@ -376,7 +376,7 @@ async fn test_outbound_connect_not_denied_by_allowlist_miss() {
 /// call, by which point the responder has built a control machine, allocated
 /// a session index, opened a link, and completed the Noise session. All of
 /// that has to come back down on the denial. A machine left in
-/// `peer_machines` is unreachable by every teardown path and holds a
+/// `handshakes` is unreachable by every teardown path and holds a
 /// peering-budget slot forever, so that is what this pins, along with the
 /// link and the connection count.
 ///
@@ -386,7 +386,7 @@ async fn test_outbound_connect_not_denied_by_allowlist_miss() {
 /// promotion, which is downstream of this gate, so
 /// `assert!(!peers_by_index.contains_key(..))` holds whether the denial frees
 /// the index or leaks it — its pass value and its failure value coincide.
-/// `debug_assert_peer_maps_coherent()` is no better; it walks `peer_machines`
+/// `debug_assert_peer_maps_coherent()` is no better; it walks `handshakes`
 /// for carriers and says nothing about the allocator. Naming the index and
 /// asserting `is_allocated` before and after is what discriminates.
 #[tokio::test]
@@ -426,11 +426,11 @@ async fn test_acl_rejected_msg3_leaves_no_registry_trace() {
     // B has parked a machine awaiting msg3. No admission decision has run:
     // it still does not know who dialed it.
     let link_id_b = *node_b
-        .peer_machines
+        .handshakes
         .keys()
         .next()
         .expect("msg1 parks a machine on the responder");
-    let machine_b = node_b.peer_machines.get(&link_id_b).unwrap();
+    let machine_b = node_b.handshakes.get(&link_id_b).unwrap();
     let our_index_b = node_b
         .handshake_index(link_id_b)
         .expect("msg1 allocates the responder's session index");
@@ -462,7 +462,7 @@ async fn test_acl_rejected_msg3_leaves_no_registry_trace() {
         .await;
 
     assert!(
-        node_b.peer_machines.is_empty(),
+        node_b.handshakes.is_empty(),
         "a denied peer must leave no control machine behind"
     );
     assert_eq!(node_b.connection_count(), 0);

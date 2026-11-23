@@ -66,8 +66,10 @@ it (`Table<TestInstant, Xx>`), declared from `../mod.rs` as `tests`.
 
 ## What `next.rs` transcribes
 
-At `be5204f9e` (unchanged at the port branch's tip, by `git diff --stat`
-over these files), each site with its line. This is a reviewer's
+At `be5204f9e`, each site with its line. The port has since replaced the
+node's sites with the node carrying out this flow's decisions, and removed
+`establish_inbound` and `establish_outbound`, so the lines record what was
+transcribed. This is a reviewer's
 checklist: a change at one of these lines reds no test here, so a re-read
 is the check that the transcription stands.
 

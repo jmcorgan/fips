@@ -6,12 +6,11 @@
 
 use crate::NodeAddr;
 use crate::node::Node;
-use crate::node::dataplane::PeerActionCtx;
 use crate::node::diag::OrNone;
 use crate::node::reject::{MmpReject, RejectReason, TreeReject};
+use crate::node::settle::exec::Removed;
 use crate::node::tree::sign_declaration;
 use crate::peer::ActivePeer;
-use crate::peer::machine::PeerEvent;
 use crate::proto::link::LinkMessageType;
 use crate::proto::mmp::{
     LinkReportKind, LinkReportSnapshot, MmpAction, PeerLivenessSnapshot, ReceiverReport, RrLog,
@@ -20,7 +19,6 @@ use crate::proto::mmp::{
 use crate::proto::settle::output::Why;
 use crate::proto::stp::{Stp, TreeDecision};
 use crate::time::HostClock;
-use crate::transport::{TransportAddr, TransportId};
 use fips_core::time::Clock;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
@@ -654,28 +652,24 @@ impl Node {
         }
     }
 
-    /// Route a link-dead reap through the peer machine + executor. Two callers
-    /// decide: the tick sweep's `plan_heartbeats` batch emits a `ReapPeer` for a
-    /// peer that has gone quiet, and a link's path machine, stepped by
-    /// [`Self::path_presence`], [`Self::path_removed`] or any other input,
-    /// orphans a link that has no original or acked path left, as when the
-    /// interface its one path used goes away. The shell has already
-    /// decided by the time this runs, so the machine only CONSUMES the decision
-    /// via [`PeerEvent::LinkDeadSuspected`]. The resulting executor arms
-    /// (`InvalidateSendState` → the removal, `ReportLost` →
-    /// `note_link_dead`) reproduce the pre-refactor inline reap body exactly, in
-    /// that order.
+    /// Carry out a link-dead reap. Two callers decide: the tick sweep's
+    /// `plan_heartbeats` batch emits a `ReapPeer` for a peer that has gone
+    /// quiet, and a link's path machine, stepped by [`Self::path_presence`],
+    /// [`Self::path_removed`] or any other input, orphans a link that has no
+    /// original or acked path left, as when the interface its one path used
+    /// goes away. The peer is removed, then noted lost for a reconnect, as
+    /// the inline reap body did, in that order.
     ///
-    /// An established peer always has a `peer_machine`. If the peer vanished
-    /// between snapshot and effect, the old inline body was already a
-    /// no-op, so we return; if the machine is absent (which should be impossible)
-    /// we fall back to the byte-identical inline body under a `debug_assert`.
+    /// An established peer always has a handshake entry, marked as the
+    /// peer's. If the peer vanished between snapshot and effect, the reap is
+    /// a no-op; an entry not marked as an established peer's (a peer already
+    /// found dead) is left as it is; if the entry is absent (which should be
+    /// impossible) the peer is removed under a `debug_assert`.
     ///
-    /// `now_ms` is the caller's hoisted wall-clock ms; it flows to the peer
-    /// machine's ambient context. The reconnect schedule itself is on the
-    /// peering clock, which `note_link_dead`'s callers read. `why` is which
-    /// of the two callers decided: `Dead` from the sweep, `Orphaned` from
-    /// the path machine.
+    /// `now_ms` is the caller's hoisted wall-clock ms; the reconnect
+    /// schedule itself is on the peering clock, which `note_link_dead`'s
+    /// callers read. `why` is which of the two callers decided: `Dead` from
+    /// the sweep, `Orphaned` from the path machine.
     pub(in crate::node) async fn route_link_dead(
         &mut self,
         node_addr: NodeAddr,
@@ -688,52 +682,33 @@ impl Node {
 
     /// The work of [`Self::route_link_dead`], which audits the per-peer maps
     /// after it.
-    async fn linkdead_body(&mut self, node_addr: NodeAddr, now_ms: u64, why: Why) {
+    async fn linkdead_body(&mut self, node_addr: NodeAddr, _now_ms: u64, why: Why) {
         let link = match self.peers.get(&node_addr) {
             Some(peer) => peer.link_id(),
             None => return,
         };
-        if !self.peer_machines.contains_key(&link) {
-            debug_assert!(false, "peer machine present for every established peer");
-            if let Some(removed) = self.remove(&node_addr, Why::Dead) {
-                self.removed(&node_addr, removed).await;
+        match self.handshakes.get_mut(&link) {
+            Some(entry) if entry.is_established() => entry.closed(),
+            Some(_) => return,
+            None => {
+                debug_assert!(false, "handshake entry present for every established peer");
+                if let Some(removed) = self.remove(&node_addr, Why::Dead) {
+                    self.removed(&node_addr, removed).await;
+                }
+                return;
             }
-            return;
         }
-        let ambient = self.link_dead_ctx(&node_addr, now_ms, why);
-        self.advance_peer_machine(
-            link,
-            PeerEvent::LinkDeadSuspected,
-            Self::interval_ms(),
-            &ambient,
-        )
-        .await;
-    }
-
-    /// Ambient shell facts for the routed liveness reap. The executor reads only
-    /// `verified_identity` (`InvalidateSendState` → the removal resolves
-    /// its `NodeAddr` from it, so it must equal `node_addr`). `ReportLost` →
-    /// `note_link_dead` schedules the reconnect on the peering clock, not on
-    /// `now_ms`. The transport/index/direction fields are unused by these two
-    /// arms and are populated best-effort for coherence; `now_ms` is threaded in
-    /// as the caller's hoisted wall-clock, and `why` as the caller decided it.
-    fn link_dead_ctx(&self, node_addr: &NodeAddr, now_ms: u64, why: Why) -> PeerActionCtx {
-        let peer = &self.peers[node_addr];
-        PeerActionCtx {
-            verified_identity: *peer.identity(),
-            transport_id: peer.transport_id().unwrap_or_else(|| TransportId::new(0)),
-            remote_addr: peer
-                .current_addr()
-                .cloned()
-                .unwrap_or_else(|| TransportAddr::new(Vec::new())),
-            our_index: peer.our_index(),
-            their_index: peer.their_index(),
-            now_ms,
-            interval_ms: Self::interval_ms(),
-            is_outbound: false,
-            pending_outbound_key: None,
-            why: Some(why),
+        // The removal closes the peer's link rekey machine, whose outputs
+        // free every index its sessions hold. The loss is noted for a
+        // reconnect below, once the removal has run.
+        let removed = self.remove(&node_addr, why).map(|removed| Removed {
+            noted: true,
+            ..removed
+        });
+        if let Some(removed) = removed {
+            self.removed(&node_addr, removed).await;
         }
+        self.note_link_dead(node_addr, Self::peering_now());
     }
 }
 

@@ -97,9 +97,10 @@ field, at once.
   link; and `rebuild` names a test's index entries through the records
   (`Links::name`). A bundle a test mutator changed past the feed is not
   written: `links-mirror` skips its peer instead.
-- `maps.rs`: `MachineMap`, the per-peer control machines with their timer
-  store (`add`, `ensure`, `rekey`, `drop`, `get_mut`; `timers`, `arm`,
-  `cancel`), `rekey` keying a moved peer's machine under the dial's link;
+- `maps.rs`: `HandshakeMap`, the handshake entries (`crate::peer::handshake`)
+  with their timer store (`add`, `ensure`, `rekey`, `drop`, `get_mut`;
+  `timers`, `arm`, `cancel`), `rekey` keying a moved peer's entry under the
+  dial's link;
   `DialMap`, the dials waiting for their msg2 (`note`, `forget`); `LegMap`,
   the inbound handshakes waiting for their msg3 (`note`, `take`, `forget`),
   each recording the peer it is a candidate rekey of when its msg1 came
@@ -120,20 +121,22 @@ field, at once.
   core opened (`opened`) and asks for the reconnects of the core's
   `Retry` at a failed connect. At its own dial's msg2 the site sends no
   msg3 when the core kept the held peer at once (`withholds`), and
-  otherwise steps the dial's `PeerMachine` with the establish decision
+  otherwise steps the dial's `Handshake` with the establish decision
   the core made at the msg2 and the msg3's send (`outbound`: an install's
   promote or restart, a move, a keep), falling back to next's own
   decision on a link the core does not number, which only a test makes.
-  At an answer's msg3 the site steps the leg's `PeerMachine` with the
+  At an answer's msg3 the site steps the leg's `Handshake` with the
   establish decision the core made (`inbound`: an install's promote or
   restart, a move or a keep at a crossing, the peer's rekey, a repeat of
   the stored msg2, or a gate's refusal), falling back to next's own
-  decision where the core made none.
+  decision where the core made none. A dial's leg is quieted once its
+  msg2 completes the handshake through `quiet`, which takes the table
+  alone because the msg2's site holds the dial's handshake entry.
   Elsewhere the site decides itself, after
   stepping the core: the link a step opens is
   returned for the link table to take under its number, and each lease
   the core hands back (`Free`, an install's, a rekey's) goes back to the
-  machine of the leg it came from (`PeerMachine::give_lease`, onto the
+  machine of the leg it came from (`Handshake::give_lease`, onto the
   leg's msg3 read while one is unsettled, else onto the carrier) or to the
   allocator; the lookup is rebuilt after each step. A handshake's lease is
   so the core's from the dial or the answer until the core lets the leg
@@ -241,9 +244,12 @@ field, at once.
 - A peer's rekey and path machines are built, moved and closed only through
   the settlement core's join, which only `src/peer/active.rs` asks for a
   change of machines, and only `exec/` asks the active peer, but for a
-  crossing's move at its two sites and `promote_connection`'s unreached
-  tie-break replacement. `tests/scans.rs` holds the code to each, with
-  its exemptions and their reasons.
+  crossing's move at its two sites. Only `decide.rs` steps, reaps or
+  polls the settlement core's table, and the core's decision inputs (its
+  gate constants, the rekey parameters, the node-address ordering) appear
+  in the root crate only where the configuration is mapped onto them.
+  `tests/scans.rs` holds the code to each, with its exemptions and their
+  reasons.
   Its rule states what the code does today; a cell the code does not match is
   a wrong cell or a wrong site, and a change of what a transition does changes
   the cell and its golden line in the same commit.

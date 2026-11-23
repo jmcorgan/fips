@@ -20,11 +20,10 @@ it out. Handshake message bytes are opaque here.
   `EphemeralDigest` of the ephemeral an XX msg1 consists of, which the
   silent-session record can key on; this line passes it none, since an
   XX session is promoted only at msg3), the `poll_*` decisions
-  (handshake timeout and msg1 resend), the classification of an inbound
-  msg3 (a msg3 declaring a rekey of the session held goes to the peer's
-  rekey machine, which owns the tie-break against a rekey of its own) and
-  of an outbound msg2, the cross-connection tie-break, and the
-  negotiation payload's version and profile checks.
+  (handshake timeout and msg1 resend), the initiator's dial-identity
+  decision at an initial msg2, the cross-connection tie-break, and the
+  negotiation payload's version and profile checks. The XX handshake's
+  establish decisions are the XX flow's (`flow/`).
 - `state.rs`: `ConnectionState`, the bookkeeping of a connection in its
   handshake phase, which holds this node's index for the handshake as an
   `IndexLease` from the rekey machine's `lease::allocate`, so promotion
@@ -32,8 +31,8 @@ it out. Handshake message bytes are opaque here.
   `LegStamp`: a wall-clock reading for the start and idle times operators
   are shown, and the caller's interval-clock reading, which the handshake
   timeout reads; and `Fmp`, the stateless lifecycle anchor `Node` holds.
-- `silent.rs`: `ActiveBackoff`, the silent-session refusal in force that a
-  msg3's snapshot carries, and `SilentSessions`, the record of link
+- `silent.rs`: `ActiveBackoff`, a silent-session refusal in force, and
+  `SilentSessions`, the record of link
   sessions that ended without an authenticated frame, and the handshake
   refusal it drives, applied at msg3, where the XX handshake first names
   the initiator. The node keeps that record in the settlement core's
@@ -42,8 +41,8 @@ it out. Handshake message bytes are opaque here.
 - `limits.rs`: the connection-retry backoff arithmetic.
 - `flow/`: the XX handshake flow of the settlement core
   (`proto::settle`), a profile of its one table that classifies next's
-  msg1, msg2 and msg3 as next's shell does. Hidden from the docs; nothing
-  in the node runs it yet. Its README describes it.
+  msg1, msg2 and msg3, whose decisions the node's settlement table
+  carries out. Hidden from the docs. Its README describes it.
 - `rekey/`: the link's profile of the shared rekey machine
   (`proto::rekey`) over Noise XX, and the node-level read of an inbound
   leg's msg3. Hidden from the docs; the root crate's active peers hold

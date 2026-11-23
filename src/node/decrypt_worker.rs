@@ -99,7 +99,7 @@ fn worker_channel() -> (Sender<WorkerMsg>, Receiver<WorkerMsg>) {
 /// authoritative recv path for a peer the moment FMP is up — well
 /// before the FSP handshake completes.
 ///
-/// Built at FMP-session establishment time (`promote_connection`)
+/// Built at FMP-session establishment time (`install_handshake`)
 /// and shipped to the assigned worker via `WorkerMsg::RegisterSession`.
 pub(crate) struct OwnedSessionState {
     pub fmp_cipher: LessSafeKey,

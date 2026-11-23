@@ -83,7 +83,7 @@ pub(super) fn promoted_peer_with_the_far_side_session(
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let msg1 = node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, LegStamp::at(1_000))
@@ -106,7 +106,7 @@ pub(super) fn promoted_peer_with_the_far_side_session(
     // has processed msg3. The line this came from ran IK, where the responder
     // was done at msg2 and the third leg did not exist.
     let (msg3, _negotiation) = node
-        .peer_machines
+        .handshakes
         .get_mut(&link_id)
         .unwrap()
         .complete_handshake_accepting(&msg2, None, LegStamp::at(1_000))
@@ -120,7 +120,7 @@ pub(super) fn promoted_peer_with_the_far_side_session(
         .take_session()
         .expect("the responder holds a session once it has processed msg3");
 
-    node.promote_connection(link_id, peer_identity, 2_000)
+    node.install_handshake(link_id, peer_identity, 2_000)
         .unwrap();
     let node_addr = *peer_identity.node_addr();
     let our_index = node

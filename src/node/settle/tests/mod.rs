@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::peer::ActivePeer;
-use crate::peer::machine::{PeerMachine, TimerKind};
+use crate::peer::handshake::{Handshake, TimerKind};
 use crate::proto::fmp::LegStamp;
 use crate::proto::settle::links::Links;
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId};
@@ -20,14 +20,14 @@ mod rules;
 mod scans;
 
 /// An inbound machine for `link`, with no handshake started.
-fn machine(link: LinkId) -> PeerMachine {
-    PeerMachine::new_inbound(link, LegStamp::at(1000))
+fn machine(link: LinkId) -> Handshake {
+    Handshake::new_inbound(link, LegStamp::at(1000))
 }
 
 #[test]
 fn dropping_a_machine_drops_its_timers_and_leaves_other_links() {
     let (one, two) = (LinkId::new(1), LinkId::new(2));
-    let mut map = MachineMap::default();
+    let mut map = HandshakeMap::default();
     map.add(one, machine(one));
     map.add(two, machine(two));
     map.arm(one, TimerKind::HandshakeTimeout, 5000);
@@ -51,7 +51,7 @@ fn dropping_a_machine_drops_its_timers_and_leaves_other_links() {
 #[test]
 fn arming_a_timer_again_replaces_its_deadline_and_cancelling_keeps_the_links_store() {
     let link = LinkId::new(1);
-    let mut map = MachineMap::default();
+    let mut map = HandshakeMap::default();
     map.arm(link, TimerKind::HandshakeRetransmit, 1000);
     map.arm(link, TimerKind::HandshakeRetransmit, 2000);
     map.arm(link, TimerKind::HandshakeTimeout, 9000);
@@ -82,7 +82,7 @@ fn arming_a_timer_again_replaces_its_deadline_and_cancelling_keeps_the_links_sto
 #[test]
 fn ensuring_a_machine_keeps_the_one_the_link_has_and_makes_one_otherwise() {
     let link = LinkId::new(1);
-    let mut map = MachineMap::default();
+    let mut map = HandshakeMap::default();
     map.ensure(link, || machine(link));
     assert!(map.contains_key(&link), "a link with none gets a machine");
     map.ensure(link, || panic!("the link already has a machine"));
@@ -511,7 +511,7 @@ fn only_a_candidate_rekeys_leg_is_taken_from_another_transport_and_only_for_a_pe
 #[test]
 fn dropping_a_machine_hands_it_back_with_any_lease_it_still_holds() {
     let link = LinkId::new(1);
-    let mut map = MachineMap::default();
+    let mut map = HandshakeMap::default();
     map.add(link, machine(link));
     assert!(map.drop(link).is_some(), "the machine comes back");
     assert!(map.drop(link).is_none(), "and it is gone");
@@ -520,7 +520,7 @@ fn dropping_a_machine_hands_it_back_with_any_lease_it_still_holds() {
 #[test]
 fn only_the_ways_past_the_writers_mark_a_map_planted() {
     let link = LinkId::new(1);
-    let mut machines = MachineMap::default();
+    let mut machines = HandshakeMap::default();
     machines.add(link, machine(link));
     machines.arm(link, TimerKind::HandshakeTimeout, 1);
     machines.cancel(link, TimerKind::HandshakeTimeout);
@@ -566,7 +566,7 @@ fn only_the_ways_past_the_writers_mark_a_map_planted() {
     dials.raw();
     peers.raw();
     indices.raw();
-    let mut timers = MachineMap::default();
+    let mut timers = HandshakeMap::default();
     timers.raw_timers();
     links.raw();
     let mut index = LinkTable::default();
@@ -695,7 +695,7 @@ fn the_live_audit_fails_a_session_index_no_link_machine_binds() {
 fn the_live_audit_fails_a_handshake_machine_with_no_carrier() {
     let mut node = bare();
     let one = LinkId::new(1);
-    node.peer_machines.add(one, machine(one));
+    node.handshakes.add(one, machine(one));
     audit::live(&node, "test");
 }
 

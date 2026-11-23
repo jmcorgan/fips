@@ -101,7 +101,7 @@ impl Node {
     /// Run `r`'s plan: each of its transition's effects, in their order.
     pub(in crate::node) async fn run(&mut self, r: &mut Run) {
         // Boxed once here, so that no effect boxes anything: an effect can
-        // reach the peer action executor, which can run another transition.
+        // reach a path step, which can run another transition.
         Box::pin(async move {
             for effect in plan(&r.t) {
                 self.effect(*effect, r).await;
@@ -168,7 +168,7 @@ impl Node {
             }
 
             Effect::SettleLink => install::settle_link(self, r).await,
-            Effect::MachineResolved => install::machine_resolved(self, r).await,
+            Effect::Established => install::established(self, r).await,
             Effect::RelinkInitiator => install::relink_initiator(self, r).await,
             Effect::PromotedNote => install::promoted_note(self, r).await,
             Effect::SetupNote => install::setup_note(self, r).await,
@@ -180,7 +180,6 @@ impl Node {
             Effect::MovedRead => cross::moved_read(self, r).await,
             Effect::SeedMtuIfMoved => cross::seed_mtu(self, r).await,
             Effect::MoveNote => cross::move_note(self, r).await,
-            Effect::MachineCrossed => cross::machine_crossed(self, r).await,
             Effect::LoserClose => cross::loser_close(self, r).await,
             Effect::LoserRemoved => cross::loser_removed(self, r).await,
             Effect::LegMachineRemoved => cross::leg_machine_removed(self, r).await,

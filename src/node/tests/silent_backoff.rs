@@ -64,7 +64,7 @@ pub(super) fn node0_initiator(
     nodes: &[TestNode],
     epoch: [u8; 8],
     index: u32,
-) -> (PeerMachine, Vec<u8>) {
+) -> (Handshake, Vec<u8>) {
     let target = PeerIdentity::from_pubkey_full(nodes[1].node.identity().pubkey_full());
     let mut leg = outbound_leg(LinkId::new(0x5EED), target, 1000);
     let noise_msg1 = leg
@@ -79,7 +79,7 @@ pub(super) fn node0_initiator(
 
 /// The framed msg3 `leg` answers node 1's framed `msg2` with, declaring no
 /// rekey.
-fn msg3_for(leg: &mut PeerMachine, msg2: &[u8], index: u32) -> Vec<u8> {
+fn msg3_for(leg: &mut Handshake, msg2: &[u8], index: u32) -> Vec<u8> {
     let header = Msg2Header::parse(msg2).expect("msg2 header");
     let neg = NegotiationPayload::fmp(1, 1, crate::proto::fmp::NodeProfile::Full).encode();
     let (noise_msg3, _) = leg
@@ -154,7 +154,7 @@ async fn three_silent_sessions_ended_by_link_dead_refuse_the_next_same_epoch_msg
         "a refused msg3 draws no msg2 resend"
     );
     assert!(
-        nodes[1].node.peer_machines.is_empty(),
+        nodes[1].node.handshakes.is_empty(),
         "the refused leg is disposed"
     );
     assert_eq!(nodes[1].node.gates().silent(&a), Some(3));

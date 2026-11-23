@@ -1594,7 +1594,7 @@ run_tests() {
     # since a name filter that matches nothing passes. Mirrored in
     # .github/workflows/ci.yml; check-ci-parity.sh holds each such step to its
     # counterpart.
-    local residue_test="peer::machine::tests::take_leg_leaves_no_session_keys_in_the_slot_it_empties"
+    local residue_test="peer::handshake::tests::take_leg_leaves_no_session_keys_in_the_slot_it_empties"
     local release_log
     release_log=$(mktemp "/tmp/ci-release-lib-tests.XXXXXX")
     info "cargo test --profile integration --lib -- --exact $residue_test"

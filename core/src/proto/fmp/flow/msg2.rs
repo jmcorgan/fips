@@ -9,7 +9,7 @@
 //! address order, the smaller node moving onto its dial and the larger
 //! keeping the peer where it is. Every decision but the own-dial keep waits
 //! for the outcome of the msg3 send, since next promotes only once the msg3
-//! is out (`handshake.rs`, the msg3 send before `promote_connection`).
+//! is out (`handshake.rs`, the msg3 send before `install_handshake`).
 
 use alloc::vec::Vec;
 

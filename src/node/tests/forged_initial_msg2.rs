@@ -14,7 +14,7 @@ use crate::node::tests::spanning_tree::{
     TestNode, cleanup_nodes, initiate_handshake, make_test_node, process_available_packets,
 };
 use crate::noise::HANDSHAKE_MSG2_SIZE;
-use crate::peer::machine::TimerKind;
+use crate::peer::handshake::TimerKind;
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 use std::time::Duration;
 
@@ -160,8 +160,8 @@ struct Attempt {
 }
 
 fn attempt(node: &Node, link: LinkId) -> Attempt {
-    let machine = node.peer_machines.get(&link).expect("the dial's machine");
-    let timers = node.peer_machines.timers().get(&link);
+    let machine = node.handshakes.get(&link).expect("the dial's machine");
+    let timers = node.handshakes.timers().get(&link);
     Attempt {
         link,
         handshake_held: machine
@@ -223,7 +223,7 @@ async fn forged_msg2_leaves_the_resend_schedule(forge: Forge) {
     nodes[0].node.check_timeouts().await;
 
     assert!(
-        nodes[0].node.peer_machines.contains_key(&link),
+        nodes[0].node.handshakes.contains_key(&link),
         "the forged msg2 must not end the attempt"
     );
     assert_eq!(
@@ -268,7 +268,7 @@ async fn an_impostor_initial_msg2_leaves_the_resend_schedule_as_it_was() {
 /// any forgery, on the interval clock the timeout reads.
 async fn alive_at_and_after_deadline(forge: Option<Forge>) -> (bool, bool) {
     let (mut nodes, link, msg1, observed) = dial_unanswered().await;
-    let last_activity = nodes[0].node.peer_machines[&link].conn_active_at();
+    let last_activity = nodes[0].node.handshakes[&link].conn_active_at();
     let timeout_ms = nodes[0]
         .node
         .config()
@@ -288,12 +288,12 @@ async fn alive_at_and_after_deadline(forge: Option<Forge>) -> (bool, bool) {
         .node
         .drive_peer_timers(last_activity + timeout_ms)
         .await;
-    let at = nodes[0].node.peer_machines.contains_key(&link);
+    let at = nodes[0].node.handshakes.contains_key(&link);
     nodes[0]
         .node
         .drive_peer_timers(last_activity + timeout_ms + 1)
         .await;
-    let after = nodes[0].node.peer_machines.contains_key(&link);
+    let after = nodes[0].node.handshakes.contains_key(&link);
     cleanup_nodes(&mut nodes).await;
     (at, after)
 }
@@ -341,7 +341,7 @@ async fn an_impostor_initial_msg2_keeps_the_dialed_identity_and_gets_no_msg3() {
 
     let machine = nodes[0]
         .node
-        .peer_machines
+        .handshakes
         .get(&link)
         .expect("the impostor's msg2 must not end the attempt");
     assert_eq!(

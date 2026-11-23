@@ -2355,9 +2355,9 @@ async fn a_bootstrap_transport_that_carries_a_standby_path_is_kept() {
     node.transports.insert(boot, TransportHandle::Loopback(lo));
     // Peer X on t1, and Y, the peer the rendezvous adopted the transport for.
     let x = seed_completed_connection(&mut node, LinkId::new(1), t1, 1_000);
-    node.promote_connection(LinkId::new(1), x, 2_000).unwrap();
+    node.install_handshake(LinkId::new(1), x, 2_000).unwrap();
     let y = seed_completed_connection(&mut node, LinkId::new(2), boot, 1_000);
-    node.promote_connection(LinkId::new(2), y, 2_000).unwrap();
+    node.install_handshake(LinkId::new(2), y, 2_000).unwrap();
     node.supervisor.nostr_rendezvous.insert_bootstrap_transport(
         boot,
         y.npub(),
@@ -2966,11 +2966,7 @@ async fn dials_anonymous_beacon(auto: bool) -> bool {
         .links
         .index()
         .contains_key(&(t2(), b2.clone()));
-    let leg = nodes[0]
-        .node
-        .peer_machines
-        .values()
-        .any(|m| m.leg().is_some());
+    let leg = nodes[0].node.handshakes.values().any(|m| m.leg().is_some());
     assert_eq!(link, leg, "a dial has both a link and a leg");
     cleanup_nodes(&mut nodes).await;
     link
@@ -3020,16 +3016,8 @@ async fn a_beacon_from_a_live_peer_on_a_new_transport_probes_instead_of_dialling
     assert_eq!(nodes[0].node.peer_count(), 1);
     assert_eq!(nodes[1].node.peer_count(), 1);
     assert!(
-        !nodes[1]
-            .node
-            .peer_machines
-            .values()
-            .any(|m| m.leg().is_some())
-            && !nodes[0]
-                .node
-                .peer_machines
-                .values()
-                .any(|m| m.leg().is_some()),
+        !nodes[1].node.handshakes.values().any(|m| m.leg().is_some())
+            && !nodes[0].node.handshakes.values().any(|m| m.leg().is_some()),
         "no handshake is in flight at either end"
     );
     cleanup_nodes(&mut nodes).await;

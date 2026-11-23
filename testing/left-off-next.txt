@@ -101,7 +101,7 @@ test          replaced   a_pin_is_kept_when_our_later_dial_from_the_larger_addre
 test          replaced   a_pin_is_kept_when_our_later_dial_from_the_larger_address_leaves_us_on_a_peering_the_peer_dialled_and_dropped  src/node/tests/control.rs  a_pin_is_kept_when_our_second_dial_from_the_larger_address_meets_a_peer_that_dropped_us
 test          replaced   a_crossed_dial_won_on_the_tie_break_keeps_the_pin_when_the_peers_leg_is_promoted_after_our_dial  src/node/tests/crossed_dial.rs  a_crossed_dial_settled_at_msg3_keeps_the_larger_nodes_pin
 test          replaced   abandoned_rekey_frees_its_index_and_clears_both_registries  src/node/tests/establish_chartests.rs  abandon_releases_the_attempt_index
-test          replaced   chartest_msg1_duplicate_active_same_epoch_resends_stored_msg2  src/node/tests/establish_chartests.rs  establish_same_link_fresh_is_duplicate
+test          replaced   chartest_msg1_duplicate_active_same_epoch_resends_stored_msg2  src/node/tests/establish_chartests.rs  a_resend_of_the_answered_msg1_draws_the_stored_msg2_until_its_msg3_and_no_other_msg1_does
 test          replaced   chartest_msg1_duplicate_pending_resends_stored_msg2  src/node/tests/establish_chartests.rs  test_xx_duplicate_msg1_resends_msg2
 test          replaced   chartest_msg1_epoch_restart_replaces_active_peer  src/node/tests/establish_chartests.rs  a_restart_msg3_replaces_the_peer_as_the_table_says
 test          replaced   chartest_msg1_rekey_dual_init_we_lose_becomes_responder  src/node/tests/establish_chartests.rs  crossed_three_message_rekeys_both_holding_pending_converge_on_the_smaller_initiators_epoch
@@ -113,11 +113,11 @@ test          replaced   forged_initial_msg2_does_not_end_the_dial  src/node/tes
 test          replaced   initial_dial_completes_on_genuine_msg2_without_forgery  src/node/tests/forged_initial_msg2.rs  xx_initial_dial_completes_on_genuine_msg2_without_forgery
 test          replaced   initial_msg2_with_an_invalid_ephemeral_does_not_end_the_dial  src/node/tests/forged_initial_msg2.rs  xx_initial_msg2_with_an_invalid_ephemeral_does_not_end_the_dial
 test          replaced   a_coords_required_with_a_reserved_body_bit_is_discarded_before_it_is_judged  src/node/tests/fsp_envelope.rs  a_coords_required_with_a_reserved_body_bit_is_judged_all_the_same
-test          replaced   a_first_epoch_change_against_a_silent_peering_still_restarts_it  src/node/tests/handshake.rs  establish_epoch_mismatch_is_accepted_at_the_liveness_threshold
-test          replaced   a_second_epoch_change_inside_the_dampening_interval_leaves_the_peering_intact  src/node/tests/handshake.rs  establish_epoch_mismatch_is_refused_a_second_time_inside_the_interval
+test          replaced   a_first_epoch_change_against_a_silent_peering_still_restarts_it  src/node/tests/handshake.rs  a_restart_at_msg3_is_refused_while_the_peering_was_heard_inside_the_interval_and_accepted_after
+test          replaced   a_second_epoch_change_inside_the_dampening_interval_leaves_the_peering_intact  src/node/tests/handshake.rs  the_gate_read_as_heard_refuses_exactly_where_nexts_idle_floor_and_dampener_refuse
 test          replaced   a_transient_msg2_failure_keeps_the_link_for_the_retry  src/node/tests/handshake.rs  a_transient_msg2_failure_keeps_the_inbound_leg_for_the_retry
 test          replaced   a_transient_msg2_failure_on_the_restart_path_leaves_the_fresh_leg_pending  src/node/tests/handshake.rs  a_transient_msg2_failure_from_an_established_peer_address_leaves_the_fresh_leg_pending
-test          replaced   an_epoch_mismatch_msg1_against_a_live_peering_leaves_it_intact  src/node/tests/handshake.rs  establish_epoch_mismatch_is_refused_while_the_peering_is_still_live
+test          replaced   an_epoch_mismatch_msg1_against_a_live_peering_leaves_it_intact  src/node/tests/handshake.rs  a_restart_at_msg3_is_refused_while_the_peering_was_heard_inside_the_interval_and_accepted_after
 test          replaced   an_identical_resend_after_a_lost_msg2_still_draws_the_stored_msg2  src/node/tests/handshake.rs  test_xx_duplicate_msg1_resends_msg2
 test          replaced   a_pin_ends_when_the_peer_replaces_the_peering_with_our_second_dial_from_the_larger_address  src/node/tests/handshake.rs  a_pin_is_kept_when_our_second_dial_from_the_larger_address_to_a_peering_we_dialled_is_settled_by_address_order
 test          replaced   a_pin_ends_when_the_peer_replaces_the_peering_with_our_second_dial_from_the_smaller_address  src/node/tests/handshake.rs  a_pin_is_kept_when_our_second_dial_from_the_smaller_address_moves_a_peering_we_dialled
@@ -136,7 +136,7 @@ test          replaced   a_heard_peering_quiet_past_the_restart_interval_is_repl
 test          replaced   a_peering_heard_just_now_after_an_old_promotion_is_not_replaced_by_a_restart_msg1  src/node/tests/settle/clock.rs  a_frame_after_a_quiet_spell_keeps_the_peering_from_being_replaced_by_a_restart
 test          replaced   a_restart_msg1_replaces_the_peer_as_the_table_says  src/node/tests/settle/table/replace.rs  a_restart_msg3_replaces_the_peer_as_the_table_says
 test          replaced   a_restart_msg1_replaces_the_peer_as_the_table_says_with_multipath_on  src/node/tests/settle/table/replace.rs  a_restart_msg3_replaces_the_peer_as_the_table_says_with_multipath_on
-test          replaced   a_new_epoch_msg1_from_a_peer_idle_15_s_restarts_it_during_the_back_off  src/node/tests/silent_backoff.rs  a_new_epoch_msg3_from_an_idle_existing_peer_restarts_it_during_the_back_off
+test          replaced   a_new_epoch_msg1_from_a_peer_idle_15_s_restarts_it_during_the_back_off  src/node/tests/silent_backoff.rs  a_silent_identitys_msg3_is_refused_at_the_epoch_it_counted_and_promoted_at_another
 test          replaced   a_new_epoch_msg1_is_promoted_during_the_back_off_when_no_session_is_left  src/node/tests/silent_backoff.rs  a_new_epoch_msg3_is_promoted_during_the_back_off
 test          replaced   a_replayed_msg1_counts_once_however_often_its_sessions_end_silent  src/node/tests/silent_backoff.rs  a_replayed_msg1_promotes_nothing_so_it_cannot_count_a_silent_session
 test          replaced   refused_msg1s_during_a_back_off_log_three_lines_then_one_suppression_notice  src/node/tests/silent_backoff.rs  refused_msg3s_during_a_back_off_log_three_lines_then_one_suppression_notice
@@ -337,8 +337,6 @@ test          next-rule  a_responder_whose_first_msg2_send_succeeds_installs_the
 test          next-rule  a_responder_whose_stored_msg2_send_succeeds_installs_the_peer  src/node/tests/stored_msg2_install.rs
 test          next-rule  same_epoch_tcp_redial_completes_its_rekey_without_waiting_for_the_reaper  src/node/tests/tcp.rs
 test          next-rule  a_link_step_hands_each_reply_its_route  src/node/tests/unit.rs
-test          next-rule  a_promotion_for_a_held_identity_is_refused_and_keeps_the_peer  src/node/tests/unit.rs
-test          next-rule  the_executor_asserts_that_no_held_identity_reaches_a_promotion  src/node/tests/unit.rs
 
 # Master's late second dials and crossed msg1s past the heard floor, now run past link-dead and
 # a redial, which master accepts as the way such a split ends, beside the control that a working
@@ -442,8 +440,8 @@ test          replaced   a_peer_the_smaller_node_alone_drops_and_redials_then_th
 # fifth field, cover them: a failed send marks the leg failed and shows "failed", and every
 # state maps to the string the operator is shown. The failed-send target does not cover the rest
 # of master's test, that the failed leg keeps its crypto carrier and drops its Noise handle.
-test          replaced   a_failed_dial_keeps_its_crypto_carrier_and_shows_failed  src/peer/tests/handshake.rs  handshake_send_failed_marks_leg_without_leaving_handshaking
-test          replaced   the_shown_handshake_state_follows_each_step_of_a_handshake  src/peer/tests/handshake.rs  handshake_state_str_total_mapping
+test          replaced   a_failed_dial_keeps_its_crypto_carrier_and_shows_failed  src/peer/tests/handshake.rs  a_failed_dial_keeps_its_crypto_carrier_shows_failed_and_stays_due_its_msg1_resends
+test          replaced   the_shown_handshake_state_follows_each_step_of_a_handshake  src/peer/tests/handshake.rs  the_shown_handshake_state_of_each_phase_is_the_string_the_pending_view_showed
 # The rekey machine's cap on refused rekey msg2s, wired into master's node. The cap is on next,
 # but next's link reply carries no route, so the XX link profile's arrived answers None and the
 # machine counts no refused msg2 and drops none; the node wiring is not carried.
@@ -633,10 +631,6 @@ test          next-rule  a_dropped_peer_is_redialled_on_its_first_retry_when_its
 test          next-rule  a_dropped_peer_is_redialled_on_its_first_retry_when_no_claims_are_made  src/node/tests/claim_slots.rs
 test          next-rule  a_dropped_peer_is_redialled_on_its_first_retry_while_claims_of_a_connected_peer_continue  src/node/tests/claim_slots.rs
 
-# The scan for cross-connection promotion results. next's promote_connection still
-# resolves a held identity, and test_node_cross_connection_resolution pins it.
-test          next-rule  no_node_code_names_a_cross_connection_promotion_result_and_the_scan_finds_a_planted_one  src/node/tests/survivors.rs
-
 # Master's node holds the settlement core and decides through it (src/node/settle/decide.rs and
 # params.rs), resyncs the core's link records from the node's maps in tests, keeps a handshake
 # entry where the peer control machine was (src/peer/handshake.rs), reads the interval clock as an
@@ -654,9 +648,6 @@ test          no-site    a_bundle_a_test_mutator_changed_is_in_its_links_record_
 test          no-site    a_path_acked_past_the_feed_is_in_its_links_record_after_a_drain  src/node/settle/tests/links.rs
 test          no-site    a_path_acked_past_the_feed_is_in_its_links_record_after_a_refused_msg1  src/node/settle/tests/links.rs
 test          no-site    a_path_acked_past_the_feed_is_in_its_links_record_after_a_refused_msg2  src/node/settle/tests/links.rs
-test          no-site    the_gate_constants_rekey_parameters_and_address_order_appear_only_on_the_exempt_list  src/node/settle/tests/scans.rs
-test          no-site    the_settlement_core_is_stepped_polled_reaped_and_closed_only_from_decide_and_the_two_path_feeds  src/node/settle/tests/scans.rs
-test          no-site    no_name_of_the_deleted_peer_control_machine_survives_and_the_scan_finds_each_one_put_back  src/node/tests/survivors.rs
 test          no-site    a_dials_first_resend_goes_out_a_second_after_the_dial_whatever_the_interval  src/node/tests/settle/clock.rs
 test          no-site    a_pending_dial_is_shown_as_sent_msg1_to_its_expected_peer_with_its_resend_count  src/node/tests/settle/clock.rs
 test          no-site    an_instant_at_an_interval_reading_reads_back_as_that_reading_and_orders_as_the_readings  src/time/tests.rs
@@ -742,3 +733,8 @@ known-defect  next-rule  node::tests::settle::crossing::a_larger_dialers_dial_on
 known-defect  next-rule  node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  next-rule  node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered  src/node/tests/settle/crossing.rs
 known-defect  next-rule  node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_with_multipath_on  src/node/tests/settle/crossing.rs
+
+# The scan that confines the settlement core's steps to decide.rs. Master's has two path feeds
+# outside it; next's path input and its dial's msg2 quiet step the core from decide.rs, so next's
+# scan has no feeds and is named for that.
+test          replaced   the_settlement_core_is_stepped_polled_reaped_and_closed_only_from_decide_and_the_two_path_feeds  src/node/settle/tests/scans.rs  the_settlement_core_is_stepped_polled_reaped_and_closed_only_from_decide

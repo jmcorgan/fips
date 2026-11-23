@@ -64,8 +64,10 @@ pub(crate) mod table;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+use crate::proto::settle::params::Params;
 pub(in crate::node) use links::LinkTable;
-pub(in crate::node) use maps::{BindMap, DialMap, Leg, LegMap, MachineMap, PeerMap};
+pub(in crate::node) use maps::{BindMap, DialMap, HandshakeMap, Leg, LegMap, PeerMap};
 
 /// The settlement core's table the node holds: its link records, its
 /// handshake legs and its restart gates, running the XX flow.
@@ -117,7 +119,7 @@ impl crate::node::Node {
     /// The parameters of the node's handshake legs
     /// ([`params::leg_params`]), for a test that writes a leg itself.
     #[cfg(test)]
-    pub(in crate::node) fn leg_params(&self) -> crate::proto::settle::params::Params {
+    pub(in crate::node) fn leg_params(&self) -> Params {
         params::leg_params(&self.config().node)
     }
 
@@ -131,7 +133,7 @@ impl crate::node::Node {
         self.core_no(link)
             .and_then(|no| self.legs().get(no))
             .map(|leg| crate::utils::index::SessionIndex::new(leg.index()))
-            .or_else(|| self.peer_machines.get(&link)?.our_index())
+            .or_else(|| self.handshakes.get(&link)?.our_index())
     }
 
     /// When the dial on `link` next resends its msg1, on the interval
@@ -148,7 +150,7 @@ impl crate::node::Node {
     /// interval is next's restart interval and whose silent-session bounds
     /// are the node's.
     #[cfg(test)]
-    pub(in crate::node) fn gate_params(&self) -> crate::proto::settle::params::Params {
+    pub(in crate::node) fn gate_params(&self) -> Params {
         params::xx_params(&self.config().node)
     }
 
@@ -215,6 +217,6 @@ impl crate::node::Node {
             || self.peers_by_index.planted()
             || self.pending_outbound.planted()
             || self.pending_inbound.planted()
-            || self.peer_machines.planted()
+            || self.handshakes.planted()
     }
 }

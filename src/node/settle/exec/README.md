@@ -14,9 +14,9 @@ statements at its site.
 ## Files
 
 - `mod.rs`: `Run` and `Facts`; `Node::run`, which boxes its one body
-  because an effect can reach the peer action executor and through it
-  another run; the total match on `Effect`; the bodies of the effects two
-  kinds of change share (the restart's, the dial's forget, the tree
+  because an effect can reach a path step and through it another run; the
+  total match on `Effect`; the bodies of the effects two kinds of change
+  share (the restart's, the dial's forget, the tree
   announce with `announce_line`, the filter mark, the backoff reset, the
   path renewal, and the connected-socket clear and relink under a moved
   pair); and the call of every other effect's function in its file.
@@ -25,31 +25,32 @@ statements at its site.
   statements its sites ran.
 - `install.rs`: a promotion's effects, and the promotion a replacement
   ends with, with their `Facts`; `Node::install`, the part of a promotion a
-  test may run alone through `promote_connection`, which builds the peer's
-  machines and puts it in the node's maps; and `Run::promotion`, the run the
-  peer action executor's promotion arm builds once `promote_connection`
-  succeeded, a replacement's where the step says why it removed the held
-  peer. What the leg's control machine returns for the outcome goes back to
-  that arm's worklist, after the plan. A replacement is not one step: the
-  old peer's control machine notes the loss between its removal and its
-  promotion, and `promote_connection` may then refuse the new peer, which
-  stops it with the removal done. So the executor's removal arm runs the
-  removal's part of its plan, through `Run::replacement` and
-  `Node::run_removal`, and the promotion arm the rest, through
-  `Node::run_promotion`, which runs a promotion's whole plan.
+  test may run alone through `install_handshake`, which builds the peer's
+  machines and puts it in the node's maps; and `Run::promotion`, the run
+  `Node::promote` (`dataplane/establish.rs`) builds once
+  `install_handshake` succeeded, a replacement's where the handshake says
+  why it removed the held peer. Its `Established` effect marks the promoted
+  link's handshake entry as the peer's. A replacement is not one step: the
+  old peer's loss is noted between its removal and its promotion, and
+  `install_handshake` may then refuse the new peer, which stops it with
+  the removal done. So `Node::replace_held` runs the removal's part of its
+  plan, through `Run::replacement` and `Node::run_removal`, and
+  `Node::promote` the rest, through `Node::run_promotion`, which runs a
+  promotion's whole plan.
 - `cross.rs`: a crossing's effects, moved onto the other handshake's
   session or kept on the session the peer holds, with their `Facts`. A
   crossing settles at this node's dial's msg2, where the site in
   `handle_msg2` fills the facts through `Run::crossing`, since this file's
-  module is private to `exec/`, or at the peer's msg3, where the peer
-  action executor's msg3 crossing arm does; the two have their own lists.
-  The move itself, `move_session`, stays at each site, and so does the
+  module is private to `exec/`, or at the peer's msg3, where
+  `Node::cross_inbound` (`dataplane/establish.rs`) does; the two have their
+  own lists.
+  The move itself, `adopt_dial`, stays at each site, and so does the
   decision between a move and a keep, which at the msg2 is the settlement
   core's (the mutation lane's `CrossedRunsKeep` is read on the core's tie
   term). A move at the msg2
   that rebuilt the machine holds the peer on the dial's link:
-  `move_session` sets the peer's link id, and `HoldDial` holds the core's
-  record of that link and keys the control machine, its timers and the
+  `adopt_dial` sets the peer's link id, and `HoldDial` holds the core's
+  record of that link and keys the handshake entry, its timers and the
   carrier readings under it. `Facts.loser` names the link torn down, the
   one the move left or, at a refused move and a keep, the dial's, which
   `LoserClose` and `LoserRemoved` close by the close rule
@@ -102,10 +103,8 @@ statements at its site.
 - A peer's machines are built and closed here, through the active peer's
   `with_session` and `stop`, which alone ask the settlement core's join for
   those changes; a crossing's move is the one change its two sites ask
-  for, through `move_session`, before running the rest here, and
-  `promote_connection`'s tie-break replacement, which no handshake reaches,
-  closes the old peer's machines itself. No code outside the
-  join calls a machine to build, renew or close it but the exemptions
+  for, through `adopt_dial`, before running the rest here. No code outside
+  the join calls a machine to build, renew or close it but the exemptions
   `../tests/scans.rs` lists with their reasons, and that scan reds on any
   other.
 - Its tests are in `../tests/plan.rs`, `../tests/remove.rs`,

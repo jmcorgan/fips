@@ -6,11 +6,12 @@
 //! The table keeps its shared rules: the link records, the legs, the gates'
 //! memory, the held peers, removal, the path inputs and the close rule. This
 //! flow decides what the IK rules decide at msg1 and msg2, and what a msg3
-//! does, as next's shell decides it (`src/node/handlers/handshake.rs` and
-//! `establish_inbound` and `establish_outbound` in `../core.rs`). It reaches
-//! the table only through the table's facade (`Ops`) and its hooks, and
-//! keeps its own state, [`Xx`], in the table's flow slot. Nothing in the
-//! node runs it yet.
+//! does, as next's shell decided it at `be5204f9e`
+//! (`src/node/handlers/handshake.rs` and `establish_inbound` and
+//! `establish_outbound` in `../core.rs`, since removed: the node now carries
+//! out this flow's decisions). It reaches the table only through the table's
+//! facade (`Ops`) and its hooks, and keeps its own state, [`Xx`], in the
+//! table's flow slot.
 //!
 //! What differs from the IK flow, each by next's code:
 //!

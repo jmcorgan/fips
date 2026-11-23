@@ -178,7 +178,7 @@ impl SessionStats {
 pub struct HandshakeStats {
     /// Handshake state-machine rejection: header parse failed, Noise
     /// crypto step failed, identity could not be learned, index allocator
-    /// returned an error, msg2/msg3 send failed, promote_connection
+    /// returned an error, msg2/msg3 send failed, install_handshake
     /// returned an error, ACL gate rejected the peer, or an admission gate
     /// other than the msg1 `max_peers` gate fired.
     pub bad_state: u64,

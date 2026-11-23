@@ -3,14 +3,16 @@
 //! it, and the node's handling of the two cross-connection promotion results,
 //! once a promotion for a held identity became a refusal. The second is the
 //! same scan over a narrower directory, the node outside its tests, because
-//! the peer machine still carries those results. A third keeps the per-peer
-//! map wrappers of `node/settle/` closed: what the compiler cannot refuse
-//! there is a `DerefMut` on a wrapper, or a way past the writers outside
-//! `#[cfg(test)]`. A fourth keeps out what a crossed dial's fix replaced:
-//! the two close helpers the close rule took over, the excuses for a link
-//! with no index entry, and the dial's close and removal. The settlement
-//! scans of `node/settle/tests/` walk the source with this file's `sources`
-//! too, and name each file with its `label`.
+//! the published `PromotionResult` still names those results. A third keeps
+//! the per-peer map wrappers of `node/settle/` closed: what the compiler
+//! cannot refuse there is a `DerefMut` on a wrapper, or a way past the
+//! writers outside `#[cfg(test)]`. A fourth keeps out what a crossed dial's
+//! fix replaced: the two close helpers the close rule took over, the excuses
+//! for a link with no index entry, and the dial's close and removal. A fifth
+//! keeps out the peer control machine and the deciders it ran, once the
+//! settlement core decided every handshake. The settlement scans of
+//! `node/settle/tests/` walk the source with this file's `sources` too, and
+//! name each file with its `label`.
 
 use std::path::{Path, PathBuf};
 
@@ -263,6 +265,45 @@ const CROSSING: &[&str] = &[
 /// waiver of a msg1.
 const SETTLE: &[&str] = &["waiver"];
 
+/// The promotion results the node no longer produces or reads. The enum
+/// stays, published with its arms for them.
+const PROMOTION: &[&str] = &["CrossConnectionWon", "CrossConnectionLost"];
+
+/// Names of the peer control machine and what it alone reached, deleted
+/// once the settlement core decided every handshake: the machine, its
+/// events and actions with their executor and the context it ran with, its
+/// teardown and promotion actions, its map, the effects and the observation
+/// that stepped it, the protocol crate's handshake decisions it ran and the
+/// snapshots they read, the shell's replay, dampener and silent-session
+/// records the settlement core's gates replaced, and the names the install
+/// and the move had while the machine drove them.
+const MACHINE: &[&str] = &[
+    "PeerMachine",
+    "PeerEvent",
+    "PeerAction",
+    "PeerActionCtx",
+    "InvalidateSendState",
+    "PromoteToActive",
+    "MachineMap",
+    "MachineResolved",
+    "MachineCrossed",
+    "CrossConnOutcome",
+    "observe_cross_conn_resolved",
+    "advance_peer_machine",
+    "execute_peer_actions",
+    "establish_inbound",
+    "establish_outbound",
+    "EstablishSnapshot",
+    "OutboundSnapshot",
+    "InboundDecision",
+    "OutboundDecision",
+    "ReplayedMsg1s",
+    "restart_dampener",
+    "silent_sessions",
+    "promote_connection",
+    "move_session",
+];
+
 /// Each use of a name in `banned` in the code of `source` (comments and
 /// literals left out, so prose may still say what the deployed code did),
 /// as `file:line: name`.
@@ -392,7 +433,7 @@ fn no_deployed_rekey_rule_of_either_layer_survives_in_the_shells_and_the_scan_fi
         "deployed rekey code is back in the shell: {found:?}"
     );
     // The scan reaches the session table and its handlers, the active peer
-    // and its machine, the link handshake handlers, the data plane and the
+    // and its handshake entry, the link handshake handlers, the data plane and the
     // executor of both layers' outputs.
     for want in [
         "node/session/mod.rs",
@@ -401,10 +442,54 @@ fn no_deployed_rekey_rule_of_either_layer_survives_in_the_shells_and_the_scan_fi
         "node/handlers/handshake.rs",
         "node/dataplane/encrypted.rs",
         "peer/active.rs",
-        "peer/machine.rs",
+        "peer/handshake.rs",
     ] {
         assert!(files.iter().any(|p| p.ends_with(want)), "{want} is scanned");
     }
+}
+
+/// Nothing in the node outside its tests names either cross-connection
+/// promotion result: `install_handshake` refuses a held identity rather than
+/// resolving it, so no code there may produce or match one. The planted lines
+/// show the scan finds a match arm and a constructor in code, and not a name
+/// in a comment.
+#[test]
+fn no_node_code_names_a_cross_connection_promotion_result_and_the_scan_finds_a_planted_one() {
+    let planted = "    // CrossConnectionLost once closed the losing link.\n\
+                   \x20   PromotionResult::CrossConnectionWon { loser_link_id, .. } => {}\n\
+                   \x20   Ok(PromotionResult::CrossConnectionLost { winner_link_id: id })\n";
+    assert_eq!(
+        uses("planted.rs", planted, PROMOTION),
+        [
+            "planted.rs:2: CrossConnectionWon",
+            "planted.rs:3: CrossConnectionLost"
+        ],
+        "the scan finds both results in code, and not one named in a comment"
+    );
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let node = root.join("node");
+    let mut files = Vec::new();
+    sources(&node, &mut files);
+    let mut found = Vec::new();
+    for path in &files {
+        let source = std::fs::read_to_string(path).expect("the source file reads");
+        let file = label(&root, path);
+        found.extend(uses(&file, &source, PROMOTION));
+    }
+    assert!(
+        found.is_empty(),
+        "the node handles a cross-connection promotion result again: {found:?}"
+    );
+    // The scan reaches the promotion and the executor that runs its plan,
+    // and leaves the node's tests out.
+    for want in ["node/handlers/handshake.rs", "node/settle/exec/install.rs"] {
+        assert!(files.iter().any(|p| p.ends_with(want)), "{want} is scanned");
+    }
+    assert!(
+        !files.iter().any(|p| p.starts_with(node.join("tests"))),
+        "the node's tests are not scanned"
+    );
 }
 
 /// Nothing a crossed dial's fix replaced is back in the root crate's code,
@@ -508,7 +593,7 @@ fn wrapper_escapes(file: &str, source: &str) -> Vec<String> {
 /// a name in a comment.
 #[test]
 fn no_map_wrapper_opens_its_map_to_production_writes_and_the_scan_finds_a_planted_one() {
-    let planted = "    // impl DerefMut for MachineMap, once.\n\
+    let planted = "    // impl DerefMut for HandshakeMap, once.\n\
                    \x20   impl std::ops::DerefMut for DialMap {\n\
                    \x20   #[cfg(test)]\n\
                    \x20   /// The inner map.\n\
@@ -544,5 +629,68 @@ fn no_map_wrapper_opens_its_map_to_production_writes_and_the_scan_finds_a_plante
         "node/settle/links.rs",
     ] {
         assert!(files.iter().any(|p| p.ends_with(want)), "{want} is scanned");
+    }
+}
+
+/// Nothing the peer control machine's deletion removed is back in the code
+/// of the node, the peer or the protocol crate. Each name is put back one at
+/// a time in a planted line, and the scan finds it in code and not in a
+/// comment. The transports' own `promote_connection` is another function and
+/// is not scanned.
+#[test]
+fn no_name_of_the_deleted_peer_control_machine_survives_and_the_scan_finds_each_one_put_back() {
+    for name in MACHINE {
+        let planted = format!(
+            "    // {name} once decided a handshake here.\n\
+             \x20   let _ = {name}(node, link);\n"
+        );
+        assert_eq!(
+            uses("planted.rs", &planted, MACHINE),
+            [format!("planted.rs:2: {name}")],
+            "defect: the scan does not find {name} put back in code, or finds it in a comment"
+        );
+    }
+
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.join("src");
+    let core = manifest.join("core").join("src");
+    let mut files = Vec::new();
+    sources(&root.join("node"), &mut files);
+    sources(&root.join("peer"), &mut files);
+    let mut found = Vec::new();
+    for path in &files {
+        let source = std::fs::read_to_string(path).expect("the source file reads");
+        found.extend(uses(&label(&root, path), &source, MACHINE));
+    }
+    let mut protocol = Vec::new();
+    sources(&core, &mut protocol);
+    for path in &protocol {
+        let source = std::fs::read_to_string(path).expect("the source file reads");
+        let file = format!("core/src/{}", label(&core, path));
+        found.extend(uses(&file, &source, MACHINE));
+    }
+    assert!(
+        found.is_empty(),
+        "the peer control machine or a decider it ran is back: {found:?}"
+    );
+    // The scan reaches the handshake handlers, the dial, the handshake map
+    // and its entry, the executor, and the protocol crate's handshake and
+    // settlement code.
+    for want in [
+        "node/handlers/handshake.rs",
+        "node/dataplane/establish.rs",
+        "node/lifecycle/mod.rs",
+        "node/settle/maps.rs",
+        "node/settle/exec/install.rs",
+        "peer/handshake.rs",
+        "peer/active.rs",
+    ] {
+        assert!(files.iter().any(|p| p.ends_with(want)), "{want} is scanned");
+    }
+    for want in ["proto/fmp/core.rs", "proto/settle/table.rs"] {
+        assert!(
+            protocol.iter().any(|p| p.ends_with(want)),
+            "core/src/{want} is scanned"
+        );
     }
 }

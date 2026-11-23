@@ -208,7 +208,7 @@ pub enum DiscoveryReject {
 pub enum HandshakeReject {
     /// Handshake state-machine rejection: header parse failed, crypto step
     /// failed, identity could not be learned, index allocator returned an
-    /// error, msg2/msg3 send failed, promote_connection returned an error,
+    /// error, msg2/msg3 send failed, install_handshake returned an error,
     /// ACL gate rejected the peer, or the admission gate fired
     /// (max_peers / accept_connections). The rekey static-key continuity
     /// gate also lived here until it was given its own

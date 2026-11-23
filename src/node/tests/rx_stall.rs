@@ -37,7 +37,7 @@
 use super::*;
 use crate::config::{TcpConfig, UdpConfig};
 use crate::node::acl::PeerAclReloader;
-use crate::peer::machine::{PeerEvent, PeerMachine, TimerKind};
+use crate::peer::handshake::{Handshake, TimerKind};
 use crate::proto::fmp::NegotiationPayload;
 use crate::proto::fmp::wire::{
     CommonPrefix, Msg1Header, Msg2Header, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2, PHASE_MSG3,
@@ -89,7 +89,7 @@ fn negotiation(rekey_of: Option<SessionIndex>) -> Vec<u8> {
 
 /// An XX initiator for `sender` dialing `node`: the machine that carries its
 /// handshake, and the framed msg1 it sends under `sender_index`.
-fn initiator(node: &Node, sender: &Identity, sender_index: u32) -> (PeerMachine, Vec<u8>) {
+fn initiator(node: &Node, sender: &Identity, sender_index: u32) -> (Handshake, Vec<u8>) {
     let target = PeerIdentity::from_pubkey_full(node.identity().pubkey_full());
     let mut leg = outbound_leg(LinkId::new(0x5EED), target, 1000);
     let noise_msg1 = leg
@@ -109,7 +109,7 @@ fn craft_msg1(node: &Node, sender_index: u32) -> Vec<u8> {
 /// The framed msg3 an initiator answers the framed `msg2` with, sent under
 /// `sender_index`.
 fn msg3_for(
-    leg: &mut PeerMachine,
+    leg: &mut Handshake,
     msg2: &[u8],
     sender_index: u32,
     rekey_of: Option<SessionIndex>,
@@ -344,7 +344,7 @@ async fn timed_fire(node: &mut Node, trigger: Trigger) -> Reply {
         }
         Trigger::PeerTimers(now_ms) => node.drive_peer_timers(now_ms).await,
         Trigger::StoredMsg1(link, addr) => {
-            node.send_stored_msg1(link, TransportId::new(TCP_ID), &addr, Node::interval_ms())
+            node.send_stored_msg1(link, TransportId::new(TCP_ID), &addr)
                 .await
         }
         Trigger::StartHandshake(link, addr) => {
@@ -354,7 +354,7 @@ async fn timed_fire(node: &mut Node, trigger: Trigger) -> Reply {
                     TransportId::new(TCP_ID),
                     addr,
                     None,
-                    crate::peer::machine::DialOrigin::Addressed,
+                    crate::peer::handshake::DialOrigin::Addressed,
                 )
                 .await;
         }
@@ -579,25 +579,16 @@ fn dial_leg(
     node.pending_outbound
         .raw()
         .insert((tcp_id, our_index.as_u32()), link_id);
-    let mut machine = PeerMachine::new_outbound(link_id, Some(target), LegStamp::at(now_ms));
-    let _ = machine.step(
-        PeerEvent::Dial {
-            transport_id: tcp_id,
-            remote_addr: addr.clone(),
-            peer_identity: target,
-            connection_oriented: false,
-        },
-        now_ms,
-        &mut node.index_allocator,
-    );
+    let mut machine = Handshake::new_outbound(link_id, Some(target), LegStamp::at(now_ms));
+    let _ = machine.sending_msg1(false);
     machine.set_conn_handshake_msg1(wire.clone(), due_ms);
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(tcp_id);
     machine.set_conn_source_addr(addr.clone());
     machine.set_leg(leg.take_leg().unwrap());
     assert!(machine.is_handshaking_sent_msg1());
-    node.peer_machines.raw().insert(link_id, machine);
-    node.peer_machines
+    node.handshakes.raw().insert(link_id, machine);
+    node.handshakes
         .raw_timers()
         .entry(link_id)
         .or_default()

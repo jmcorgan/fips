@@ -34,8 +34,8 @@ MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_
 MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first	defect: the smaller node holds a connection besides its dial's
 MoveKeepsInboundLink	red	fips-mesh	node::tests::settle::crossing::a_move_closes_the_left_links_connection_with_no_dial_on_it_larger_first_with_multipath_on	defect: the smaller node holds a connection besides its dial's
 MoveKeepsInboundLink	red	fips-core	proto::settle::table::tests::a_crossing_moves_the_smaller_node_and_retires_the_inbound_link	the inbound link is retired and its connection closed
-MachineLeftBehind	red	fips-mesh	node::tests::settle::crossing::a_moved_peers_control_machine_moves_with_it	peer machine present for the promoted cross-connection peer
-MachineLeftBehind	red	fips-mesh	node::tests::settle::crossing::a_moved_peers_control_machine_moves_with_it_with_multipath_on	peer machine present for the promoted cross-connection peer
+MachineLeftBehind	red	fips-mesh	node::tests::settle::crossing::a_moved_peers_control_machine_moves_with_it	audit_live: handle_msg2: carrier
+MachineLeftBehind	red	fips-mesh	node::tests::settle::crossing::a_moved_peers_control_machine_moves_with_it_with_multipath_on	audit_live: handle_msg2: carrier
 CarrierLeftBehind	red	fips-mesh	node::tests::settle::readings::a_no_carrier_reading_stays_across_a_move_and_goes_with_the_peer
 ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_garbage_msg2s
 ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_replayed_msg2s

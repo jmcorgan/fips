@@ -52,9 +52,8 @@ listed! {
         /// Tell the transport which of two connections at the promoted
         /// link's address to keep, now that the handshake named the peer.
         SettleLink,
-        /// Feed the outcome of the promotion back to the leg's control
-        /// machine and run what it returns.
-        MachineResolved,
+        /// Mark the promoted link's handshake entry as the new peer's.
+        Established,
         /// Mark the link a dial of this node's promoted, at the transport.
         RelinkInitiator,
         /// Log the promotion of a dial of this node's.
@@ -69,7 +68,7 @@ listed! {
         /// Offer the pair the link left to the heard feed, if the move left
         /// one.
         HeardLeft,
-        /// Hold the peer's link record, its control machine and its carrier
+        /// Hold the peer's link record, its handshake entry and its carrier
         /// readings on the dial's link, if the move left another.
         HoldDial,
         /// Read the pair the peer is on after the move.
@@ -79,8 +78,6 @@ listed! {
         /// Log the move, and at a dial's msg2 the replays suppressed during
         /// it.
         MoveNote,
-        /// Tell the peer's control machine how the crossing resolved.
-        MachineCrossed,
         /// Close the losing link's connection unless a live link uses it:
         /// the link a move left, or the dial's.
         LoserClose,
@@ -88,7 +85,7 @@ listed! {
         /// handshake the crossing ended, this node's dial or the inbound leg
         /// the peer's msg3 completed.
         LoserRemoved,
-        /// Drop the control machine of the inbound leg the peer's msg3
+        /// Drop the handshake entry of the inbound leg the peer's msg3
         /// completed.
         LegMachineRemoved,
         /// Log the crossing kept on the session the peer holds.
@@ -142,7 +139,7 @@ const PROMOTE_OUT: &[Effect] = &[
     Effect::BackoffReset,
     Effect::DialForget,
     Effect::RelinkInitiator,
-    Effect::MachineResolved,
+    Effect::Established,
     Effect::PathsRenewed,
 ];
 
@@ -153,7 +150,7 @@ const PROMOTE_IN: &[Effect] = &[
     Effect::TreeAnnounce,
     Effect::BloomMark,
     Effect::BackoffReset,
-    Effect::MachineResolved,
+    Effect::Established,
     Effect::PathsRenewed,
 ];
 
@@ -170,7 +167,7 @@ const REPLACE_OUT: &[Effect] = &[
     Effect::BackoffReset,
     Effect::DialForget,
     Effect::RelinkInitiator,
-    Effect::MachineResolved,
+    Effect::Established,
     Effect::PathsRenewed,
 ];
 
@@ -185,14 +182,14 @@ const REPLACE_IN: &[Effect] = &[
     Effect::TreeAnnounce,
     Effect::BloomMark,
     Effect::BackoffReset,
-    Effect::MachineResolved,
+    Effect::Established,
     Effect::PathsRenewed,
 ];
 
 /// A crossing won by this node's dial at its msg2: the rekey machine moved
 /// onto the dial's session and the path machine renewed, the peer held on
-/// the dial's link, then what follows a move to another pair, the note, the
-/// control machine, and the link the move left ends.
+/// the dial's link, then what follows a move to another pair, the note, and
+/// the link the move left ends.
 const MOVE_DIAL: &[Effect] = &[
     Effect::RunLinkOutputs,
     Effect::RunRenewed,
@@ -204,7 +201,6 @@ const MOVE_DIAL: &[Effect] = &[
     Effect::SeedMtuIfMoved,
     Effect::RelinkIfMoved,
     Effect::MoveNote,
-    Effect::MachineCrossed,
     Effect::DialForget,
     Effect::LoserClose,
     Effect::LoserRemoved,
@@ -235,7 +231,6 @@ const MOVE_LEG: &[Effect] = &[
 const KEEP_DIAL: &[Effect] = &[
     Effect::KeepNote,
     Effect::LeaseFreed,
-    Effect::MachineCrossed,
     Effect::DialForget,
     Effect::LoserClose,
     Effect::LoserRemoved,

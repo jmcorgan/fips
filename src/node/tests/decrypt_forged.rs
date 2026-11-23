@@ -301,7 +301,7 @@ async fn twenty_five_forged_frames_on_a_second_tcp_connection_leave_a_tcp_held_p
             .index()
             .get(&(TransportId::new(TCP_ID), peer_remote.clone()))
             .expect("precondition: the msg1 opened a leg");
-        node.peer_machines
+        node.handshakes
             .get(link)
             .and_then(|machine| machine.conn_handshake_msg2())
             .expect("precondition: the leg stored its msg2")
