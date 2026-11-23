@@ -15,7 +15,7 @@
 # or `untested` when none asserts it, and the incidental part with its record. The
 # settlement core's own list is ../../settle/rules.txt, with IDs S-NN; these are XX-NN.
 # `src/node/settle/tests/rules.rs` checks this file against current.txt and the tests.
-XX-01  I-kept  tested    the larger node that keeps the session it holds at its own msg2, by address order, still sends msg3; FRC-2201 Section 5.7 is silent; kept as next's node has it
+XX-01  I-kept  tested    the larger node that keeps the session it holds on a link the peer dialed at its own msg2, by address order, still sends msg3; FRC-2201 Section 5.7 is silent; kept as next's node has it
 XX-02  I-kept  tested    the restart gate at msg3 counts the peering's idle time from its install as well as from its last frame, so a peering installed under 15 s ago that carried no frame refuses a restart; FRC-2201 Section 5.6's first gate counts frames only; kept as next's node has it
 XX-03  I-kept  tested    the silent-session values: a refusal from the third silent session in a row at one epoch, 30 s, doubling to 600 s, a record lapsing after 600 s; kept as next's node has it
 XX-04  I-kept  tested    the retry after a failure at msg2 goes to the identity the leg expects by then: the one its completion learned, else the one the msg2 taught, else the one the dial named; an anonymous dial that learned no one retries no one; kept as next's node has it

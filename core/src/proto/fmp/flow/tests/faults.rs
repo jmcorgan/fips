@@ -17,6 +17,7 @@ use super::super::faults::Fault;
 const MSG1: &str = "proto::fmp::flow::tests::msg1::";
 const MSG2: &str = "proto::fmp::flow::tests::msg2::";
 const MSG3: &str = "proto::fmp::flow::tests::msg3::";
+const JOINTS: &str = "proto::fmp::flow::tests::joint::";
 
 /// One test, by the prefix of its file and its name.
 type Test = (&'static str, &'static str);
@@ -151,6 +152,26 @@ pub(crate) const ROWS: &[(Fault, &[Test])] = &[
         )],
     ),
     (
+        Fault::SameSideByOrder,
+        &[(
+            MSG3,
+            "a_msg3_from_a_peer_held_on_a_link_it_dialed_moves_either_node_onto_the_answer",
+        )],
+    ),
+    (
+        Fault::SameSideFinalSent,
+        &[
+            (
+                MSG2,
+                "a_later_dial_by_the_larger_node_off_a_link_it_dialed_is_kept_at_once_with_no_msg3_and_no_offer",
+            ),
+            (
+                JOINTS,
+                "a_redial_by_the_larger_flow_node_off_a_link_it_dialed_sends_no_msg3_and_both_ends_keep_that_link",
+            ),
+        ],
+    ),
+    (
         Fault::Msg3MoveKeepsHeldLink,
         &[(
             MSG3,
@@ -220,7 +241,7 @@ pub(crate) const CHARACTERISATION: &[(&str, &str)] = &[
         JOINT,
     ),
     (
-        "a_redial_by_either_flow_node_while_it_holds_the_peer_logs_what_next_does",
+        "a_redial_by_the_smaller_flow_node_while_it_holds_the_peer_logs_what_next_does",
         JOINT,
     ),
     (

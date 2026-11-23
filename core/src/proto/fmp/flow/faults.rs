@@ -79,6 +79,15 @@ pub(crate) enum Fault {
     /// answer's session on the link it dialed and stays held there, and the
     /// answer's link is the one retired.
     Msg3MoveKeepsHeldLink,
+    /// A msg3 with no claim from a peer held on a link the peer dialed is
+    /// settled by address order, as a crossing is, so the smaller node
+    /// keeps the old link, where the same-side rule moves it onto the new
+    /// session.
+    SameSideByOrder,
+    /// The larger node holding the peer on a link it dialed, whose later
+    /// dial address order keeps, still sends that dial's msg3, where the
+    /// same-side rule withholds it and ends the dial.
+    SameSideFinalSent,
     /// A move keeps the frame heard under the session it leaves, where
     /// next's `heard_on_session` starts afresh, so a dial in flight at the
     /// move is no longer beside this node's own unheard dial and sends its
@@ -106,6 +115,8 @@ impl Fault {
         Self::OwnDialCountsSilent,
         Self::CrossedRunsKeep,
         Self::Msg3MoveKeepsHeldLink,
+        Self::SameSideByOrder,
+        Self::SameSideFinalSent,
         Self::MoveKeepsFramed,
     ];
 

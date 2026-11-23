@@ -6,11 +6,14 @@
 # line, or the file:line the panic must be at) is for a test that predates
 # the marker, or picks one `defect:` assertion of a test that has more than
 # one. See run.sh.
-MoveKeepsOldPair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_on_another_transport_moves_the_link_to_the_msg2s_transport_and_address	s takes the msg2's transport and source address as l's
-MoveKeepsOldPair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_from_another_address_moves_the_link_to_the_msg2s_address	s takes the msg2's transport and source address as l's
-MoveKeepsOldPair	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	node 0 keeps L2, the link its winning handshake ran on, pooled
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_another_transport_does_what_the_move_cells_say
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_a_second_ble_link_relinks_the_mark
+# On next the live audit inside handle_msg2 sees the held peer's pair left
+# unnamed first, so MoveKeepsOldPair's lines are anchored at its held-entry
+# check rather than at each test's own assertion.
+MoveKeepsOldPair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_on_another_transport_moves_the_link_to_the_msg2s_transport_and_address	audit_live: handle_msg2: held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_from_another_address_moves_the_link_to_the_msg2s_address	audit_live: handle_msg2: held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	audit_live: handle_msg2: held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_another_transport_does_what_the_move_cells_say	audit_live: handle_msg2: held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_a_second_ble_link_relinks_the_mark	audit_live: handle_msg2: held-entry
 MoveAnnouncesFirst	red	fips-mesh	node::tests::control::a_move_at_the_dialers_msg2_sends_nothing_on_the_session_it_leaves
 CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_over_tcp_does_what_the_move_cells_say_smaller_first
 CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_over_tcp_does_what_the_move_cells_say_smaller_first_with_multipath_on
@@ -19,10 +22,10 @@ CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_w
 CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::an_own_dial_answered_on_an_aged_link_does_what_the_move_cells_say
 CrossedRunsKeep	red	fips-mesh	node::tests::settle::table::crossing::an_own_dial_answered_on_an_aged_link_does_what_the_move_cells_say_with_multipath_on
 CrossedRunsKeep	red	fips-core	proto::settle::table::tests::a_crossing_decided_by_the_tie_break_alone_moves_the_smaller_node_onto_its_dial
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_from_another_address_keeps_an_index_entry_for_its_link
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_from_another_address_keeps_an_index_entry_for_its_link_with_multipath_on
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_another_transport_keeps_an_index_entry_for_its_link
-MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_another_transport_keeps_an_index_entry_for_its_link_with_multipath_on
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_from_another_address_keeps_an_index_entry_for_its_link	audit_live: handle_msg2: held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_from_another_address_keeps_an_index_entry_for_its_link_with_multipath_on	audit_live: handle_msg2: held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_another_transport_keeps_an_index_entry_for_its_link	audit_live: handle_msg2: held-entry
+MoveKeepsOldPair	red	fips-mesh	node::tests::settle::links::a_crossed_dial_on_another_transport_keeps_an_index_entry_for_its_link_with_multipath_on	audit_live: handle_msg2: held-entry
 # Crossed TCP dials here settle at each end's msg3, which this break does not
 # reach, so the tests of the smaller node's link record after them are not
 # under it on this line; they pass with it on and with it off.
@@ -356,9 +359,11 @@ AnonLegNamed	red	fips-core	proto::fmp::flow::tests::msg1::an_anonymous_answer_in
 PendingFreesSentAnswers	red	fips-core	proto::fmp::flow::tests::msg1::the_admission_cap_counts_an_anonymous_answer_until_its_msg3_whether_or_not_its_msg2_was_sent
 PendingFreesSentAnswers	red	fips-mesh	node::tests::tcp::an_answer_waiting_for_its_msg3_holds_the_pending_cap_so_a_further_msg1_is_refused
 AnonDialNamed	red	fips-core	proto::fmp::flow::tests::msg2::an_anonymous_dial_completes_under_the_identity_its_msg2_taught
-AnonDialNamed	red	fips-mesh	node::tests::handshake::test_anonymous_dial_msg2_promotes_whoever_answers	an anonymous dial promotes whoever answered it
+# The refused anonymous dial leaves its leg's handshake behind, which the
+# live audit inside handle_msg2 reports before the test's own assertion.
+AnonDialNamed	red	fips-mesh	node::tests::handshake::test_anonymous_dial_msg2_promotes_whoever_answers	audit_live: handle_msg2: leg-handshake
 BesideOwnSendsFinal	red	fips-core	proto::fmp::flow::tests::msg2::a_msg2_beside_this_nodes_own_dial_is_kept_at_once_with_no_msg3_and_offers_its_pair
-BesideOwnSendsFinal	red	fips-mesh	node::tests::double_dial::a_smaller_nodes_two_dials_answered_in_order_leave_both_ends_on_one_session
+BesideOwnSendsFinal	red	fips-mesh	node::tests::double_dial::a_smaller_nodes_two_dials_whose_msg3s_cross_leave_both_ends_on_one_session	both ends hold one session
 FinalBeforeSendOutcome	red	fips-core	proto::fmp::flow::tests::msg2::a_msg2_installs_nothing_until_its_msg3_is_sent
 MoveClosesDial	red	fips-core	proto::fmp::flow::tests::msg2::the_smaller_nodes_move_at_msg2_leaves_open_the_connection_its_dial_was_set_up_at
 TimeoutNoRetry	red	fips-core	proto::fmp::flow::tests::msg2::a_dial_past_its_deadline_asks_for_a_retry_of_the_identity_it_expects_before_its_reap
@@ -377,7 +382,7 @@ Msg3RestartUngated	red	fips-mesh	node::tests::settle::clock::a_forward_wall_cloc
 MismatchClaimTearsDown	red	fips-core	proto::fmp::flow::tests::msg3::a_msg3_claiming_a_session_not_held_repeats_the_stored_msg2_and_leaves_the_peer
 MismatchClaimTearsDown	red	fips-mesh	node::tests::handshake_lines::repeated_duplicate_handshakes_log_three_resend_lines_then_one_suppression_notice	src/node/tests/handshake_lines.rs:106
 MatchesReadAsCross	red	fips-core	proto::fmp::flow::tests::msg3::a_msg3_claiming_the_session_held_hands_the_leg_and_its_lease_to_the_peers_rekey
-MatchesReadAsCross	red	fips-mesh	node::tests::path_accept::a_switch_between_rekey_msg1_and_msg2_leaves_the_rekey_to_complete_on_the_new_path
+MatchesReadAsCross	red	fips-mesh	node::tests::handshake::test_msg3_rekey_respond_disposes_leg_machine	rekey-responder arm stores the pending session
 SilentRefusalAnyEpoch	red	fips-core	proto::fmp::flow::tests::msg3::a_silent_identitys_msg3_is_refused_at_the_epoch_it_counted_and_promoted_at_another
 SilentRefusalAnyEpoch	red	fips-mesh	node::tests::silent_backoff::a_new_epoch_msg3_is_promoted_during_the_back_off	silent_session(&mut nodes, NEW_EPOCH, 4)
 OwnDialCountsSilent	red	fips-core	proto::fmp::flow::tests::msg2::a_dialed_session_that_ends_unheard_is_not_counted_silent_and_an_answered_one_is
@@ -396,6 +401,14 @@ Msg3MoveKeepsHeldLink	red	fips-mesh	node::tests::settle::table::crossing::a_cros
 Msg3MoveKeepsHeldLink	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_leaves_the_larger_node_on_a_pooled_link
 Msg3KeepLeavesLegOpen	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_settled_at_the_msg3_over_tcp_keeps_the_smaller_node_as_the_table_says
 Msg3KeepLeavesLegOpen	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_settled_at_the_msg3_over_tcp_keeps_the_smaller_node_as_the_table_says_with_multipath_on
+SameSideByOrder	red	fips-core	proto::fmp::flow::tests::msg3::a_msg3_from_a_peer_held_on_a_link_it_dialed_moves_either_node_onto_the_answer
+SameSideByOrder	red	fips-mesh	node::tests::roam_redial::a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering
+SameSideByOrder	red	fips-mesh	node::tests::roam_redial::a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering_with_multipath_on
+SameSideByOrder	red	fips-mesh	node::tests::redial_split::a_larger_node_redialing_an_aged_link_it_dialed_converges_on_one_session_both_ways
+SameSideFinalSent	red	fips-core	proto::fmp::flow::tests::msg2::a_later_dial_by_the_larger_node_off_a_link_it_dialed_is_kept_at_once_with_no_msg3_and_no_offer
+SameSideFinalSent	red	fips-core	proto::fmp::flow::tests::joint::a_redial_by_the_larger_flow_node_off_a_link_it_dialed_sends_no_msg3_and_both_ends_keep_that_link
+SameSideFinalSent	red	fips-mesh	node::tests::settle::redialed::a_peer_the_larger_node_dialed_and_dials_again_stays_on_one_session_on_its_first_dial
+SameSideFinalSent	red	fips-mesh	node::tests::settle::redialed::a_peer_the_larger_node_dialed_and_dials_again_stays_on_one_session_on_its_first_dial_with_multipath_on
 MoveKeepsFramed	red	fips-core	proto::fmp::flow::tests::msg2::a_dial_in_flight_at_the_smaller_nodes_move_is_beside_its_new_own_dial_though_the_peer_was_heard_before
 MoveKeepsFramed	red	fips-mesh	node::tests::double_dial::a_frame_heard_before_a_move_does_not_let_a_second_dial_cross_the_ends	both ends hold one session
 MoveKeepsFramed	red	fips-mesh	node::tests::double_dial::a_frame_heard_before_a_move_does_not_let_a_second_dial_cross_the_ends_with_multipath_on	both ends hold one session

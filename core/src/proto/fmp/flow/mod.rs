@@ -13,7 +13,8 @@
 //! facade (`Ops`) and its hooks, and keeps its own state, [`Xx`], in the
 //! table's flow slot.
 //!
-//! What differs from the IK flow, each by next's code:
+//! What differs from the IK flow, each by next's code or, where the port
+//! fixed next, by FRC-2201 Section 5.7:
 //!
 //! - **A msg1 names no one.** It opens an anonymous answer, with no gate,
 //!   cap or epoch, and the answer installs nothing at its send. A resend of
@@ -26,13 +27,17 @@
 //!   sessions refuse it; an epoch change is a restart, refused while the
 //!   peering was heard or installed less than the interval ago or the
 //!   dampener holds; a claim of a session not held repeats the stored
-//!   msg2; no claim is a crossing, which the larger node's inbound wins;
-//!   and a claim of the session held is the peer's rekey.
+//!   msg2; no claim is a crossing, which the larger node's inbound wins,
+//!   the larger node moving the peer onto the answer's link and session,
+//!   unless the peer is held on a link it dialed itself, when either node
+//!   moves onto the answer (the same-side rule's responder half); and a
+//!   claim of the session held is the peer's rekey.
 //! - **The initiator decides at msg2 and acts once its msg3 is sent.** A
 //!   new identity is promoted and a restarted one replaced, with no gate;
 //!   a msg2 beside this node's own dial is kept at once with no msg3; any
 //!   other is settled by address order, the smaller node moving onto its
-//!   dial.
+//!   dial, and the larger node's keep of a peer held on a link it dialed
+//!   ending the dial with no msg3 (the same-side rule's initiator half).
 //! - **A leaf node holds one peer**, and refuses another at msg2 or msg3,
 //!   removing the link at once. The max-peers cap at msg2 leaves the dial's
 //!   leg for its reap, and at msg3 removes the answer's link at once.

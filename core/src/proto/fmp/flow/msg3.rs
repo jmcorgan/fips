@@ -7,7 +7,9 @@
 //! while the peering was heard or installed less than the interval ago or
 //! the dampener holds, and stamping the dampener when accepted; a claim of
 //! a session not held repeats the held peer's stored msg2; no claim is a
-//! crossing, which the larger node's inbound wins; and a claim of the
+//! crossing, which the larger node's inbound wins, or, from a peer held on
+//! a link it dialed, a second handshake by the same side, which moves this
+//! node either way (FRC-2201 Section 5.7); and a claim of the
 //! session held is the peer's rekey. next's two guards on the crossing, a
 //! different link and a session held, are always true here: every answer's
 //! link is a link of its own, and a held peer holds a session.
@@ -19,7 +21,7 @@ use crate::identity::NodeAddr;
 use crate::proto::fmp::RekeyClaim;
 use crate::proto::settle::flow::Outs;
 use crate::proto::settle::gates::{Ask, Epoch, Liveness, Refusal, Source};
-use crate::proto::settle::links::{LinkNo, Pair};
+use crate::proto::settle::links::{Dir, LinkNo, Pair};
 use crate::proto::settle::output::{Denial, Output, Transition, Why};
 use crate::proto::settle::table::Ops;
 use crate::time::Instant;
@@ -204,9 +206,12 @@ fn rekey<I: Instant>(
 /// one's carry, and retires the link it held, its own dial's, whose
 /// connection the smaller node's keep closes at the other end. The smaller
 /// node keeps its own and drops the answer, a keep. Both end on the link
-/// the smaller node dialed (FRC-2201 Section 5.7). Each is told as the
-/// column next's node runs for it (`Transition::Move` and
-/// `Transition::Keep`, both `inbound`, in `src/node/settle/table.rs`).
+/// the smaller node dialed (FRC-2201 Section 5.7). A peer held on a link
+/// it dialed itself is not crossing this node's dial but dialing again
+/// from the same side, and either node moves onto the answer as the larger
+/// does. Each is told as the column next's node runs for it
+/// (`Transition::Move` and `Transition::Keep`, both `inbound`, in
+/// `src/node/settle/table.rs`).
 #[allow(clippy::too_many_arguments)]
 fn cross<I: Instant>(
     ops: &mut Ops<'_, I, Xx>,
@@ -218,7 +223,15 @@ fn cross<I: Instant>(
     now: I,
     out: &mut Vec<Outs<I, Xx>>,
 ) {
-    if ops.me() < peer {
+    // The same-side rule's responder half: the peer dialed the link it is
+    // held on as well as this answer, so it has left that link, and this
+    // node moves whatever the address order (FRC-2201 Section 5.7).
+    let same_side = ops
+        .held(&peer)
+        .and_then(|h| ops.links().get(h.link))
+        .is_some_and(|r| r.dir == Dir::Inbound)
+        && !(xx_fault!(SameSideByOrder) || node_fault!(SameSideByOrder));
+    if ops.me() < peer && !same_side {
         end(ops, link, out);
         out.push(Output::Reset {
             peer,

@@ -370,18 +370,21 @@ impl Node {
         };
         match (our_inbound_wins, session, lease) {
             (true, Some(session), Some(lease)) => {
-                // Larger node side: move to the inbound session so it
-                // pairs with the peer's kept outbound session. The
+                // Larger node side, or either node where the peer
+                // dialed the link held as well as this leg (the
+                // same-side rule): move to the inbound session so it
+                // pairs with the peer's outbound session. The
                 // peer's link machine is closed and rebuilt on it,
                 // which abandons any rekey of ours in flight and
                 // releases every index the old machine held. Both
-                // ends converge on the link the smaller node dialed
-                // (FRC-2201, Section 5.7), which this msg3 came over,
-                // so the peer is held on the leg's link, taken at the
-                // msg3's transport and source address, and the rebuilt
-                // machine records the leg's binding on that transport.
-                // The link it held, its own dial's, is torn down and its
-                // connection closed unless a live link uses it. The path
+                // ends converge on the link the peer dialed (FRC-2201,
+                // Section 5.7), which this msg3 came over, so the peer
+                // is held on the leg's link, taken at the msg3's
+                // transport and source address, and the rebuilt machine
+                // records the leg's binding on that transport. The link
+                // it held, its own dial's at a crossing, is torn down
+                // and its connection closed unless a live link uses it.
+                // The path
                 // machine starts again with that pair as the new link's
                 // original path (multipath v1 draft, Section 5.4).
                 let prior = self.peer_link(&peer);
@@ -425,11 +428,10 @@ impl Node {
                         params: path_params,
                         facts: &facts,
                     },
-                    // Not needed for safety: only the larger
-                    // node moves here, where the address order
-                    // keeps the held session anyway, so an
-                    // own-dial keep this mark allows changes
-                    // only whether a msg3 is sent.
+                    // Not needed for safety: the peer is held
+                    // here on the leg's link, which the peer
+                    // dialed, so no own-dial keep reads this
+                    // mark until a later dial of ours holds it.
                     mark: self.next_link_id,
                 };
                 let (out, paths) = peer_ref.adopt_dial(

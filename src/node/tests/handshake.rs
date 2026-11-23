@@ -1761,6 +1761,20 @@ async fn make_hs_node(config: Config) -> HsNode {
     }
 }
 
+/// An initiator and a responder whose address is the larger. A later dial
+/// of a larger initiator that holds the responder on its own dial sends no
+/// msg3 (the same-side rule), so a test that drives a second exchange
+/// between the two pins this order.
+async fn make_hs_pair_initiator_smaller() -> (HsNode, HsNode) {
+    let initiator = make_hs_node(Config::new()).await;
+    loop {
+        let responder = make_hs_node(Config::new()).await;
+        if responder.node.node_addr() > initiator.node.node_addr() {
+            return (initiator, responder);
+        }
+    }
+}
+
 async fn stop_hs(n: &mut HsNode) {
     for (_, t) in n.node.transports.iter_mut() {
         t.stop().await.ok();
@@ -4188,8 +4202,7 @@ async fn a_failed_msg2_send_leaves_the_peer_address_naming_the_peer_link() {
 
 #[tokio::test]
 async fn a_dampened_epoch_restart_leaves_the_peer_address_naming_the_peer_link() {
-    let mut initiator = make_hs_node(Config::new()).await;
-    let mut responder = make_hs_node(Config::new()).await;
+    let (mut initiator, mut responder) = make_hs_pair_initiator_smaller().await;
     let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
     responder.node.handle_msg3(msg3).await;
     let peer_addr =
@@ -4247,8 +4260,7 @@ async fn a_second_epoch_restart_past_the_interval_on_the_node_clock_is_accepted(
     use std::time::Duration;
 
     let past_interval = Duration::from_secs(EPOCH_RESTART_MIN_INTERVAL_SECS + 1);
-    let mut initiator = make_hs_node(Config::new()).await;
-    let mut responder = make_hs_node(Config::new()).await;
+    let (mut initiator, mut responder) = make_hs_pair_initiator_smaller().await;
     let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
     responder.node.handle_msg3(msg3).await;
     let peer_addr =
@@ -4320,8 +4332,7 @@ async fn a_second_epoch_restart_inside_the_interval_on_the_node_clock_is_refused
  {
     use std::time::Duration;
 
-    let mut initiator = make_hs_node(Config::new()).await;
-    let mut responder = make_hs_node(Config::new()).await;
+    let (mut initiator, mut responder) = make_hs_pair_initiator_smaller().await;
     let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
     responder.node.handle_msg3(msg3).await;
     let peer_addr =
@@ -4385,8 +4396,7 @@ async fn a_second_epoch_restart_inside_the_interval_on_the_node_clock_is_refused
 async fn a_refused_epoch_change_does_not_slide_the_dampening_window() {
     use std::time::Duration;
 
-    let mut initiator = make_hs_node(Config::new()).await;
-    let mut responder = make_hs_node(Config::new()).await;
+    let (mut initiator, mut responder) = make_hs_pair_initiator_smaller().await;
     let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
     responder.node.handle_msg3(msg3).await;
     let peer_addr =

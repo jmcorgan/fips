@@ -284,16 +284,18 @@ async fn every_leg_exit_releases_its_lease() {
             .await;
         exited(&nodes, b, a, "expiry");
 
-        // A fresh dial crossing the link B holds with the same peer: B's
-        // inbound handshake wins when B is the larger.
+        // A fresh dial beside the link B holds with the same peer: B's
+        // inbound handshake wins when B is the larger, and, when A dialed
+        // the link held (node 0 dialed the pair's link), whatever the order,
+        // since A then dials again from the same side.
         let dial = HandDial::open(&mut nodes, a, b, &a_id, a_epoch, 0x1D00_000A).await;
         let before = nodes[b].node.get_peer(&a_addr).unwrap().our_index();
         dial.finish(&mut nodes, a, b, &payload(None)).await;
         let after = nodes[b].node.get_peer(&a_addr).unwrap().our_index();
         assert_eq!(
             after != before,
-            larger,
-            "precondition: B moves to the crossing dial's session exactly when its inbound wins"
+            larger || a == 0,
+            "precondition: B moves to the dial's session exactly when its inbound wins"
         );
         exited(&nodes, b, a, "a cross-connection");
 

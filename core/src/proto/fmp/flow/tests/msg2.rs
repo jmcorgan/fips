@@ -168,8 +168,8 @@ fn a_dial_in_flight_at_the_install_is_settled_by_address_order_once_the_peer_was
 }
 
 /// Records current behaviour (rule XX-01): open to change by decision. The
-/// incidental part is the larger node's msg3 at its keep; the smaller node's
-/// move onto its later dial is not.
+/// incidental part is the larger node's msg3 at its keep of a peer held on
+/// the peer's dial; the smaller node's move onto its later dial is not.
 #[test]
 fn a_later_dial_of_a_held_peer_is_settled_by_address_order_once_its_msg3_is_sent() {
     // The smaller node moves onto its dial.
@@ -192,9 +192,10 @@ fn a_later_dial_of_a_held_peer_is_settled_by_address_order_once_its_msg3_is_sent
             .any(|o| matches!(o, Output::Retire { link, .. } if *link == first)),
         "and retires the link it left: {out:?}"
     );
-    // The larger node keeps the peer where it is.
+    // The larger node holding the peer on the peer's dial keeps it where
+    // it is.
     let mut b = node(large(), false);
-    let first = held_by_dial(&mut b, small(), E1, 1, 1, 0);
+    let first = held_by_answer(&mut b, small(), E1, 1, 1, 0);
     let later = opened(&go(&mut b, dial(small(), 2, 2), 10));
     let out = xx(&mut b, msg2(later, small(), E1, 2), 20);
     assert!(
@@ -213,6 +214,57 @@ fn a_later_dial_of_a_held_peer_is_settled_by_address_order_once_its_msg3_is_sent
         "the larger node keeps the peer: {out:?}"
     );
     assert_eq!(b.held(&small()).map(|h| h.link), Some(first));
+}
+
+#[test]
+fn a_later_dial_by_the_larger_node_off_a_link_it_dialed_is_kept_at_once_with_no_msg3_and_no_offer()
+{
+    // The larger node holds the peer on its own dial and dials again: the
+    // address order keeps, and the same-side rule withholds the msg3, so
+    // the peer, which would move at a same-side msg3, never meets one.
+    let mut b = node(large(), false);
+    let first = held_by_dial(&mut b, small(), E1, 1, 1, 0);
+    go(
+        &mut b,
+        Input::Heard {
+            peer: small(),
+            from: pair(1),
+            kind: 0,
+        },
+        5,
+    );
+    let later = opened(&go(&mut b, dial(small(), 2, 2), 10));
+    let out = xx(&mut b, msg2(later, small(), E1, 2), 20);
+    assert!(
+        !finals(&out, later),
+        "defect: the larger node sends the msg3 of a dial it drops: {out:?}"
+    );
+    assert!(
+        out.iter().any(|o| matches!(
+            o,
+            Output::Reset {
+                transition: Transition::Keep,
+                ..
+            }
+        )),
+        "the peer is kept at once: {out:?}"
+    );
+    assert!(
+        !out.iter()
+            .any(|o| matches!(o, Output::Flow(Out::Offer { .. }))),
+        "no heard path is offered: {out:?}"
+    );
+    assert_eq!(
+        b.held(&small()).map(|h| h.link),
+        Some(first),
+        "on the link it dialed"
+    );
+    assert!(b.legs().get(later).is_none(), "the later dial is given up");
+    let out = xx(&mut b, In::FinalSent { link: later }, 20);
+    assert!(
+        out.is_empty(),
+        "a send the core never asked for decides nothing: {out:?}"
+    );
 }
 
 #[test]

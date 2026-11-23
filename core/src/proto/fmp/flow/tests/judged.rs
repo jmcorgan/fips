@@ -20,6 +20,10 @@
 //!   fixed): next settles a second handshake dialed by the same side by
 //!   address order at both ends, where Section 5.7 has the initiator move
 //!   (no live test being applied, row N2) and the responder move.
+//! - [`Known::OwnLinkKept`] (row N2): the flow's larger node, holding the
+//!   peer on a link it dialed, ends a second dial of its own at its msg2
+//!   with no msg3 (the same-side rule's initiator half), where the judge,
+//!   without the live test, moves. next's transcribed rules never show it.
 //! - [`Known::KeepSendsFinal`]: the larger node of a crossing that
 //!   completes at its own msg2 keeps what it holds and still sends msg3,
 //!   where the judge's `KeepEndsAttempt` sends none. The FRC is silent; the
@@ -52,6 +56,10 @@ pub enum Known {
     Msg2RestartUngated,
     /// Row N3: a same-side second handshake settled by address order.
     SameSideByOrder,
+    /// Row N2: the larger node's second dial off a link it dialed and
+    /// holds is ended at its msg2 with no msg3, by the same-side rule,
+    /// where the judge, without the live test, moves onto it.
+    OwnLinkKept,
     /// The larger node's keep at its msg2 sends msg3.
     KeepSendsFinal,
     /// next's restart gate counts from the install.
@@ -86,6 +94,16 @@ impl Diff {
             && n.change == Some(Transition::Replace)
         {
             return Some(Known::Msg2RestartUngated);
+        }
+        if at2
+            && j.class == Some(Class::SameSide)
+            && j.change == Some(Transition::Move)
+            && n.class == Some(Class::SameSide)
+            && n.refused.is_none()
+            && n.reply == Some(Reply::Silent)
+            && n.change.is_none()
+        {
+            return Some(Known::OwnLinkKept);
         }
         if (at2 || at3)
             && j.class == Some(Class::SameSide)
@@ -515,6 +533,14 @@ fn every_difference_the_check_names_is_told_apart_by_its_cause() {
                 did(Class::SameSide, None, Reply::Silent, Some(Transition::Move)),
             ),
             Some(Known::SameSideByOrder),
+        ),
+        (
+            diff(
+                msg2,
+                did(Class::SameSide, None, Reply::Silent, None),
+                did(Class::SameSide, None, Reply::Final, Some(Transition::Move)),
+            ),
+            Some(Known::OwnLinkKept),
         ),
         (
             diff(

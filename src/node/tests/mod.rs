@@ -67,6 +67,7 @@ mod path_score;
 mod paths;
 mod peer_restart;
 mod probe;
+mod redial_split;
 mod rekey_answer;
 mod rekey_attempt_ceiling;
 mod rekey_clock;

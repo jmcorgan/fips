@@ -652,6 +652,14 @@ faults! {
     /// keeps its own dial and leaves the inbound leg's connection open,
     /// though no other link uses it.
     Msg3KeepLeavesLegOpen,
+    /// The XX flow and the node: a msg3 with no claim from a peer held on a
+    /// link the peer dialed is settled by address order, so the smaller
+    /// node keeps the old link while the peer has left it.
+    SameSideByOrder,
+    /// The XX flow and the node: the larger node holding the peer on a link
+    /// it dialed sends the msg3 of a later dial that address order keeps,
+    /// so the peer moves onto a link the larger node drops.
+    SameSideFinalSent,
     /// The XX flow and the node: a move keeps the frame heard under the
     /// session it leaves, so a dial in flight at the move is no longer
     /// beside the node's own unheard dial and sends its msg3.

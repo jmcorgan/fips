@@ -143,7 +143,8 @@ pub(in crate::node) fn leafed(out: &[XxOut]) -> bool {
 
 /// Whether the core withholds the msg3 of the dial whose msg2 it took, from
 /// that step's outputs `out`: not when it asks for the msg3 (`Final`), and
-/// so when it kept the held peer at once (next's own-dial keep). `None`
+/// so when it kept the held peer at once (next's own-dial keep, or the
+/// same-side rule's keep of a peer held on a link this node dialed). `None`
 /// when it did neither: it numbers no such link, or took the msg2 for no
 /// dial of its own.
 pub(in crate::node) fn withholds(out: &[XxOut]) -> Option<bool> {
@@ -164,6 +165,15 @@ pub(in crate::node) fn withholds(out: &[XxOut]) -> Option<bool> {
             )
         })
         .then_some(true)
+}
+
+/// Whether the core offers the pair of the msg2 it took to the held peer's
+/// link as a heard path, from that step's outputs `out`: at the own-dial
+/// keep, and not at the same-side rule's keep, which also withholds the
+/// msg3.
+pub(in crate::node) fn offers(out: &[XxOut]) -> bool {
+    out.iter()
+        .any(|o| matches!(o, Output::Flow(Out::Offer { .. })))
 }
 
 /// What the node does at a dial's msg2, as the settlement core decided at the

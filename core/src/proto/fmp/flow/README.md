@@ -12,9 +12,13 @@ the path inputs and the close rule. This flow decides what an XX msg1,
 msg2 and msg3 do, as next's shell decided them at `be5204f9e`
 (`src/node/handlers/handshake.rs`, and `establish_inbound` and
 `establish_outbound` in `../core.rs`, which the node no longer has: it
-carries out this flow's decisions instead). Next's code is the spec here, not
-FRC-2201; the module comment of `mod.rs` lists where the flow differs from
-the IK flow.
+carries out this flow's decisions instead). Next's code is the spec here,
+except where the port's fixes changed next's rules: the msg3 crossing and
+both halves of the same-side rule follow FRC-2201 Section 5.7, the
+admission cap's count of an answer until its msg3 follows FRC-2201, and
+the silent count of only the sessions the peer dialed follows the
+operator's decision. The
+module comment of `mod.rs` lists where the flow differs from the IK flow.
 
 ## Files
 
@@ -38,7 +42,9 @@ the IK flow.
   the own-dial keep with no msg3, and address order, where the smaller
   node's move closes the link it left but not its dial's own connection,
   as next's move does, which the table's move would close when the msg2
-  came from another pair.
+  came from another pair. The larger node's keep of a peer held on a link
+  it dialed is ended at once with no msg3 (the same-side rule's initiator
+  half, FRC-2201 Section 5.7).
 - `msg3.rs`: next's `establish_inbound` at msg3 (its crossing told as the
   column next's node runs, a move at the larger node and a keep at the
   smaller): the promote, unless the
@@ -47,7 +53,9 @@ the IK flow.
   session not held; the crossing, which the larger node's inbound wins,
   the larger node moving the peer onto the answer's link, session and
   lease and retiring the link it held (`Ops::move_answer`), so both ends
-  settle on the link the smaller node dialed (FRC-2201 Section 5.7);
+  settle on the link the smaller node dialed (FRC-2201 Section 5.7), and
+  a peer held on a link it dialed itself moving either node onto the
+  answer (the same-side rule's responder half);
   and the rekey handed to the peer's machine with the leg's lease.
 - `faults.rs`: the flow's test-only switches, read from
   `FIPS_SETTLE_XX_FAULTS`; each is a variant of the node's list too

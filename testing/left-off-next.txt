@@ -363,11 +363,10 @@ test          next-rule  a_working_pair_run_past_the_link_dead_timeout_on_the_te
 # and swaps the peering at the redial's first frame, with the gates a replacement has (ACL, peer
 # cap, the restart dampener, the silent-session back-off, the unheard floor). On next a
 # dialer's identity first appears at the msg3, so a redial is a fresh XX handshake judged at its
-# msg3: its own roam_redial tests assert that the smaller node's redial settles at its msg3, and
-# that the larger node's settles only after the responder reaps the old peering (issue 130,
-# known-defect tests there). Master also answers a rekey msg1 off the link, from a probing or
-# unseen pair, a setup pair holding no path or a second transport, as a redial; next has no
-# redial answer at the msg1 for any of them.
+# msg3: its own roam_redial tests assert that a redial settles at its msg3 in either address
+# order, the responder moving by the same-side rule. Master also answers a rekey msg1 off the
+# link, from a probing or unseen pair, a setup pair holding no path or a second transport, as a
+# redial; next has no redial answer at the msg1 for any of them.
 test          next-rule  a_redial_from_a_new_address_on_a_young_link_is_answered_and_settles_before_the_responder_would_reap_multipath_off  src/node/tests/roam_redial.rs
 test          next-rule  a_redial_from_a_new_address_on_a_young_link_is_answered_and_settles_before_the_responder_would_reap_multipath_on  src/node/tests/roam_redial.rs
 test          next-rule  a_redial_from_a_new_address_on_a_young_link_is_answered_and_settles_before_the_responder_would_reap_with_decrypt_workers_multipath_off  src/node/tests/roam_redial.rs

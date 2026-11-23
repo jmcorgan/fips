@@ -297,6 +297,44 @@ fn a_crossing_at_msg3_moves_the_larger_node_onto_its_inbound_session_and_keeps_t
     assert_eq!(a.held(&large()).map(|h| h.link), Some(own));
 }
 
+#[test]
+fn a_msg3_from_a_peer_held_on_a_link_it_dialed_moves_either_node_onto_the_answer() {
+    for me in [small(), large()] {
+        let peer = if me == small() { large() } else { small() };
+        // The peer dialed the link held, then dials again from the same
+        // side: it has left that link, and this node moves whatever the
+        // address order.
+        let mut a = node(me, false);
+        let old = held_by_answer(&mut a, peer, E1, 1, 1, 0);
+        let link = answered(&mut a, 2, 2, None, 10);
+        let out = xx(&mut a, msg3(link, peer, E1, RekeyClaim::None, 2), 20);
+        assert!(
+            out.iter().any(|o| matches!(
+                o,
+                Output::Install(i) if i.link == link && i.pair == pair(2) && !i.initiator && i.rekey == Build::FromCarry
+            )),
+            "defect: the node does not move onto the answer, smaller {}: {out:?}",
+            me == small()
+        );
+        assert!(
+            out.iter().any(|o| matches!(
+                o,
+                Output::Reset {
+                    transition: Transition::Move,
+                    ..
+                }
+            )),
+            "as a move: {out:?}"
+        );
+        assert!(
+            out.iter()
+                .any(|o| matches!(o, Output::Retire { link: l, .. } if *l == old)),
+            "the link the peer left is retired: {out:?}"
+        );
+        assert_eq!(a.held(&peer).map(|h| h.link), Some(link));
+    }
+}
+
 /// Records current behaviour (rule XX-03): open to change by decision. The
 /// incidental part is the count that refuses; the refusal at msg3 is not.
 #[test]

@@ -7,9 +7,12 @@
 //! dial, in flight when the session held was installed and not heard under
 //! since, is kept at once and sends no msg3; anything else is settled by
 //! address order, the smaller node moving onto its dial and the larger
-//! keeping the peer where it is. Every decision but the own-dial keep waits
-//! for the outcome of the msg3 send, since next promotes only once the msg3
-//! is out (`handshake.rs`, the msg3 send before `install_handshake`).
+//! keeping the peer where it is. A keep of a peer held on a link this node
+//! dialed is a second handshake dialed by the same side, and it too sends
+//! no msg3 (the same-side rule's initiator half, FRC-2201 Section 5.7).
+//! Every other decision waits for the outcome of the msg3 send, since next
+//! promotes only once the msg3 is out (`handshake.rs`, the msg3 send before
+//! `install_handshake`).
 
 use alloc::vec::Vec;
 
@@ -174,6 +177,16 @@ pub(super) fn msg2<I: Instant>(
             let crossed = xx_fault!(CrossedRunsKeep) || node_fault!(CrossedRunsKeep);
             if ops.me() < peer && !crossed {
                 How::Swap { own }
+            } else if own && !(xx_fault!(SameSideFinalSent) || node_fault!(SameSideFinalSent)) {
+                // The same-side rule's initiator half: a second handshake
+                // dialed off a link this node dialed, which address order
+                // keeps, sends no msg3 and ends, so the responder, which
+                // moves at a same-side msg3, never meets one the initiator
+                // dropped (FRC-2201 Section 5.7). No path is offered: that
+                // belongs to the race the own-dial keep is for.
+                ops.flow_mut().forget(link);
+                ops.keep(peer, link, out);
+                return;
             } else {
                 How::Keep
             }

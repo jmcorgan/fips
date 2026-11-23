@@ -52,7 +52,10 @@ it (`Table<TestInstant, Xx>`), declared from `../mod.rs` as `tests`.
   `NextParty` nodes with the same deliveries: each flow node must log, peer
   by peer, the events and outcomes the next node in its place logs (link
   numbers aside), end on the same sessions, and differ from the judge only
-  where `judged.rs` names a cause for next.
+  where `judged.rs` names a cause for next. The larger node's redial off a
+  link it dialed runs on flow nodes alone, since the flow withholds that
+  redial's msg3 where next sends it (the same-side rule); its one
+  difference from the judge is row N2's.
 - `faults.rs`: each switch's row, the tests listed as characterisation
   with why, and the meta-test, which runs under the `slow-tests` feature:
   each row's tests in a child with the switch on, which must fail, and

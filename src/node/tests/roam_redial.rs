@@ -43,8 +43,10 @@
 //! On this line the link handshake is Noise XX: the dialler's identity
 //! first appears at its msg3, so B answers a dial from A's new address
 //! before it knows the dial is A's, and settles the msg3 against the
-//! peering it holds by the crossing rule, which goes by node-address order.
-//! The responder tests therefore state each order on its own.
+//! peering it holds. A dialed that peering's link too, so B takes the msg3
+//! for a second handshake dialed by the same side and moves onto it in
+//! either node-address order (FRC-2201 Section 5.7). The responder tests
+//! still state each order on its own.
 
 use super::paths::{beacon, capable_at, loopback};
 use super::settle::with_path;
@@ -766,16 +768,17 @@ fn refusals(r: &HandshakeStatsSnapshot) -> u64 {
         + r.off_link
 }
 
-/// A redial from A, the smaller node, as this line settles it. A's dial
-/// from its new address reaches B 5 s after the change, and B answers it.
-/// B learns that the dial is A's only at its msg3, which arrives on a link
-/// other than the one B holds A on and declares no rekey, so B settles it
-/// as a crossing by node-address order: with A the smaller, B moves onto the
-/// dial's session and link. Both ends hold it 5 s after the change, B on
-/// the dial's link (`How::NewLink`). One msg1 and one msg2
+/// A redial from A as this line settles it, in either address order. A's
+/// dial from its new address reaches B 5 s after the change, and B answers
+/// it. B learns that the dial is A's only at its msg3, which arrives on a
+/// link other than the one B holds A on and declares no rekey. A dialed
+/// that link as well, so the msg3 is a second handshake dialed by the same
+/// side, and B moves onto the dial's session and link whichever node is
+/// the smaller (FRC-2201 Section 5.7). Both ends hold it 5 s after the
+/// change, B on the dial's link (`How::NewLink`). One msg1 and one msg2
 /// pass, none of them stale, B refuses nothing and never drops A, and A,
 /// which withdrew B at the detach, dropped it at the change.
-fn smaller_settles_at_its_msg3(o: &Outcome) -> bool {
+fn settles_at_its_msg3(o: &Outcome) -> bool {
     o.first_msg1 == Some(5.0)
         && o.msg1s == 1
         && refusals(&o.b_refused) == 0
@@ -788,46 +791,17 @@ fn smaller_settles_at_its_msg3(o: &Outcome) -> bool {
         && o.works
 }
 
-/// A redial from A, the larger node, as this line settles it: the open
-/// case of issue 130 here. B answers the dial 5 s after the change, A
-/// promotes B on B's msg2, and at the dial's msg3 B, the smaller node,
-/// keeps the session it holds A on. The two ends then sit on different
-/// sessions until B's link-dead reaper removes A 30 s after the change,
-/// and A's next dial settles on a new link at 40 s. Two msg1s and two
-/// msg2s pass, none of them stale, and B refuses nothing.
-fn larger_settles_after_the_reap(o: &Outcome) -> bool {
-    o.first_msg1 == Some(5.0)
-        && o.msg1s == 2
-        && refusals(&o.b_refused) == 0
-        && o.msg2s == 2
-        && o.stale_msg2s == 0
-        && o.a_dropped == Some(0.0)
-        && o.b_dropped.is_some_and(|d| (29.5..=30.5).contains(&d))
-        && o.settled == Some(40.0)
-        && o.how == Some(How::NewLink)
-        && o.works
-}
-
 /// A's interface goes and comes back at a new address, and its reconnect
-/// dials B 5 s later, at each link age of `ages` at the change. A redial
-/// from the smaller node settles at its msg3
-/// ([`smaller_settles_at_its_msg3`]); one from the larger node settles only
-/// after B reaps the old peering ([`larger_settles_after_the_reap`]).
-async fn redial_settles_by_order(mp: Multipath, ages: &[u64]) {
+/// dials B 5 s later, at each link age of `ages` at the change. The redial
+/// settles at its msg3 in both address orders ([`settles_at_its_msg3`]).
+async fn redial_settles_at_its_msg3(mp: Multipath, ages: &[u64]) {
     for &age in ages {
         let outcomes = responder_runs(mp, age, Trigger::Detach, 90).await;
         for ((a_smaller, _), o) in RUNS.into_iter().zip(outcomes) {
-            if a_smaller {
-                assert!(
-                    smaller_settles_at_its_msg3(&o),
-                    "A smaller, age {age}: {o:?}"
-                );
-            } else {
-                assert!(
-                    larger_settles_after_the_reap(&o),
-                    "A larger, age {age}: {o:?}"
-                );
-            }
+            assert!(
+                settles_at_its_msg3(&o),
+                "A smaller {a_smaller}, age {age}: {o:?}"
+            );
         }
     }
 }
@@ -841,39 +815,39 @@ const AGED: [u64; 2] = [60, 51];
 const YOUNG: [u64; 1] = [10];
 
 #[tokio::test]
-async fn a_redial_from_a_new_address_on_an_aged_link_settles_at_5_s_from_the_smaller_node_and_at_40_s_from_the_larger_after_the_responder_reaps_multipath_off()
+async fn a_redial_from_a_new_address_on_an_aged_link_settles_at_5_s_at_its_msg3_from_either_node_multipath_off()
  {
-    redial_settles_by_order(Multipath::Off, &AGED).await;
+    redial_settles_at_its_msg3(Multipath::Off, &AGED).await;
 }
 
 #[tokio::test]
-async fn a_redial_from_a_new_address_on_an_aged_link_settles_at_5_s_from_the_smaller_node_and_at_40_s_from_the_larger_after_the_responder_reaps_multipath_on()
+async fn a_redial_from_a_new_address_on_an_aged_link_settles_at_5_s_at_its_msg3_from_either_node_multipath_on()
  {
-    redial_settles_by_order(Multipath::On, &AGED).await;
+    redial_settles_at_its_msg3(Multipath::On, &AGED).await;
 }
 
 #[tokio::test]
-async fn a_redial_from_a_new_address_on_an_aged_link_settles_at_5_s_from_the_smaller_node_and_at_40_s_from_the_larger_after_the_responder_reaps_multipath_on_at_the_redialler_only()
+async fn a_redial_from_a_new_address_on_an_aged_link_settles_at_5_s_at_its_msg3_from_either_node_multipath_on_at_the_redialler_only()
  {
-    redial_settles_by_order(Multipath::AOnly, &AGED).await;
+    redial_settles_at_its_msg3(Multipath::AOnly, &AGED).await;
 }
 
 #[tokio::test]
-async fn a_redial_from_a_new_address_on_an_aged_link_settles_at_5_s_from_the_smaller_node_and_at_40_s_from_the_larger_after_the_responder_reaps_multipath_on_at_the_responder_only()
+async fn a_redial_from_a_new_address_on_an_aged_link_settles_at_5_s_at_its_msg3_from_either_node_multipath_on_at_the_responder_only()
  {
-    redial_settles_by_order(Multipath::BOnly, &AGED).await;
+    redial_settles_at_its_msg3(Multipath::BOnly, &AGED).await;
 }
 
 #[tokio::test]
-async fn a_redial_from_a_new_address_on_a_young_link_settles_at_5_s_from_the_smaller_node_and_at_40_s_from_the_larger_after_the_responder_reaps_multipath_off()
+async fn a_redial_from_a_new_address_on_a_young_link_settles_at_5_s_at_its_msg3_from_either_node_multipath_off()
  {
-    redial_settles_by_order(Multipath::Off, &YOUNG).await;
+    redial_settles_at_its_msg3(Multipath::Off, &YOUNG).await;
 }
 
 #[tokio::test]
-async fn a_redial_from_a_new_address_on_a_young_link_settles_at_5_s_from_the_smaller_node_and_at_40_s_from_the_larger_after_the_responder_reaps_multipath_on()
+async fn a_redial_from_a_new_address_on_a_young_link_settles_at_5_s_at_its_msg3_from_either_node_multipath_on()
  {
-    redial_settles_by_order(Multipath::On, &YOUNG).await;
+    redial_settles_at_its_msg3(Multipath::On, &YOUNG).await;
 }
 
 /// A is cut off both ways for 40 s from the change: both ends' link-dead
@@ -911,8 +885,8 @@ async fn after_an_outage_past_the_link_dead_timeout_both_ends_reap_and_the_redia
 
 /// Issue 130's reported shape, on the detach trigger: a redial from a new
 /// address settles before the responder reaps the old peering. A is the
-/// smaller node when `a_smaller`. On this line the redial of the smaller
-/// node meets it and the redial of the larger does not.
+/// smaller node when `a_smaller`. On this line the redial meets it in both
+/// address orders.
 async fn settles_before_the_old_peering_is_reaped(mp: Multipath, a_smaller: bool) {
     let o = responder(mp, a_smaller, 60, Trigger::Detach, OldAddr::Blackhole, 90).await;
     eprintln!("{o:?}");
@@ -922,7 +896,7 @@ async fn settles_before_the_old_peering_is_reaped(mp: Multipath, a_smaller: bool
     );
 }
 
-/// The target with A the smaller node, which this line meets.
+/// The target with A the smaller node.
 #[tokio::test]
 async fn a_redial_from_a_new_address_settles_before_the_responder_reaps_the_old_peering() {
     settles_before_the_old_peering_is_reaped(Multipath::Off, true).await;
@@ -935,10 +909,9 @@ async fn a_redial_from_a_new_address_settles_before_the_responder_reaps_the_old_
     settles_before_the_old_peering_is_reaped(Multipath::On, true).await;
 }
 
-/// The target with A the larger node, which this line misses: the redial
-/// settles at 40 s, after B reaps the old peering at 30 s.
+/// The target with A the larger node: B, the smaller, moves at the
+/// redial's msg3 by the same-side rule.
 #[tokio::test]
-#[ignore = "known defect: issue 130 on this line, a redial from a new address by the larger node settles only after the responder reaps the old peering"]
 async fn a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering()
  {
     settles_before_the_old_peering_is_reaped(Multipath::Off, false).await;
@@ -946,7 +919,6 @@ async fn a_redial_from_a_new_address_by_the_larger_node_settles_before_the_respo
 
 /// The same with multipath on.
 #[tokio::test]
-#[ignore = "known defect: issue 130 on this line, a redial from a new address by the larger node settles only after the responder reaps the old peering"]
 async fn a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering_with_multipath_on()
  {
     settles_before_the_old_peering_is_reaped(Multipath::On, false).await;

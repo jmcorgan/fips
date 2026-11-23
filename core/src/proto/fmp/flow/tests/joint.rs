@@ -1066,24 +1066,42 @@ fn two_dials_of_one_flow_node_answered_in_turn_log_what_next_does() {
 }
 
 #[test]
-fn a_redial_by_either_flow_node_while_it_holds_the_peer_logs_what_next_does() {
-    for (x, expected) in [
-        (0, &[][..]),
-        (
-            1,
-            &[(S, Known::SameSideByOrder), (L, Known::SameSideByOrder)][..],
-        ),
-    ] {
-        let r = both(|r| {
-            r.dial(x);
-            r.drain();
-            r.at(5_000);
-            r.dial(x);
-            r.drain();
-        });
-        assert_eq!(r.held(0), r.held(1), "node {x}: both ends on one session");
-        assert_eq!(r.known(), expected, "node {x}");
-    }
+fn a_redial_by_the_smaller_flow_node_while_it_holds_the_peer_logs_what_next_does() {
+    let r = both(|r| {
+        r.dial(0);
+        r.drain();
+        r.at(5_000);
+        r.dial(0);
+        r.drain();
+    });
+    assert_eq!(r.held(0), r.held(1), "both ends on one session");
+    assert_eq!(r.known(), []);
+}
+
+/// The flow departs from next's transcribed rules here, by the same-side
+/// rule: the larger node, holding the peer on a link it dialed, dials again
+/// and ends the redial at its msg2 with no msg3, where next sends one and
+/// the smaller node keeps the old link at it. Both ends stay on the first
+/// session either way; the judge, without the live test (row N2), moves
+/// the larger node onto the redial.
+#[test]
+fn a_redial_by_the_larger_flow_node_off_a_link_it_dialed_sends_no_msg3_and_both_ends_keep_that_link()
+ {
+    let mut r = Run::new(Rules::Flow);
+    r.dial(1);
+    r.drain();
+    r.at(5_000);
+    let first = r.held(1);
+    assert!(first.is_some(), "precondition: the first dial installs");
+    r.dial(1);
+    r.drain();
+    assert!(
+        !r.world.net.flight.iter().any(|f| m3(&f.pkt)),
+        "no msg3 in flight"
+    );
+    assert_eq!(r.held(1), first, "the larger node keeps the link it dialed");
+    assert_eq!(r.held(0), r.held(1), "defect: the ends hold other sessions");
+    assert_eq!(r.known(), [(L, Known::OwnLinkKept)]);
 }
 
 #[test]

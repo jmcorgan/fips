@@ -140,7 +140,9 @@ named for off. The other files run off, which is what they test.
   end, after the smaller node's link-dead reap and reconnect, on one
   working session held `Outbound` at one end and `Inbound` at the other; a
   peer the smaller node alone drops and redials must stay, through the
-  larger node's later dial, on one session on the smaller node's dial; and
+  larger node's later dial, on one session on the smaller node's dial; a
+  peer the larger node dialed and dials again must stay on one session on
+  its first dial, the later dial's msg3 withheld by the same-side rule; and
   the smaller node's redial after the mixed-schedule crossing of
   `crossing.rs` must leave it `Outbound` and the larger `Inbound`. Each
   turns on the larger node's msg3 crossing, which holds it on the link the

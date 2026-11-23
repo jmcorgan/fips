@@ -1275,7 +1275,10 @@ impl Node {
         // session, with nothing heard under it since, sends no msg3, so the
         // peer completes only the handshake the held session came from,
         // whatever order the two transports deliver the msg3s in (the
-        // own-dial keep). Any other decision waits for the msg3's send. A
+        // own-dial keep). Nor does a later dial of the larger node to a peer
+        // it holds on a link it dialed: the peer would move onto it at the
+        // msg3 while this node keeps the link it holds (the same-side rule,
+        // FRC-2201 Section 5.7). Any other decision waits for the msg3's send. A
         // link the core does not number, which only a test makes, or a msg2
         // the core decides nothing for, ends the dial's leg.
         let msg2_out = self
@@ -1287,6 +1290,7 @@ impl Node {
             })
             .unwrap_or_default();
         let withhold = crate::node::settle::decide::withholds(&msg2_out).unwrap_or(false);
+        let offered = crate::node::settle::decide::offers(&msg2_out);
         let mut sent_out = Vec::new();
 
         // Build and send msg3, on the msg2's connection. A reply on the rx
@@ -1300,7 +1304,8 @@ impl Node {
                 peer = %self.peer_display_name(&peer_node_addr),
                 link_id = %link_id,
                 their_index = %header.sender_idx,
-                "Second dial of ours, in flight when another dial installed the peer, unheard since: keeping the held session, no msg3"
+                beside = offered,
+                "Second dial of ours to a peer held on our own dial: keeping the held session, no msg3"
             );
         } else if let Some(transport) = self.transports.get(&packet.transport_id) {
             match transport
@@ -1605,7 +1610,7 @@ impl Node {
                 facts.lease = carrier_our_index;
                 facts.loser = Some(link_id);
                 self.run(&mut run).await;
-                if withhold {
+                if offered {
                     // The msg2 authenticated the peer at the dial's pair, and
                     // nothing else offers that pair: without it the peer's
                     // next beacon there reads as a stranger's and is dialled

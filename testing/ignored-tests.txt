@@ -93,12 +93,6 @@ helper        fips-mesh  node::tests::settle::lane::a_planted_switch_reds_at_its
 helper        fips-mesh  nostr::tests::fixtures::capture_the_v044_fixtures  src/nostr/tests/fixtures.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
 known-defect  fips-mesh  node::tests::restart_dial::a_larger_node_still_hearing_a_restarted_peer_settles_on_one_session_when_both_dial_and_the_peer_reads_its_own_answer_first  src/node/tests/restart_dial.rs
-# The next two are issue 130 on this line, with multipath off and on: a
-# redial from a new address by the larger node settles only after the
-# responder reaps the old peering. The smaller node's redial settles at its
-# msg3, and its target tests run.
-known-defect  fips-mesh  node::tests::roam_redial::a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering  src/node/tests/roam_redial.rs
-known-defect  fips-mesh  node::tests::roam_redial::a_redial_from_a_new_address_by_the_larger_node_settles_before_the_responder_reaps_the_old_peering_with_multipath_on  src/node/tests/roam_redial.rs
 # The next two, with multipath off and on: a smaller node's two concurrent dials,
 # the first dial's msg3 lost and the second's withheld by the own-dial keep, leave
 # the larger node holding no session for the smaller until the link-dead timeout.

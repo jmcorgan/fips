@@ -1471,10 +1471,13 @@ async fn a_pin_is_kept_when_our_second_dial_from_the_larger_address_to_a_peering
 /// a peering, made by its own dial when `dialer_dialled_first`, else by the
 /// peer's, and pins its link; the peer drops the peering (as its own
 /// link-dead reap does), and the dialer dials the peer again on a second
-/// address. The peer promotes the dial as a new peering; the dialer
-/// settles the dial by address order, as a crossed handshake, which it
-/// cannot tell this from, holding the dial's link where it moves to the
-/// dial's session and its own otherwise. Its pin is kept either way.
+/// address. The dialer settles the dial by address order, as a crossed
+/// handshake, which it cannot tell this from, holding the dial's link where
+/// it moves to the dial's session and its own otherwise. The peer promotes
+/// the dial as a new peering, except where the dialer is the larger and
+/// holds the peering on its own dial: then the dialer ends the dial at its
+/// msg2 with no msg3 (the same-side rule), so the peer holds nothing until
+/// the dialer's link-dead reap. The dialer's pin is kept either way.
 async fn pin_when_the_peer_dropped_the_peering_first(
     dialer_smaller: bool,
     dialer_dialled_first: bool,
@@ -1495,14 +1498,16 @@ async fn pin_when_the_peer_dropped_the_peering_first(
 
     second_dial(&mut nodes, d, p, &alternate).await;
 
+    let withheld = !dialer_smaller && dialer_dialled_first;
     assert_ne!(
         nodes[p].node.get_peer(&dialer_addr).map(|x| x.link_id()),
         Some(peer_link_before),
-        "precondition: the peer promoted the dial as a new peering ({orientation})"
+        "precondition: the peer did not take back the dropped peering ({orientation})"
     );
-    assert!(
+    assert_eq!(
         nodes[p].node.get_peer(&dialer_addr).is_some(),
-        "precondition: the peer holds the dialer again ({orientation})"
+        !withheld,
+        "precondition: the peer holds the dialer again unless the dial's msg3 was withheld ({orientation})"
     );
     let dialer_after = link_view(&nodes[d], &peer_addr);
     let moved = dialer_after.our_index != dialer_before.our_index;

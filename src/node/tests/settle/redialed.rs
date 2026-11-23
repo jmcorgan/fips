@@ -24,6 +24,9 @@
 //! - A peer the larger node dialed, which the smaller node alone removes and
 //!   redials, after which the larger node dials again: the pair must end on
 //!   one working session on the smaller node's dial.
+//! - A peer the larger node dialed and dials again: address order keeps the
+//!   larger node, which withholds the later dial's msg3 by the same-side
+//!   rule, so the pair must stay on one working session on its first dial.
 //! - After the crossing the larger node settles at the peer's msg3 and the
 //!   smaller at its own msg2 (the mixed schedule of `crossing.rs`), the
 //!   smaller node's redial over a dropped connection must leave the pair on
@@ -317,6 +320,73 @@ async fn a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_a
 async fn a_peer_the_smaller_node_alone_drops_and_redials_then_the_larger_dials_again_stays_on_one_session_on_the_smaller_nodes_dial_with_multipath_on()
  {
     dial_after(true).await;
+}
+
+// ---------------------------------------------------------------------------
+// The larger node dials again a peer it holds on its own dial
+// ---------------------------------------------------------------------------
+
+/// The larger node dials the smaller, each hears the other, and the larger
+/// node dials the smaller again. Address order keeps the larger node where
+/// it is, and the same-side rule withholds the later dial's msg3, so the
+/// smaller node, which moves at a same-side msg3, never meets one: the pair
+/// must stay on one working session on the larger node's first dial, the
+/// larger node holding it `Outbound` and the smaller `Inbound`.
+async fn larger_dials_again(on: bool) {
+    let mut nodes = tcp_pair(on, true).await;
+    let (s, l) = (0, 1);
+    tcp_dial(&mut nodes, l, s).await;
+    resolve_connect(&mut nodes[l]).await;
+    pump(&mut nodes).await;
+    heartbeat_reaches(&mut nodes, s, l)
+        .await
+        .expect("precondition: frames authenticate from the smaller node");
+    heartbeat_reaches(&mut nodes, l, s)
+        .await
+        .expect("precondition: frames authenticate from the larger node");
+    let link = |nodes: &[TestNode], at: usize, of: usize| {
+        nodes[at]
+            .node
+            .get_peer(nodes[of].node.node_addr())
+            .map(|p| p.link_id())
+    };
+    let before = (link(&nodes, s, l), link(&nodes, l, s));
+    tcp_dial(&mut nodes, l, s).await;
+    resolve_connect(&mut nodes[l]).await;
+    pump(&mut nodes).await;
+    let works = settled(&mut nodes, s, l).await;
+    let held = directions(&nodes, s, l);
+    let after = (link(&nodes, s, l), link(&nodes, l, s));
+    cleanup_nodes(&mut nodes).await;
+    let mut bad = Vec::new();
+    if let Err(e) = works {
+        bad.push(format!(
+            "after the larger node's later dial the pair is not on one working session: {e}"
+        ));
+    }
+    if (held, after)
+        != (
+            (Some(LinkDirection::Inbound), Some(LinkDirection::Outbound)),
+            before,
+        )
+    {
+        bad.push(format!(
+            "the larger node's later dial moved the pair off its first dial: (smaller, larger) hold {held:?} on links {after:?}, were on {before:?}"
+        ));
+    }
+    assert!(bad.is_empty(), "defect: {bad:#?}");
+}
+
+#[tokio::test]
+async fn a_peer_the_larger_node_dialed_and_dials_again_stays_on_one_session_on_its_first_dial() {
+    larger_dials_again(false).await;
+}
+
+/// [`a_peer_the_larger_node_dialed_and_dials_again_stays_on_one_session_on_its_first_dial`] with multipath on.
+#[tokio::test]
+async fn a_peer_the_larger_node_dialed_and_dials_again_stays_on_one_session_on_its_first_dial_with_multipath_on()
+ {
+    larger_dials_again(true).await;
 }
 
 // ---------------------------------------------------------------------------
