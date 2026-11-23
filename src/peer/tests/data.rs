@@ -326,6 +326,7 @@ fn dirtied(at: At) -> PeerData {
         heard_at: at.peer,
         frame_heard: true,
         handshake_msg2: Some(vec![9; 40]),
+        handshake_msg3: Some((LinkId::new(7), vec![8; 40])),
         hs_lines,
         replay_total: Arc::new(AtomicU64::new(8)),
         replay_base: 3,
@@ -375,6 +376,7 @@ fn rows(data: &PeerData) -> Vec<(DataRow, String)> {
         heard_at,
         frame_heard,
         handshake_msg2,
+        handshake_msg3,
         hs_lines,
         replay_total,
         replay_base,
@@ -405,7 +407,10 @@ fn rows(data: &PeerData) -> Vec<(DataRow, String)> {
             format!("{tree_announce_min_interval_ms}"),
         ),
         (DataRow::Heard, format!("{frame_heard} {heard_at:?}")),
-        (DataRow::StoredSetup, format!("{handshake_msg2:?}")),
+        (
+            DataRow::StoredSetup,
+            format!("{handshake_msg2:?} {handshake_msg3:?}"),
+        ),
         (
             DataRow::Stats,
             format!(
@@ -918,8 +923,8 @@ fn destructure_scans(source: &str) {
     let fields = declared_fields(source);
     assert_eq!(
         fields.len(),
-        26,
-        "precondition: the scan reads the record's 26 fields"
+        27,
+        "precondition: the scan reads the record's 27 fields"
     );
     assert_eq!(
         destructure_faults(source),

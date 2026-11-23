@@ -150,9 +150,11 @@ named for off. The other files run off, which is what they test.
   which answers a redial at the msg1.
 - `withheld.rs`: a lost first msg3 beside a withheld one. The smaller node
   dials on two loopback transports at once, the second dial's msg3 is
-  withheld by the own-dial keep, and the first dial's msg3 is lost: the
-  larger node must still hold the smaller on the smaller's session. A known
-  defect on this line, with multipath off and on.
+  withheld by the own-dial keep, and the first dial's msg3 is lost; or the
+  larger node's msg3 is lost and its later dial is withheld by the
+  same-side rule. The node resends the first msg3 on its own link at the
+  withhold, so the peer must still hold the dialer on the dialer's session,
+  with multipath off and on.
 - `table/`: the transition table checked on real nodes. Its `mod.rs` is
   the harness: a reading of every row of a peer's state on one node
   (`Seen`), a writer that makes every row it can reach differ from a fresh

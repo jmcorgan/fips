@@ -664,6 +664,11 @@ faults! {
     /// session it leaves, so a dial in flight at the move is no longer
     /// beside the node's own unheard dial and sends its msg3.
     MoveKeepsFramed,
+    /// The node: a later dial ended at its msg2 with no msg3, before the
+    /// peer was heard under the session held, does not resend the msg3 of
+    /// the dial that installed it, so a lost one leaves the peer holding
+    /// nothing until the link-dead timeout.
+    WithheldMsg3NotResent,
 }
 
 impl Fault {

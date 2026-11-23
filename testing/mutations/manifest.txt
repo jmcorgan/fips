@@ -412,3 +412,7 @@ SameSideFinalSent	red	fips-mesh	node::tests::settle::redialed::a_peer_the_larger
 MoveKeepsFramed	red	fips-core	proto::fmp::flow::tests::msg2::a_dial_in_flight_at_the_smaller_nodes_move_is_beside_its_new_own_dial_though_the_peer_was_heard_before
 MoveKeepsFramed	red	fips-mesh	node::tests::double_dial::a_frame_heard_before_a_move_does_not_let_a_second_dial_cross_the_ends	both ends hold one session
 MoveKeepsFramed	red	fips-mesh	node::tests::double_dial::a_frame_heard_before_a_move_does_not_let_a_second_dial_cross_the_ends_with_multipath_on	both ends hold one session
+WithheldMsg3NotResent	red	fips-mesh	node::tests::settle::withheld::a_lost_first_msg3_beside_a_withheld_second_dial_leaves_the_larger_node_holding_the_smaller
+WithheldMsg3NotResent	red	fips-mesh	node::tests::settle::withheld::a_lost_first_msg3_beside_a_withheld_second_dial_leaves_the_larger_node_holding_the_smaller_with_multipath_on
+WithheldMsg3NotResent	red	fips-mesh	node::tests::settle::withheld::a_lost_first_msg3_before_a_withheld_same_side_dial_leaves_the_smaller_node_holding_the_larger
+WithheldMsg3NotResent	red	fips-mesh	node::tests::settle::withheld::a_lost_first_msg3_before_a_withheld_same_side_dial_leaves_the_smaller_node_holding_the_larger_with_multipath_on

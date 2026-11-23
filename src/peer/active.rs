@@ -1191,6 +1191,23 @@ impl ActivePeer {
         self.data.handshake_msg2.as_deref()
     }
 
+    /// Store the wire-format msg3 of this node's dial on `link`, sent as
+    /// the dial installed the session held.
+    pub(crate) fn set_handshake_msg3(&mut self, link: LinkId, msg3: Vec<u8>) {
+        self.data.handshake_msg3 = Some((link, msg3));
+    }
+
+    /// The msg3 of this node's dial that installed the session held, for a
+    /// resend: only while the peer is held on that dial's link and nothing
+    /// has been heard under the session (FRC-2201 Section 7.6 keeps a msg3
+    /// until a frame of the peer's authenticates under its session).
+    pub(crate) fn handshake_msg3(&self) -> Option<&[u8]> {
+        match &self.data.handshake_msg3 {
+            Some((link, msg3)) if *link == self.link_id() && !self.heard_on_session() => Some(msg3),
+            _ => None,
+        }
+    }
+
     // === Replay Detection Suppression ===
 
     /// Increment replay suppression counter. Returns the new count.
@@ -1516,7 +1533,6 @@ impl ActivePeer {
     /// session the move left shows only that the peer held that one.
     ///
     /// [`heard`]: ActivePeer::heard
-    #[cfg(test)]
     pub(crate) fn heard_on_session(&self) -> bool {
         self.rekey
             .as_ref()

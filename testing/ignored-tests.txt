@@ -93,11 +93,6 @@ helper        fips-mesh  node::tests::settle::lane::a_planted_switch_reds_at_its
 helper        fips-mesh  nostr::tests::fixtures::capture_the_v044_fixtures  src/nostr/tests/fixtures.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
 known-defect  fips-mesh  node::tests::restart_dial::a_larger_node_still_hearing_a_restarted_peer_settles_on_one_session_when_both_dial_and_the_peer_reads_its_own_answer_first  src/node/tests/restart_dial.rs
-# The next two, with multipath off and on: a smaller node's two concurrent dials,
-# the first dial's msg3 lost and the second's withheld by the own-dial keep, leave
-# the larger node holding no session for the smaller until the link-dead timeout.
-known-defect  fips-mesh  node::tests::settle::withheld::a_lost_first_msg3_beside_a_withheld_second_dial_leaves_the_larger_node_holding_the_smaller  src/node/tests/settle/withheld.rs
-known-defect  fips-mesh  node::tests::settle::withheld::a_lost_first_msg3_beside_a_withheld_second_dial_leaves_the_larger_node_holding_the_smaller_with_multipath_on  src/node/tests/settle/withheld.rs
 # A known defect on next, on the BLE mock: a crossed dial answered over the peer's
 # own dial connection moves the smaller node onto its dial there and leaves the
 # connection it dialled open with no link using it.

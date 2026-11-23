@@ -24,7 +24,7 @@ use crate::proto::bloom::BloomFilter;
 use crate::proto::fmp::NodeProfile;
 use crate::proto::mmp::MmpPeerState;
 use crate::proto::stp::{ParentDeclaration, TreeCoordinate};
-use crate::transport::LinkStats;
+use crate::transport::{LinkId, LinkStats};
 use crate::utils::index::SessionIndex;
 use portable_atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -101,6 +101,12 @@ pub(super) struct PeerData {
     /// Wire-format msg2 for resend on duplicate msg1 (responder only).
     /// Kept for the life of the peering: nothing clears it.
     pub(super) handshake_msg2: Option<Vec<u8>>,
+    /// The wire-format msg3 of this node's dial that installed the session
+    /// held, with that dial's link (initiator only), resent when a later
+    /// dial of this node's is ended with no msg3 before the peer is heard.
+    /// Kept for the life of the peering; it is read only while the peer is
+    /// held on that link and unheard under the session.
+    pub(super) handshake_msg3: Option<(LinkId, Vec<u8>)>,
 
     // === Counts ===
     /// Repeated handshake lines logged for this peer, by kind, so a peer
@@ -148,6 +154,7 @@ impl PeerData {
             heard_at: now,
             frame_heard: false,
             handshake_msg2: None,
+            handshake_msg3: None,
             hs_lines: HsLineCounts::default(),
             replay_total: Arc::new(AtomicU64::new(0)),
             replay_base: 0,
@@ -184,6 +191,7 @@ impl PeerData {
             heard_at: _,
             frame_heard: _,
             handshake_msg2: _,
+            handshake_msg3: _,
             hs_lines,
             replay_total,
             replay_base,
@@ -334,6 +342,7 @@ impl PeerData {
             heard_at: _,
             frame_heard,
             handshake_msg2: _,
+            handshake_msg3: _,
             hs_lines,
             replay_total,
             replay_base,

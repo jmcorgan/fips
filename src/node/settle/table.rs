@@ -121,7 +121,7 @@ listed! {
         TreeInterval,
         /// `frame_heard`, `heard_at`.
         Heard,
-        /// The stored msg2.
+        /// The stored msg2, and the stored msg3 with its dial's link.
         StoredSetup,
         /// `link_stats`, `authenticated_at`, `last_seen`, the heartbeat stamps
         /// and `failed_idx`.

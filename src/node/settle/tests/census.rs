@@ -166,10 +166,13 @@ const PATH_DRIVER: &[(&str, Held)] = &[
 /// new setter takes a line here only with a reason its state has no event.
 /// `set_past_feed` writes no state of the peer's: it puts back the test's
 /// mark that the live audit's `links-mirror` reads, around the frame's
-/// accounting.
+/// accounting. `set_handshake_msg3`, like `set_handshake_msg2`, keeps a
+/// handshake message for a resend, stored by the dial that sent it as it
+/// installs the peer; no transition reads or resets it.
 const SETTERS: &[&str] = &[
     "set_connected_udp",
     "set_handshake_msg2",
+    "set_handshake_msg3",
     "set_tree_announce_min_interval_ms",
     "set_last_tree_announce_sent_ms",
     "set_link_id",

@@ -1307,6 +1307,13 @@ impl Node {
                 beside = offered,
                 "Second dial of ours to a peer held on our own dial: keeping the held session, no msg3"
             );
+            // The peer may never have had the msg3 of the dial the session
+            // held came from: resend it on that dial's link, so a lost one
+            // does not leave the peer holding nothing (FRC-2201 Section 7.6
+            // keeps a msg3 until the peer is heard under its session).
+            if !node_fault!(WithheldMsg3NotResent) {
+                self.resend_msg3(&peer_node_addr).await;
+            }
         } else if let Some(transport) = self.transports.get(&packet.transport_id) {
             match transport
                 .send_existing(&packet.remote_addr, &wire_msg3)
@@ -1578,6 +1585,7 @@ impl Node {
                     facts.epoch = Some(epoch);
                     facts.msg1 = sent_msg1_digest;
                     self.run(&mut run).await;
+                    self.keep_msg3(&peer_node_addr, link_id, wire_msg3);
                     return;
                 }
             } else {
@@ -1697,6 +1705,51 @@ impl Node {
             // The leaf's refusal in the promotion removed the dial's link,
             // so no pending dial may name it.
             self.pending_outbound.forget(&key);
+        }
+        self.keep_msg3(&peer_node_addr, link_id, wire_msg3);
+    }
+
+    /// Keep on `peer` the msg3 its dial on `link` sent, if that dial
+    /// installed the session it is held on.
+    fn keep_msg3(&mut self, peer: &NodeAddr, link: LinkId, msg3: Vec<u8>) {
+        if let Some(p) = self.peers.get_mut(peer)
+            && p.link_id() == link
+        {
+            p.set_handshake_msg3(link, msg3);
+        }
+    }
+
+    /// Resend, on its own link's connection, the msg3 of the dial that
+    /// installed `peer`'s session, while nothing has been heard under it.
+    /// A reply on the rx loop, so it never dials.
+    async fn resend_msg3(&mut self, peer: &NodeAddr) {
+        let Some(p) = self.peers.get(peer) else {
+            return;
+        };
+        let Some(msg3) = p.handshake_msg3().map(<[u8]>::to_vec) else {
+            return;
+        };
+        let Some((tid, addr)) = self
+            .links
+            .get(&p.link_id())
+            .map(|l| (l.transport_id(), l.remote_addr().clone()))
+        else {
+            return;
+        };
+        let Some(transport) = self.transports.get(&tid) else {
+            return;
+        };
+        match transport.send_existing(&addr, &msg3).await {
+            Ok(bytes) => debug!(
+                peer = %self.peer_display_name(peer),
+                bytes,
+                "Resent the held session's msg3, its peer not yet heard"
+            ),
+            Err(e) => debug!(
+                peer = %self.peer_display_name(peer),
+                error = %e,
+                "Failed to resend the held session's msg3"
+            ),
         }
     }
 
