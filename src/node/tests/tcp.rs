@@ -1359,6 +1359,48 @@ async fn a_leafs_second_dial_refused_at_its_msg2_closes_its_tcp_connection() {
     );
 }
 
+/// A responder whose pending-handshake cap is one answers a first
+/// initiator's msg1 and waits for its msg3, which does not come, since the
+/// initiator is not run. A second initiator's msg1 is then refused at the
+/// cap, because the first answer is still pending.
+#[tokio::test]
+async fn an_answer_waiting_for_its_msg3_holds_the_pending_cap_so_a_further_msg1_is_refused() {
+    let mut config = Config::new();
+    config.node.limits.max_pending_inbound = 1;
+    let mut nodes = vec![
+        make_test_node_tcp().await,
+        make_test_node_tcp_with(config).await,
+        make_test_node_tcp().await,
+    ];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    let answered = run_until(&mut nodes[1..2], |n| n[0].node.connection_count() == 1).await;
+    settle_for(&mut nodes[1..2], Duration::from_millis(200)).await;
+    let waiting = nodes[1].node.connection_count() == 1 && nodes[1].node.peer_count() == 0;
+    let bad = nodes[1].node.stats().handshake.bad_state;
+    initiate_handshake(&mut nodes, 2, 1).await;
+    let decided = run_until(&mut nodes[1..2], |n| {
+        n[0].node.connection_count() == 2 || n[0].node.stats().handshake.bad_state > bad
+    })
+    .await;
+    let legs = nodes[1].node.connection_count();
+    let refused = nodes[1].node.stats().handshake.bad_state > bad;
+    cleanup_nodes(&mut nodes).await;
+
+    assert!(
+        answered,
+        "precondition: the responder answered the first msg1"
+    );
+    assert!(
+        waiting,
+        "precondition: the first answer is still waiting for its msg3"
+    );
+    assert!(decided, "precondition: the responder read the second msg1");
+    assert!(
+        refused && legs == 1,
+        "defect: a msg1 past the pending cap was answered while an answer waits for its msg3: {legs} legs"
+    );
+}
+
 /// A responder that can draw no session index refuses a fresh inbound msg1
 /// at the msg1, before it knows who sent it. It closes the inbound TCP
 /// connection the msg1 came on, as nothing else uses it, so a second later

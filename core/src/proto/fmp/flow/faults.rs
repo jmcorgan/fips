@@ -27,9 +27,9 @@ pub(crate) enum Fault {
     /// msg1's source, as an IK answer names the msg1's identity, so the
     /// table's send rule takes it for that peer's answer.
     AnonLegNamed,
-    /// The admission cap counts an anonymous answer whose msg2 was sent, as
-    /// the IK flow counts every answer leg.
-    PendingCountsSentAnswers,
+    /// The admission cap stops counting an anonymous answer once its msg2
+    /// is sent, though the answer waits for its msg3.
+    PendingFreesSentAnswers,
     /// A msg2 completes under the identity its dial named, as an IK dial's
     /// does, so an anonymous dial never completes.
     AnonDialNamed,
@@ -86,7 +86,7 @@ impl Fault {
     /// Every switch, for the name lookup and the meta-test.
     pub(crate) const ALL: &'static [Fault] = &[
         Self::AnonLegNamed,
-        Self::PendingCountsSentAnswers,
+        Self::PendingFreesSentAnswers,
         Self::AnonDialNamed,
         Self::BesideOwnSendsFinal,
         Self::FinalBeforeSendOutcome,

@@ -18,8 +18,8 @@
 //! - **A msg1 names no one.** It opens an anonymous answer, with no gate,
 //!   cap or epoch, and the answer installs nothing at its send. A resend of
 //!   the same bytes from the same address draws the stored msg2 until the
-//!   msg3 comes, and the admission cap counts only the answers whose msg2
-//!   is not yet sent.
+//!   msg3 comes, and the admission cap counts each answer until its msg3,
+//!   a failure or its timeout ends it.
 //! - **A dial may name no one**, and its msg2 supplies the identity.
 //! - **The responder installs at msg3**, classified in the order next's
 //!   `establish_inbound` has: a new identity is promoted unless its silent
@@ -190,14 +190,15 @@ impl Xx {
     }
 
     /// The anonymous answers and asks whose leg or link is still in
-    /// `table` and that the admission cap counts: those whose msg2 is not
-    /// yet sent.
+    /// `table`, which the admission cap counts: an answer counts from its
+    /// msg1 until its msg3, a failure or its timeout ends its leg, whether
+    /// or not its msg2 is sent.
     fn pending<I: Instant>(&self, table: &Table<I, Self>) -> usize {
-        let every = xx_fault!(PendingCountsSentAnswers) || node_fault!(PendingCountsSentAnswers);
+        let frees = xx_fault!(PendingFreesSentAnswers) || node_fault!(PendingFreesSentAnswers);
         let answers = self
             .answers
             .iter()
-            .filter(|(l, a)| table.legs().get(**l).is_some() && (!a.sent || every))
+            .filter(|(l, a)| table.legs().get(**l).is_some() && !(a.sent && frees))
             .count();
         let asks = self
             .asks

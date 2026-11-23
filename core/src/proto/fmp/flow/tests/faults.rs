@@ -31,10 +31,10 @@ pub(crate) const ROWS: &[(Fault, &[Test])] = &[
         )],
     ),
     (
-        Fault::PendingCountsSentAnswers,
+        Fault::PendingFreesSentAnswers,
         &[(
             MSG1,
-            "the_admission_cap_counts_an_anonymous_answer_only_until_its_msg2_is_sent",
+            "the_admission_cap_counts_an_anonymous_answer_until_its_msg3_whether_or_not_its_msg2_was_sent",
         )],
     ),
     (
@@ -318,7 +318,7 @@ pub(crate) const CHARACTERISATION: &[(&str, &str)] = &[
         CHARACTERISED,
     ),
     (
-        "the_admission_cap_counts_asks_and_unsent_answers_and_a_sent_answer_frees_its_place",
+        "the_admission_cap_counts_asks_and_answers_until_their_end_and_a_refused_ask_frees_its_place",
         CHARACTERISED,
     ),
     (

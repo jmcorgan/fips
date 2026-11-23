@@ -580,9 +580,9 @@ faults! {
     /// peer held on the link at the msg1's source, so the table's send rule
     /// takes it for that peer's answer.
     AnonLegNamed,
-    /// The XX flow: the admission cap counts an anonymous answer whose msg2
-    /// was sent.
-    PendingCountsSentAnswers,
+    /// The XX flow: the admission cap stops counting an anonymous answer
+    /// once its msg2 is sent, though the answer waits for its msg3.
+    PendingFreesSentAnswers,
     /// The XX flow: a msg2 completes under the identity its dial named, so
     /// an anonymous dial never completes.
     AnonDialNamed,

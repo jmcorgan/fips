@@ -54,7 +54,7 @@ fn an_anonymous_answer_installs_nothing_at_its_send_and_waits_for_its_msg3_after
 }
 
 #[test]
-fn the_admission_cap_counts_an_anonymous_answer_only_until_its_msg2_is_sent() {
+fn the_admission_cap_counts_an_anonymous_answer_until_its_msg3_whether_or_not_its_msg2_was_sent() {
     let params = Params {
         pending: 1,
         ..Params::default()
@@ -84,9 +84,16 @@ fn the_admission_cap_counts_an_anonymous_answer_only_until_its_msg2_is_sent() {
     go(&mut a, Input::Sent { link }, 20);
     let out = go(&mut a, stranger(), 30);
     assert!(
-        !full(&out),
-        "defect: a sent answer, waiting only for its msg3, still holds the cap: {out:?}"
+        full(&out),
+        "defect: a sent answer, waiting for its msg3, no longer holds the cap: {out:?}"
     );
+    let out = xx(&mut a, msg3(link, small(), E1, RekeyClaim::None, 5), 40);
+    assert!(
+        installs(&out, small()),
+        "precondition: the msg3 installs: {out:?}"
+    );
+    let out = go(&mut a, stranger(), 50);
+    assert!(!full(&out), "the msg3 frees the cap's place: {out:?}");
 }
 
 #[test]

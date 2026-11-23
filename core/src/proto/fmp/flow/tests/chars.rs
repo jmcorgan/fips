@@ -101,7 +101,7 @@ fn the_gates_count_silent_sessions_and_refuse_as_nexts_silent_sessions_record_do
 }
 
 #[test]
-fn the_admission_cap_counts_asks_and_unsent_answers_and_a_sent_answer_frees_its_place() {
+fn the_admission_cap_counts_asks_and_answers_until_their_end_and_a_refused_ask_frees_its_place() {
     let params = Params {
         pending: 2,
         ..Params::default()
@@ -131,7 +131,10 @@ fn the_admission_cap_counts_asks_and_unsent_answers_and_a_sent_answer_frees_its_
     );
     go(&mut a, Input::Sent { link }, 20);
     let out = go(&mut a, stranger.clone_input(), 30);
-    assert!(!full(&out), "the sent answer frees its place: {out:?}");
+    assert!(
+        full(&out),
+        "the sent answer, waiting for its msg3, keeps its place: {out:?}"
+    );
     xx(
         &mut a,
         In::Refused {
@@ -144,6 +147,8 @@ fn the_admission_cap_counts_asks_and_unsent_answers_and_a_sent_answer_frees_its_
         a.links().get(ask).is_none(),
         "the refused ask's link is gone"
     );
+    let out = go(&mut a, stranger.clone_input(), 50);
+    assert!(!full(&out), "the refused ask frees its place: {out:?}");
 }
 
 /// A copy of an `Arrived` input, which is all this file copies.

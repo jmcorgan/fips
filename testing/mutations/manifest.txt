@@ -357,7 +357,8 @@ IntervalTen	red	fips-core	proto::settle::gates::tests::the_default_intervals_are
 # is read there as xx_fault!(X) || node_fault!(X), and its core tests red
 # through the node half until a root test reaches the site.
 AnonLegNamed	red	fips-core	proto::fmp::flow::tests::msg1::an_anonymous_answer_installs_nothing_at_its_send_and_waits_for_its_msg3_after_the_peer_at_its_source_is_gone
-PendingCountsSentAnswers	red	fips-core	proto::fmp::flow::tests::msg1::the_admission_cap_counts_an_anonymous_answer_only_until_its_msg2_is_sent
+PendingFreesSentAnswers	red	fips-core	proto::fmp::flow::tests::msg1::the_admission_cap_counts_an_anonymous_answer_until_its_msg3_whether_or_not_its_msg2_was_sent
+PendingFreesSentAnswers	red	fips-mesh	node::tests::tcp::an_answer_waiting_for_its_msg3_holds_the_pending_cap_so_a_further_msg1_is_refused
 AnonDialNamed	red	fips-core	proto::fmp::flow::tests::msg2::an_anonymous_dial_completes_under_the_identity_its_msg2_taught
 AnonDialNamed	red	fips-mesh	node::tests::handshake::test_anonymous_dial_msg2_promotes_whoever_answers	an anonymous dial promotes whoever answered it
 BesideOwnSendsFinal	red	fips-core	proto::fmp::flow::tests::msg2::a_msg2_beside_this_nodes_own_dial_is_kept_at_once_with_no_msg3_and_offers_its_pair

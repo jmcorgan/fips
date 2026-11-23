@@ -339,7 +339,7 @@ impl Node {
         // Pre-crypto: the settlement core answers a resend of the msg1 a
         // pending answer's leg at this address answered, byte for byte, with
         // that leg's stored msg2, and refuses a msg1 past the admission cap on
-        // answers whose msg2 is not yet sent. A different msg1 is a new attempt
+        // answers awaiting their msg3. A different msg1 is a new attempt
         // (a rekey, a fresh dial after a restart, or a stale leg left by a
         // replay or an abandoned attempt) and gets its own leg: XX msg2 is
         // bound to the initiator's ephemeral in msg1, so the pending leg's msg2
