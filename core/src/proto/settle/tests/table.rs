@@ -3,8 +3,9 @@
 //! a failed msg2 send, a failed dial resend, an orphaned bundle, the
 //! admission cap, the links a move retires, the reset a move hands the
 //! per-peer data, the answer a msg1 is asked for only once admitted, the
-//! max-peers cap at each of its three sites, and the link a rekey answer
-//! adopted on its msg1's connection turns.
+//! max-peers cap at each of its three sites, the link a rekey answer
+//! adopted on its msg1's connection turns, and a flow's hold of a peer on
+//! its link with an answer's session.
 
 use alloc::vec::Vec;
 
@@ -2784,4 +2785,265 @@ fn an_adopted_answer_on_a_link_the_peer_set_up_or_for_no_held_peer_changes_nothi
         out.is_empty(),
         "defect: an adoption for no held peer asked for {out:?}"
     );
+}
+
+/// The larger node holding `small()` on its own dial to `at(1)`, with an
+/// answer to the peer's msg1 from `at(3)` taken from its leg unsent: the
+/// table, the dial's link and the answer's leg.
+fn held_beside_an_answer() -> (Table<TestInstant>, LinkNo, Leg<TestInstant>) {
+    let mut table = Table::new(large(), Params::default());
+    let dialed = opened(&go(&mut table, Input::Dial(dial(small(), 1, 1)), 0));
+    let inbound = answered(&hi(&mut table, small(), 2, 3, 0));
+    let msg2 = Input::Msg2 {
+        link: dialed,
+        epoch: E1,
+        from: pair(1),
+    };
+    go(&mut table, msg2, 0);
+    assert_eq!(
+        table.held(&small()).map(|h| h.link),
+        Some(dialed),
+        "precondition: the peer is held on the dial"
+    );
+    table.answered.remove(&inbound);
+    let leg = table
+        .legs
+        .take(inbound)
+        .expect("precondition: the answer's leg is open");
+    (table, dialed, leg)
+}
+
+/// A flow that keeps a held peer on its link with an answer's session
+/// gets the answer's lease on that link, at the pair it names, rebuilt
+/// from the closed machine's carry and told as a move; the answer's link
+/// goes, closing nothing, and the held link's record is unchanged.
+#[test]
+fn holding_a_peer_on_its_link_with_an_answers_session_installs_the_answers_lease_there_and_retires_the_answers_link()
+ {
+    let (mut table, dialed, leg) = held_beside_an_answer();
+    let inbound = leg.link();
+    let record = table.links().get(dialed).cloned();
+    let mut out = Vec::new();
+    Ops { t: &mut table }.hold_answer(small(), leg, pair(4), E1, eph(2), t(10), &mut out);
+    let lease = out.iter().find_map(|o| {
+        if let Output::Install(i) = o {
+            Some(i.lease.index())
+        } else {
+            None
+        }
+    });
+    assert_eq!(lease, Some(2), "the answer's lease is installed: {out:?}");
+    let out = drain(out);
+    assert_eq!(
+        out,
+        alloc::vec![
+            Output::Opened { link: dialed },
+            Output::Reset {
+                peer: small(),
+                transition: Transition::Move,
+            },
+            Output::Retire {
+                link: inbound,
+                closes: Vec::new(),
+            },
+        ],
+        "installed on the held link, told as a move, the answer's link retired"
+    );
+    let held = table.held(&small()).expect("the peer stays held");
+    assert_eq!(held.link, dialed, "on the link it held");
+    assert_eq!(held.current, pair(4), "at the pair named");
+    assert_eq!(held.setup, Some(eph(2)), "from the answer's msg1");
+    assert!(!held.heard, "unheard, as an answer's install leaves it");
+    assert_eq!(table.links().get(dialed).cloned(), record);
+    assert!(table.links().get(inbound).is_none());
+}
+
+/// The move renews the peer's bundle, which forgets that the peer is
+/// capable: the held link's record no longer holds it capable, and keeps
+/// the rest of what it held.
+#[test]
+fn holding_a_peer_on_a_link_known_capable_leaves_its_record_not_capable_as_the_renewed_bundle_is() {
+    let (mut table, dialed, leg) = held_beside_an_answer();
+    table.links.capable(dialed);
+    let before = table
+        .links()
+        .get(dialed)
+        .cloned()
+        .expect("the held link's record");
+    assert!(
+        before.capable,
+        "precondition: the held link is known capable"
+    );
+    let mut out = Vec::new();
+    Ops { t: &mut table }.hold_answer(small(), leg, pair(4), E1, eph(2), t(10), &mut out);
+    drain(out);
+    let after = table
+        .links()
+        .get(dialed)
+        .cloned()
+        .expect("the held link's record");
+    assert!(
+        !after.capable,
+        "defect: the record still holds the peer capable"
+    );
+    assert_eq!(
+        LinkRec {
+            capable: true,
+            ..after
+        },
+        before,
+        "nothing else in the record changed"
+    );
+}
+
+/// The rebuilt machine's install says so.
+#[test]
+fn holding_a_peer_on_its_link_with_an_answers_session_rebuilds_from_the_carry_as_responder() {
+    let (mut table, dialed, leg) = held_beside_an_answer();
+    let mut out = Vec::new();
+    Ops { t: &mut table }.hold_answer(small(), leg, pair(4), E1, eph(2), t(10), &mut out);
+    assert!(
+        out.iter().any(|o| matches!(
+            o,
+            Output::Install(i) if i.link == dialed
+                && i.pair == pair(4)
+                && i.rekey == Build::FromCarry
+                && !i.initiator
+        )),
+        "{out:?}"
+    );
+    drain(out);
+}
+
+/// With no peer held, holding takes nothing: the answer's lease goes back
+/// and its link is retired, closing nothing.
+#[test]
+fn holding_a_peer_not_held_frees_the_answers_lease_and_retires_its_link() {
+    let (mut table, _, leg) = held_beside_an_answer();
+    let inbound = leg.link();
+    let mut out = Vec::new();
+    Ops { t: &mut table }.hold_answer(large(), leg, pair(4), E1, eph(2), t(10), &mut out);
+    assert!(
+        matches!(out.first(), Some(Output::Free { lease }) if lease.index() == 2),
+        "{out:?}"
+    );
+    assert_eq!(
+        drain(out),
+        alloc::vec![Output::Retire {
+            link: inbound,
+            closes: Vec::new(),
+        }]
+    );
+    assert!(table.held(&large()).is_none());
+    assert!(table.links().get(inbound).is_none());
+}
+
+/// A flow that moves a held peer onto an answer's link gets the answer's
+/// lease installed on that link, at the pair it names, rebuilt from the
+/// closed machine's carry and told as a move; the answer's link is the
+/// peer's, and the link it held is retired, closing its pair, which no
+/// remaining link uses.
+#[test]
+fn moving_a_peer_onto_an_answers_link_installs_the_answers_lease_there_and_retires_the_link_it_held()
+ {
+    let (mut table, dialed, leg) = held_beside_an_answer();
+    let inbound = leg.link();
+    let mut out = Vec::new();
+    Ops { t: &mut table }.move_answer(small(), leg, pair(3), E1, eph(2), t(10), &mut out);
+    assert!(
+        out.iter().any(|o| matches!(
+            o,
+            Output::Install(i) if i.link == inbound
+                && i.pair == pair(3)
+                && i.rekey == Build::FromCarry
+                && !i.initiator
+                && i.lease.index() == 2
+        )),
+        "the answer's lease is installed on its link, rebuilt from the carry: {out:?}"
+    );
+    let out = drain(out);
+    assert_eq!(
+        out,
+        alloc::vec![
+            Output::Opened { link: inbound },
+            Output::Reset {
+                peer: small(),
+                transition: Transition::Move,
+            },
+            Output::Retire {
+                link: dialed,
+                closes: alloc::vec![pair(1)],
+            },
+        ],
+        "installed on the answer's link, told as a move, the held link retired"
+    );
+    let held = table.held(&small()).expect("the peer stays held");
+    assert_eq!(held.link, inbound, "on the answer's link");
+    assert_eq!(held.current, pair(3), "at the pair named");
+    assert_eq!(held.setup, Some(eph(2)), "from the answer's msg1");
+    assert!(held.heard, "heard, as the peering on this node's dial was");
+    assert_eq!(
+        table.links().get(inbound).map(|r| r.holder),
+        Some(Holder::Peer(small())),
+        "the answer's record is the peer's"
+    );
+    assert!(table.links().get(dialed).is_none());
+}
+
+/// The move changes the peer's session, not its peering: it keeps whether
+/// it was heard, its install instant and its last frame, which the restart
+/// gate and the silent count read, as the dialer's move at its msg2 keeps
+/// them.
+#[test]
+fn moving_a_peer_onto_an_answers_link_keeps_whether_it_was_heard_its_install_instant_and_its_last_frame()
+ {
+    let (mut table, _, leg) = held_beside_an_answer();
+    let frame = Input::Heard {
+        peer: small(),
+        from: pair(1),
+        kind: heartbeat(),
+    };
+    go(&mut table, frame, 1_000);
+    let before = table
+        .held(&small())
+        .cloned()
+        .expect("precondition: the peer is held");
+    assert_eq!(
+        before.last,
+        Some(t(1_000)),
+        "precondition: the frame is the peering's last"
+    );
+    let mut out = Vec::new();
+    Ops { t: &mut table }.move_answer(small(), leg, pair(3), E1, eph(2), t(30_000), &mut out);
+    drain(out);
+    let after = table.held(&small()).expect("the peer stays held");
+    assert_eq!(
+        (after.heard, after.installed, after.last),
+        (before.heard, before.installed, before.last),
+        "defect: the move seats the peer as a fresh install"
+    );
+}
+
+/// With no peer held, moving takes nothing: the answer's lease goes back
+/// and its link is retired, closing nothing.
+#[test]
+fn moving_a_peer_not_held_frees_the_answers_lease_and_retires_its_link() {
+    let (mut table, dialed, leg) = held_beside_an_answer();
+    let inbound = leg.link();
+    let mut out = Vec::new();
+    Ops { t: &mut table }.move_answer(large(), leg, pair(3), E1, eph(2), t(10), &mut out);
+    assert!(
+        matches!(out.first(), Some(Output::Free { lease }) if lease.index() == 2),
+        "{out:?}"
+    );
+    assert_eq!(
+        drain(out),
+        alloc::vec![Output::Retire {
+            link: inbound,
+            closes: Vec::new(),
+        }]
+    );
+    assert!(table.held(&large()).is_none());
+    assert!(table.links().get(inbound).is_none());
+    assert!(table.links().get(dialed).is_some(), "the held link stays");
 }

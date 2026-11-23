@@ -231,8 +231,10 @@ can rebuild any state by replaying the path that reached it.
   dial answered after a crossing; a msg1's answer asked for only once
   it is admitted and after any teardown, with the link of an answer the
   shell refused retired; the max-peers cap at a msg1, at a sent
-  answer and at a completed dial; and the test hook's reap of one leg,
-  which reaps that leg alone and only from its deadline.
+  answer and at a completed dial; the test hook's reap of one leg,
+  which reaps that leg alone and only from its deadline; and the facade's
+  hold of a held peer on its link with an answer's session and lease,
+  which no IK rule calls, and of a peer not held.
 - `links.rs`: the unit tests of `../links.rs`, attached from it with
   `#[path]` (so it is that module's child, not declared in `mod.rs`): the
   derived index, the close rule's cases with a link a leg holds, a

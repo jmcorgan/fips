@@ -1055,22 +1055,7 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
     ) {
         let link = leg.link();
         self.links.hold(link, Holder::Peer(peer));
-        self.held.insert(
-            peer,
-            Held {
-                link,
-                epoch,
-                current: pair.clone(),
-                heard: false,
-                installed: now,
-                last: None,
-                setup: Some(ephemeral),
-                sending: None,
-            },
-        );
-        F::installed(&mut Ops { t: self }, peer);
-        self.gates
-            .promoted(peer, ephemeral, now, None, &self.params);
+        self.seat(peer, link, pair.clone(), epoch, ephemeral, now);
         out.push(Output::Install(Install {
             peer,
             link,
@@ -1085,6 +1070,136 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
             Transition::Promote
         };
         out.push(Output::Reset { peer, transition });
+    }
+
+    /// Hold `peer` on `link`, at `pair`, as a responder leg's install
+    /// leaves it: unheard, installed `now`, from a msg1 with `ephemeral` at
+    /// `epoch`, which its replay memory takes.
+    fn seat(
+        &mut self,
+        peer: NodeAddr,
+        link: LinkNo,
+        pair: Pair,
+        epoch: Epoch,
+        ephemeral: EphemeralDigest,
+        now: I,
+    ) {
+        self.held.insert(
+            peer,
+            Held {
+                link,
+                epoch,
+                current: pair,
+                heard: false,
+                installed: now,
+                last: None,
+                setup: Some(ephemeral),
+                sending: None,
+            },
+        );
+        F::installed(&mut Ops { t: self }, peer);
+        self.gates
+            .promoted(peer, ephemeral, now, None, &self.params);
+    }
+
+    /// Keep the held `peer` on the link it holds and give it the session
+    /// of the responder leg `leg` instead, set up from a msg1 with
+    /// `ephemeral` at `epoch`, at `pair`: the peer is seated there as the
+    /// leg's install would seat it, its rekey machine rebuilt from the
+    /// closed one's carry with the leg's lease, and the leg's link retired,
+    /// closing nothing. Told as a move, at which the shell renews the
+    /// peer's bundle, so the held link's record no longer holds the peer
+    /// capable. A peer not held takes nothing: the leg's lease goes back
+    /// and its link is retired, closing nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn hold_answer(
+        &mut self,
+        peer: NodeAddr,
+        leg: Leg<I>,
+        pair: Pair,
+        epoch: Epoch,
+        ephemeral: EphemeralDigest,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        let link = leg.link();
+        if let Some(held) = self.held.get(&peer).map(|h| h.link) {
+            self.seat(peer, held, pair.clone(), epoch, ephemeral, now);
+            self.links.renewed(held);
+            out.push(Output::Install(Install {
+                peer,
+                link: held,
+                pair,
+                rekey: Build::FromCarry,
+                initiator: false,
+                lease: leg.lease(),
+            }));
+            out.push(Output::Reset {
+                peer,
+                transition: Transition::Move,
+            });
+        } else {
+            out.push(Output::Free { lease: leg.lease() });
+        }
+        let _ = self.links.retire(link);
+        out.push(Output::Retire {
+            link,
+            closes: Vec::new(),
+        });
+    }
+
+    /// Move the held `peer` onto the responder leg `leg`'s link and session,
+    /// set up from a msg1 with `ephemeral` at `epoch`, at `pair`: the peer
+    /// is seated on the leg's link as the leg's install would seat it, its
+    /// rekey machine rebuilt from the closed one's carry with the leg's
+    /// lease, told as a move, and the link it held retired, closing each of
+    /// that link's pairs no remaining link uses. The peering is the same
+    /// one, so it keeps whether it was heard, its install instant and its
+    /// last frame, which the gates read, as the dialer's move at its msg2
+    /// keeps them. A peer not held takes nothing: the leg's lease goes back
+    /// and its link is retired, closing nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn move_answer(
+        &mut self,
+        peer: NodeAddr,
+        leg: Leg<I>,
+        pair: Pair,
+        epoch: Epoch,
+        ephemeral: EphemeralDigest,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        let link = leg.link();
+        let Some((old, live)) = self.held.get(&peer).map(|h| (h.link, h.liveness())) else {
+            out.push(Output::Free { lease: leg.lease() });
+            let _ = self.links.retire(link);
+            out.push(Output::Retire {
+                link,
+                closes: Vec::new(),
+            });
+            return;
+        };
+        self.links.hold(link, Holder::Peer(peer));
+        self.seat(peer, link, pair.clone(), epoch, ephemeral, now);
+        if let Some(h) = self.held.get_mut(&peer) {
+            h.heard = live.heard;
+            h.installed = live.installed;
+            h.last = live.last;
+        }
+        out.push(Output::Install(Install {
+            peer,
+            link,
+            pair,
+            rekey: Build::FromCarry,
+            initiator: false,
+            lease: leg.lease(),
+        }));
+        out.push(Output::Reset {
+            peer,
+            transition: Transition::Move,
+        });
+        let closes = self.links.retire(old);
+        out.push(Output::Retire { link: old, closes });
     }
 
     /// A redial: through the cap, the silent-session refusal, the slot rule
@@ -1703,13 +1818,14 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         F::removed(&mut Ops { t: self }, peer);
         // As the node: a session that carried no frame counts, whatever
         // its role, so this node's own dial, heard from its install, counts
-        // when it ends before the peer's first frame.
+        // when it ends before the peer's first frame, where the flow counts
+        // such a session at all.
         let silent = if fault!(SilentReadsHeard) || node_fault!(SilentReadsHeard) {
             !h.heard
         } else {
             h.last.is_none()
         };
-        if silent {
+        if silent && F::silent(self, &h) {
             self.gates
                 .ended(peer, Some(h.epoch), h.setup, now, None, &self.params);
         }
@@ -2074,6 +2190,40 @@ impl<I: Instant, F: Flow<I>> Ops<'_, I, F> {
             .install_answer(peer, leg, pair, epoch, ephemeral, replaces, now, out);
     }
 
+    /// Keep the held `peer` on its link with the responder leg `leg`'s
+    /// session and lease, at `pair`, and retire the leg's link.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hold_answer(
+        &mut self,
+        peer: NodeAddr,
+        leg: Leg<I>,
+        pair: Pair,
+        epoch: Epoch,
+        ephemeral: EphemeralDigest,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        self.t
+            .hold_answer(peer, leg, pair, epoch, ephemeral, now, out);
+    }
+
+    /// Move the held `peer` onto the responder leg `leg`'s link and
+    /// session, at `pair`, and retire the link it held.
+    #[allow(clippy::too_many_arguments)]
+    pub fn move_answer(
+        &mut self,
+        peer: NodeAddr,
+        leg: Leg<I>,
+        pair: Pair,
+        epoch: Epoch,
+        ephemeral: EphemeralDigest,
+        now: I,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        self.t
+            .move_answer(peer, leg, pair, epoch, ephemeral, now, out);
+    }
+
     /// Keep the held `peer` where it is and give up the dial on `link`.
     pub fn keep(&mut self, peer: NodeAddr, link: LinkNo, out: &mut Vec<Outs<I, F>>) {
         self.t.keep(peer, link, out);
@@ -2144,6 +2294,11 @@ impl<I: Instant> Flow<I> for Ik {
     fn heard(_: &mut Ops<'_, I, Self>, _: NodeAddr) {}
 
     fn removed(_: &mut Ops<'_, I, Self>, _: NodeAddr) {}
+
+    /// Every session that carried no frame counts, whatever its role.
+    fn silent(_: &Table<I, Self>, _: &Held<I>) -> bool {
+        true
+    }
 }
 
 /// The paths of `r` its bundle does not keep when it releases them at a

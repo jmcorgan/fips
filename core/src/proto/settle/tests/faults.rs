@@ -1700,8 +1700,48 @@ const LEGACY_RUN: &str = "the same oracles and list as the run on `IgnoreOwnDial
 /// Why a guard of the unpin a move reports is characterisation.
 const UNPIN_HAND: &str = "a guard of the pin a move ends where `UnpinOwnOnly` changes nothing, the link left being this node's dial or the dial made before the peer was held; its breaks, `unpin` true at every move and `unpin` without the link left being this node's dial, are scratch edits run by hand and logged with the commit";
 
+/// Why a test of the hold a flow outside settle makes, which no IK rule
+/// calls and no switch sits in, is characterisation.
+const HOLD_HAND: &str = "a test of `Ops::hold_answer`, which only a flow outside settle calls; its breaks, the peer installed on the answer's link and the answer's link left unretired, are scratch edits run by hand and logged with the commit";
+
+/// Why a test of the move a flow outside settle makes, which no IK rule
+/// calls and no switch sits in, is characterisation.
+const MOVE_HAND: &str = "a test of `Ops::move_answer`, which only a flow outside settle calls; its breaks, the peer left on the link it held and that link left unretired, are scratch edits run by hand and logged with the commit";
+
+/// Why the test that a move keeps the peering's liveness is
+/// characterisation.
+const MOVE_LIVE_HAND: &str = "a test of `Ops::move_answer`, which only a flow outside settle calls; its break, the peer seated as a fresh install with no liveness carried, is the scratch revert of the carry, run by hand and logged with the commit";
+
 /// The tests that characterise behaviour no switch breaks, each with why.
 pub const CHARACTERISATION: &[(&str, &str)] = &[
+    (
+        "moving_a_peer_onto_an_answers_link_keeps_whether_it_was_heard_its_install_instant_and_its_last_frame",
+        MOVE_LIVE_HAND,
+    ),
+    (
+        "moving_a_peer_onto_an_answers_link_installs_the_answers_lease_there_and_retires_the_link_it_held",
+        MOVE_HAND,
+    ),
+    (
+        "moving_a_peer_not_held_frees_the_answers_lease_and_retires_its_link",
+        MOVE_HAND,
+    ),
+    (
+        "holding_a_peer_on_its_link_with_an_answers_session_installs_the_answers_lease_there_and_retires_the_answers_link",
+        HOLD_HAND,
+    ),
+    (
+        "holding_a_peer_on_its_link_with_an_answers_session_rebuilds_from_the_carry_as_responder",
+        HOLD_HAND,
+    ),
+    (
+        "holding_a_peer_not_held_frees_the_answers_lease_and_retires_its_link",
+        HOLD_HAND,
+    ),
+    (
+        "holding_a_peer_on_a_link_known_capable_leaves_its_record_not_capable_as_the_renewed_bundle_is",
+        HOLD_HAND,
+    ),
     (
         "an_adopted_answer_on_a_link_the_peer_set_up_or_for_no_held_peer_changes_nothing",
         HAND,

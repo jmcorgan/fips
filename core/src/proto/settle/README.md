@@ -30,7 +30,9 @@ so it reaches no normal or release build.
   the one reading of what a link's bundle reported (a path moved,
   switched to, changed state or released, or the peer turned capable),
   which `table.rs` applies and a shell's own record of its links can apply
-  the same way. Under the test hooks, `resync` sets a record's paths and
+  the same way. `renewed` forgets a record's capable flag when its
+  bundle is renewed on a new session on the same link, which no IK rule
+  does and a flow's hold of a peer on its link does. Under the test hooks, `resync` sets a record's paths and
   its capable flag outright, for a shell that resyncs a record whose
   bundle a test changed past the feed, and `name` names a link in the
   index at pairs past its record, for a shell that resyncs the index
@@ -97,7 +99,8 @@ so it reaches no normal or release build.
   associated types, keeps its own state as the value of its type in the
   table, and is called back at the hooks where a flow may differ: the
   stored answer, the count the admission cap reads, an answer sent with
-  no peer named, and an install, move, frame or removal of a held peer.
+  no peer named, an install, move, frame or removal of a held peer, and
+  whether a removed session that carried no frame counts as silent.
   `Ik`, the flow of FMP's IK handshake, is every rule the table's own
   inputs carry: its payloads are `Infallible`, the enums' and the table's
   type parameters default to it, and each hook's body, in `table.rs`, is
@@ -124,7 +127,16 @@ so it reaches no normal or release build.
   taken out of the inputs that run them: `install_answer` (a responder
   leg's install, from `Sent`), `keep` (the larger node's keep of its held
   peer at its own dial's msg2) and `open_answer` (a responder leg's
-  opening, from `Hello`). Under the test hooks `plant`, `plant_leg` and
+  opening, from `Hello`). Two no IK rule calls: `hold_answer` keeps a
+  held peer on the link it holds with a responder leg's session and
+  lease, at a pair the flow names, and retires the leg's link; it seats
+  the peer as `install_answer` does, through the same step, forgets the
+  held link's capable flag, since the shell renews the peer's bundle at
+  that move. `move_answer` moves a held peer onto a responder leg's link,
+  session and lease, at a pair the flow names, seated the same way but
+  keeping whether the peering was heard, its install instant and its last
+  frame, as the dialer's move at msg2 does, and retires the link it held,
+  closing that link's pairs no remaining link uses. Their own tests are in `tests/table.rs`. Under the test hooks `plant`, `plant_leg` and
   `records` write a held peer, a leg and the link records outright, for a
   shell that resyncs into its copy of the table what a test planted past
   its writers (a responder's leg planted as an answer whose send failed,

@@ -311,6 +311,14 @@ impl Links {
         }
     }
 
+    /// `link`'s bundle was renewed on a new session, which forgets that the
+    /// peer is capable until the renewed bundle finds it again.
+    pub fn renewed(&mut self, link: LinkNo) {
+        if let Some(r) = self.recs.get_mut(&link) {
+            r.capable = false;
+        }
+    }
+
     /// `link`'s bundle holds exactly `paths`, each in its state, and has
     /// found the peer capable exactly when `capable` says, whatever its
     /// record held: a shell's resync of a record whose bundle a test

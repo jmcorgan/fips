@@ -22,7 +22,7 @@ use core::fmt::Debug;
 
 use super::links::{LinkNo, Pair};
 use super::output::Output;
-use super::table::{Ops, Table};
+use super::table::{Held, Ops, Table};
 use crate::identity::NodeAddr;
 use crate::time::Instant;
 
@@ -65,6 +65,10 @@ pub trait Flow<I: Instant>: Sized {
 
     /// The held `peer` was removed.
     fn removed(ops: &mut Ops<'_, I, Self>, peer: NodeAddr);
+
+    /// Whether the removed session `held`, which carried no frame, counts
+    /// toward its peer's silent-session back-off.
+    fn silent(table: &Table<I, Self>, held: &Held<I>) -> bool;
 }
 
 /// The flow of FMP's two-message IK handshake (see the module's comment).
