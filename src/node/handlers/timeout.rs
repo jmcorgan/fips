@@ -6,44 +6,25 @@ use crate::node::Node;
 use crate::node::handlers::path_intake::Feed;
 use crate::node::session::SessionInstant;
 use crate::peer::machine::{DialOrigin, TimerKind};
-use crate::proto::fmp::{ConnAction, ConnSnapshot, LifecycleView};
+use crate::proto::fmp::flow::In;
+use crate::proto::settle::input::Input as CoreInput;
+use crate::proto::settle::legs::LegOut;
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use fips_core::proto::path::{Input, Source};
 use fips_core::time::Instant;
 use std::time::Duration;
 use tracing::{debug, info};
 
-impl LifecycleView for Node {
-    fn stale_connections(&self, interval_now: u64, timeout_ms: u64) -> Vec<ConnSnapshot> {
-        // `is_failed()` legs are always reaped here (~1s), as before. The
-        // idle-timeout is reaped here ONLY for legs whose timeout is not already
-        // driven by a machine `HandshakeTimeout` timer — i.e. inbound legs (IK
-        // inbound arms none). Outbound legs with an armed timer are reaped by
-        // `drive_handshake_timeouts`, so excluding them here avoids a double
-        // reap.
-        self.peer_machines
-            .iter()
-            .filter(|(_, machine)| machine.leg().is_some())
-            .filter(|(link_id, machine)| {
-                machine.is_failed()
-                    || (machine.conn_is_timed_out(interval_now, timeout_ms)
-                        && !self
-                            .peer_machines
-                            .timers()
-                            .get(*link_id)
-                            .is_some_and(|timers| {
-                                timers.contains_key(&TimerKind::HandshakeTimeout)
-                            }))
-            })
-            .map(|(link_id, machine)| ConnSnapshot {
-                link: *link_id,
-                is_outbound: machine.conn_is_outbound(),
-                retry_addr: machine.conn_expected_identity().map(|id| *id.node_addr()),
-                resend_count: 0,
-                msg1: Vec::new(),
-            })
-            .collect()
-    }
+/// A handshake the stale-connection sweep reaps.
+#[derive(Debug)]
+pub(in crate::node) struct Stale {
+    /// Its link.
+    pub(in crate::node) link: LinkId,
+    /// Whether its machine marked it failed.
+    failed: bool,
+    /// The identity to note a handshake timeout against: the one its
+    /// carrier expects, for this node's own dial.
+    retry: Option<NodeAddr>,
 }
 
 impl Node {
@@ -52,9 +33,8 @@ impl Node {
     /// Called periodically by the RX event loop. Removes connections that have
     /// been idle longer than the configured handshake timeout or are in Failed state.
     ///
-    /// The stale/failed predicate and every registry mutation stay shell-side;
-    /// the retry-then-teardown choreography is the pure
-    /// [`Fmp::poll_timeouts`](crate::proto::fmp::Fmp::poll_timeouts) decision.
+    /// A handshake in the settlement core's legs is reaped there, at its
+    /// deadline; every registry mutation stays shell-side.
     pub(in crate::node) async fn check_timeouts(&mut self) {
         self.timeouts_body().await;
         self.audit_live("check_timeouts");
@@ -73,6 +53,7 @@ impl Node {
     /// of the interval clock (`Node::interval_ms`), so a test can run the
     /// reaper past the handshake timeout without waiting.
     pub(in crate::node) async fn check_timeouts_at(&mut self, interval_now: u64) {
+        let swept = self.core_tick(interval_now, true);
         if self.connection_count() == 0 {
             return;
         }
@@ -84,47 +65,137 @@ impl Node {
         let timeout_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
 
         let stale = self.stale_connections(interval_now, timeout_ms);
-        for action in self.fmp.poll_timeouts(stale) {
-            match action {
-                ConnAction::ScheduleRetry { peer } => {
-                    self.note_handshake_timeout(peer, peering_now)
-                }
-                ConnAction::Teardown { link } => {
-                    // Log before cleanup (needs live connection state). The
-                    // failure signal is now read from the control machine; the
-                    // leg still carries direction/idle for the log fields.
-                    let is_failed = self
-                        .peer_machines
-                        .get(&link)
-                        .is_some_and(|machine| machine.is_failed());
-                    if let Some(machine) = self
-                        .peer_machines
-                        .get(&link)
-                        .filter(|machine| machine.leg().is_some())
+        let now = crate::time::mono_at(interval_now);
+        for Stale {
+            link,
+            failed,
+            retry,
+        } in stale
+        {
+            // A handshake timed out in the legs is reaped there, and its
+            // lease goes back to its machine for the cleanup below. The
+            // core says whom it retries: a failed leg its sweep reaped, as
+            // the sweep asked; any other leg it holds, as its reap asks.
+            let retry = if failed {
+                match swept.get(&link) {
+                    Some(asked) => *asked,
+                    None => match self
+                        .core_no(link)
+                        .filter(|no| self.legs().get(*no).is_some())
                     {
-                        let direction = machine.conn_direction();
-                        if is_failed {
-                            debug!(
-                                link_id = %link,
-                                direction = %direction,
-                                "Failed handshake connection cleaned up"
-                            );
-                        } else {
-                            debug!(
-                                link_id = %link,
-                                direction = %direction,
-                                idle_secs =
-                                    now_ms.saturating_sub(self.connection_last_activity(link)) / 1000,
-                                "Stale handshake connection timed out"
-                            );
-                        }
-                    }
-                    self.cleanup_stale_connection(link, now_ms).await;
+                        Some(no) => self.core_timed(no),
+                        None => retry,
+                    },
                 }
-                #[allow(unreachable_patterns)]
-                _ => {}
+            } else if self.leg_on(link).is_some() {
+                match self.timed_reap(link, now) {
+                    Some(asked) => asked,
+                    None => continue,
+                }
+            } else {
+                retry
+            };
+            if let Some(peer) = retry {
+                self.note_handshake_timeout(peer, peering_now);
             }
+            // Log before cleanup (needs live connection state). The
+            // failure signal is now read from the control machine; the
+            // leg still carries direction/idle for the log fields.
+            let is_failed = self
+                .peer_machines
+                .get(&link)
+                .is_some_and(|machine| machine.is_failed());
+            if let Some(machine) = self
+                .peer_machines
+                .get(&link)
+                .filter(|machine| machine.leg().is_some())
+            {
+                let direction = machine.conn_direction();
+                if is_failed {
+                    debug!(
+                        link_id = %link,
+                        direction = %direction,
+                        "Failed handshake connection cleaned up"
+                    );
+                } else {
+                    debug!(
+                        link_id = %link,
+                        direction = %direction,
+                        idle_secs =
+                            now_ms.saturating_sub(self.connection_last_activity(link)) / 1000,
+                        "Stale handshake connection timed out"
+                    );
+                }
+            }
+            self.cleanup_stale_connection(link, now_ms).await;
         }
+    }
+
+    /// The handshakes the stale-connection sweep reaps at `interval_now`, a
+    /// reading of the interval clock: every failed one, and each idle past
+    /// `timeout_ms` whose timeout no machine `HandshakeTimeout` timer drives
+    /// (an answer, or an anonymous dial; `drive_handshake_timeouts` reaps
+    /// the rest, so neither reaps one twice). A handshake in the settlement
+    /// core's legs is idle past its timeout once its leg's deadline has come;
+    /// one a test planted past the legs is judged by its carrier.
+    pub(in crate::node) fn stale_connections(
+        &self,
+        interval_now: u64,
+        timeout_ms: u64,
+    ) -> Vec<Stale> {
+        let now = crate::time::mono_at(interval_now);
+        self.peer_machines
+            .iter()
+            .filter(|(_, machine)| machine.leg().is_some())
+            .filter(|(link_id, machine)| {
+                machine.is_failed()
+                    || (!self
+                        .peer_machines
+                        .timers()
+                        .get(*link_id)
+                        .is_some_and(|timers| timers.contains_key(&TimerKind::HandshakeTimeout))
+                        && match self.leg_on(**link_id) {
+                            Some(leg) => leg.deadline() <= now,
+                            None => machine.conn_is_timed_out(interval_now, timeout_ms),
+                        })
+            })
+            .map(|(link_id, machine)| Stale {
+                link: *link_id,
+                failed: machine.is_failed(),
+                retry: machine
+                    .conn_is_outbound()
+                    .then(|| machine.conn_expected_identity().map(|id| *id.node_addr()))
+                    .flatten(),
+            })
+            .collect()
+    }
+
+    /// The handshake leg on the node's link `link` in the settlement core's
+    /// legs.
+    pub(in crate::node) fn leg_on(
+        &self,
+        link: LinkId,
+    ) -> Option<&crate::proto::settle::legs::Leg<crate::peer::PeerInstant>> {
+        self.core_no(link).and_then(|no| self.legs().get(no))
+    }
+
+    /// Reap the handshake on `link` in the settlement core's legs at `now`,
+    /// if its deadline has come: the core says whom the dial retries, then
+    /// hands its lease back to its machine for the cleanup that disposes of
+    /// both. The retry the core asked for, or `None` when nothing was
+    /// reaped.
+    fn timed_reap(
+        &mut self,
+        link: LinkId,
+        now: crate::peer::PeerInstant,
+    ) -> Option<Option<NodeAddr>> {
+        let no = self.core_no(link)?;
+        if self.legs().get(no).is_none_or(|leg| leg.deadline() > now) {
+            return None;
+        }
+        let retry = self.core_timed(no);
+        self.core_reap(no, now);
+        self.legs().get(no).is_none().then_some(retry)
     }
 
     /// Remove a handshake connection and all associated state.
@@ -153,8 +224,11 @@ impl Node {
             Some(c) => c,
             None => return,
         };
-        // Read the transport ID and session index off the surviving carrier
-        // before disposing the machine (the leg no longer projects them).
+        // Read the transport ID off the surviving carrier, and the session
+        // index from the handshake's leg in the settlement core's legs or else the
+        // carrier, before disposing the machine (the leg no longer projects
+        // them).
+        self.core_drop_leg(link_id);
         let (transport_id, our_index) = match self.peer_machines.get_mut(&link_id) {
             Some(machine) => (machine.conn_transport_id(), machine.take_our_index()),
             None => (None, None),
@@ -193,15 +267,15 @@ impl Node {
         }
     }
 
-    /// Act on the per-peer machine timers this tick.
+    /// Act on the handshake timers this tick.
     ///
-    /// The sans-IO machine arms `SetTimer`/`CancelTimer` actions into the
-    /// timer store on [`peer_machines`](Node::peer_machines); this is the
-    /// shell driver that acts on them: timeout reaps idle-timed-out outbound legs, retransmit resends the
-    /// due msg1s. Handshake-TIMEOUT is driven before handshake-RETRANSMIT so a
-    /// timed-out leg is reaped rather than resent on the same tick. The
-    /// rekey/liveness kinds keep their own shell drivers, so only the two
-    /// handshake kinds are driven here.
+    /// The sans-IO machine arms its `HandshakeTimeout` into the timer store
+    /// on [`peer_machines`](Node::peer_machines), whose presence marks an
+    /// outbound leg this driver reaps once idle-timed-out; the dial's leg in
+    /// the settlement core's legs times the msg1 resends this driver sends,
+    /// and is told what the driver did with each. The timeouts are driven before the
+    /// resends so a timed-out leg is reaped rather than resent on the same
+    /// tick. The rekey/liveness kinds keep their own shell drivers.
     ///
     /// `interval_now` is a reading of the interval clock
     /// (`Node::interval_ms`), which the timers' deadlines and the legs'
@@ -214,7 +288,8 @@ impl Node {
     /// The work of [`Self::drive_peer_timers`], which audits the per-peer maps
     /// after it.
     async fn timers_body(&mut self, interval_now: u64) {
-        if self.peer_machines.timers().is_empty() {
+        let _ = self.core_tick(interval_now, false);
+        if self.peer_machines.timers().is_empty() && self.legs().iter().next().is_none() {
             return;
         }
         self.drive_handshake_timeouts(interval_now).await;
@@ -225,14 +300,16 @@ impl Node {
     /// as machine-timeout-owned and which have idle-timed-out this tick.
     ///
     /// The timer's PRESENCE selects the leg (only OUTBOUND legs arm one — IK
-    /// inbound arms none); the reap THRESHOLD is the shell `is_timed_out(now,
-    /// config)` predicate, NOT the timer's stored deadline. This matters because
-    /// the machine arms the timer from a hardcoded constant at dial, which is not
-    /// authoritative for an operator-tuned `handshake_timeout_secs` — reading the
-    /// threshold from config each tick keeps the reap neutral for any config, and
-    /// off the `last_activity` clock exactly as the old `check_timeouts` did. A
-    /// timed-out leg is reaped by the old Teardown path: the outbound retry
-    /// reflex, then `cleanup_stale_connection` (which drops the machine + timers).
+    /// inbound arms none); the reap THRESHOLD is NOT the timer's stored
+    /// deadline. This matters because the machine arms the timer from a
+    /// hardcoded constant at dial, which is not authoritative for an
+    /// operator-tuned `handshake_timeout_secs`. A dial in the settlement core's
+    /// legs is reaped there, at its leg's deadline, which is counted from the
+    /// carrier's last activity by the configured timeout; one a test planted
+    /// past the legs is judged by the shell `is_timed_out(now, config)`
+    /// predicate, off the same `last_activity` clock. A timed-out leg is
+    /// reaped by the old Teardown path: the outbound retry reflex, then
+    /// `cleanup_stale_connection` (which drops the machine + timers).
     ///
     /// `check_timeouts` keeps reaping everything else — `is_failed()` legs and the
     /// idle-timeout of legs without a machine timer (inbound legs).
@@ -249,11 +326,23 @@ impl Node {
             // The idle-timeout threshold reads the survivor carrier's
             // last-activity; presence of a pending handshake is what decides
             // between reaping and dropping an orphan timer.
-            let timed_out = self
-                .peer_machines
-                .get(&link)
-                .is_some_and(|machine| machine.conn_is_timed_out(now_ms, timeout_ms));
+            // A dial in the settlement core's legs has timed out once the
+            // legs reap it, which puts its lease back on its machine for
+            // the cleanup below.
+            // The core says whom such a dial retries, as its reap asks.
+            let legged = self.has_pending_leg(&link) && self.leg_on(link).is_some();
+            let timed = legged
+                .then(|| self.timed_reap(link, crate::time::mono_at(now_ms)))
+                .flatten();
+            let timed_out = if legged {
+                timed.is_some()
+            } else {
+                self.peer_machines
+                    .get(&link)
+                    .is_some_and(|machine| machine.conn_is_timed_out(now_ms, timeout_ms))
+            };
             let (reap, retry_peer) = match self.has_pending_leg(&link) {
+                true if timed_out && legged => (true, timed.flatten()),
                 true if timed_out => {
                     let retry_peer = if self
                         .peer_machines
@@ -356,48 +445,32 @@ impl Node {
         .await;
     }
 
-    /// Fire due handshake-retransmit timers: resend the stored msg1.
+    /// Send the msg1 resends the settlement core's legs find due at `now_ms`
+    /// on the interval clock.
     ///
-    /// The pre-fold `resend_pending_handshakes` logic, re-homed: the *due* signal
-    /// is the machine-armed timer (not the connection's `next_resend_at_ms`), and
-    /// the resend counter lives on the machine (the operator-visible count reads
-    /// from there). The wire bytes and transport target still come from the shell
-    /// connection, the pure core computes the backoff schedule, and — matching the
-    /// old shell exactly — the count and reschedule advance only on a successful
-    /// send; a failed send neither advances the count nor marks the connection
-    /// failed, it just retries next tick. A leg an mDNS advert directed at a
-    /// node this node is not configured to dial stops at the discovery cap
-    /// ([`DialOrigin::resend_limit`](crate::peer::machine::DialOrigin::resend_limit)),
-    /// whatever the configured count.
+    /// The legs time each dial's resends: the first a second after the
+    /// dial's msg1, then at waits of the configured interval growing by the
+    /// configured multiplier, up to the configured count or the lower cap of
+    /// a leg an mDNS advert directed at a node this node is not configured
+    /// to dial ([`DialOrigin::resend_limit`]). The node keeps its own word on
+    /// each: a dial whose peer is already held, or whose machine has left
+    /// `SentMsg1` or reached its cap, sends no more resends (the leg is
+    /// quieted, and the handshake timeout takes it from there); one whose
+    /// carrier holds no msg1 yet stays due; and one whose send target is not
+    /// known stays due. A resend is counted, on the leg and on the machine
+    /// (the operator-visible count reads the machine), and the next
+    /// scheduled, only once sent; a failed send is tried again at the next
+    /// tick, and neither counts nor marks the dial failed.
     async fn drive_handshake_retransmits(&mut self, now_ms: u64) {
         let max_resends = self.config().node.rate_limit.handshake_max_resends;
-        let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
-        let backoff = self.config().node.rate_limit.handshake_resend_backoff;
-
-        // Collect due retransmit timers (kind-filtered).
-        let due: Vec<LinkId> = self
-            .peer_machines
-            .timers()
-            .iter()
-            .filter(|(_, timers)| {
-                timers
-                    .get(&TimerKind::HandshakeRetransmit)
-                    .is_some_and(|&at_ms| now_ms >= at_ms)
-            })
-            .map(|(link, _)| *link)
-            .collect();
-        if due.is_empty() {
-            return;
-        }
-
-        // Classify each due link against the machine + connection. A timer whose
-        // machine has left `SentMsg1` (promoted/gone) or has hit the resend cap
-        // is dropped — no more resends, exactly as the old shell stopped
-        // selecting a capped/settled connection; the handshake-timeout reaper
-        // takes it from there.
-        let mut candidates: Vec<ConnSnapshot> = Vec::new();
-        let mut drop_timers: Vec<LinkId> = Vec::new();
-        for link in due {
+        let now = crate::time::mono_at(now_ms);
+        for out in self.legs().resends(now) {
+            let LegOut::Resend { link: no, bytes } = out else {
+                continue;
+            };
+            let Some(link) = self.core_link(no) else {
+                continue;
+            };
             // Skip a resend whose target peer already promoted via the inbound
             // cross-connection path — resending msg1 would start a new handshake
             // (session mismatch).
@@ -408,68 +481,27 @@ impl Node {
                     .map(|id| self.peers.contains_key(id.node_addr()))
                     .unwrap_or(false)
             {
-                drop_timers.push(link);
+                self.tend(CoreInput::Flow(In::Quiet { link: no }), now);
                 continue;
             }
-            let armed = match self.peer_machines.get(&link) {
-                Some(machine)
-                    if machine.is_handshaking_sent_msg1()
-                        && machine.resend_count()
-                            < machine.dial_origin().resend_limit(max_resends) =>
-                {
-                    machine.resend_count()
-                }
-                Some(_) => {
-                    drop_timers.push(link);
-                    continue;
-                }
-                None => {
-                    drop_timers.push(link);
-                    continue;
-                }
-            };
-            match self
-                .peer_machines
-                .get(&link)
-                .and_then(|machine| machine.conn_handshake_msg1())
-            {
-                // Armed but the stored wire isn't there yet — leave the timer and
-                // retry next tick (matches the old candidate filter skipping it).
-                None => continue,
-                Some(msg1) => candidates.push(ConnSnapshot {
-                    link,
-                    is_outbound: true,
-                    retry_addr: None,
-                    resend_count: armed,
-                    msg1: msg1.to_vec(),
-                }),
-            }
-        }
-        for link in drop_timers {
-            self.peer_machines
-                .cancel(link, TimerKind::HandshakeRetransmit);
-        }
-
-        for action in self
-            .fmp
-            .poll_resends(candidates, now_ms, interval_ms, backoff)
-        {
-            let ConnAction::ResendMsg1 {
-                link,
-                bytes,
-                next_resend_at_ms,
-            } = action
-            else {
+            let Some(machine) = self.peer_machines.get(&link).filter(|machine| {
+                machine.is_handshaking_sent_msg1()
+                    && machine.resend_count() < machine.dial_origin().resend_limit(max_resends)
+            }) else {
+                self.tend(CoreInput::Flow(In::Quiet { link: no }), now);
                 continue;
             };
-
-            let (transport_id, remote_addr) = match self.peer_machines.get(&link) {
-                Some(machine) if machine.leg().is_some() => {
-                    match (machine.conn_transport_id(), machine.conn_source_addr()) {
-                        (Some(tid), Some(addr)) => (tid, addr.clone()),
-                        _ => continue,
-                    }
-                }
+            // Armed but the stored wire isn't there yet: leave it due and
+            // retry next tick.
+            if machine.conn_handshake_msg1().is_none() {
+                continue;
+            }
+            let (transport_id, remote_addr) = match (
+                machine.leg().is_some(),
+                machine.conn_transport_id(),
+                machine.conn_source_addr(),
+            ) {
+                (true, Some(tid), Some(addr)) => (tid, addr.clone()),
                 _ => continue,
             };
 
@@ -493,21 +525,17 @@ impl Node {
             };
 
             if sent {
+                self.tend(CoreInput::Sent { link: no }, now);
                 if let Some(machine) = self.peer_machines.get_mut(&link) {
-                    machine.record_resend(next_resend_at_ms);
+                    machine.record_resend(now_ms);
                     debug!(
                         link_id = %link,
                         resend = machine.resend_count(),
                         "Resent handshake msg1"
                     );
                 }
-                self.peer_machines
-                    .arm(link, TimerKind::HandshakeRetransmit, next_resend_at_ms);
             } else {
-                // Failed send: keep retrying at the tick cadence (the old shell
-                // left next_resend_at_ms unchanged so the connection stayed due).
-                self.peer_machines
-                    .arm(link, TimerKind::HandshakeRetransmit, now_ms);
+                self.tend(CoreInput::SendFailed { link: no }, now);
             }
         }
     }

@@ -22,26 +22,42 @@ the IK flow.
   `params`, the XX parameters of a table, the `xx_fault!` macro, the rules
   every message shares (the shell's refusals, which close nothing; next's
   promote refusals, the leaf rule and the max-peers cap; the failed legs
-  and their sweep), and the flow's implementation of `settle::flow::Flow`:
-  its hooks, which the table's shared rules call, and its step.
+  and their sweep; the retry a dial past its deadline asks for, and an
+  identified dial's at a failed connection), and the flow's implementation
+  of `settle::flow::Flow`:
+  its hooks, which the table's shared rules call, among them the one that
+  counts a removed silent session only when the peer dialed it, and its
+  step.
 - `msg1.rs`: an anonymous msg1 opens its link and asks for its answer, and
   the answer opens a leg that names no one.
 - `msg2.rs`: this node's anonymous dials, and next's `establish_outbound`
   at msg2, parked until the msg3 is sent: promote, restart with no gate,
-  the own-dial keep with no msg3, and address order.
+  the own-dial keep with no msg3, and address order, where the smaller
+  node's move closes the link it left but not its dial's own connection,
+  as next's move does, which the table's move would close when the msg2
+  came from another pair.
 - `msg3.rs`: next's `establish_inbound` at msg3 (its crossing told as the
   column next's node runs, a move at the larger node and a keep at the
   smaller): the promote, unless the
   identity's silent sessions refuse it; the restart, through next's one
   floor and the dampener; the repeat of the stored msg2 for a claim of a
-  session not held; the crossing, which the larger node's inbound wins;
+  session not held; the crossing, which the larger node's inbound wins,
+  the larger node keeping the peer on the link it holds with the answer's
+  session and lease (`Ops::hold_answer`), as next's node does;
   and the rekey handed to the peer's machine with the leg's lease.
 - `faults.rs`: the flow's test-only switches, read from
   `FIPS_SETTLE_XX_FAULTS`; each is a variant of the node's list too
   (`crate::faults`), and a site reads `xx_fault!(X) || node_fault!(X)`.
 - `input.rs`: `In`, the flow's inputs: the anonymous msg1 and its answer,
   the anonymous dial, the msg2 with the identity it taught, the outcome of
-  the msg3 send, the shell's refusals and failures, the msg3 and the sweep.
+  the msg3 send, the shell's refusals and failures, the msg3, the sweep,
+  the node's timers ahead of the table's poll (`Due`), or a node's timer
+  reaping one dial alone (`Timed`), a dial's failed
+  connection with the identity it named (`Unconnected`), and the shell's
+  word that a dial sends no more resends (`Quiet`). The anonymous msg1's
+  `rekey_of` stays the shell's: the node computes it and keeps its own map
+  of it for the moved-msg3 lookup, and the flow reads it only in
+  `AnonLegNamed`'s defect shape.
 - `output.rs`: `Out`, the flow's outputs (the ask for an anonymous msg1's
   answer, the msg3 to send, the stored msg2 to repeat, the rekey handed to
   the peer's machine with its lease, the heard path offered), and `Deny`,

@@ -30,10 +30,10 @@ pub struct Anon {
     pub bytes: Vec<u8>,
     /// Its ephemeral.
     pub ephemeral: EphemeralDigest,
-    /// The link of an established peer at its source, which a msg3 that
-    /// declares a rekey may name later (next's `rekey_of`, noted with the
-    /// leg for the moved-msg3 lookup). The shell feeds it until the core
-    /// places a msg1 itself.
+    /// The link of an established peer at its source (next's `rekey_of`).
+    /// The shell computes it and keeps its own map of it for the moved-msg3
+    /// lookup (`src/node/handlers/handshake.rs`, `src/node/settle/maps.rs`);
+    /// the flow reads it only in `AnonLegNamed`'s defect shape.
     pub rekey_of: Option<LinkNo>,
 }
 
@@ -147,4 +147,34 @@ pub enum In {
     },
     /// The shell's sweep: every failed leg is reaped.
     Sweep,
+    /// The node's timers run, before the table's poll at the same instant:
+    /// each dial past its deadline asks for a retry of the identity it
+    /// expects, as next's handshake timeout does; the poll then reaps it.
+    Due,
+    /// The node's timer reaps its dial on `link`, past its deadline or
+    /// failed: the dial asks for a retry of the identity it expects by
+    /// then, as [`In::Due`] has each dial past its deadline ask, for a
+    /// shell whose timers reap one dial at a time, as next's do.
+    Timed {
+        /// The dial's link.
+        link: LinkNo,
+    },
+    /// The connection a dial waited on could not be opened, and the shell
+    /// names the identity the dial named, if it named one: the link goes,
+    /// closing nothing, and an identified dial asks for its retry, as next
+    /// does at a failed connect.
+    Unconnected {
+        /// The dial's link.
+        link: LinkNo,
+        /// The identity the dial named, if any.
+        retry: Option<NodeAddr>,
+    },
+    /// The shell stops the msg1 resends of its dial on `link`, which is
+    /// left to its deadline: the msg2 completed, the peer is held through
+    /// another link, or the dial's own state rules out a resend, as next's
+    /// timer driver decides.
+    Quiet {
+        /// The dial's link.
+        link: LinkNo,
+    },
 }

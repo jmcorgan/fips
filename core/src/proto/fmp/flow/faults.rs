@@ -38,9 +38,23 @@ pub(crate) enum Fault {
     BesideOwnSendsFinal,
     /// A msg2's decision runs before the outcome of its msg3 send.
     FinalBeforeSendOutcome,
+    /// The smaller node's move onto its dial at msg2 closes the dial's own
+    /// connection when the msg2 came from another pair, as the table's move
+    /// does, where next leaves it open.
+    MoveClosesDial,
+    /// A dial past its deadline is reaped with no retry, where next's
+    /// handshake timeout retries the identity it expects.
+    TimeoutNoRetry,
+    /// An identified dial whose connection could not be opened asks for no
+    /// retry, where next retries the identity it named.
+    ConnectFailNoRetry,
     /// A leaf's refusal of a second peer leaves the dial's or answer's leg
     /// for its reap, as the max-peers cap does.
     LeafKeepsLink,
+    /// The max-peers cap's refusal at msg3 leaves the answer's leg for its
+    /// reap, as the cap at msg2 leaves a dial's, where next's inbound
+    /// promote failure removes the answer's link at once.
+    CapKeepsAnswer,
     /// A msg3 at a new epoch restarts the held peer with no gate, while the
     /// peering is still heard or the dampener holds.
     Msg3RestartUngated,
@@ -53,6 +67,19 @@ pub(crate) enum Fault {
     /// The silent-session refusal at msg3 refuses an identity at any epoch,
     /// not only the epoch its silent sessions counted.
     SilentRefusalAnyEpoch,
+    /// A session this node dialed that ends before the peer's first frame
+    /// counts toward the peer's silent-session back-off, as one the peer
+    /// dialed does.
+    OwnDialCountsSilent,
+    /// A msg2 the address order settles keeps the peer where it is at the
+    /// smaller node, as at the larger, where next moves the smaller node
+    /// onto its dial.
+    CrossedRunsKeep,
+    /// A move keeps the frame heard under the session it leaves, where
+    /// next's `heard_on_session` starts afresh, so a dial in flight at the
+    /// move is no longer beside this node's own unheard dial and sends its
+    /// msg3.
+    MoveKeepsFramed,
 }
 
 impl Fault {
@@ -63,11 +90,18 @@ impl Fault {
         Self::AnonDialNamed,
         Self::BesideOwnSendsFinal,
         Self::FinalBeforeSendOutcome,
+        Self::MoveClosesDial,
+        Self::TimeoutNoRetry,
+        Self::ConnectFailNoRetry,
         Self::LeafKeepsLink,
+        Self::CapKeepsAnswer,
         Self::Msg3RestartUngated,
         Self::MismatchClaimTearsDown,
         Self::MatchesReadAsCross,
         Self::SilentRefusalAnyEpoch,
+        Self::OwnDialCountsSilent,
+        Self::CrossedRunsKeep,
+        Self::MoveKeepsFramed,
     ];
 
     /// The switch whose variant name is `name`.

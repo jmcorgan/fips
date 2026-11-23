@@ -56,6 +56,40 @@ pub(crate) const ROWS: &[(Fault, &[Test])] = &[
         &[(MSG2, "a_msg2_installs_nothing_until_its_msg3_is_sent")],
     ),
     (
+        Fault::TimeoutNoRetry,
+        &[
+            (
+                MSG2,
+                "a_dial_past_its_deadline_asks_for_a_retry_of_the_identity_it_expects_before_its_reap",
+            ),
+            (
+                MSG2,
+                "a_dial_its_timer_reaps_alone_asks_for_a_retry_of_the_identity_it_expects_and_an_answer_asks_none",
+            ),
+        ],
+    ),
+    (
+        Fault::ConnectFailNoRetry,
+        &[(
+            MSG2,
+            "an_identified_dials_failed_connection_retries_the_identity_it_named_and_an_anonymous_ones_retries_none",
+        )],
+    ),
+    (
+        Fault::CrossedRunsKeep,
+        &[(
+            MSG2,
+            "a_dial_in_flight_at_the_install_is_settled_by_address_order_once_the_peer_was_heard",
+        )],
+    ),
+    (
+        Fault::MoveClosesDial,
+        &[(
+            MSG2,
+            "the_smaller_nodes_move_at_msg2_leaves_open_the_connection_its_dial_was_set_up_at",
+        )],
+    ),
+    (
         Fault::LeafKeepsLink,
         &[
             (
@@ -67,6 +101,13 @@ pub(crate) const ROWS: &[(Fault, &[Test])] = &[
                 "a_leaf_refuses_a_second_peer_at_msg3_and_removes_the_link_at_once",
             ),
         ],
+    ),
+    (
+        Fault::CapKeepsAnswer,
+        &[(
+            MSG3,
+            "the_peer_cap_at_msg3_refuses_and_removes_the_answers_link_at_once_closing_nothing",
+        )],
     ),
     (
         Fault::Msg3RestartUngated,
@@ -102,6 +143,20 @@ pub(crate) const ROWS: &[(Fault, &[Test])] = &[
             "a_silent_identitys_msg3_is_refused_at_the_epoch_it_counted_and_promoted_at_another",
         )],
     ),
+    (
+        Fault::OwnDialCountsSilent,
+        &[(
+            MSG2,
+            "a_dialed_session_that_ends_unheard_is_not_counted_silent_and_an_answered_one_is",
+        )],
+    ),
+    (
+        Fault::MoveKeepsFramed,
+        &[(
+            MSG2,
+            "a_dial_in_flight_at_the_smaller_nodes_move_is_beside_its_new_own_dial_though_the_peer_was_heard_before",
+        )],
+    ),
 ];
 
 /// Why a test of a rule the flow takes from the table, or carries in no
@@ -125,6 +180,18 @@ const JOINT: &str = "a scripted run of flow nodes in the settlement world, held 
 
 /// The tests that characterise behaviour no switch breaks, each with why.
 pub(crate) const CHARACTERISATION: &[(&str, &str)] = &[
+    (
+        "an_answer_reaped_at_its_deadline_is_forgotten_by_the_flows_next_step",
+        RULE,
+    ),
+    (
+        "the_smaller_nodes_move_at_msg2_closes_the_link_it_left_when_its_dial_was_set_up_at_the_same_pair",
+        RULE,
+    ),
+    (
+        "a_failed_dial_past_its_deadline_asks_for_a_retry_of_the_identity_its_failure_noted",
+        RULE,
+    ),
     (
         "a_lone_dial_on_flow_nodes_logs_what_next_does_and_settles_as_the_judge_does",
         JOINT,
@@ -241,7 +308,6 @@ pub(crate) const CHARACTERISATION: &[(&str, &str)] = &[
         "a_crossing_at_msg3_moves_the_larger_node_onto_its_inbound_session_and_keeps_the_smaller_on_its_own",
         RULE,
     ),
-    ("the_peer_cap_at_msg3_leaves_the_answer_for_its_reap", RULE),
     ("a_msg3_for_no_anonymous_answer_changes_nothing", RULE),
     (
         "a_resend_of_the_answered_msg1_draws_the_stored_msg2_until_its_msg3_and_no_other_msg1_does",

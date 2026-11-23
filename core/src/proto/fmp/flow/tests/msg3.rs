@@ -174,17 +174,19 @@ fn a_msg3_claiming_the_session_held_hands_the_leg_and_its_lease_to_the_peers_rek
 #[test]
 fn a_crossing_at_msg3_moves_the_larger_node_onto_its_inbound_session_and_keeps_the_smaller_on_its_own()
  {
-    // The larger node holds the peer on its own dial and moves.
+    // The larger node holds the peer on its own dial and moves onto the
+    // answer's session, which it takes on the link it holds.
     let mut b = node(large(), false);
     let own = held_by_dial(&mut b, small(), E1, 1, 1, 0);
+    let record = b.links().get(own).cloned();
     let link = answered(&mut b, 2, 3, None, 10);
     let out = xx(&mut b, msg3(link, small(), E1, RekeyClaim::None, 4), 20);
     assert!(
         out.iter().any(|o| matches!(
             o,
-            Output::Install(i) if i.link == link && i.pair == pair(4) && !i.initiator && i.rekey == Build::FromCarry
+            Output::Install(i) if i.link == own && i.pair == pair(4) && !i.initiator && i.rekey == Build::FromCarry
         )),
-        "the larger node moves onto the answer at the msg3's pair: {out:?}"
+        "the larger node takes the answer's session on the link it holds, at the msg3's pair: {out:?}"
     );
     assert!(
         out.iter().any(|o| matches!(
@@ -197,10 +199,26 @@ fn a_crossing_at_msg3_moves_the_larger_node_onto_its_inbound_session_and_keeps_t
         "as a move, the column next's node runs: {out:?}"
     );
     assert!(
-        retires_quietly(&out, own),
-        "its own dial's link goes, closing nothing: {out:?}"
+        retires_quietly(&out, link),
+        "the answer's link goes, closing nothing: {out:?}"
     );
-    assert_eq!(b.held(&small()).map(|h| h.link), Some(link));
+    assert!(
+        !out.iter()
+            .any(|o| matches!(o, Output::Retire { link: l, .. } if *l == own)),
+        "its own dial's link stays: {out:?}"
+    );
+    assert_eq!(b.held(&small()).map(|h| h.link), Some(own));
+    assert_eq!(
+        b.held(&small()).map(|h| h.current.clone()),
+        Some(pair(4)),
+        "at the msg3's pair"
+    );
+    assert_eq!(
+        b.links().get(own).cloned(),
+        record,
+        "the held link's record is unchanged"
+    );
+    assert!(b.links().get(link).is_none());
     // The smaller node keeps its own dial and drops the answer.
     let mut a = node(small(), false);
     let own = held_by_dial(&mut a, large(), E1, 1, 1, 0);
@@ -274,8 +292,11 @@ fn a_leaf_refuses_a_second_peer_at_msg3_and_removes_the_link_at_once() {
     assert!(retires_quietly(&out, link), "closing nothing: {out:?}");
 }
 
+/// next's inbound promote failure removes the answer's link and machine
+/// at once (`src/node/dataplane/peer_actions.rs`), unlike the cap at msg2,
+/// which leaves the dial's leg for its reap.
 #[test]
-fn the_peer_cap_at_msg3_leaves_the_answer_for_its_reap() {
+fn the_peer_cap_at_msg3_refuses_and_removes_the_answers_link_at_once_closing_nothing() {
     let params = Params {
         peers: 1,
         ..Params::default()
@@ -285,7 +306,12 @@ fn the_peer_cap_at_msg3_leaves_the_answer_for_its_reap() {
     let link = answered(&mut a, 2, 6, None, 10);
     let out = xx(&mut a, msg3(link, third(), E1, RekeyClaim::None, 6), 20);
     assert!(rejects(&out, Denial::Cap), "the cap refuses: {out:?}");
-    assert!(a.legs().get(link).is_some(), "the leg is left for its reap");
+    assert!(
+        a.legs().get(link).is_none(),
+        "defect: the refused answer's leg is left for its reap: {out:?}"
+    );
+    assert!(retires_quietly(&out, link), "closing nothing: {out:?}");
+    assert!(a.held(&third()).is_none(), "nothing installed");
     let again = xx(&mut a, msg3(link, third(), E1, RekeyClaim::None, 6), 30);
     assert!(again.is_empty(), "nothing completes it: {again:?}");
 }

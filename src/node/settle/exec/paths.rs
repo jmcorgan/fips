@@ -184,7 +184,7 @@ fn key(path: &PathRef) -> AddrKey {
 /// Rebuild the link's lookup at the path's move; the link's record follows
 /// the move when the feed applies it.
 pub(super) fn link_follow(node: &mut Node, _: &mut Run) {
-    node.links.follow();
+    node.links.follow(node.core.parts_mut().0);
 }
 
 /// Log the path's move.
@@ -224,7 +224,7 @@ pub(super) fn link_claim(node: &mut Node, r: &mut Run) {
     if let Some(f) = of(r)
         && let (Some(link), Some(to)) = (f.link, &f.to)
     {
-        node.links.claim(link, key(to));
+        node.links.claim(node.core.parts_mut().0, link, key(to));
     }
 }
 
@@ -286,7 +286,7 @@ pub(super) fn link_unclaim(node: &mut Node, r: &mut Run) {
         && !f.removed
         && let (Some(link), Some(to)) = (f.link, &f.to)
     {
-        node.links.unclaim(link, &key(to));
+        node.links.unclaim(node.core.parts_mut().0, link, &key(to));
     }
 }
 

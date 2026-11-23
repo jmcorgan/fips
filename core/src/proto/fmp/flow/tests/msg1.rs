@@ -99,3 +99,27 @@ fn an_answer_to_no_ask_hands_its_lease_back() {
     );
     assert!(a.legs().get(LinkNo(7)).is_none(), "no leg opens");
 }
+
+/// A leg the table reaps at its deadline leaves the flow's entries for its
+/// link behind, and the flow's next step forgets them.
+#[test]
+fn an_answer_reaped_at_its_deadline_is_forgotten_by_the_flows_next_step() {
+    let mut a = node(large(), false);
+    let link = answered(&mut a, 1, 5, None, 0);
+    assert!(
+        a.flow().answer(link).is_some(),
+        "precondition: the answer is kept"
+    );
+    let late = 1_000_000;
+    let out = a.poll(t(late));
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::Retire { link: l, .. } if *l == link)),
+        "precondition: the poll reaps the answer's leg: {out:?}"
+    );
+    xx(&mut a, In::Sweep, late);
+    assert!(
+        a.flow().answer(link).is_none(),
+        "defect: the reaped answer's entry outlives its leg"
+    );
+}

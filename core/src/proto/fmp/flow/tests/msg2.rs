@@ -34,6 +34,50 @@ fn an_anonymous_dial_completes_under_the_identity_its_msg2_taught() {
     );
 }
 
+/// next's `heard_on_session` starts afresh at a move. The smaller node,
+/// heard before it moves onto its first dial, gets a msg2 on a further dial
+/// that was in flight at the move: that dial is beside the new own dial,
+/// unheard under its session, and is kept with no msg3.
+#[test]
+fn a_dial_in_flight_at_the_smaller_nodes_move_is_beside_its_new_own_dial_though_the_peer_was_heard_before()
+ {
+    let mut s = node(small(), false);
+    held_by_answer(&mut s, large(), E1, 1, 1, 0);
+    go(
+        &mut s,
+        Input::Heard {
+            peer: large(),
+            from: pair(1),
+            kind: 0,
+        },
+        1_000,
+    );
+    let moved = opened(&go(&mut s, dial(large(), 2, 2), 2_000));
+    let later = opened(&go(&mut s, dial(large(), 3, 3), 2_000));
+    xx(&mut s, msg2(moved, large(), E1, 2), 3_000);
+    let out = xx(&mut s, In::FinalSent { link: moved }, 3_000);
+    assert!(
+        out.iter().any(|o| matches!(
+            o,
+            Output::Reset {
+                transition: Transition::Move,
+                ..
+            }
+        )),
+        "precondition: the smaller node moves onto its first dial: {out:?}"
+    );
+    let out = xx(&mut s, msg2(later, large(), E1, 3), 4_000);
+    assert!(
+        !finals(&out, later),
+        "defect: the dial in flight at the move sends a msg3: {out:?}"
+    );
+    assert_eq!(
+        s.held(&large()).map(|h| h.link),
+        Some(moved),
+        "the peer stays on the dial it moved onto"
+    );
+}
+
 #[test]
 fn a_msg2_installs_nothing_until_its_msg3_is_sent() {
     let mut a = node(small(), false);
@@ -169,6 +213,248 @@ fn a_later_dial_of_a_held_peer_is_settled_by_address_order_once_its_msg3_is_sent
         "the larger node keeps the peer: {out:?}"
     );
     assert_eq!(b.held(&small()).map(|h| h.link), Some(first));
+}
+
+#[test]
+fn the_smaller_nodes_move_at_msg2_leaves_open_the_connection_its_dial_was_set_up_at() {
+    // The peer dialed in from port 1 and is held there; this node's own
+    // dial went to port 2, and the peer answers it from port 1.
+    let mut a = node(small(), false);
+    let held = held_by_answer(&mut a, large(), E1, 1, 1, 0);
+    let later = opened(&go(&mut a, dial(large(), 2, 2), 10));
+    xx(&mut a, msg2(later, large(), E1, 1), 20);
+    let out = xx(&mut a, In::FinalSent { link: later }, 20);
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::Swapped { own: false, .. })),
+        "precondition: the smaller node moves onto its dial: {out:?}"
+    );
+    assert_eq!(
+        a.held(&large()).map(|h| (h.link, h.current.clone())),
+        Some((later, pair(1))),
+        "held on the dial, at the msg2's pair"
+    );
+    assert!(
+        retires_quietly(&out, held),
+        "defect: the move closes the connection its dial was set up at, which next leaves open: {out:?}"
+    );
+    assert_eq!(
+        a.links().get(later).map(|r| r.setup.clone()),
+        Some(pair(2)),
+        "the dial's link keeps the pair it was set up at"
+    );
+}
+
+/// The smaller node's move closes the link it left, which here was set up
+/// at the pair its dial was set up at too: that pair stays in the retire's
+/// closes, since the retire of the link left chose it, though the move
+/// leaves the dial's own connection open otherwise.
+#[test]
+fn the_smaller_nodes_move_at_msg2_closes_the_link_it_left_when_its_dial_was_set_up_at_the_same_pair()
+ {
+    // The peer dialed in from port 2 and is held there; this node's own
+    // dial went to port 2 too, and the peer answers it from port 1.
+    let mut a = node(small(), false);
+    let held = held_by_answer(&mut a, large(), E1, 1, 2, 0);
+    let later = opened(&go(&mut a, dial(large(), 2, 2), 10));
+    xx(&mut a, msg2(later, large(), E1, 1), 20);
+    let out = xx(&mut a, In::FinalSent { link: later }, 20);
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::Swapped { own: false, .. })),
+        "precondition: the smaller node moves onto its dial: {out:?}"
+    );
+    let closes = out.iter().find_map(|o| {
+        if let Output::Retire { link, closes } = o
+            && *link == held
+        {
+            Some(closes.clone())
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        closes,
+        Some(alloc::vec![pair(2)]),
+        "defect: the move leaves open the connection of the link it left: {out:?}"
+    );
+}
+
+/// A failed dial expects by its timeout the identity its failure noted,
+/// ahead of the one it named.
+#[test]
+fn a_failed_dial_past_its_deadline_asks_for_a_retry_of_the_identity_its_failure_noted() {
+    let mut a = node(small(), false);
+    let link = opened(&go(&mut a, dial(large(), 1, 1), 0));
+    xx(
+        &mut a,
+        In::Failed {
+            link,
+            learned: Some(third()),
+        },
+        0,
+    );
+    let out = xx(&mut a, In::Due, 1_000_000);
+    let retries: Vec<NodeAddr> = out
+        .iter()
+        .filter_map(|o| {
+            if let Output::Retry { peer } = o {
+                Some(*peer)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        retries,
+        alloc::vec![third()],
+        "defect: the timeout retries the identity the dial named, not the one its failure noted: {out:?}"
+    );
+}
+
+#[test]
+fn a_dial_past_its_deadline_asks_for_a_retry_of_the_identity_it_expects_before_its_reap() {
+    let mut a = node(small(), false);
+    let named = opened(&go(&mut a, dial(large(), 1, 1), 0));
+    let anon = opened(&xx(&mut a, anon_dial(2, 2), 0));
+    xx(&mut a, msg2(anon, third(), E1, 2), 0);
+    xx(&mut a, In::FinalFailed { link: anon }, 0);
+    let answer = answered(&mut a, 3, 3, None, 0);
+    let retries = |out: &[O]| {
+        let mut peers: Vec<NodeAddr> = out
+            .iter()
+            .filter_map(|o| {
+                if let Output::Retry { peer } = o {
+                    Some(*peer)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        peers.sort();
+        peers
+    };
+    let out = xx(&mut a, In::Due, 10);
+    assert!(retries(&out).is_empty(), "nothing is due yet: {out:?}");
+    let late = 1_000_000;
+    let out = xx(&mut a, In::Due, late);
+    let mut want = alloc::vec![large(), third()];
+    want.sort();
+    assert_eq!(
+        retries(&out),
+        want,
+        "defect: a dial past its deadline asks for no retry of the identity it named, or that its msg2 taught; an answer asks none"
+    );
+    let out = a.poll(t(late));
+    for link in [named, anon, answer] {
+        assert!(
+            out.iter()
+                .any(|o| matches!(o, Output::Retire { link: l, .. } if *l == link)),
+            "the poll at the same instant reaps {link:?}: {out:?}"
+        );
+    }
+    let out = xx(&mut a, In::Sweep, late);
+    assert!(
+        retries(&out).is_empty(),
+        "the failed dial, reaped, is not swept again: {out:?}"
+    );
+}
+
+#[test]
+fn a_dial_its_timer_reaps_alone_asks_for_a_retry_of_the_identity_it_expects_and_an_answer_asks_none()
+ {
+    let mut a = node(small(), false);
+    let named = opened(&go(&mut a, dial(large(), 1, 1), 0));
+    let anon = opened(&xx(&mut a, anon_dial(2, 2), 0));
+    xx(&mut a, msg2(anon, third(), E1, 2), 0);
+    xx(&mut a, In::FinalFailed { link: anon }, 0);
+    let answer = answered(&mut a, 3, 3, None, 0);
+    let retries = |out: &[O]| -> Vec<NodeAddr> {
+        out.iter()
+            .filter_map(|o| {
+                if let Output::Retry { peer } = o {
+                    Some(*peer)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    let out = xx(&mut a, In::Timed { link: named }, 10);
+    assert_eq!(
+        retries(&out),
+        alloc::vec![large()],
+        "defect: a dial its timer reaps alone asks for no retry of the identity it named: {out:?}"
+    );
+    let out = xx(&mut a, In::Timed { link: anon }, 10);
+    assert_eq!(
+        retries(&out),
+        alloc::vec![third()],
+        "defect: a failed dial its timer reaps asks for no retry of the identity its msg2 taught: {out:?}"
+    );
+    let out = xx(&mut a, In::Timed { link: answer }, 10);
+    assert!(retries(&out).is_empty(), "an answer asks none: {out:?}");
+    let out = xx(&mut a, In::Sweep, 10);
+    assert!(
+        retries(&out).is_empty(),
+        "the failed dial its timer took is not swept again: {out:?}"
+    );
+}
+
+#[test]
+fn an_identified_dials_failed_connection_retries_the_identity_it_named_and_an_anonymous_ones_retries_none()
+ {
+    let mut a = node(small(), false);
+    let named = opened(&go(
+        &mut a,
+        Input::Connecting {
+            peer: large(),
+            to: pair(1),
+            resends: None,
+        },
+        0,
+    ));
+    let out = xx(
+        &mut a,
+        In::Unconnected {
+            link: named,
+            retry: Some(large()),
+        },
+        10,
+    );
+    assert!(
+        retires_quietly(&out, named),
+        "the link goes, closing nothing: {out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::Retry { peer } if *peer == large())),
+        "defect: an identified dial's failed connection asks for no retry: {out:?}"
+    );
+    let anon = opened(&xx(
+        &mut a,
+        In::AnonConnecting {
+            to: pair(2),
+            resends: None,
+        },
+        20,
+    ));
+    let out = xx(
+        &mut a,
+        In::Unconnected {
+            link: anon,
+            retry: None,
+        },
+        30,
+    );
+    assert!(
+        retires_quietly(&out, anon),
+        "the link goes, closing nothing: {out:?}"
+    );
+    assert!(
+        !out.iter().any(|o| matches!(o, Output::Retry { .. })),
+        "an anonymous dial's asks for none: {out:?}"
+    );
 }
 
 #[test]
@@ -391,4 +677,35 @@ fn an_anonymous_dial_on_a_connection_starts_on_its_link_and_a_failed_connection_
     ));
     let out = xx(&mut a, In::AnonConnectFailed { link: other }, 30);
     assert!(retires_quietly(&out, other), "closing nothing: {out:?}");
+}
+
+/// A session this node dialed that ends before the peer's first frame is
+/// not counted toward the peer's silent-session back-off: the peer may have
+/// refused its msg3, and the peer's frames then had no session to arrive
+/// on. A session the peer dialed still counts.
+#[test]
+fn a_dialed_session_that_ends_unheard_is_not_counted_silent_and_an_answered_one_is() {
+    let mut a = node(small(), false);
+    held_by_dial(&mut a, large(), E1, 1, 5, 0);
+    go(&mut a, Input::Dead { peer: large() }, 50);
+    assert!(
+        a.held(&large()).is_none(),
+        "precondition: the dial's peer is removed"
+    );
+    assert_eq!(
+        a.gates().silent(&large()),
+        None,
+        "defect: the session this node dialed is counted against the peer"
+    );
+    held_by_answer(&mut a, large(), E1, 2, 6, 100);
+    go(&mut a, Input::Dead { peer: large() }, 150);
+    assert!(
+        a.held(&large()).is_none(),
+        "precondition: the answer's peer is removed"
+    );
+    assert_eq!(
+        a.gates().silent(&large()),
+        Some(1),
+        "the session the peer dialed is counted"
+    );
 }

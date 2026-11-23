@@ -10,9 +10,11 @@
 use super::{Facts as Of, Run};
 use crate::NodeAddr;
 use crate::node::diag::OrNone;
+use crate::node::settle::decide::Decided;
 use crate::node::settle::table::{Cell, Row, Transition, cell};
 use crate::node::{AddrKey, Node};
 use crate::proto::settle::output::Why;
+use crate::transport::LinkDirection;
 use tracing::debug;
 
 /// What a removal hands the statements that follow it: why the peer went,
@@ -30,6 +32,11 @@ pub(in crate::node) struct Removed {
     /// Disconnect handler, which cannot await. A cell that notes it then
     /// runs nothing here.
     pub(in crate::node) noted: bool,
+    /// What the settlement core decided of the removal, which the run that
+    /// follows carries out: its reconnect. `None` where the core held no
+    /// peer there, or the removal is part of a replacement, which the
+    /// table's cells then decide.
+    pub(in crate::node) decided: Option<Decided>,
 }
 
 /// What a removal's effects read beyond the transition: the removal.
@@ -58,9 +65,14 @@ impl Node {
         let link_id = peer.link_id();
         // Read while the machines are open: the transport for the bootstrap
         // cleanup below, and the startup epoch the silent-session note files
-        // the refusal under.
+        // the refusal under. Read while the link is held: whether this node
+        // dialed it, since only a session the peer dialed is noted silent.
         let transport_id = peer.transport_id();
         let epoch = peer.remote_epoch();
+        let own = self
+            .links
+            .get(&link_id)
+            .is_some_and(|link| link.direction() == LinkDirection::Outbound);
         let peer_name = self
             .peer_aliases
             .get(node_addr)
@@ -72,9 +84,7 @@ impl Node {
         let (paths, out) = peer.stop();
         let departed = peer.depart();
 
-        if !departed.frame_heard {
-            self.note_silent_session(node_addr, epoch);
-        }
+        let silent = !departed.frame_heard && (!own || node_fault!(OwnDialCountsSilent));
 
         // Log suppressed replay detection summary before teardown
         if departed.suppressed > 0 {
@@ -141,6 +151,10 @@ impl Node {
         self.run_link_outputs(node_addr, out);
 
         // Remove link and address mapping
+        // The settlement core takes the removal while it still holds the
+        // link's record, which it retires, so it reads the link's direction
+        // and its paths as the removal left them.
+        let decided = self.core_remove(*node_addr, why);
         if !node_fault!(RemoveKeepsLink) {
             self.remove_link(&link_id);
         }
@@ -175,10 +189,14 @@ impl Node {
             tree_changed = tree_changed,
             "Peer removed and state cleaned up"
         );
+        if silent {
+            self.note_silent_session(node_addr, epoch);
+        }
         Some(Removed {
             why,
             held,
             noted: false,
+            decided,
         })
     }
 
@@ -200,25 +218,26 @@ impl Node {
         self.remove(node_addr, Why::Ended)
     }
 
-    /// Count the session of the peer at `node_addr`, removed without having
-    /// carried one authenticated frame, toward its identity's silent-session
-    /// back-off at its startup `epoch`, and log the refusal this starts or
+    /// Log the refusal the removal of the peer at `node_addr` starts or
     /// extends, with how many handshakes the identity's previous refusal
-    /// refused.
+    /// refused: its session, which the peer dialed, carried no
+    /// authenticated frame, and the settlement core counted it toward the
+    /// identity's silent-session back-off at its startup `epoch` as it took
+    /// the removal.
     fn note_silent_session(&mut self, node_addr: &NodeAddr, epoch: Option<[u8; 8]>) {
-        // No setup digest: on XX a session is promoted only on a msg3 bound
-        // to this node's fresh msg2, so a replayed msg1 cannot promote one
-        // and every silent session counts.
-        let refusal = self
-            .silent_sessions
-            .ended(*node_addr, epoch, None, crate::time::mono_ms());
-        if let Some(refusal) = refusal {
+        // A refusal the end starts reports what the record's previous one
+        // refused, and counts again from none; a record the end started
+        // afresh has refused nothing.
+        if let Some(refusing) = self.gates().refusing(node_addr, crate::peer::peer_now()) {
+            let length = refusing.remaining;
+            let silent = self.gates().silent(node_addr).unwrap_or(0);
+            let prior = self.core.take_refused(node_addr);
             debug!(
                 peer = %self.peer_display_name(node_addr),
                 startup_epoch = %OrNone(epoch.map(hex::encode)),
-                silent = refusal.backoff.silent,
-                refuse_s = refusal.backoff.remaining_ms / 1000,
-                prior_refused = refusal.prior_refused,
+                silent,
+                refuse_s = length.as_secs(),
+                prior_refused = prior,
                 "Session ended without a frame, refusing the peer's handshakes at this epoch"
             );
         }
@@ -301,19 +320,28 @@ pub(super) async fn reconnect(node: &mut Node, r: &mut Run) {
         return;
     };
     let c = cell(Row::Reconnect, &r.t);
+    // The settlement core's word on the reconnect, where it decided the
+    // removal; the table's cell where it did not.
+    let noted_dead = removed
+        .decided
+        .as_ref()
+        .map_or(c == Cell::NotedDead, |d| d.retry);
     if c == Cell::NotedDeadThenRemoved {
         debug_assert!(
             removed.noted,
             "a replacement's loss is noted by the old peer's control machine"
         );
-    } else if c == Cell::NotedDead {
+    } else if noted_dead {
         if !removed.noted {
             node.note_link_dead(r.peer, Node::peering_now());
         }
     } else if c == Cell::Removed {
         node.peering.reconciler.retry_pending.remove(&r.peer);
     } else {
-        debug_assert!(c == Cell::Keep, "a removal's reconnect is {c:?}");
+        debug_assert!(
+            c == Cell::Keep || c == Cell::NotedDead,
+            "a removal's reconnect is {c:?}"
+        );
         if removed.why == Why::Ended && node_fault!(EndedSchedulesRetry) {
             node.note_link_dead(r.peer, Node::peering_now());
         }

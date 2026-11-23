@@ -100,10 +100,16 @@ fn sizes(node: &Node, others: &[NodeAddr]) -> Vec<(&'static str, usize)> {
         ("addr_to_link", node.links.index().len()),
         ("peers_by_index", node.peers_by_index.len()),
         ("index_allocator", node.index_allocator.count()),
-        ("restart_dampener", node.restart_dampener.len()),
+        (
+            "restart_dampener",
+            node.gates()
+                .known()
+                .filter(|p| node.gates().stamp(p).is_some())
+                .count(),
+        ),
     ];
     for peer in others {
-        let silent = node.silent_sessions.count(peer).unwrap_or(0);
+        let silent = node.gates().silent(peer).unwrap_or(0);
         sizes.push(("silent_sessions", silent as usize));
     }
     sizes

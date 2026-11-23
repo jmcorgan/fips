@@ -650,8 +650,8 @@ fn read(
                 e.is_initiator()
             ))
         ),
-        Row::Dampener => format!("{:?}", node.restart_dampener.get(peer)),
-        Row::Silent => format!("{:?}", node.silent_sessions.count(peer)),
+        Row::Dampener => format!("{:?}", node.gates().stamp(peer)),
+        Row::Silent => format!("{:?}", node.gates().silent(peer)),
         Row::Reconnect => format!(
             "{:?}",
             node.peering.reconciler.retry_pending.get(peer).map(|r| (
@@ -857,13 +857,16 @@ fn planted_dial(spare: &PathRef) -> (TransportId, u32) {
 pub(super) fn dial_aside(node: &mut Node, peer: &NodeAddr) {
     let spare = spare(node, peer);
     let id = node.allocate_link_id();
-    node.links.open(Link::connectionless(
-        id,
-        spare.transport,
-        TransportAddr::from_string("spare:3"),
-        LinkDirection::Outbound,
-        Duration::from_millis(100),
-    ));
+    node.links.open(
+        node.core.parts_mut().0,
+        Link::connectionless(
+            id,
+            spare.transport,
+            TransportAddr::from_string("spare:3"),
+            LinkDirection::Outbound,
+            Duration::from_millis(100),
+        ),
+    );
     node.pending_outbound.note(planted_dial(&spare), id);
 }
 
@@ -877,11 +880,17 @@ fn now_ms() -> u64 {
 /// map writers, never `raw`, so the node stays audited. Run it after peering:
 /// the record's rows are written only while the peer is held, and the
 /// node's per-peer state either way. The peering still carries frames each
-/// way afterwards.
+/// way afterwards. The dampener's stamp goes in last: the restart gates
+/// drop an identity whose memory has all lapsed whenever they are written,
+/// so a lapsed stamp planted before the silent-session row would be gone
+/// before it was.
 pub(super) async fn dirty(node: &mut Node, peer: &NodeAddr) {
     for row in Row::all() {
-        dirty_row(node, peer, row).await;
+        if row != Row::Dampener {
+            dirty_row(node, peer, row).await;
+        }
     }
+    dirty_row(node, peer, Row::Dampener).await;
 }
 
 /// The rows [`dirty`] does not reach with multipath set as `on`, each with
@@ -928,12 +937,39 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
         Row::Link => {}
         Row::Index => {
             if let Some(id) = node.get_peer(peer).map(ActivePeer::link_id) {
-                node.links.claim(id, (spare.transport, spare.addr.clone()));
+                node.links.claim(
+                    node.core.parts_mut().0,
+                    id,
+                    (spare.transport, spare.addr.clone()),
+                );
             }
         }
+        // Acked, so the link's record holds the pair the Index row claimed;
+        // the core is told of the path's state after it, as the join tells
+        // it of a bundle's, so a close of the pair is one the core decides
+        // too.
         Row::Paths => {
-            if let Some(p) = node.get_peer_mut(peer) {
-                p.admit_path(spare.transport, spare.addr.clone());
+            let at = PathRef {
+                transport: spare.transport,
+                addr: spare.addr.clone(),
+            };
+            let Some(p) = node.get_peer_mut(peer) else {
+                return;
+            };
+            p.admit_path(spare.transport, spare.addr.clone());
+            p.ack_path(spare.transport, &spare.addr);
+            let id = p.link_id();
+            let proven = p
+                .bundle()
+                .map_or(crate::proto::settle::links::Proven::Probing, |b| {
+                    crate::proto::settle::join::proven(b, &at)
+                });
+            if let Some(link) = node.links.no(&id) {
+                node.feed(&crate::proto::settle::input::Input::State {
+                    link,
+                    pair: crate::proto::settle::join::pair(&at),
+                    proven,
+                });
             }
         }
         Row::Pin => {
@@ -1026,13 +1062,18 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
             }
         }
         Row::Dampener => {
-            let past = crate::time::mono_now()
-                .checked_sub(PAST_THE_RESTART_INTERVAL)
-                .expect("precondition: the monotonic clock reaches back past the restart interval");
-            node.restart_dampener.insert(*peer, past);
+            let past = fips_core::time::Instant::checked_sub(
+                crate::peer::peer_now(),
+                PAST_THE_RESTART_INTERVAL,
+            )
+            .expect("precondition: the monotonic clock reaches back past the restart interval");
+            node.gates_mut().plant(*peer, past);
         }
         Row::Silent => {
-            node.silent_sessions.ended(*peer, None, None, now_ms());
+            let params = node.gate_params();
+            let now = crate::peer::peer_now();
+            node.gates_mut()
+                .ended(*peer, None, None, now, None, &params);
         }
         Row::Reconnect => {
             let npub = node
@@ -1057,12 +1098,23 @@ pub(super) async fn dirty_row(node: &mut Node, peer: &NodeAddr, row: Row) {
         Row::PathConnects => node.paths.wait(*peer, spare),
         Row::PathCloses => {
             // Another spare pair: a release unclaims its pair's index entry.
+            // The core is told of the release after it, as the join tells
+            // it of a bundle's, so the close it queues is one the core
+            // decides too.
             let to = PathRef {
                 transport: spare.transport,
                 addr: TransportAddr::from_string("spare:2"),
             };
             if let Some(id) = node.get_peer(peer).map(ActivePeer::link_id) {
+                let pair = crate::proto::settle::join::pair(&to);
                 node.release_path(peer, id, to, Default::default(), false, false);
+                if let Some(link) = node.links.no(&id) {
+                    node.feed(&crate::proto::settle::input::Input::Released {
+                        link,
+                        pair,
+                        keep: false,
+                    });
+                }
             }
         }
         Row::PathListings => {
@@ -1201,13 +1253,16 @@ fn dirty_socket(_node: &mut Node, _peer: &NodeAddr) {}
 /// reports at its next entry.
 fn orphan_link(node: &mut Node, spare: PathRef) {
     let id = node.allocate_link_id();
-    node.links.open(crate::transport::Link::new(
-        id,
-        spare.transport,
-        spare.addr,
-        LinkDirection::Outbound,
-        Duration::from_millis(50),
-    ));
+    node.links.open(
+        node.core.parts_mut().0,
+        crate::transport::Link::new(
+            id,
+            spare.transport,
+            spare.addr,
+            LinkDirection::Outbound,
+            Duration::from_millis(50),
+        ),
+    );
 }
 
 /// Change `row` of `peer`'s state on `node` by any means, `raw` included,

@@ -33,9 +33,19 @@ tests.
   default configuration, at each multipath setting, against the ones
   `fips_core::proto::settle::parity` states for the schedules a real node
   and the joint world both run, so the two run alike.
+- `decide.rs`: the resync of a link a test put in the link map, a record
+  held as a leg at its setup pair in the node's table, and of a peer a test
+  planted on a link the map lacks, held on a record of its own at the
+  peer's pair (the counterparts of master's planted-resync tests in
+  `links.rs`).
+- `params.rs`: the core's parameters from the node's configuration,
+  against the core's defaults and against the node's own msg1 resend
+  schedule.
 - `links.rs`: the settlement core's link records the link table keeps, from
   a link's open to its close or a dial's forget, and holding a link capable
-  once its bundle turns capable through the core's join; and the live audit's
+  once its bundle turns capable through the core's join; the node's resync
+  of the records from a link, an index entry and a peer a test planted past
+  the writers; and the live audit's
   `links-mirror` clause, which skips only a peer a test mutator changed past
   the feed, every other clause still reading it, with one row per mutator
   that it flags its peer. The clause on real nodes is in

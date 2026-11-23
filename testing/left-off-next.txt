@@ -641,20 +641,19 @@ test          next-rule  no_node_code_names_a_cross_connection_promotion_result_
 # params.rs), resyncs the core's link records from the node's maps in tests, keeps a handshake
 # entry where the peer control machine was (src/peer/handshake.rs), reads the interval clock as an
 # instant for the core (time::mono_at), and scans that all of this stays confined. next keeps its
-# own handshake shell and peer machine, and none of these is in its tree: no decide.rs, params.rs,
-# Node::resync, peer/handshake.rs or mono_at, no link-cache clause in its live audit, and no core
-# beside the node to count silent sessions, hold a restart or retry a restarted peer.
+# own handshake shell and peer machine, and none of these is in its tree: no deciding core,
+# peer/handshake.rs or mono_at, no link-cache clause in its live audit, and no core deciding
+# beside the node to count silent sessions, hold a restart or retry a restarted peer. next's
+# Node::resync writes into its link records only the links, index entries and peers a test
+# planted past the writers; a bundle a test mutator changed past the feed is not written, and the
+# live audit's links-mirror skips its peer instead, so master's tests of that half have no site.
+# next's decide.rs is a test-only copy of the core beside the node, which decides nothing; its
+# params.rs carries master's three parameter tests under their names.
 switch        no-site    HeldCacheStale  core/src/faults.rs
-switch        no-site    ResyncSkipped  core/src/faults.rs
 test          no-site    a_bundle_a_test_mutator_changed_is_in_its_links_record_at_the_next_close  src/node/settle/tests/links.rs
 test          no-site    a_path_acked_past_the_feed_is_in_its_links_record_after_a_drain  src/node/settle/tests/links.rs
 test          no-site    a_path_acked_past_the_feed_is_in_its_links_record_after_a_refused_msg1  src/node/settle/tests/links.rs
 test          no-site    a_path_acked_past_the_feed_is_in_its_links_record_after_a_refused_msg2  src/node/settle/tests/links.rs
-test          no-site    a_planted_link_and_a_planted_index_entry_are_in_the_records_after_a_resync  src/node/settle/tests/links.rs
-test          no-site    a_planted_peers_link_and_an_entrys_link_put_in_the_map_after_are_in_the_records  src/node/settle/tests/links.rs
-test          no-site    a_configured_backoff_gives_the_nodes_resend_schedule  src/node/settle/tests/params.rs
-test          no-site    a_configured_interval_leaves_the_first_resend_a_second_after_the_dial  src/node/settle/tests/params.rs
-test          no-site    the_default_configuration_gives_the_settlement_cores_defaults  src/node/settle/tests/params.rs
 test          no-site    the_gate_constants_rekey_parameters_and_address_order_appear_only_on_the_exempt_list  src/node/settle/tests/scans.rs
 test          no-site    the_settlement_core_is_stepped_polled_reaped_and_closed_only_from_decide_and_the_two_path_feeds  src/node/settle/tests/scans.rs
 test          no-site    no_name_of_the_deleted_peer_control_machine_survives_and_the_scan_finds_each_one_put_back  src/node/tests/survivors.rs
@@ -715,12 +714,6 @@ test          open       a_session_rekey_reset_leaves_the_receiver_reporting_the
 test          open       every_msg1_dropped_by_winning_a_dual_rekey_initiation_is_logged  src/node/tests/handshake_lines.rs
 # show_peers reports the promotion time as a wall-clock reading.
 test          open       a_shown_authenticated_at_follows_a_wall_step  src/node/tests/settle/clock.rs
-# The standby roam's report to the core's record. The site and its rule are on next
-# (the frame accounting in src/node/dataplane/encrypted.rs tells the record the pair a standby
-# path left), but master's test reaches it through Node::resync, which next lacks, and next
-# holds no test of its own there. It wants a test written for next, and the switch goes with it.
-switch        open       StandbyRoamUnfed  core/src/faults.rs
-test          open       a_standby_paths_roam_moves_its_links_record_with_multipath_on  src/node/tests/settle/live.rs
 
 # Switches of master's msg1 handling: the restart gates a link machine asks for. Its site is
 # not on next.

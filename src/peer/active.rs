@@ -1136,6 +1136,13 @@ impl ActivePeer {
         paths.mark_acked(index);
     }
 
+    /// Leave the link's paths with none active, for tests of a lone path
+    /// that is not active, which the path machine leaves only inside a step.
+    #[cfg(test)]
+    pub(crate) fn idle_active(&mut self) {
+        self.test_paths().deactivate();
+    }
+
     /// Mark the held path (`transport_id`, `addr`) Dead, as unanswered
     /// probes would, for tests that need a held path given up on.
     #[cfg(test)]

@@ -7,9 +7,8 @@
 //! change to a record is a core input the join gives: [`pathed`] runs what a
 //! step of a link's bundle returned through it, [`Node::roamed`] a one-path
 //! roam or a bind, which the bundle reports in no output, and [`Node::feed`]
-//! applies each input to the record. Nothing reads the records to decide
-//! anything until the core decides the index and the close rule; the live
-//! audit holds them to each held link's bundle.
+//! steps the core with each input, so the record and the peer held on it
+//! follow. The live audit holds the records to each held link's bundle.
 
 use super::super::links::pair;
 use crate::NodeAddr;
@@ -56,9 +55,9 @@ pub(in crate::node) fn pathed(
 }
 
 impl Node {
-    /// Apply the core input `input` to the core's record of the link it
-    /// names: a path's state, move, switch or release, or the link turning
-    /// capable. Every other input
+    /// Step the core with the core input `input`, so its record of the link
+    /// it names follows: a path's state, move, switch or release, or the
+    /// link turning capable ([`Node::core_pathed`]). Every other input
     /// changes no record, and the node acts on it, if at all, where the join
     /// gave it.
     pub(in crate::node) fn feed(&mut self, input: &Input) {
@@ -73,7 +72,7 @@ impl Node {
             | Input::Moved { .. }
             | Input::Switched { .. }
             | Input::Released { .. }
-            | Input::Capable { .. } => self.links.mirror(input),
+            | Input::Capable { .. } => self.core_pathed(input),
             Input::Dial(_)
             | Input::Connecting { .. }
             | Input::Hello(_)
@@ -102,6 +101,23 @@ impl Node {
         }
     }
 
+    /// The record the settlement core holds `peer` on where a test planted
+    /// the peer on a link the node's map lacks, which no link of the node's
+    /// is numbered for, so a roam the peer makes reaches it (test builds
+    /// only; `None` otherwise).
+    fn planted_record(&self, peer: &NodeAddr) -> Option<LinkNo> {
+        #[cfg(test)]
+        if self.planted() {
+            return self
+                .core
+                .held(peer)
+                .map(|h| h.link)
+                .filter(|no| self.links.id(*no).is_none());
+        }
+        let _ = peer;
+        None
+    }
+
     /// The one path of `peer`'s link `link` moved inside its transport from
     /// `from` to `to`, or, with `from` `None`, a bundle holding no path was
     /// bound at `to`: neither is in any output of the bundle, so the join is
@@ -115,7 +131,7 @@ impl Node {
         to: &AddrKey,
         standby: bool,
     ) {
-        let Some(link) = self.links.no(&link) else {
+        let Some(link) = self.links.no(&link).or_else(|| self.planted_record(&peer)) else {
             return;
         };
         // The mutation lane's break: the roam never reaches the record.

@@ -33,8 +33,8 @@
 //!   other is settled by address order, the smaller node moving onto its
 //!   dial.
 //! - **A leaf node holds one peer**, and refuses another at msg2 or msg3,
-//!   removing the link at once. The max-peers cap at msg2 or msg3 leaves
-//!   the leg for its reap.
+//!   removing the link at once. The max-peers cap at msg2 leaves the dial's
+//!   leg for its reap, and at msg3 removes the answer's link at once.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
@@ -75,7 +75,7 @@ use crate::proto::fmp::EphemeralDigest;
 use crate::proto::settle::flow::{Flow, Outs};
 use crate::proto::settle::gates::Epoch;
 use crate::proto::settle::legs::Kind;
-use crate::proto::settle::links::{LinkNo, Pair};
+use crate::proto::settle::links::{Dir, LinkNo, Pair};
 use crate::proto::settle::output::{Denial, Output};
 use crate::proto::settle::params::Params;
 use crate::proto::settle::table::{Held, Ops, Table};
@@ -87,13 +87,14 @@ pub struct Answer {
     /// The ephemeral of the msg1 it answers, which an install at its msg3
     /// records.
     pub ephemeral: EphemeralDigest,
-    /// The established link at the msg1's source, as the shell fed it.
-    pub rekey_of: Option<LinkNo>,
     /// Its msg2 was sent.
     pub sent: bool,
 }
 
-/// An anonymous msg1 waiting for the answer the shell builds.
+/// An anonymous msg1 waiting for the answer the shell builds. Its
+/// `rekey_of` is read only by `AnonLegNamed`'s defect shape: the shell
+/// computes `rekey_of` and keeps its own map of it for the moved-msg3
+/// lookup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Asked {
     msg1: Vec<u8>,
@@ -216,6 +217,17 @@ impl Xx {
         self.reaped.remove(&link);
     }
 
+    /// The identity the dial on `link`, which named `named`, expects by its
+    /// reap, to retry: a failed dial's, as its failure noted it and taken
+    /// from the failed dials, or the one its msg2 taught, or else the one it
+    /// named (next's `conn_expected_identity`).
+    fn expects(&mut self, link: LinkNo, named: Option<NodeAddr>) -> Option<NodeAddr> {
+        match self.failed.remove(&link) {
+            Some(failed) => failed,
+            None => self.learned.get(&link).copied().or(named),
+        }
+    }
+
     /// Whether the flow keeps anything for `link`.
     fn holds(&self, link: LinkNo) -> bool {
         self.asks.contains_key(&link)
@@ -300,14 +312,17 @@ fn end<I: Instant>(ops: &mut Ops<'_, I, Xx>, link: LinkNo, out: &mut Vec<Outs<I,
     }
 }
 
-/// Whether next's promote refuses to install `peer` from the leg on `link`:
-/// a leaf holding another peer, which removes the link at once, or the
-/// max-peers cap, which leaves the leg for its reap. The refusal goes to
-/// `out`.
+/// Whether next's promote refuses to install `peer` from the leg on `link`,
+/// an answer's at msg3 when `answer` says so and a dial's at msg2
+/// otherwise: a leaf holding another peer, which removes the link at once,
+/// or the max-peers cap, which leaves a dial's leg for its reap and removes
+/// an answer's link at once, closing nothing, as next's inbound promote
+/// failure does. The refusal goes to `out`.
 fn barred<I: Instant>(
     ops: &mut Ops<'_, I, Xx>,
     peer: NodeAddr,
     link: LinkNo,
+    answer: bool,
     out: &mut Vec<Outs<I, Xx>>,
 ) -> bool {
     let flow = ops.flow();
@@ -330,7 +345,11 @@ fn barred<I: Instant>(
             source: None,
             why: Denial::Cap,
         });
-        ops.flow_mut().reaped.insert(link);
+        if answer && !(xx_fault!(CapKeepsAnswer) || node_fault!(CapKeepsAnswer)) {
+            end(ops, link, out);
+        } else {
+            ops.flow_mut().reaped.insert(link);
+        }
         return true;
     }
     false
@@ -392,6 +411,49 @@ fn sweep<I: Instant>(ops: &mut Ops<'_, I, Xx>, out: &mut Vec<Outs<I, Xx>>) {
     }
 }
 
+/// The node's timers at `now`: each dial past its deadline asks for a
+/// retry of the identity it expects by then, as next's handshake timeout
+/// does (`drive_handshake_timeouts` and the stale sweep, which read the
+/// leg's expected identity): a failed dial's, as its failure noted it, or
+/// the one its msg2 taught, or else the one it named. The table's poll at
+/// the same instant reaps it, so a failed one is not swept again.
+fn due<I: Instant>(ops: &mut Ops<'_, I, Xx>, now: I, out: &mut Vec<Outs<I, Xx>>) {
+    if xx_fault!(TimeoutNoRetry) || node_fault!(TimeoutNoRetry) {
+        return;
+    }
+    let timed: Vec<(LinkNo, Option<NodeAddr>)> = ops
+        .legs()
+        .iter()
+        .filter(|l| matches!(l.kind(), Kind::Dial) && l.deadline() <= now)
+        .map(|l| (l.link(), l.peer()))
+        .collect();
+    for (link, named) in timed {
+        if let Some(peer) = ops.flow_mut().expects(link, named) {
+            out.push(Output::Retry { peer });
+        }
+    }
+}
+
+/// The node's timer reaps its dial on `link` alone: the dial asks for a
+/// retry of the identity it expects by then, as [`due`] has each dial past
+/// its deadline ask. Nothing for a leg that is not a dial.
+fn timed<I: Instant>(ops: &mut Ops<'_, I, Xx>, link: LinkNo, out: &mut Vec<Outs<I, Xx>>) {
+    if xx_fault!(TimeoutNoRetry) || node_fault!(TimeoutNoRetry) {
+        return;
+    }
+    let Some(named) = ops
+        .legs()
+        .get(link)
+        .filter(|l| matches!(l.kind(), Kind::Dial))
+        .map(|l| l.peer())
+    else {
+        return;
+    };
+    if let Some(peer) = ops.flow_mut().expects(link, named) {
+        out.push(Output::Retry { peer });
+    }
+}
+
 impl<I: Instant> Flow<I> for Xx {
     type In = In;
     type Out = Out;
@@ -423,6 +485,16 @@ impl<I: Instant> Flow<I> for Xx {
                 from,
             } => msg3::msg3(ops, link, peer, epoch, claim, from, now, out),
             In::Sweep => sweep(ops, out),
+            In::Due => due(ops, now, out),
+            In::Timed { link } => timed(ops, link, out),
+            In::Quiet { link } => ops.legs_mut().quiet(link),
+            In::Unconnected { link, retry } => {
+                msg2::unconnected(ops, link, out);
+                let asked = !(xx_fault!(ConnectFailNoRetry) || node_fault!(ConnectFailNoRetry));
+                if let Some(peer) = retry.filter(|_| asked) {
+                    out.push(Output::Retry { peer });
+                }
+            }
         }
     }
 
@@ -452,8 +524,17 @@ impl<I: Instant> Flow<I> for Xx {
         fresh(ops, peer);
     }
 
+    /// next's `heard_on_session` starts afresh at a move: a frame heard
+    /// under the session left does not count for the one moved onto.
     fn moved(ops: &mut Ops<'_, I, Self>, peer: NodeAddr) {
+        // The mutation lane's break: the move keeps the frame heard before
+        // it.
+        let kept = (xx_fault!(MoveKeepsFramed) || node_fault!(MoveKeepsFramed))
+            && ops.flow().framed(&peer);
         fresh(ops, peer);
+        if kept {
+            ops.flow_mut().framed.insert(peer);
+        }
     }
 
     fn heard(ops: &mut Ops<'_, I, Self>, peer: NodeAddr) {
@@ -466,9 +547,15 @@ impl<I: Instant> Flow<I> for Xx {
         flow.framed.remove(&peer);
     }
 
-    /// next counts every session that carried no frame, whatever its role.
-    fn silent(_: &Table<I, Self>, _: &Held<I>) -> bool {
-        true
+    /// Only a session the peer dialed counts. One this node dialed may have
+    /// had its msg3 refused by the peer, whose frames then had no session
+    /// to arrive on, so its silence is not held against the peer.
+    fn silent(table: &Table<I, Self>, held: &Held<I>) -> bool {
+        let own = table
+            .links()
+            .get(held.link)
+            .is_some_and(|r| r.dir == Dir::Outbound);
+        !own || xx_fault!(OwnDialCountsSilent) || node_fault!(OwnDialCountsSilent)
     }
 }
 

@@ -15,9 +15,9 @@
 //!
 //! `step(event, now, index_allocator) -> Vec<PeerAction>` is a **pure reducer**:
 //! every lifecycle *decision* is delegated to the existing sans-IO cores in
-//! [`crate::proto::fmp`] ([`Fmp::establish_inbound`], `establish_outbound`,
-//! `poll_timeouts` and `poll_resends`) — this module writes **no new decision
-//! core**. A link's rekeys are not modelled here: the active peer's link rekey
+//! [`crate::proto::fmp`] (`poll_timeouts` and `poll_resends`), or made by
+//! the node's settlement core and handed in (the inbound and outbound
+//! establish decisions) — this module writes **no new decision core**. A link's rekeys are not modelled here: the active peer's link rekey
 //! machine holds them. The machine only (a) builds
 //! the plain-data snapshots those cores consume from its control-tier state, (b)
 //! maps the returned [`ConnAction`]/[`InboundDecision`]/[`PromotionResult`] into
@@ -30,7 +30,7 @@
 //!
 //! - **Identity crystallizes at msg3, not msg1.** On XX the responder learns the
 //!   initiator's node address only once `msg3` completes the Noise handshake, so
-//!   the inbound classification ([`Fmp::establish_inbound`]) runs at msg3. The
+//!   the inbound classification runs at msg3. The
 //!   single IK `InboundMsg1` event is therefore split into an
 //!   [`InboundMsg1`](PeerEvent::InboundMsg1) index-alloc/defer step and an
 //!   [`InboundMsg3`](PeerEvent::InboundMsg3) classify step.
@@ -55,12 +55,12 @@
 //! the peer's link rekey machine.
 //!
 //! The outbound completion is routed through the machine the same way:
-//! `handle_msg2` crystallizes the learned identity, builds an
-//! [`OutboundSnapshot`], and steps the persistent machine once; the machine
-//! computes the establish decision via `establish_outbound`. The shell reads
-//! the same pure decision from the same snapshot once before the msg3 goes,
-//! only to send no msg3 on an [`OwnDialKeep`](OutboundDecision::OwnDialKeep),
-//! which the machine resolves as a keep. A net-new
+//! `handle_msg2` crystallizes the learned identity and steps the persistent
+//! machine once with the establish decision, which the node's settlement
+//! core made at the msg2 and the msg3 send (`src/node/settle/decide.rs`).
+//! The shell sends no msg3 on an
+//! [`OwnDialKeep`](OutboundDecision::OwnDialKeep), which the machine
+//! resolves as a keep. A net-new
 //! completion promotes through [`PromoteToActive`](PeerAction::PromoteToActive)
 //! (the executor feeds the outcome back via
 //! [`PromotionResolved`](PeerEvent::PromotionResolved)), while a
@@ -84,9 +84,8 @@ use crate::identity::ErasingKeypair;
 use crate::identity::OsEntropy;
 use crate::noise::{self, NoiseError, NoiseSession};
 use crate::proto::fmp::{
-    ConnAction, ConnSnapshot, ConnectionState, DialMsg2Decision, DialMsg2Reject, EstablishSnapshot,
-    Fmp, InboundDecision, LegStamp, NodeProfile, OutboundDecision, OutboundSnapshot,
-    PromotionResult, WireOutcome,
+    ConnAction, ConnSnapshot, ConnectionState, DialMsg2Decision, DialMsg2Reject, Fmp,
+    InboundDecision, LegStamp, NodeProfile, OutboundDecision, PromotionResult, WireOutcome,
 };
 use crate::proto::link::LinkMessageType;
 use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
@@ -356,23 +355,24 @@ pub(crate) enum PeerEvent {
     /// or wire outcome — on XX neither is known at msg1.
     InboundMsg1 { link: LinkId },
     /// Inbound handshake msg3 completed (Noise finalized, identity crystallized
-    /// shell-side, ACL already gated). Drives the establish classification. Used
-    /// for both a fresh inbound establish and a rekey msg3 on an established peer.
-    /// The leg's index is the lease this machine took at msg1.
+    /// shell-side, ACL already gated). Carries the establish decision the
+    /// settlement core made, which the machine carries out. Used for both a
+    /// fresh inbound establish and a rekey msg3 on an established peer. The
+    /// leg's index is the lease this machine took at msg1.
     InboundMsg3 {
         wire: WireOutcome,
-        est: EstablishSnapshot,
+        decision: InboundDecision,
     },
     /// Outbound handshake msg2 completed (Noise finalized, identity crystallized
     /// onto the machine shell-side, ACL already gated, msg3 sent). Carries the
-    /// shell-built [`OutboundSnapshot`]; the machine computes the establish
-    /// decision from it — a net-new promote, or a cross-connection swap/keep
-    /// conveyed as [`ResolveCrossConnection`](PeerAction::ResolveCrossConnection).
+    /// establish decision the settlement core made, which the machine carries
+    /// out — a net-new promote, or a cross-connection swap/keep conveyed as
+    /// [`ResolveCrossConnection`](PeerAction::ResolveCrossConnection).
     /// `their_index` carries the peer's session index for shape parity with the
     /// inbound path.
     OutboundMsg2 {
         their_index: SessionIndex,
-        out: OutboundSnapshot,
+        decision: OutboundDecision,
     },
     /// `promote_connection` resolved the [`PromoteToActive`](PeerAction::PromoteToActive)
     /// action shell-side; the machine consumes the outcome (it does not
@@ -1130,6 +1130,19 @@ impl PeerMachine {
         self.conn.set_expected_identity(identity);
     }
 
+    /// Hand back the lease on the leg's session index that the settlement
+    /// core held while the handshake was in flight: onto the leg's msg3
+    /// read while one is unsettled, as the read would have taken it, and
+    /// onto the surviving carrier otherwise. Returns a lease the caller is
+    /// to release: `lease` itself if the read holds one already, or the
+    /// lease the carrier held before.
+    pub(crate) fn give_lease(&mut self, lease: IndexLease) -> Option<IndexLease> {
+        match self.leg.as_mut().and_then(|leg| leg.fin.as_mut()) {
+            Some(fin) => fin.give(lease),
+            None => self.conn.set_our_index(lease),
+        }
+    }
+
     /// Take the lease holding our session index off the surviving carrier:
     /// the promotion hands it to the active peer's link rekey machine, a
     /// cross-connection hands it to the promoted peer's, and the
@@ -1441,13 +1454,14 @@ impl PeerMachine {
             PeerEvent::TransportFailed => self.on_transport_failed(now),
             PeerEvent::HandshakeSendFailed => self.on_handshake_send_failed(),
             PeerEvent::InboundMsg1 { link } => self.on_inbound_msg1(link, now, index_allocator),
-            PeerEvent::InboundMsg3 { wire, est } => {
-                let (_decision, actions) = self.inbound_msg3(wire, est, now, index_allocator);
+            PeerEvent::InboundMsg3 { wire, decision } => {
+                let (_decision, actions) = self.inbound_msg3(wire, decision, now, index_allocator);
                 actions
             }
-            PeerEvent::OutboundMsg2 { their_index, out } => {
-                self.on_outbound_msg2(their_index, out, now)
-            }
+            PeerEvent::OutboundMsg2 {
+                their_index,
+                decision,
+            } => self.on_outbound_msg2(their_index, decision, now),
             PeerEvent::PromotionResolved { result } => self.on_promotion_resolved(result, now),
             PeerEvent::CrossConnResolved { outcome } => self.on_cross_conn_resolved(outcome),
             PeerEvent::FilterAnnounce => vec![PeerAction::SendLinkMessage {
@@ -1599,9 +1613,9 @@ impl PeerMachine {
         vec![PeerAction::SendHandshake { bytes: Vec::new() }]
     }
 
-    /// Inbound **msg3**: identity crystallizes here. Compute the establish
-    /// decision for the driver, alongside the machine-phase actions. The single
-    /// `establish_inbound` evaluation happens here; the driver routes on the
+    /// Inbound **msg3**: identity crystallizes here. Carry out `decision`, the
+    /// establish decision the settlement core made, and return it to the
+    /// driver alongside the machine-phase actions. The driver routes on the
     /// returned [`InboundDecision`], while the terminal arms' effect actions —
     /// the reject/duplicate `FreeIndex` and the `fail` flip — are legitimate
     /// carrier effects on this map-resident machine. The duplicate-resend send
@@ -1616,7 +1630,7 @@ impl PeerMachine {
     pub(crate) fn inbound_msg3(
         &mut self,
         wire: WireOutcome,
-        est: EstablishSnapshot,
+        decision: InboundDecision,
         _now: u64,
         _alloc: &mut IndexAllocator,
     ) -> (InboundDecision, Vec<PeerAction>) {
@@ -1624,7 +1638,6 @@ impl PeerMachine {
         // address + epoch; the full static key stays shell-side).
         self.node_addr = Some(wire.peer_node_addr);
 
-        let decision = Fmp::new().establish_inbound(&est, &wire);
         let actions = match &decision {
             // The epoch-mismatch teardown was refused: the peering this msg3
             // would destroy is still carrying authenticated traffic, or this
@@ -1699,14 +1712,14 @@ impl PeerMachine {
     }
 
     /// Outbound completion after msg2 completes the initiator handshake:
-    /// compute the establish decision from the snapshot via
-    /// `establish_outbound`. `Promote` drives promotion via actions; the
+    /// carry out the establish decision `decision`, which the settlement core
+    /// made. `Promote` drives promotion via actions; the
     /// Swap/Keep outcomes are conveyed as a
     /// [`ResolveCrossConnection`](PeerAction::ResolveCrossConnection) decision
     /// for the shell's inline resolution, which owns all effects (index frees,
     /// session replacement) permanently. No state guard: anonymous-discovery
     /// legs reach msg2 parked in `Discovered` (identified dials in
-    /// `Handshaking{SentMsg1}`), and the decision reads only the snapshot.
+    /// `Handshaking{SentMsg1}`).
     ///
     /// On `Promote` the persistent machine survives as the active peer's
     /// control machine, and `Established` is written here, ahead of the
@@ -1719,11 +1732,11 @@ impl PeerMachine {
     fn on_outbound_msg2(
         &mut self,
         their_index: SessionIndex,
-        out: OutboundSnapshot,
+        decision: OutboundDecision,
         _now: u64,
     ) -> Vec<PeerAction> {
         self.conn.set_their_index(their_index);
-        match Fmp::new().establish_outbound(&out, self.conn.remote_epoch()) {
+        match decision {
             OutboundDecision::Promote => self.outbound_promote(),
             OutboundDecision::RestartThenPromote => {
                 // The peer restarted: the stale peer goes first, with its
@@ -2107,8 +2120,21 @@ mod msg2_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::fmp::{PromotionResult, RekeyClaim};
+    use crate::proto::fmp::{EstablishSnapshot, OutboundSnapshot, PromotionResult, RekeyClaim};
     use crate::{Identity, PeerIdentity};
+
+    /// next's establish decision for `out`, at a msg2 carrying no epoch, as
+    /// the settlement core makes it for the node.
+    fn decided(out: OutboundSnapshot) -> OutboundDecision {
+        Fmp::new().establish_outbound(&out, None)
+    }
+
+    /// The msg3 step for `wire`, carrying next's establish decision for
+    /// `est`, as the settlement core makes it for the node.
+    fn classified(wire: WireOutcome, est: EstablishSnapshot) -> PeerEvent {
+        let decision = Fmp::new().establish_inbound(&est, &wire);
+        PeerEvent::InboundMsg3 { wire, decision }
+    }
 
     fn peer_identity() -> PeerIdentity {
         PeerIdentity::from_pubkey(Identity::generate().pubkey())
@@ -2167,12 +2193,12 @@ mod tests {
         let actions = m.step(
             PeerEvent::OutboundMsg2 {
                 their_index,
-                out: OutboundSnapshot {
+                decision: decided(OutboundSnapshot {
                     has_existing_peer: false,
                     our_outbound_wins: false,
                     beside_own: false,
                     existing_peer_epoch: None,
-                },
+                }),
             },
             0,
             &mut alloc,
@@ -2209,12 +2235,12 @@ mod tests {
         let actions = m.step(
             PeerEvent::OutboundMsg2 {
                 their_index,
-                out: OutboundSnapshot {
+                decision: decided(OutboundSnapshot {
                     has_existing_peer: false,
                     our_outbound_wins: false,
                     beside_own: false,
                     existing_peer_epoch: None,
-                },
+                }),
             },
             0,
             &mut alloc,
@@ -2255,12 +2281,12 @@ mod tests {
         let swap = m2.step(
             PeerEvent::OutboundMsg2 {
                 their_index: SessionIndex::new(0x99),
-                out: OutboundSnapshot {
+                decision: decided(OutboundSnapshot {
                     has_existing_peer: true,
                     our_outbound_wins: true,
                     beside_own: false,
                     existing_peer_epoch: None,
-                },
+                }),
             },
             400,
             &mut alloc,
@@ -2295,12 +2321,12 @@ mod tests {
         let keep = m3.step(
             PeerEvent::OutboundMsg2 {
                 their_index: SessionIndex::new(0x9A),
-                out: OutboundSnapshot {
+                decision: decided(OutboundSnapshot {
                     has_existing_peer: true,
                     our_outbound_wins: false,
                     beside_own: false,
                     existing_peer_epoch: None,
-                },
+                }),
             },
             500,
             &mut alloc,
@@ -2466,7 +2492,7 @@ mod tests {
         est.existing_peer_epoch = Some([1u8; 8]); // old
         let wire = wire_outcome(peer_addr, Some([2u8; 8])); // new epoch
 
-        let actions = m.step(PeerEvent::InboundMsg3 { wire, est }, 1_000, &mut alloc);
+        let actions = m.step(classified(wire, est), 1_000, &mut alloc);
         assert_eq!(
             actions,
             vec![
@@ -2515,10 +2541,7 @@ mod tests {
             &mut alloc,
         );
         let wp = winner.step(
-            PeerEvent::InboundMsg3 {
-                wire: wire_outcome(peer_addr, Some([3u8; 8])),
-                est: est_new_peer(our),
-            },
+            classified(wire_outcome(peer_addr, Some([3u8; 8])), est_new_peer(our)),
             100,
             &mut alloc,
         );
@@ -2552,10 +2575,7 @@ mod tests {
             &mut alloc,
         );
         let lp = loser.step(
-            PeerEvent::InboundMsg3 {
-                wire: wire_outcome(peer_addr, Some([3u8; 8])),
-                est: est_new_peer(our),
-            },
+            classified(wire_outcome(peer_addr, Some([3u8; 8])), est_new_peer(our)),
             100,
             &mut alloc,
         );
@@ -2626,10 +2646,7 @@ mod tests {
         // msg3: net-new promote.
         let our = *peer_identity().node_addr();
         let msg3 = m.step(
-            PeerEvent::InboundMsg3 {
-                wire: wire_outcome(peer_addr, Some([4u8; 8])),
-                est: est_new_peer(our),
-            },
+            classified(wire_outcome(peer_addr, Some([4u8; 8])), est_new_peer(our)),
             200,
             &mut alloc,
         );
@@ -2711,7 +2728,7 @@ mod tests {
         est.rekey_claim = RekeyClaim::None; // no rekey declared -> cross-connection
         let wire = wire_outcome(peer_addr, Some([5u8; 8]));
 
-        let actions = m.step(PeerEvent::InboundMsg3 { wire, est }, 200, &mut alloc);
+        let actions = m.step(classified(wire, est), 200, &mut alloc);
         assert_eq!(
             actions,
             vec![PeerAction::ResolveInboundCrossConnection {
@@ -2747,7 +2764,8 @@ mod tests {
         est.rekey_claim = RekeyClaim::Matches; // declared rekey of our session
         let wire = wire_outcome(peer_addr, Some([7u8; 8]));
 
-        let (decision, actions) = m.inbound_msg3(wire, est, 200, &mut alloc);
+        let decision = Fmp::new().establish_inbound(&est, &wire);
+        let (decision, actions) = m.inbound_msg3(wire, decision, 200, &mut alloc);
         assert!(matches!(decision, InboundDecision::PeerRekey { peer } if peer == peer_addr));
         assert_eq!(actions, vec![PeerAction::FreeIndex { index: seed }]);
         assert_eq!(m.our_index(), None, "the leg's lease is released");
@@ -2789,7 +2807,7 @@ mod tests {
         est.stored_msg2 = Some(stored_msg2.clone());
         let wire = wire_outcome(peer_addr, Some([9u8; 8]));
 
-        let actions = m.step(PeerEvent::InboundMsg3 { wire, est }, 200, &mut alloc);
+        let actions = m.step(classified(wire, est), 200, &mut alloc);
         assert_eq!(actions, vec![PeerAction::FreeIndex { index: seed }]);
         assert_eq!(
             m.state(),
@@ -2827,12 +2845,12 @@ mod tests {
         let promote = m.step(
             PeerEvent::OutboundMsg2 {
                 their_index: SessionIndex::new(0x77),
-                out: OutboundSnapshot {
+                decision: decided(OutboundSnapshot {
                     has_existing_peer: false,
                     our_outbound_wins: false,
                     beside_own: false,
                     existing_peer_epoch: None,
-                },
+                }),
             },
             300,
             &mut alloc,
@@ -2871,7 +2889,7 @@ mod tests {
         est.has_existing_peer = true;
         est.existing_peer_epoch = Some([1u8; 8]);
         let wire = wire_outcome(peer_addr, Some([2u8; 8]));
-        let restart = m.step(PeerEvent::InboundMsg3 { wire, est }, 1_000, &mut alloc);
+        let restart = m.step(classified(wire, est), 1_000, &mut alloc);
         assert!(
             !restart
                 .iter()
@@ -2935,12 +2953,12 @@ mod tests {
         let promote = m.step(
             PeerEvent::OutboundMsg2 {
                 their_index: SessionIndex::new(0x77),
-                out: OutboundSnapshot {
+                decision: decided(OutboundSnapshot {
                     has_existing_peer: false,
                     our_outbound_wins: false,
                     beside_own: false,
                     existing_peer_epoch: None,
-                },
+                }),
             },
             200,
             &mut alloc,

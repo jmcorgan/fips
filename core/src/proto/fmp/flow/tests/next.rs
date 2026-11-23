@@ -514,12 +514,14 @@ impl NextParty {
                 };
                 if self.me >= id {
                     // Our inbound wins: onto the leg's session, at the msg3's
-                    // pair; the link left is retired, closing nothing.
-                    self.links.remove(&p.link);
+                    // pair, on the link the peer is held on, whose record
+                    // stays as it was; the leg's link is retired, closing
+                    // nothing (`ResolveInboundCrossConnection`,
+                    // `peer_actions.rs`).
+                    self.links.remove(&link);
                     let mark = self.nextlink;
                     let q = self.peers.get_mut(&id).expect("held");
                     q.hs = hs;
-                    q.link = link;
                     q.current = src;
                     q.heard = self.now;
                     q.framed = false;

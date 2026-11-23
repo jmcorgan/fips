@@ -3,12 +3,13 @@
 //! Pure, runtime-agnostic maintain/teardown decisions for the FMP peer
 //! connection lifecycle: handshake-connection timeout/teardown and outbound
 //! msg1 resend scheduling. Link rekeys are decided by each link's rekey
-//! machine (`proto::rekey`), not here. The async I/O adapters in
-//! `node::handlers::timeout` build a [`LifecycleView`] over live node state (pre-computing every clock
-//! read into plain `u64`/`bool` snapshot fields), call the `poll_*` decisions,
-//! and drive the returned [`ConnAction`]s — the actual sends, registry
-//! mutations, metrics, and logging. No I/O, no clock, no metrics, no logging
-//! here.
+//! machine (`proto::rekey`), not here. The `poll_*` decisions take plain
+//! snapshots with every clock read pre-computed into `u64`/`bool` fields,
+//! and return [`ConnAction`]s for the caller to drive. The root crate's node
+//! no longer calls them: it times and reaps its handshakes in the
+//! settlement core's legs (`proto::settle::legs`), and only the peer
+//! machine's own timer handlers still call them. No I/O, no clock, no
+//! metrics, no logging here.
 //!
 //! The establish leaf's Noise wire construction and `promote_connection`
 //! effects stay shell-side; handshake message bytes are carried as opaque blobs
@@ -400,7 +401,8 @@ pub enum ConnAction {
 pub trait LifecycleView {
     /// Snapshot every handshake connection that is stale (idle past
     /// `timeout_ms`) or failed, as of `now_ms`. The shell resolves the
-    /// timeout/failed predicate; the core decides retry-then-teardown.
+    /// timeout/failed predicate; the core decides retry-then-teardown. The
+    /// root crate's node no longer implements it.
     fn stale_connections(&self, now_ms: u64, timeout_ms: u64) -> Vec<ConnSnapshot>;
 }
 

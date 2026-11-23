@@ -408,7 +408,10 @@ pub(super) async fn dial_at(
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    initiator.node.links.open(link);
+    initiator
+        .node
+        .links
+        .open(initiator.node.core.parts_mut().0, link);
     initiator
         .node
         .pending_outbound

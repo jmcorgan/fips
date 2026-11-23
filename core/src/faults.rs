@@ -107,9 +107,6 @@ faults! {
     /// A rekey machine that yields to a peer's completed attempt keeps its
     /// own attempt instead of abandoning it.
     YieldKeepsOwnAttempt,
-    /// The restart gate measures a heard peering's idle time on the wall
-    /// clock instead of the peer clock.
-    GateOnWall,
     /// The replay memory never ages an entry out.
     MemoryNeverExpires,
     /// A move that makes a peering heard keeps the replay memory of the
@@ -320,6 +317,10 @@ faults! {
     /// Abandoning a dial takes the index's entry at the dial's pair from
     /// whichever link it named, as the written index did.
     ForgetTakesKey,
+    /// The node's test-only resync of its link records writes nothing, so a
+    /// link, an index entry or a peer a test planted past the writers has no
+    /// record the msg1 predicates can read.
+    ResyncSkipped,
     /// A pair several links use names the link opened first, not the one
     /// opened last.
     IndexOldestWins,
@@ -329,6 +330,10 @@ faults! {
     /// A one-path roam or a bind, which the bundle reports in no output, is
     /// not told to the core, so the link's record keeps the old pair.
     RoamNotFed,
+    /// A frame that roams a link's one path while it is not the active
+    /// path tells the settlement core's record nothing of the pair it left,
+    /// so the record gains the new pair and keeps the old.
+    StandbyRoamUnfed,
     /// An anonymous beacon at any pair the link index names is not dialled,
     /// whatever holds the link there, so a beacon at a proven path of a
     /// held peer silent past its liveness is skipped too.
@@ -587,9 +592,20 @@ faults! {
     /// The XX flow: a msg2's decision runs before the outcome of its msg3
     /// send.
     FinalBeforeSendOutcome,
+    /// The XX flow: the smaller node's move at msg2 closes the dial's own
+    /// connection when the msg2 came from another pair.
+    MoveClosesDial,
+    /// The XX flow: a dial past its deadline is reaped with no retry.
+    TimeoutNoRetry,
+    /// The XX flow: an identified dial whose connection could not be opened
+    /// asks for no retry.
+    ConnectFailNoRetry,
     /// The XX flow: a leaf's refusal of a second peer leaves the leg for its
     /// reap.
     LeafKeepsLink,
+    /// The XX flow: the max-peers cap's refusal at msg3 leaves the answer's
+    /// leg for its reap.
+    CapKeepsAnswer,
     /// The XX flow: a msg3 at a new epoch restarts the held peer with no
     /// gate.
     Msg3RestartUngated,
@@ -602,6 +618,14 @@ faults! {
     /// The XX flow: the silent-session refusal at msg3 refuses an identity
     /// at any epoch.
     SilentRefusalAnyEpoch,
+    /// The XX flow and the node: a session this node dialed that ends before
+    /// the peer's first frame counts toward the peer's silent-session
+    /// back-off.
+    OwnDialCountsSilent,
+    /// The XX flow and the node: a move keeps the frame heard under the
+    /// session it leaves, so a dial in flight at the move is no longer
+    /// beside the node's own unheard dial and sends its msg3.
+    MoveKeepsFramed,
 }
 
 impl Fault {

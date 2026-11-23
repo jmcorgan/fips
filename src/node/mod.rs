@@ -88,7 +88,7 @@ use crate::proto::fmp::wire::{
     ESTABLISHED_HEADER_SIZE, FLAG_CE, FLAG_KEY_EPOCH, build_encrypted, build_established_header,
     prepend_inner_header,
 };
-use crate::proto::fmp::{Fmp, NodeProfile, SilentSessions};
+use crate::proto::fmp::{Fmp, NodeProfile};
 use crate::proto::fsp::Fsp;
 use crate::proto::fsp::quorum::LinkQuorum;
 use crate::proto::lookup::{Lookup, LookupBackoff, LookupForwardRateLimiter};
@@ -823,17 +823,30 @@ pub struct Node {
     /// (transport_id, our_index). The responder stores the connection here
     /// after sending msg2 and awaits msg3 to learn the initiator's identity.
     pending_inbound: settle::LegMap,
-    /// When each peer identity's last ACCEPTED epoch change tore down its
-    /// peering. Keyed on identity rather than address, and held here rather
-    /// than on `ActivePeer`, because the teardown being dampened destroys
-    /// the peer entry itself. Pruned on insert; see
-    /// `EPOCH_RESTART_MIN_INTERVAL_SECS`.
-    restart_dampener: HashMap<NodeAddr, std::time::Instant>,
-    /// Each identity's recent link sessions that ended without one
-    /// authenticated frame, and the msg1 refusal they drive. Held here, not
-    /// on `ActivePeer`, for the same reason as `restart_dampener`: the
-    /// removal it counts destroys the peer entry.
-    silent_sessions: SilentSessions,
+    /// The settlement core's table, the one copy of each of its parts the
+    /// node holds ([`settle::Core`]), stepped at each of the node's
+    /// decision sites (`settle::decide`). Its link records are those the
+    /// link table's index is derived from (`links`). Its handshake legs are
+    /// each of this node's own dials in flight, from its msg1 until the
+    /// core decides its msg2, with the lease on the session index its msg1
+    /// named and its msg1 resends, and each of its answers, from its msg2
+    /// until the core decides its msg3, with its lease and the msg1 and
+    /// msg2 a resent msg1 is told apart by and answered with; each is
+    /// reaped there at its handshake timeout. A leg is numbered by its
+    /// link's record. Its restart gates remember of each peer identity
+    /// when its last accepted epoch change tore down its peering, which
+    /// stamps the dampener, and its link sessions that ended without one
+    /// authenticated frame, which drive the msg3 refusal, with the
+    /// handshakes that refusal has refused, for the lines that report
+    /// them; keyed on identity and held here rather than on `ActivePeer`,
+    /// because the teardown or removal they bound destroys the peer entry
+    /// itself. The node still decides with the parts itself, through
+    /// [`Table::parts`](crate::proto::settle::table::Table::parts).
+    core: settle::Core,
+    /// What the resync of a test's planted state into the core keeps, in
+    /// test builds (`settle::decide`).
+    #[cfg(test)]
+    replanted: Box<settle::decide::Replant>,
     /// The node's side of the links' path machines: the connections a
     /// machine asked for and the connections left to close.
     paths: handlers::path::PathDriver,
@@ -1176,8 +1189,9 @@ impl Node {
             msgtype_budget: diag::LogBudget::new(std::time::Instant::now()),
             pending_outbound: settle::DialMap::default(),
             pending_inbound: settle::LegMap::default(),
-            restart_dampener: HashMap::new(),
-            silent_sessions: SilentSessions::new(),
+            core: settle::core(node_addr, &config),
+            #[cfg(test)]
+            replanted: Box::default(),
             paths: handlers::path::PathDriver::default(),
             msg1_rate_limiter,
             setup_rate_limiter,
@@ -1366,8 +1380,9 @@ impl Node {
             msgtype_budget: diag::LogBudget::new(std::time::Instant::now()),
             pending_outbound: settle::DialMap::default(),
             pending_inbound: settle::LegMap::default(),
-            restart_dampener: HashMap::new(),
-            silent_sessions: SilentSessions::new(),
+            core: settle::core(node_addr, &config),
+            #[cfg(test)]
+            replanted: Box::default(),
             paths: handlers::path::PathDriver::default(),
             msg1_rate_limiter,
             setup_rate_limiter,
@@ -3197,7 +3212,7 @@ impl Node {
                 max: self.max_links(),
             });
         }
-        self.links.open(link);
+        self.links.open(self.core.parts_mut().0, link);
         Ok(())
     }
 
@@ -3307,25 +3322,25 @@ impl Node {
     /// records give names the link named there before, if that link is still
     /// live.
     pub fn remove_link(&mut self, link_id: &LinkId) -> Option<Link> {
-        self.links.close(link_id)
+        self.links.close(self.core.parts_mut().0, link_id)
     }
 
     /// Single choke-point for dropping a per-peer control machine. Also drops the
     /// machine's timer store so no armed `SetTimer` outlives it (the store and the
     /// machine share the `LinkId` lifetime), and releases the lease on a
-    /// handshake leg's index that the machine still holds, so no exit of a leg
-    /// leaks its index. Every teardown path routes machine removal here rather
+    /// handshake leg's index that the machine, or the dial's leg in the
+    /// settlement core's legs, still holds, so no exit of a leg leaks its
+    /// index. Every teardown path routes machine removal here rather
     /// than calling `peer_machines.remove` directly.
     pub(in crate::node) fn remove_peer_machine(&mut self, link: LinkId) {
-        if let Some(lease) = self
+        self.core_drop_leg(link);
+        let held = self
             .peer_machines
             .drop(link)
             .as_mut()
-            .and_then(PeerMachine::take_our_index)
-        {
-            let _ = self
-                .index_allocator
-                .free(crate::utils::index::SessionIndex::new(lease.release()));
+            .and_then(PeerMachine::take_our_index);
+        if let Some(lease) = held {
+            self.free_lease(lease);
         }
     }
 

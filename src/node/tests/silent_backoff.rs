@@ -157,7 +157,7 @@ async fn three_silent_sessions_ended_by_link_dead_refuse_the_next_same_epoch_msg
         nodes[1].node.peer_machines.is_empty(),
         "the refused leg is disposed"
     );
-    assert_eq!(nodes[1].node.silent_sessions.count(&a), Some(3));
+    assert_eq!(nodes[1].node.gates().silent(&a), Some(3));
 
     cleanup_nodes(&mut nodes).await;
 }
@@ -197,7 +197,7 @@ async fn a_replayed_msg1_promotes_nothing_so_it_cannot_count_a_silent_session() 
         nodes[1].node.check_link_heartbeats().await;
         assert!(nodes[1].node.get_peer(&a).is_none(), "round {round}");
     }
-    assert_eq!(nodes[1].node.silent_sessions.count(&a), None);
+    assert_eq!(nodes[1].node.gates().silent(&a), None);
 
     cleanup_nodes(&mut nodes).await;
 }
@@ -221,7 +221,7 @@ async fn one_authenticated_frame_clears_the_count_so_three_more_silent_sessions_
     drain_all_packets(&mut nodes, false).await;
     let peer = nodes[1].node.get_peer(&a).expect("node 1's dial completed");
     assert!(peer.heard(), "node 0's frames reached node 1");
-    assert_eq!(nodes[1].node.silent_sessions.count(&a), None);
+    assert_eq!(nodes[1].node.gates().silent(&a), None);
 
     // A session that carried frames is not counted when it ends.
     nodes[1].node.remove_active_peer(&a);
@@ -229,7 +229,7 @@ async fn one_authenticated_frame_clears_the_count_so_three_more_silent_sessions_
     nodes[0].node.remove_active_peer(&b);
     discard(&mut nodes[0]);
     discard(&mut nodes[1]);
-    assert_eq!(nodes[1].node.silent_sessions.count(&a), None);
+    assert_eq!(nodes[1].node.gates().silent(&a), None);
 
     // Two more silent sessions do not reach the limit again.
     for index in 5..=6 {
@@ -329,8 +329,8 @@ async fn sessions_that_carried_a_frame_never_count_toward_the_back_off() {
         discard(&mut nodes[0]);
         discard(&mut nodes[1]);
     }
-    assert_eq!(nodes[1].node.silent_sessions.count(&a), None);
-    assert_eq!(nodes[0].node.silent_sessions.count(&b), None);
+    assert_eq!(nodes[1].node.gates().silent(&a), None);
+    assert_eq!(nodes[0].node.gates().silent(&b), None);
     assert_eq!(nodes[1].node.stats().handshake.silent_backoff, 0);
 
     cleanup_nodes(&mut nodes).await;
@@ -340,9 +340,8 @@ async fn sessions_that_carried_a_frame_never_count_toward_the_back_off() {
 /// promotes at its msg2 and holds a session node 1 never installed; node
 /// 0's link-dead reaper then removes it unheard. The refusal was node 1's,
 /// and node 1's frames never had a session to arrive on, so the session
-/// must not count toward node 0's back-off for node 1. On next it does:
-/// a removal counts every peer it removes unheard, whoever dialed it.
-/// Multipath is set as `on`.
+/// must not count toward node 0's back-off for node 1: a removal counts
+/// only a session the peer dialed. Multipath is set as `on`.
 async fn refused_dialer(on: bool) {
     let mut nodes = vec![
         spanning_tree::make_test_node_with_config(
@@ -386,7 +385,7 @@ async fn refused_dialer(on: bool) {
         nodes[0].node.get_peer(&b).is_none(),
         "precondition: node 0's reaper removed the one-sided session"
     );
-    let counted = nodes[0].node.silent_sessions.count(&b);
+    let counted = nodes[0].node.gates().silent(&b);
 
     cleanup_nodes(&mut nodes).await;
     assert_eq!(
@@ -396,7 +395,6 @@ async fn refused_dialer(on: bool) {
 }
 
 #[tokio::test]
-#[ignore = "known defect: a dialer's one-sided session refused at msg3 is counted against the refuser"]
 async fn a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_against_the_refuser()
 {
     refused_dialer(false).await;
@@ -404,7 +402,6 @@ async fn a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_ag
 
 /// [`a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_against_the_refuser`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: a dialer's one-sided session refused at msg3 is counted against the refuser"]
 async fn a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_against_the_refuser_with_multipath_on()
  {
     refused_dialer(true).await;

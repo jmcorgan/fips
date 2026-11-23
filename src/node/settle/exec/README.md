@@ -44,8 +44,9 @@ statements at its site.
   module is private to `exec/`, or at the peer's msg3, where the peer
   action executor's msg3 crossing arm does; the two have their own lists.
   The move itself, `move_session`, stays at each site, and so does the
-  decision between a move and a keep, which at the msg2 passes through
-  `Run::swaps` for the mutation lane's break of it. A move at the msg2
+  decision between a move and a keep, which at the msg2 is the settlement
+  core's (the mutation lane's `CrossedRunsKeep` is read on the core's tie
+  term). A move at the msg2
   that rebuilt the machine holds the peer on the dial's link:
   `move_session` sets the peer's link id, and `HoldDial` holds the core's
   record of that link and keys the control machine, its timers and the

@@ -169,7 +169,10 @@ pub(super) fn msg2<I: Instant>(
                 out.push(Output::Flow(Out::Offer { peer, pair: from }));
                 return;
             }
-            if ops.me() < peer {
+            // The mutation lane's break: the smaller node keeps, as the
+            // larger does.
+            let crossed = xx_fault!(CrossedRunsKeep) || node_fault!(CrossedRunsKeep);
+            if ops.me() < peer && !crossed {
                 How::Swap { own }
             } else {
                 How::Keep
@@ -217,19 +220,58 @@ fn run<I: Instant>(
     ops.flow_mut().learned.remove(&link);
     match p.how {
         How::Promote => {
-            if barred(ops, p.peer, link, out) {
+            if barred(ops, p.peer, link, false, out) {
                 return;
             }
             ops.dialed(p.peer, link, p.epoch, p.from, Transition::Promote, now, out);
         }
         How::Restart => {
             ops.remove(p.peer, Why::OwnRestart, now, out);
-            if barred(ops, p.peer, link, out) {
+            if barred(ops, p.peer, link, false, out) {
                 return;
             }
             ops.dialed(p.peer, link, p.epoch, p.from, Transition::Replace, now, out);
         }
-        How::Swap { own } => ops.moveto(p.peer, link, p.from, own, out),
+        How::Swap { own } => swap(ops, p.peer, link, p.from, own, out),
         How::Keep => ops.keep(p.peer, link, out),
+    }
+}
+
+/// The smaller node moves the held `peer` onto its dial on `link`, which
+/// `from` answered, and closes only what next's move closes: the link it
+/// left, where nothing else uses it. The table's move also closes the
+/// dial's own connection when the msg2 came from another pair, a rule next
+/// lacks: its move leaves that connection open (`loser_close` in
+/// `src/node/settle/exec/cross.rs` closes the link left alone). So that
+/// pair leaves the retire's closes here, unless the link left was set up
+/// at it or holds a path there, where the retire itself chose it.
+fn swap<I: Instant>(
+    ops: &mut Ops<'_, I, Xx>,
+    peer: NodeAddr,
+    link: LinkNo,
+    from: Pair,
+    own: bool,
+    out: &mut Vec<Outs<I, Xx>>,
+) {
+    let left = ops.held(&peer).map(|h| h.link);
+    let dialed = ops.links().get(link).map(|r| r.setup.clone());
+    let chosen = |p: &Pair, ops: &Ops<'_, I, Xx>| {
+        left.and_then(|l| ops.links().get(l))
+            .is_some_and(|r| r.setup == *p || r.paths.iter().any(|(q, _)| q == p))
+    };
+    let strip = dialed
+        .filter(|p| !chosen(p, ops))
+        .filter(|_| !(xx_fault!(MoveClosesDial) || node_fault!(MoveClosesDial)));
+    let start = out.len();
+    ops.moveto(peer, link, from, own, out);
+    let Some(dialed) = strip else {
+        return;
+    };
+    for o in &mut out[start..] {
+        if let Output::Retire { link: l, closes } = o
+            && Some(*l) == left
+        {
+            closes.retain(|p| *p != dialed);
+        }
     }
 }

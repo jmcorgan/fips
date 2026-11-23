@@ -62,7 +62,7 @@ pub use core::{
 };
 pub use core::{PromotionResult, cross_connection_winner};
 pub use limits::backoff_ms;
-pub use silent::SilentSessions;
+pub use silent::{ActiveBackoff, SilentSessions};
 pub use state::{ConnectionState, Fmp, LegStamp};
 pub use wire::{Disconnect, DisconnectReason};
 pub use wire::{HandshakeMessageType, NegotiationPayload, NodeProfile, TlvEntry};

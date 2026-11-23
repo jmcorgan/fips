@@ -510,9 +510,9 @@ listed! {
         Bloom,
         /// The tree state.
         Tree,
-        /// `restart_dampener`.
+        /// The dampener's stamp in `core`'s restart gates.
         Dampener,
-        /// `silent_sessions`.
+        /// The silent-session record in `core`'s restart gates.
         Silent,
         /// The reconnect schedule.
         Reconnect,

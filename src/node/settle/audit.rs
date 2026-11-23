@@ -149,7 +149,7 @@ pub(in crate::node) fn leg_entry(node: &Node) -> Vec<LinkId> {
 /// cache names there and the link the records do.
 pub(in crate::node) fn index_cache(node: &Node) -> Vec<(AddrKey, Option<LinkId>, Option<LinkId>)> {
     let cache = node.links.index();
-    let derived = node.links.derived();
+    let derived = node.links.derived(node.core.links());
     let keys: HashSet<&AddrKey> = cache.keys().chain(derived.keys()).collect();
     keys.into_iter()
         .filter(|key| cache.get(*key) != derived.get(*key))
@@ -166,7 +166,8 @@ pub(in crate::node) fn index_cache(node: &Node) -> Vec<(AddrKey, Option<LinkId>,
 /// `index`: `peers_by_index` maps exactly the indices the peers' link
 /// machines bind, each to the peer that binds it, whatever transport each
 /// binding recorded; the allocator holds those indices and the shell's own
-/// leases (a handshake carrier) and nothing else; and, with a decrypt-worker
+/// leases (a handshake carrier, or a leg in the node's legs) and
+/// nothing else; and, with a decrypt-worker
 /// pool, the workers hold exactly the sessions the machines recorded as
 /// handed to them. Panics, prefixed by `step`, on the first that fails.
 ///
@@ -193,6 +194,7 @@ pub(in crate::node) fn index(node: &Node, step: &str) {
         .values()
         .filter(|machine| machine.our_index().is_some())
         .count();
+    leased += node.legs().iter().count();
     let mapped: HashMap<_, _> = node
         .peers_by_index
         .iter()
@@ -238,6 +240,26 @@ pub(in crate::node) fn carrier(node: &Node) -> Vec<LinkId> {
         .collect()
 }
 
+/// `leg-handshake`: each leg in the node's handshake legs is a handshake
+/// in flight on its link, whose machine still carries its pending
+/// connection. A leg left behind would hold its lease past every exit of
+/// its handshake. The links of the legs that break it.
+pub(in crate::node) fn leg_handshake(node: &Node) -> Vec<LinkId> {
+    node.legs()
+        .iter()
+        .filter_map(|leg| {
+            let Some(link) = node.core_link(leg.link()) else {
+                // A leg on a record no link of the node's is numbered for.
+                return Some(LinkId::new(leg.link().0));
+            };
+            node.peer_machines
+                .get(&link)
+                .is_none_or(|machine| machine.leg().is_none())
+                .then_some(link)
+        })
+        .collect()
+}
+
 /// What `links-mirror` found over a node's held peers.
 #[derive(Debug, Default)]
 pub(in crate::node) struct Mirror {
@@ -265,10 +287,8 @@ fn sorted(mut paths: Vec<(Pair, Proven)>) -> Vec<(Pair, Proven)> {
 /// holds exactly the paths of the peer's bundle, order aside, each in the
 /// state the core is told of it (Live for a Live path, acknowledged for
 /// another acknowledged one, probing otherwise), and a peer with no bundle
-/// none. A peer a test changed past the feed is not read. Unlike the joint
-/// world's `Mirrored` oracle, it does not hold the record's capable flag to
-/// the bundle's: next's crossing at the msg3 renews the bundle without
-/// telling the record, and nothing on next reads the flag.
+/// none, and holds the link capable exactly when the peer's bundle does. A
+/// peer a test changed past the feed is not read.
 pub(in crate::node) fn links_mirror(node: &Node) -> Mirror {
     let mut found = Mirror::default();
     for (addr, peer) in node.peers.iter() {
@@ -281,7 +301,7 @@ pub(in crate::node) fn links_mirror(node: &Node) -> Mirror {
         let Some(rec) = node
             .links
             .no(&link)
-            .and_then(|no| node.links.core().get(no))
+            .and_then(|no| node.core.links().get(no))
         else {
             found.bad.push(format!("{addr}: link {link} has no record"));
             continue;
@@ -302,6 +322,14 @@ pub(in crate::node) fn links_mirror(node: &Node) -> Mirror {
                     .collect()
             })
             .unwrap_or_default();
+        let capable = peer.bundle().is_some_and(|b| b.capable());
+        if rec.capable != capable {
+            found.bad.push(format!(
+                "{addr}: link {link}'s record holds it capable {}, its bundle {capable}",
+                rec.capable
+            ));
+            continue;
+        }
         let (core, held) = (sorted(rec.paths.clone()), sorted(held));
         if core != held {
             found.bad.push(format!(
@@ -315,9 +343,10 @@ pub(in crate::node) fn links_mirror(node: &Node) -> Mirror {
 /// Run every clause on `node`, which has just left the node entry `site`,
 /// and panic, naming the site and the clause, on the first that fails.
 ///
-/// In a test, a node written past its writers is skipped, since its state
-/// is one no production path builds, and each audit is counted on the node
-/// and, when `FIPS_AUDIT_REACH` names a file, recorded there.
+/// In a test, the node's own clauses skip a node written past its writers,
+/// since its state is one no production path builds, and each audit is
+/// counted on the node and, when `FIPS_AUDIT_REACH` names a file, recorded
+/// there.
 #[cfg(debug_assertions)]
 pub(in crate::node) fn live(node: &Node, site: &str) {
     #[cfg(test)]
@@ -335,6 +364,7 @@ pub(in crate::node) fn live(node: &Node, site: &str) {
     fail(site, "index-cache", &index_cache(node));
     index(node, &format!("audit_live: {site}: index"));
     fail(site, "carrier", &carrier(node));
+    fail(site, "leg-handshake", &leg_handshake(node));
     let mirror = links_mirror(node);
     fail(site, "links-mirror", &mirror.bad);
     #[cfg(test)]

@@ -131,8 +131,8 @@ named for off. The other files run off, which is what they test.
   audited and one written through them is; an index entry put in past the
   table fails at the next frame; a session a degraded decrypt-worker pool
   refused, and two started nodes on real pools, pass. The settlement core's record of a
-  dialed link holds its original path Live, follows a one-path roam, and
-  records a switch to an acknowledged path Live, which `links-mirror` lets
+  dialed link holds its original path Live, follows a one-path roam, the
+  active path's or a standby one's, and records a switch to an acknowledged path Live, which `links-mirror` lets
   off for the active path alone; a record off its bundle fails the clause.
   Tests that need the audit to run carry `#[cfg(debug_assertions)]`.
 - `redialed.rs`: which direction each end holds its link in. After crossed

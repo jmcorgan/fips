@@ -792,8 +792,10 @@ impl Node {
     /// core's join with the core input it stands for after it, which goes to
     /// the core's record of the link. A move onto the dial's link renews the
     /// bundle on that link and releases the paths of the link it left,
-    /// `left`, which the record and the release are then for. The
-    /// connections left to close are closed at the next tick.
+    /// `left`, which the record and the release are then for. A renewed
+    /// bundle has not found the peer capable, so neither has the record of
+    /// the peer's link. The connections left to close are closed at the next
+    /// tick.
     pub(in crate::node) fn run_renewed(
         &mut self,
         node_addr: &NodeAddr,
@@ -804,6 +806,14 @@ impl Node {
         let no = held.and_then(|link| self.links.no(&link));
         let gone = left.and_then(|link| self.links.no(&link));
         let link = left.or(held);
+        let incapable = self
+            .peers
+            .get(node_addr)
+            .and_then(|p| p.bundle())
+            .is_some_and(|b| !b.capable());
+        if let Some(held) = held.filter(|_| incapable) {
+            self.links.renewed(self.core.parts_mut().0, &held);
+        }
         let bundle = self.peers.get(node_addr).and_then(|p| p.bundle());
         let steps = pathed(*node_addr, out, bundle, no, gone);
         for step in steps.into_iter().flatten() {

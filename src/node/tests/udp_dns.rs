@@ -12,7 +12,6 @@
 
 use super::*;
 use crate::config::UdpConfig;
-use crate::peer::machine::TimerKind;
 use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG1};
 use crate::transport::udp::{TestResolver, UdpTransport};
 use crate::transport::{TransportError, TransportHandle, TransportId};
@@ -153,11 +152,8 @@ async fn manual_connect_to_a_hostname_whose_lookup_outlasts_the_cold_wait_sends_
     );
 
     // A resend while the lookup runs is refused without being counted.
-    let at = *node
-        .peer_machines
-        .timers()
-        .get(&link)
-        .and_then(|timers| timers.get(&TimerKind::HandshakeRetransmit))
+    let at = node
+        .resend_at(link)
         .expect("the retransmit timer should be armed");
     capped(node.drive_peer_timers(at)).await;
     assert_eq!(node.connection_resend_count(link), 0);

@@ -40,7 +40,7 @@ async fn copies_of_one_msg1_with_a_changed_sender_idx_promote_nothing_and_leave_
         nodes[1].node.check_link_heartbeats().await;
     }
     assert_eq!(
-        nodes[1].node.silent_sessions.count(&a),
+        nodes[1].node.gates().silent(&a),
         None,
         "a copy counted as a silent session"
     );

@@ -66,13 +66,16 @@ pub(super) fn dial_of_its_own(node: &mut Node, peer: &NodeAddr) {
     );
     node.pending_outbound.forget(&key);
     let id = node.allocate_link_id();
-    node.links.open(crate::transport::Link::new(
-        id,
-        spare.transport,
-        TransportAddr::from_string("spare:3"),
-        crate::transport::LinkDirection::Outbound,
-        Duration::from_millis(50),
-    ));
+    node.links.open(
+        node.core.parts_mut().0,
+        crate::transport::Link::new(
+            id,
+            spare.transport,
+            TransportAddr::from_string("spare:3"),
+            crate::transport::LinkDirection::Outbound,
+            Duration::from_millis(50),
+        ),
+    );
     node.pending_outbound.note(key, id);
 }
 
@@ -188,7 +191,7 @@ async fn restart(on: bool) {
     unlike_new(&mut nodes[0].node, &b, &mut pairs);
     // No stamp, so that a stamp shows, and a stale one pruned does not pass
     // for it.
-    nodes[0].node.restart_dampener.remove(&b);
+    nodes[0].node.gates_mut().unstamp(&b);
     quiet(&mut nodes[0].node, &b);
     let old = nodes[0].node.get_peer(&b).map(|p| p.link_id());
     restart_one(&mut nodes, on).await;
@@ -452,7 +455,7 @@ async fn ble_restart(on: bool) {
     }];
     unlike_new(&mut nodes[1].node, &a, &mut pairs);
     // No stamp, so that a stamp shows.
-    nodes[1].node.restart_dampener.remove(&a);
+    nodes[1].node.gates_mut().unstamp(&a);
     let marked = mark_at(&nodes[1], &link).await;
     let msg3 = ble_hand_dial(&mut nodes, 0, 1, &link).await;
     let before = Seen::of(&nodes[1].node, &a, &pairs).await;

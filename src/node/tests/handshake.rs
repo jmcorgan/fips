@@ -1472,6 +1472,7 @@ async fn test_should_admit_msg1_admits_rekey_when_addr_form_differs() {
     let numeric_addr = TransportAddr::from_string("100.64.0.5:2121");
     peer.set_current_addr(transport_id, numeric_addr.clone());
     node.peers.raw().insert(peer_node_addr, peer);
+    node.resync();
 
     // Sanity: legacy carve-out still works for the hostname-form lookup.
     assert!(node.should_admit_msg1(transport_id, &hostname_addr));
@@ -1715,6 +1716,7 @@ async fn established_predicate_is_independent_of_should_admit_msg1() {
         let numeric_addr = TransportAddr::from_string("100.64.0.5:2121");
         peer.set_current_addr(transport_id, numeric_addr.clone());
         node.peers.raw().insert(peer_node_addr, peer);
+        node.resync();
 
         // Limb 1: addr_to_link maps the hostname form to a link a peer owns.
         assert!(node.should_admit_msg1(transport_id, &hostname_addr));
@@ -1939,12 +1941,7 @@ async fn test_inbound_machine_born_at_msg1_and_crystallized_at_promote() {
     // `SentMsg2`, seeded with the leg's msg1-allocated index.
     assert_eq!(responder.node.connection_count(), 1);
     let leg_link = responder.node.connections().next().unwrap().1.link_id();
-    let leg_index = responder
-        .node
-        .peer_machines
-        .get(&leg_link)
-        .unwrap()
-        .our_index();
+    let leg_index = responder.node.handshake_index(leg_link);
     assert!(leg_index.is_some(), "msg1 allocated the leg index");
     {
         let machine = responder
@@ -1959,7 +1956,7 @@ async fn test_inbound_machine_born_at_msg1_and_crystallized_at_promote() {
                 ..
             }
         ));
-        assert_eq!(machine.our_index(), leg_index);
+        assert_eq!(responder.node.handshake_index(leg_link), leg_index);
     }
     #[cfg(debug_assertions)]
     responder.node.debug_assert_peer_maps_coherent();
@@ -2023,12 +2020,7 @@ async fn a_msg3_whose_negotiation_payload_does_not_decrypt_leaves_the_leg_for_th
     assert_eq!(responder.node.peer_machines.len(), 1, "msg1-born machine");
     assert_eq!(responder.node.index_allocator.count(), 1);
     let leg = responder.node.connections().next().unwrap().1.link_id();
-    let index = responder
-        .node
-        .peer_machines
-        .get(&leg)
-        .and_then(|m| m.our_index())
-        .unwrap();
+    let index = responder.node.handshake_index(leg).unwrap();
     let activity = responder.node.connection_last_activity(leg);
 
     // Corrupt the last byte: it lands in the negotiation payload, after a
@@ -2484,10 +2476,7 @@ async fn test_anonymous_self_connect_drop_disposes_machine() {
     assert_eq!(node.node.peer_machines.len(), 1);
     let outbound_idx = node
         .node
-        .peer_machines
-        .get(&leg_link)
-        .unwrap()
-        .our_index()
+        .handshake_index(leg_link)
         .expect("the dial allocated an index for the outbound leg");
     assert!(
         node.node
@@ -2510,10 +2499,7 @@ async fn test_anonymous_self_connect_drop_disposes_machine() {
         .expect("msg1 parks an inbound leg of its own");
     let inbound_idx = node
         .node
-        .peer_machines
-        .get(&inbound_link)
-        .unwrap()
-        .our_index()
+        .handshake_index(inbound_link)
         .expect("msg1 allocates an index for the inbound leg");
     let baseline = node.node.index_allocator.count();
     assert_eq!(baseline, 2, "one index per leg, and there are two legs");
@@ -3003,10 +2989,7 @@ async fn test_dial_msg2_foreign_static_rejected() {
     let leg_link = initiator.node.connections().next().unwrap().1.link_id();
     let leg_index = initiator
         .node
-        .peer_machines
-        .get(&leg_link)
-        .unwrap()
-        .our_index()
+        .handshake_index(leg_link)
         .expect("msg1 preparation allocated our index");
     assert_eq!(
         initiator.node.index_allocator.count(),
@@ -3352,10 +3335,7 @@ async fn park_inbound_leg(
         .next()
         .expect("msg1 parks a machine on the responder");
     let our_index_b = node_b
-        .peer_machines
-        .get(&link_id_b)
-        .unwrap()
-        .our_index()
+        .handshake_index(link_id_b)
         .expect("msg1 allocates the responder's session index");
     (link_id_b, our_index_b, conn_a)
 }
@@ -4344,7 +4324,7 @@ async fn a_second_epoch_restart_past_the_interval_on_the_node_clock_is_accepted(
              node's clock move past the interval"
         );
         assert!(
-            responder.node.restart_dampener.contains_key(&peer_addr),
+            responder.node.gates().stamp(&peer_addr).is_some(),
             "restart {round} must stamp the dampener"
         );
     }
@@ -4399,7 +4379,7 @@ async fn a_second_epoch_restart_inside_the_interval_on_the_node_clock_is_refused
     let msg3 = drive_to_msg3(&mut initiator, &mut responder, 2000).await;
     responder.node.handle_msg3(msg3).await;
     assert!(
-        indices(&responder) != before && responder.node.restart_dampener.contains_key(&peer_addr),
+        indices(&responder) != before && responder.node.gates().stamp(&peer_addr).is_some(),
         "precondition: the first restart is accepted and stamps the dampener"
     );
 
@@ -4464,9 +4444,8 @@ async fn a_refused_epoch_change_does_not_slide_the_dampening_window() {
     responder.node.handle_msg3(msg3).await;
     let stamped = responder
         .node
-        .restart_dampener
-        .get(&peer_addr)
-        .copied()
+        .gates()
+        .stamp(&peer_addr)
         .expect("precondition: an accepted epoch change stamps the dampener");
 
     for round in 0..5u8 {
@@ -4488,7 +4467,7 @@ async fn a_refused_epoch_change_does_not_slide_the_dampening_window() {
     }
 
     assert_eq!(
-        responder.node.restart_dampener.get(&peer_addr).copied(),
+        responder.node.gates().stamp(&peer_addr),
         Some(stamped),
         "defect: a refused epoch change restamped the dampener, which lets a sustained replay hold the window open"
     );
@@ -4544,7 +4523,7 @@ fn assert_leg_pending(node: &HsNode, leg: LinkId, index: SessionIndex, activity:
             ..
         }
     ));
-    assert_eq!(machine.our_index(), Some(index));
+    assert_eq!(node.node.handshake_index(leg), Some(index));
     assert_eq!(
         node.node
             .pending_inbound
@@ -4567,12 +4546,7 @@ async fn an_unreadable_msg3_leaves_the_pending_leg_for_the_genuine_msg3() {
 
     let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
     let leg = responder.node.connections().next().unwrap().1.link_id();
-    let index = responder
-        .node
-        .peer_machines
-        .get(&leg)
-        .and_then(|m| m.our_index())
-        .unwrap();
+    let index = responder.node.handshake_index(leg).unwrap();
     let activity = responder.node.connection_last_activity(leg);
 
     responder.node.handle_msg3(unreadable_msg3(&msg3)).await;
@@ -4879,7 +4853,7 @@ fn deferred_leg(node: &Node, transport_id: TransportId, addr: &TransportAddr) ->
         ),
         "the leg waits for msg3 exactly as after a sent msg2"
     );
-    let index = machine.our_index().expect("the leg holds its index");
+    let index = node.handshake_index(leg).expect("the leg holds its index");
     assert!(node.index_allocator.is_allocated(index));
     assert_eq!(
         node.pending_inbound.get(&(transport_id, index.as_u32())),
@@ -5268,4 +5242,114 @@ mod dead_encrypt_worker {
         assert_eq!(pool.liveness().refused_dispatches(), 0);
         assert!(warnings.is_empty(), "{warnings:?}");
     }
+}
+
+/// An anonymous dial arms no msg1 resend: its msg1 goes out once, and the
+/// timer drive sends nothing more for it, however late it runs, short of
+/// the handshake timeout.
+#[tokio::test]
+async fn an_anonymous_dial_sends_its_msg1_once_and_no_resend() {
+    use std::time::Duration;
+
+    let mut dialer = make_hs_node(Config::new()).await;
+    let mut target = make_hs_node(Config::new()).await;
+    dialer
+        .node
+        .initiate_connection(dialer.transport_id, target.addr.clone(), None)
+        .await
+        .expect("anonymous dial");
+    recv_phase(&mut target.packet_rx, 1, "msg1").await;
+    let timeout_ms = dialer.node.config().node.rate_limit.handshake_timeout_secs * 1000;
+    let start = Node::interval_ms();
+    for s in 1..timeout_ms / 1_000 {
+        dialer.node.drive_peer_timers(start + s * 1_000).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        target.packet_rx.try_recv().is_err(),
+        "defect: the anonymous dial sent its msg1 again"
+    );
+}
+
+/// An answer's leg holds its lease and its msg2 in the settlement core's
+/// legs from its msg2 until its msg3, and leaves the legs at the msg3.
+#[tokio::test]
+async fn an_answer_holds_its_lease_and_msg2_in_the_legs_from_its_msg2_until_its_msg3() {
+    let mut initiator = make_hs_node(Config::new()).await;
+    let mut responder = make_hs_node(Config::new()).await;
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    let leg = responder.node.connections().next().unwrap().1.link_id();
+    let no = responder
+        .node
+        .core_no(leg)
+        .expect("the answer's link is numbered");
+    let machine = responder
+        .node
+        .peer_machines
+        .get(&leg)
+        .expect("the answer's machine");
+    assert_eq!(
+        machine.our_index(),
+        None,
+        "the answer's lease is in its leg"
+    );
+    let answer = responder.node.legs().get(no).expect("the answer's leg");
+    assert!(
+        responder
+            .node
+            .index_allocator
+            .is_allocated(SessionIndex::new(answer.index())),
+        "the leg holds the answer's allocated index"
+    );
+    assert_eq!(
+        responder.node.legs().msg2(no),
+        machine.conn_handshake_msg2(),
+        "the leg stores the msg2 the answer sent"
+    );
+    responder.node.handle_msg3(msg3).await;
+    assert_eq!(responder.node.peer_count(), 1, "the msg3 promoted");
+    assert!(
+        responder.node.legs().get(no).is_none(),
+        "the answer's leg left the legs at its msg3"
+    );
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+/// An unreadable msg3 leaves the answer's leg in the settlement core's legs,
+/// holding its lease, for the genuine msg3.
+#[tokio::test]
+async fn an_unreadable_msg3_leaves_the_answers_leg_and_its_lease_in_the_legs() {
+    let mut initiator = make_hs_node(Config::new()).await;
+    let mut responder = make_hs_node(Config::new()).await;
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    let leg = responder.node.connections().next().unwrap().1.link_id();
+    let no = responder
+        .node
+        .core_no(leg)
+        .expect("the answer's link is numbered");
+    let index = responder.node.handshake_index(leg).unwrap();
+    responder.node.handle_msg3(unreadable_msg3(&msg3)).await;
+    assert_eq!(
+        responder.node.peer_count(),
+        0,
+        "the garbled msg3 promoted nothing"
+    );
+    let answer = responder
+        .node
+        .legs()
+        .get(no)
+        .expect("the answer's leg stays in the legs");
+    assert_eq!(SessionIndex::new(answer.index()), index, "with its lease");
+    assert_eq!(
+        responder
+            .node
+            .peer_machines
+            .get(&leg)
+            .and_then(|m| m.our_index()),
+        None,
+        "and not on its machine"
+    );
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
 }

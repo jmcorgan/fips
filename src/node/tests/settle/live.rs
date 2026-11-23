@@ -119,7 +119,7 @@ async fn a_node_a_test_wrote_through_the_writers_is_audited() {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    tn.node.links.open(link);
+    tn.node.links.open(tn.node.core.parts_mut().0, link);
     tn.node.pending_outbound.note((tn.transport_id, 5), dial);
     tn.node.poll_pending_connects().await;
     tn.node.check_timeouts().await;
@@ -327,12 +327,13 @@ fn record(
     TransportAddr,
     crate::proto::settle::links::Proven,
 )> {
-    let links = &nodes[at].node.links;
-    let no = links
+    let node = &nodes[at].node;
+    let no = node
+        .links
         .no(&held(nodes, at, peer))
         .expect("precondition: the held link has a core record");
-    links
-        .core()
+    node.core
+        .links()
         .get(no)
         .expect("precondition: the record is there")
         .paths
@@ -357,9 +358,13 @@ async fn dialed_record(on: bool) {
     let at_dial = record(&nodes, 0, 1);
     let at_answer = record(&nodes, 1, 0);
     let clean = crate::node::settle::audit::links_mirror(&nodes[0].node).bad;
-    nodes[0].node.links.plant_path(&link, &to, Proven::Probing);
+    let n = &mut nodes[0].node;
+    n.links
+        .plant_path(n.core.parts_mut().0, &link, &to, Proven::Probing);
     let off = crate::node::settle::audit::links_mirror(&nodes[0].node).bad;
-    nodes[0].node.links.plant_path(&link, &to, Proven::Live);
+    let n = &mut nodes[0].node;
+    n.links
+        .plant_path(n.core.parts_mut().0, &link, &to, Proven::Live);
     cleanup_nodes(&mut nodes).await;
     assert_eq!(
         at_dial,
@@ -450,6 +455,62 @@ async fn a_roam_keeps_the_records_mirror_with_multipath_on() {
     roam_mirrored(true).await;
 }
 
+/// A link of one path that is not active (multipath on): a frame from a
+/// new address of the peer's roams that path, and the core's record of the
+/// link moves the path there and keeps none at the address it left, which
+/// the frame's accounting tells the core for a standby path as it does for
+/// the active one.
+#[tokio::test]
+async fn a_standby_paths_roam_moves_its_links_record_with_multipath_on() {
+    use crate::proto::settle::links::Proven;
+    let mut nodes = vec![loopback_node(true).await, loopback_node(true).await];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    pump(&mut nodes).await;
+    let tid = nodes[0].transport_id;
+    let b1 = nodes[1].addr.clone();
+    let b = *nodes[1].node.node_addr();
+    nodes[0]
+        .node
+        .peers
+        .get_mut(&b)
+        .expect("precondition: node 0 holds node 1")
+        .idle_active();
+    let standby = nodes[0]
+        .node
+        .get_peer(&b)
+        .and_then(|p| p.bundle())
+        .map(|bundle| (bundle.paths().len(), bundle.paths().active_index()));
+    let before = record(&nodes, 0, 1);
+    let moved = super::super::spanning_tree::add_loopback_alias(&b1, tid);
+    let to = *nodes[0].node.node_addr();
+    nodes[1]
+        .node
+        .send_encrypted_link_message(
+            &to,
+            &[crate::proto::link::LinkMessageType::Heartbeat.to_byte()],
+        )
+        .await
+        .expect("precondition: node 1 sends a heartbeat");
+    super::super::paths::deliver_from(&mut nodes[0], &moved).await;
+    let after = record(&nodes, 0, 1);
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        standby,
+        Some((1, None)),
+        "precondition: the link holds one path, not active"
+    );
+    assert_eq!(
+        before,
+        vec![(tid, b1, Proven::Live)],
+        "precondition: the record holds the path"
+    );
+    assert_eq!(
+        after,
+        vec![(tid, moved, Proven::Live)],
+        "defect: the record did not follow the standby path's roam"
+    );
+}
+
 /// A link of two Live paths, p (t1) active and q (t2): p's carrier goes, so
 /// p turns Suspect, still acknowledged, and the link switches to q. The core
 /// records p acknowledged, as its bundle holds it, and `links-mirror` fails
@@ -467,15 +528,17 @@ async fn a_switch_to_an_acked_path_is_recorded_acked_and_the_mirror_holds_with_m
     let p_lost = state_at(&nodes[0], &b, t1, &b1);
     let on_q = active_of(&nodes[0], &b);
     let standby = record(&nodes, 0, 1);
-    nodes[0]
-        .node
-        .links
-        .plant_path(&link, &(t1, b1.clone()), Proven::Live);
+    let n = &mut nodes[0].node;
+    n.links
+        .plant_path(n.core.parts_mut().0, &link, &(t1, b1.clone()), Proven::Live);
     let standby_live = crate::node::settle::audit::links_mirror(&nodes[0].node);
-    nodes[0]
-        .node
-        .links
-        .plant_path(&link, &(t1, b1.clone()), Proven::Acked);
+    let n = &mut nodes[0].node;
+    n.links.plant_path(
+        n.core.parts_mut().0,
+        &link,
+        &(t1, b1.clone()),
+        Proven::Acked,
+    );
     nodes[0].node.path_removed(t2()).await;
     let on_p = active_of(&nodes[0], &b);
     let p_back = state_at(&nodes[0], &b, t1, &b1);

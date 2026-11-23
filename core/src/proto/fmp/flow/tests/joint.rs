@@ -382,8 +382,11 @@ impl FlowParty {
 
     /// The change a completed handshake of class `class` made to `id`'s
     /// peering, from the link it was held on before and after.
-    fn change(&self, id: Node, class: Class, before: Option<LinkNo>) -> Option<Transition> {
-        let after = self.table.held(&na(id)).map(|h| h.link);
+    /// What a step did to `id`, from the session it was held on `before`
+    /// to the one it is held on now: a move changes the session, whether
+    /// or not it changes the link, as at the larger node's crossing at msg3.
+    fn change(&self, id: Node, class: Class, before: Option<Hs>) -> Option<Transition> {
+        let after = self.session(id);
         match (before, after) {
             (_, None) => None,
             (None, Some(_)) => Some(Transition::Promote),
@@ -411,7 +414,7 @@ impl FlowParty {
             refused: false,
         };
         let class = self.class(id, epoch, Class::SameSide, Class::Crossing);
-        let before = self.table.held(&na(id)).map(|h| h.link);
+        let before = self.session(id);
         let from = self.pair(src);
         let out = self.step(TableInput::Flow(In::Msg2 {
             link,
@@ -495,7 +498,7 @@ impl FlowParty {
             refused: false,
         };
         let class = self.class(id, epoch, Class::Crossing, Class::SameSide);
-        let before = self.table.held(&na(id)).map(|h| h.link);
+        let before = self.session(id);
         let from = self.pair(src);
         let out = self.step(TableInput::Flow(In::Msg3 {
             link,
@@ -553,6 +556,18 @@ impl FlowParty {
                     change: Some(Transition::Rekey),
                 };
                 return self.note(id, e, did);
+            }
+        }
+        // A session installed on a link other than the answer's, the link
+        // the peer is held on, is the answer's: that link's record takes
+        // it, as next's node rebuilds the held link's machine on it, and
+        // the answer's link goes.
+        for o in &out {
+            if let Output::Install(i) = o
+                && i.link != link
+            {
+                self.links.insert(i.link, shell);
+                self.links.remove(&link);
             }
         }
         let change = self.change(id, class, before);

@@ -45,7 +45,7 @@ use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::settle::exec::{Removed, Run};
 use crate::node::settle::table::Transition;
 use crate::node::{Node, NodeError};
-use crate::peer::machine::{LostKind, PeerAction, PeerEvent};
+use crate::peer::machine::{LostKind, PeerAction, PeerEvent, TimerKind};
 use crate::proto::fmp::PromotionResult;
 use crate::proto::fmp::wire::build_msg2;
 use crate::proto::settle::output::Why;
@@ -206,7 +206,12 @@ impl Node {
                                     });
                             }
                             Err(_e) => {
-                                self.links.forget(&link, &(transport_id, remote_addr));
+                                self.core_connect_failed(link);
+                                self.links.forget(
+                                    self.core.parts_mut().0,
+                                    &link,
+                                    &(transport_id, remote_addr),
+                                );
                                 self.remove_peer_machine(link);
                                 return;
                             }
@@ -729,11 +734,25 @@ impl Node {
                     // Connected-UDP plane ownership (`connected_udp.rs`). Out of
                     // scope for now.
                 }
+                PeerAction::SetTimer {
+                    kind: TimerKind::HandshakeRetransmit,
+                    at_ms,
+                } => {
+                    // The dial's first msg1 resend: the dial's leg in the
+                    // settlement core's legs, opened with the msg1, times its
+                    // resends. A dial with no leg there, which only a test
+                    // builds, keeps the timer, which the core's resync in a
+                    // test build reads.
+                    if self.leg_on(link).is_none() {
+                        self.peer_machines
+                            .arm(link, TimerKind::HandshakeRetransmit, at_ms);
+                    }
+                }
                 PeerAction::SetTimer { kind, at_ms } => {
                     // Populate the per-peer timer store (overwrite = reschedule).
-                    // The `HandshakeRetransmit` and `HandshakeTimeout` deadlines
-                    // are read + fired by `drive_peer_timers`. The liveness kind
-                    // is still SHADOW here — it keeps its own shell driver — so
+                    // The `HandshakeTimeout` deadline's presence selects the
+                    // legs `drive_peer_timers` reaps. The liveness kind is
+                    // still SHADOW here — it keeps its own shell driver — so
                     // populating it stays behavior-neutral.
                     self.peer_machines.arm(link, kind, at_ms);
                 }

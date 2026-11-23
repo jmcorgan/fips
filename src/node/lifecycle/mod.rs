@@ -644,8 +644,22 @@ impl Node {
             )
         };
 
-        // The link, and its pair in the reverse lookup
-        self.links.open(link);
+        // The link, and its pair in the reverse lookup. A dial whose
+        // connection opens first has its link opened by the settlement
+        // core, which the link table numbers it by.
+        let connecting = if is_connection_oriented {
+            self.core_connecting(
+                link_id,
+                peer_identity.map(|id| *id.node_addr()),
+                crate::node::settle::decide::pair(transport_id, &remote_addr),
+            )
+        } else {
+            None
+        };
+        match connecting {
+            Some(no) => self.links.bind(self.core.parts_mut().0, link, no),
+            None => self.links.open(self.core.parts_mut().0, link),
+        }
 
         match peer_identity {
             Some(identity) => {
@@ -736,7 +750,12 @@ impl Node {
                             }
                             Err(e) => {
                                 // Clean up link
-                                self.links.forget(&link_id, &(transport_id, remote_addr));
+                                self.core_connect_failed(link_id);
+                                self.links.forget(
+                                    self.core.parts_mut().0,
+                                    &link_id,
+                                    &(transport_id, remote_addr),
+                                );
                                 return Err(NodeError::TransportError(e.to_string()));
                             }
                         }
@@ -794,8 +813,12 @@ impl Node {
             Some(lease) => lease,
             None => {
                 // Clean up the link and dial-time machine we just created
-                self.links
-                    .forget(&link_id, &(transport_id, remote_addr.clone()));
+                self.core_connect_failed(link_id);
+                self.links.forget(
+                    self.core.parts_mut().0,
+                    &link_id,
+                    &(transport_id, remote_addr.clone()),
+                );
                 self.remove_peer_machine(link_id);
                 return Err(NodeError::IndexAllocationFailed(
                     crate::utils::index::IndexError::Exhausted.to_string(),
@@ -822,8 +845,12 @@ impl Node {
                 let _ = self
                     .index_allocator
                     .free(crate::utils::index::SessionIndex::new(our_lease.release()));
-                self.links
-                    .forget(&link_id, &(transport_id, remote_addr.clone()));
+                self.core_connect_failed(link_id);
+                self.links.forget(
+                    self.core.parts_mut().0,
+                    &link_id,
+                    &(transport_id, remote_addr.clone()),
+                );
                 self.remove_peer_machine(link_id);
                 return Err(NodeError::HandshakeFailed(e.to_string()));
             }
@@ -847,17 +874,33 @@ impl Node {
             "Connection initiated"
         );
 
-        // The peer machine arms the first msg1 resend when it starts the
-        // handshake, after this preparation, at its own fixed interval; the
-        // wire is stored on the surviving carrier below, where the retransmit
-        // driver reads it. The deadline computed here is handed to the
-        // carrier, which does not use it.
+        // The dial's leg in the settlement core's legs, started below with
+        // the wire and the lease, times the msg1 resends. The deadline
+        // computed here is handed to the carrier, which does not use it.
         let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
         let first_resend_at_ms = at.interval_ms + resend_interval;
 
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
             .note((transport_id, our_index.as_u32()), link_id);
+        // The dial's leg starts in the settlement core's legs, holding the
+        // lease on its index until the core decides its msg2, with its msg1
+        // as its resend source, capped as its origin caps its resends.
+        let resends = self
+            .peer_machines
+            .get(&link_id)
+            .map(|machine| machine.dial_origin())
+            .unwrap_or_default()
+            .resend_limit(self.config().node.rate_limit.handshake_max_resends);
+        self.core_dial(
+            link_id,
+            Some(peer_node_addr),
+            crate::node::settle::decide::pair(transport_id, remote_addr),
+            &wire_msg1,
+            our_lease,
+            resends,
+            at.interval_ms,
+        );
 
         let machine = self
             .peer_machines
@@ -873,14 +916,9 @@ impl Node {
         // projects it to the promotion hand-off); holds even if a direct caller
         // reached here without the dial-time `on_dial` write.
         machine.set_conn_transport_id(transport_id);
-        // Record our session index on the surviving carrier, the single index
-        // home on the outbound path (the inbound path writes it at authorize).
-        // A dial-time carrier holds no index before its msg1. One it held
-        // would stay allocated, as an overwritten index always has, and the
-        // dropped lease counts the leak.
-        let _ = machine.set_conn_our_index(our_lease);
         // Store the msg1 wire on the surviving carrier (the connection does not
-        // hold the resend source); the retransmit driver reads it from here.
+        // hold the resend source), for the reads that digest it; the dial's
+        // leg holds its own copy as its resend source.
         machine.set_conn_handshake_msg1(wire_msg1, first_resend_at_ms);
 
         Ok(())
@@ -918,7 +956,12 @@ impl Node {
         // promoted link's rekey machine takes over.
         let Some(our_lease) = fips_core::proto::rekey::allocate(&mut self.index_allocator) else {
             // Clean up the link we just created
-            self.links.forget(&link_id, &(transport_id, remote_addr));
+            self.core_connect_failed(link_id);
+            self.links.forget(
+                self.core.parts_mut().0,
+                &link_id,
+                &(transport_id, remote_addr),
+            );
             return Err(NodeError::IndexAllocationFailed(
                 crate::utils::index::IndexError::Exhausted.to_string(),
             ));
@@ -934,7 +977,12 @@ impl Node {
                 let _ = self
                     .index_allocator
                     .free(crate::utils::index::SessionIndex::new(our_lease.release()));
-                self.links.forget(&link_id, &(transport_id, remote_addr));
+                self.core_connect_failed(link_id);
+                self.links.forget(
+                    self.core.parts_mut().0,
+                    &link_id,
+                    &(transport_id, remote_addr),
+                );
                 return Err(NodeError::HandshakeFailed(e.to_string()));
             }
         };
@@ -966,8 +1014,8 @@ impl Node {
             );
         }
 
-        // Store msg1 for resend and schedule first resend. The carrier holds
-        // the resend wire; the retransmit driver reads it from there.
+        // Store msg1 on the carrier, which the dial's leg copies below. No
+        // resend is scheduled: the leg is quiet.
         let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
         let first_resend_at_ms = at.interval_ms + resend_interval;
         machine.set_conn_handshake_msg1(wire_msg1.clone(), first_resend_at_ms);
@@ -988,7 +1036,26 @@ impl Node {
         // machine parks at `Discovered` until msg2. The carrier was born on
         // this same stamp `at`, so its `started_at`/`last_activity` and its
         // interval-clock activity already carry the msg1-prep provenance.
+        let named = machine.conn_expected_identity().map(|id| *id.node_addr());
         self.peer_machines.add(link_id, machine);
+        // Its leg starts in the settlement core's legs, holding its lease
+        // until the core decides its msg2, and sending no resend: this path
+        // arms none.
+        if let Some(lease) = self
+            .peer_machines
+            .get_mut(&link_id)
+            .and_then(PeerMachine::take_our_index)
+        {
+            self.core_dial(
+                link_id,
+                named,
+                crate::node::settle::decide::pair(transport_id, &remote_addr),
+                &wire_msg1,
+                lease,
+                0,
+                at.interval_ms,
+            );
+        }
 
         // Send the wire format handshake message. It never dials: if the
         // connection the dial resolved to has gone, the send fails at once
@@ -1016,6 +1083,10 @@ impl Node {
                     // The machine marks its leg failed but retains it —
                     // the stale-connection sweep reclaims it, and the
                     // event loop can handle retry logic until then.
+                    self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Failed {
+                        link,
+                        learned: None,
+                    });
                     if let Some(machine) = self.peer_machines.get_mut(&link_id) {
                         let actions = machine.step(
                             PeerEvent::HandshakeSendFailed,
@@ -1091,6 +1162,10 @@ impl Node {
                     // The machine marks its leg failed but retains it —
                     // the stale-connection sweep reclaims it, and the
                     // event loop can handle retry logic until then.
+                    self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Failed {
+                        link,
+                        learned: None,
+                    });
                     if let Some(machine) = self.peer_machines.get_mut(&link_id) {
                         let actions = machine.step(
                             PeerEvent::HandshakeSendFailed,
@@ -2013,6 +2088,7 @@ impl Node {
                                 "Failed to start handshake after transport connect"
                             );
                             // Clean up link and dial-time machine on handshake failure
+                            self.core_connect_failed(pending.link_id);
                             self.remove_link(&pending.link_id);
                             self.remove_peer_machine(pending.link_id);
                         } else {
@@ -2065,6 +2141,7 @@ impl Node {
                                 "Failed to start handshake after transport connect"
                             );
                             // Clean up link on handshake failure
+                            self.core_connect_failed(pending.link_id);
                             self.remove_link(&pending.link_id);
                         }
                     }
@@ -2080,13 +2157,22 @@ impl Node {
                 );
 
                 // Clean up link and, for identified legs, the dial-time machine,
-                // then schedule retry. Anonymous discovery connections (no expected
-                // identity) don't retry — they'll be rediscovered via the
-                // shared-medium beacon.
+                // then schedule the retry the settlement core asks for.
+                // Anonymous discovery connections (no expected identity) don't
+                // retry — they'll be rediscovered via the shared-medium beacon.
+                let retries = match &pending.peer_identity {
+                    Some(id) => self.core_unconnected(pending.link_id, *id.node_addr()),
+                    None => {
+                        self.core_connect_failed(pending.link_id);
+                        Vec::new()
+                    }
+                };
                 self.remove_link(&pending.link_id);
-                if let Some(id) = &pending.peer_identity {
+                if pending.peer_identity.is_some() {
                     self.remove_peer_machine(pending.link_id);
-                    self.note_handshake_timeout(*id.node_addr(), Self::peering_now());
+                }
+                for peer in retries {
+                    self.note_handshake_timeout(peer, Self::peering_now());
                 }
             }
         }
@@ -3775,7 +3861,7 @@ impl Node {
         if node_fault!(BeaconSkipsAnyIndexed) {
             return true;
         }
-        match self.links.holder(id) {
+        match self.links.holder(self.core.links(), id) {
             Some(Holder::Peer(peer)) => self.active_peer_link_is_live(&peer),
             _ => true,
         }
@@ -4055,11 +4141,14 @@ impl Node {
         // and suppress any pending auto-reconnect, as the table says. Those
         // two run whether or not the notify's send already had the peer
         // removed.
-        self.remove(&node_addr, Why::Admin);
+        let decided = self
+            .remove(&node_addr, Why::Admin)
+            .and_then(|removed| removed.decided);
         let removed = Removed {
             why: Why::Admin,
             held,
             noted: false,
+            decided,
         };
         self.removed(&node_addr, removed).await;
 

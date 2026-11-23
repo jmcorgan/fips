@@ -87,8 +87,6 @@ TreeCarryAcrossRestart	red	fips-mesh	node::tests::settle::carry::a_peer_replaced
 TreeCarryAcrossRestart	red	fips-mesh	node::tests::settle::table::replace::a_restart_msg3_replaces_the_peer_as_the_table_says
 DropInitiatorMark	red	fips-mesh	node::tests::ble::the_ble_initiators_link_is_verified_before_any_responder_frame
 DropInitiatorMark	red	fips-mesh	node::tests::settle::table::promote::a_promotion_on_a_ble_link_marks_it_at_the_initiator_and_at_the_responders_first_frame
-GateOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_restart_replace_a_peering_heard_just_now
-GateOnWall	red	fips-mesh	node::tests::settle::clock::a_peering_quiet_on_the_peer_clock_is_replaced_by_a_restart_whatever_the_wall_clock_read
 TouchKeepsHeardInstant	red	fips-mesh	node::tests::settle::clock::a_frame_after_a_quiet_spell_keeps_the_peering_from_being_replaced_by_a_restart
 TouchKeepsHeardInstant	red	fips-core	proto::settle::table::tests::a_frame_moves_the_instant_of_the_peerings_last_frame
 TreeOnWall	red	fips-mesh	node::tests::settle::clock::a_backward_wall_step_does_not_hold_a_tree_announce_past_its_interval
@@ -198,6 +196,9 @@ CapableUnmirrored	red	fips-mesh	node::settle::tests::links::a_link_turning_capab
 # named at the msg2's pair is under MoveKeepsOldPair.
 ShadowLosesEntry	red	fips-mesh	node::settle::tests::a_pair_two_links_are_set_up_at_names_the_newest_and_then_the_one_left	closing the second link leaves the pair naming the first
 ForgetTakesKey	red	fips-mesh	node::settle::tests::links::forgetting_a_dial_leaves_the_held_links_entry
+ResyncSkipped	red	fips-mesh	node::settle::tests::links::a_planted_link_and_a_planted_index_entry_are_in_the_records_after_a_resync
+ResyncSkipped	red	fips-mesh	node::settle::tests::links::a_planted_peers_link_and_an_entrys_link_put_in_the_map_after_are_in_the_records
+ResyncSkipped	red	fips-mesh	node::tests::handshake::test_should_admit_msg1_admits_rekey_when_addr_form_differs	assertion failed: node.is_established_link_msg1(transport_id, &hostname_addr)
 IndexOldestWins	red	fips-mesh	node::settle::tests::a_pair_two_links_are_set_up_at_names_the_newest_and_then_the_one_left	the pair names the link opened last
 IndexOldestWins	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_lost_at_a_proven_pair_does_what_the_keep_cells_say
 IndexOldestWins	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_lost_at_a_proven_pair_does_what_the_keep_cells_say_with_multipath_on
@@ -205,6 +206,7 @@ IndexNotRebuilt	red	fips-mesh	node::tests::settle::links::a_second_path_proven_t
 IndexNotRebuilt	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays	index-cache
 RoamNotFed	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays	links-mirror
 RoamNotFed	red	fips-mesh	node::tests::settle::links::a_roamed_pair_is_named_and_the_setup_pair_stays_with_multipath_on	links-mirror
+StandbyRoamUnfed	red	fips-mesh	node::tests::settle::live::a_standby_paths_roam_moves_its_links_record_with_multipath_on
 BeaconSkipsAnyIndexed	red	fips-mesh	node::tests::anon_beacon::an_anonymous_beacon_at_a_proven_path_of_a_silent_peer_is_dialled
 VerdictIgnoresData	red	fips-mesh	node::tests::path_load::a_pinned_lane_whose_queue_jumps_to_two_seconds_under_two_way_traffic_keeps_the_link
 VerdictIgnoresData	red	fips-mesh	node::tests::path_load::a_pinned_lane_whose_load_restarts_after_the_window_keeps_the_link_at_the_restart
@@ -324,8 +326,10 @@ MemoryNeverDropped	red	fips-core	proto::settle::gates::tests::gate_memory_holds_
 UnsentStaysDue	red	fips-core	proto::settle::table::tests::an_unsent_dial_resend_is_tried_again_at_the_next_tick_and_not_before
 UnsentStaysDue	red	fips-core	proto::settle::table::tests::a_failed_dial_resend_is_due_at_the_next_poll_whatever_its_instant	not one tick on
 UnsentDueAtWake	red	fips-core	proto::settle::table::tests::a_failed_dial_resend_is_due_at_the_next_poll_whatever_its_instant	does not try it again
+UnsentDueAtWake	red	fips-mesh	node::tests::udp_dns::manual_connect_to_a_hostname_whose_lookup_outlasts_the_cold_wait_sends_msg1_when_the_lookup_completes	src/node/tests/udp_dns.rs:170
 UnsentPastCap	red	fips-core	proto::settle::table::tests::a_send_failure_after_a_dials_last_resend_asks_for_no_more
 BackoffDoubles	red	fips-core	proto::settle::legs::tests::a_configured_multiplier_spaces_the_resends_as_the_node_truncates_them
+BackoffDoubles	red	fips-mesh	node::tests::discovery_msg1_cap::a_configured_peer_dialled_at_an_mdns_address_keeps_the_configured_resend_count	so the discovery cap reached a configured dial
 FirstResendAtInterval	red	fips-core	proto::settle::legs::tests::a_dials_first_resend_comes_a_second_after_its_msg1_whatever_the_configured_interval
 OriginIgnored	red	fips-core	proto::settle::legs::tests::an_mdns_directed_dial_stops_at_its_resend_cap
 ConnectingUnlinked	red	fips-core	proto::settle::table::tests::a_connecting_dials_pair_is_in_use_before_its_msg1_and_a_failed_connect_retires_it_with_no_lease
@@ -355,12 +359,33 @@ IntervalTen	red	fips-core	proto::settle::gates::tests::the_default_intervals_are
 AnonLegNamed	red	fips-core	proto::fmp::flow::tests::msg1::an_anonymous_answer_installs_nothing_at_its_send_and_waits_for_its_msg3_after_the_peer_at_its_source_is_gone
 PendingCountsSentAnswers	red	fips-core	proto::fmp::flow::tests::msg1::the_admission_cap_counts_an_anonymous_answer_only_until_its_msg2_is_sent
 AnonDialNamed	red	fips-core	proto::fmp::flow::tests::msg2::an_anonymous_dial_completes_under_the_identity_its_msg2_taught
+AnonDialNamed	red	fips-mesh	node::tests::handshake::test_anonymous_dial_msg2_promotes_whoever_answers	an anonymous dial promotes whoever answered it
 BesideOwnSendsFinal	red	fips-core	proto::fmp::flow::tests::msg2::a_msg2_beside_this_nodes_own_dial_is_kept_at_once_with_no_msg3_and_offers_its_pair
+BesideOwnSendsFinal	red	fips-mesh	node::tests::double_dial::a_smaller_nodes_two_dials_answered_in_order_leave_both_ends_on_one_session
 FinalBeforeSendOutcome	red	fips-core	proto::fmp::flow::tests::msg2::a_msg2_installs_nothing_until_its_msg3_is_sent
+MoveClosesDial	red	fips-core	proto::fmp::flow::tests::msg2::the_smaller_nodes_move_at_msg2_leaves_open_the_connection_its_dial_was_set_up_at
+TimeoutNoRetry	red	fips-core	proto::fmp::flow::tests::msg2::a_dial_past_its_deadline_asks_for_a_retry_of_the_identity_it_expects_before_its_reap
+TimeoutNoRetry	red	fips-core	proto::fmp::flow::tests::msg2::a_dial_its_timer_reaps_alone_asks_for_a_retry_of_the_identity_it_expects_and_an_answer_asks_none
+TimeoutNoRetry	red	fips-mesh	node::tests::handshake::test_dial_msg2_foreign_static_reschedules_dial	the timed-out dial must leave the peer we dialed scheduled for retry
+ConnectFailNoRetry	red	fips-core	proto::fmp::flow::tests::msg2::an_identified_dials_failed_connection_retries_the_identity_it_named_and_an_anonymous_ones_retries_none
 LeafKeepsLink	red	fips-core	proto::fmp::flow::tests::msg2::a_leaf_refuses_a_second_peer_at_msg2_and_removes_the_link_at_once
 LeafKeepsLink	red	fips-core	proto::fmp::flow::tests::msg3::a_leaf_refuses_a_second_peer_at_msg3_and_removes_the_link_at_once
+CapKeepsAnswer	red	fips-core	proto::fmp::flow::tests::msg3::the_peer_cap_at_msg3_refuses_and_removes_the_answers_link_at_once_closing_nothing
+CapKeepsAnswer	red	fips-mesh	node::tests::unit::handle_msg3_silent_drops_at_cap_for_new_peer	rejected handshake's allocated session index must be freed
 Msg3RestartUngated	red	fips-core	proto::fmp::flow::tests::msg3::a_restart_at_msg3_is_refused_while_the_peering_was_heard_inside_the_interval_and_accepted_after
 Msg3RestartUngated	red	fips-core	proto::fmp::flow::tests::msg3::a_restart_at_msg3_is_refused_inside_the_interval_from_the_install_when_no_frame_was_heard
+Msg3RestartUngated	red	fips-mesh	node::tests::settle::table::replace::a_restart_msg3_replaces_the_peer_as_the_table_says
+Msg3RestartUngated	red	fips-mesh	node::tests::settle::table::replace::a_restart_msg3_replaces_the_peer_as_the_table_says_with_multipath_on
+Msg3RestartUngated	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_restart_replace_a_peering_heard_just_now
 MismatchClaimTearsDown	red	fips-core	proto::fmp::flow::tests::msg3::a_msg3_claiming_a_session_not_held_repeats_the_stored_msg2_and_leaves_the_peer
+MismatchClaimTearsDown	red	fips-mesh	node::tests::handshake_lines::repeated_duplicate_handshakes_log_three_resend_lines_then_one_suppression_notice	src/node/tests/handshake_lines.rs:106
 MatchesReadAsCross	red	fips-core	proto::fmp::flow::tests::msg3::a_msg3_claiming_the_session_held_hands_the_leg_and_its_lease_to_the_peers_rekey
+MatchesReadAsCross	red	fips-mesh	node::tests::path_accept::a_switch_between_rekey_msg1_and_msg2_leaves_the_rekey_to_complete_on_the_new_path
 SilentRefusalAnyEpoch	red	fips-core	proto::fmp::flow::tests::msg3::a_silent_identitys_msg3_is_refused_at_the_epoch_it_counted_and_promoted_at_another
+SilentRefusalAnyEpoch	red	fips-mesh	node::tests::silent_backoff::a_new_epoch_msg3_is_promoted_during_the_back_off	silent_session(&mut nodes, NEW_EPOCH, 4)
+OwnDialCountsSilent	red	fips-core	proto::fmp::flow::tests::msg2::a_dialed_session_that_ends_unheard_is_not_counted_silent_and_an_answered_one_is
+OwnDialCountsSilent	red	fips-mesh	node::tests::silent_backoff::a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_against_the_refuser
+OwnDialCountsSilent	red	fips-mesh	node::tests::silent_backoff::a_dialer_refused_at_msg3_does_not_count_its_reaped_one_sided_session_against_the_refuser_with_multipath_on
+MoveKeepsFramed	red	fips-core	proto::fmp::flow::tests::msg2::a_dial_in_flight_at_the_smaller_nodes_move_is_beside_its_new_own_dial_though_the_peer_was_heard_before
+MoveKeepsFramed	red	fips-mesh	node::tests::double_dial::a_frame_heard_before_a_move_does_not_let_a_second_dial_cross_the_ends	both ends hold one session
+MoveKeepsFramed	red	fips-mesh	node::tests::double_dial::a_frame_heard_before_a_move_does_not_let_a_second_dial_cross_the_ends_with_multipath_on	both ends hold one session

@@ -4532,8 +4532,6 @@ async fn dns_local_addr_stays_none_when_the_bind_fails() {
 /// holding a peering-budget slot and a wrong `connection_count` permanently.
 #[test]
 fn test_failed_connection_is_retained_and_reaped() {
-    use crate::proto::fmp::LifecycleView;
-
     let mut node = make_node();
     let link_id = LinkId::new(1);
     let peer_identity = make_peer_identity();
@@ -4599,8 +4597,6 @@ fn test_failed_connection_is_retained_and_reaped() {
 /// each reports "absent".
 #[test]
 fn handshake_presence_tracks_the_carrier_not_the_noise_handles() {
-    use crate::proto::fmp::LifecycleView;
-
     let mut node = make_node();
     let link_id = LinkId::new(31);
     let transport_id = TransportId::new(9);

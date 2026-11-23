@@ -12,8 +12,9 @@ it out. Handshake message bytes are opaque here.
 ## Files
 
 - `mod.rs`: declares the files and re-exports their public items.
-- `core.rs`: the `LifecycleView` trait through which the root crate's
-  `Node` shows its connections, the `ConnAction` vocabulary, the
+- `core.rs`: the `LifecycleView` trait, which the root crate's `Node`
+  no longer implements since it times its handshakes in the settlement
+  core's legs, the `ConnAction` vocabulary, the
   snapshot types, the msg1 digests (`Msg1Digest` of the whole wire
   message, which joins both ends' log lines for one handshake, and
   `EphemeralDigest` of the ephemeral an XX msg1 consists of, which the
@@ -31,9 +32,13 @@ it out. Handshake message bytes are opaque here.
   `LegStamp`: a wall-clock reading for the start and idle times operators
   are shown, and the caller's interval-clock reading, which the handshake
   timeout reads; and `Fmp`, the stateless lifecycle anchor `Node` holds.
-- `silent.rs`: `SilentSessions`, the record of link sessions that ended
-  without an authenticated frame, and the handshake refusal it drives,
-  applied at msg3, where the XX handshake first names the initiator.
+- `silent.rs`: `ActiveBackoff`, the silent-session refusal in force that a
+  msg3's snapshot carries, and `SilentSessions`, the record of link
+  sessions that ended without an authenticated frame, and the handshake
+  refusal it drives, applied at msg3, where the XX handshake first names
+  the initiator. The node keeps that record in the settlement core's
+  restart gates (`settle::gates::Gates`), whose silent-session memory the
+  flow's tests check against `SilentSessions` event by event.
 - `limits.rs`: the connection-retry backoff arithmetic.
 - `flow/`: the XX handshake flow of the settlement core
   (`proto::settle`), a profile of its one table that classifies next's

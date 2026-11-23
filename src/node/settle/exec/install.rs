@@ -262,7 +262,8 @@ impl Node {
             self.peers.install(peer_node_addr, new_peer);
             self.run_link_outputs(&peer_node_addr, out);
         }
-        self.links.hold(&link_id, peer_node_addr);
+        self.links
+            .hold(self.core.parts_mut().0, &link_id, peer_node_addr);
         for input in &core {
             self.feed(input);
         }

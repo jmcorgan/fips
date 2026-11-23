@@ -77,14 +77,6 @@ impl Run {
             | super::Facts::Remove(_) => unreachable!("set to a crossing's above"),
         }
     }
-
-    /// Whether a crossing resolved at this node's dial's msg2 moves the peer
-    /// onto the dial, as the tie-break `swap` says.
-    pub(in crate::node) fn swaps(swap: bool) -> bool {
-        // The mutation lane's break: the smaller node keeps, as the larger
-        // does.
-        swap && !node_fault!(CrossedRunsKeep)
-    }
 }
 
 /// The link of the other handshake `t` names, and whether it is an inbound
@@ -150,7 +142,7 @@ pub(super) async fn hold_dial(node: &mut Node, r: &mut Run) {
     let (Some(left), Some((dial, _))) = (left(r), other(&r.t)) else {
         return;
     };
-    node.links.hold(&dial, r.peer);
+    node.links.hold(node.core.parts_mut().0, &dial, r.peer);
     // The mutation lane's break: the machine stays under the link left.
     if !node_fault!(MachineLeftBehind) {
         node.peer_machines.rekey(left, dial);

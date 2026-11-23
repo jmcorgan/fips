@@ -247,12 +247,15 @@ async fn every_leg_exit_releases_its_lease() {
 
         let silent = Identity::generate();
         let silent_addr = *crate::PeerIdentity::from_pubkey_full(silent.pubkey_full()).node_addr();
+        let params = nodes[b].node.gate_params();
         for _ in 0..3 {
-            let _ = nodes[b].node.silent_sessions.ended(
+            let _ = nodes[b].node.gates_mut().ended(
                 silent_addr,
                 Some([4; 8]),
                 None,
-                crate::time::mono_ms(),
+                crate::peer::peer_now(),
+                None,
+                &params,
             );
         }
         let dial = HandDial::open(&mut nodes, a, b, &silent, [4; 8], 0x1D00_0007).await;

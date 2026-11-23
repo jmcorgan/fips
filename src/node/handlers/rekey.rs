@@ -431,6 +431,11 @@ impl Node {
             epoch = %hex::encode(epoch),
             "Peer restart detected during FMP rekey, resetting what was held for its previous run"
         );
+        #[cfg(test)]
+        self.decide(crate::proto::settle::input::Input::Restarted {
+            peer: *node_addr,
+            epoch,
+        });
         let mut run = Run::new(*node_addr, Transition::Restarted);
         self.run(&mut run).await;
     }

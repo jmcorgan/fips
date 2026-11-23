@@ -22,12 +22,13 @@ use crate::peer::machine::{
 use crate::peer::{ActivePeer, LinkCaps, Match, PathCaps};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::proto::fmp::{
-    DialMsg2Reject, DialMsg2Snapshot, Disconnect, DisconnectReason,
+    ActiveBackoff, DialMsg2Reject, DialMsg2Snapshot, Disconnect, DisconnectReason,
     EPOCH_RESTART_MIN_INTERVAL_SECS, EstablishSnapshot, InboundDecision, InboundReject, LegStamp,
     Msg1Digest, NegotiationPayload, OutboundDecision, OutboundSnapshot, PromotionResult,
     RekeyClaim, WireOutcome, cross_connection_winner, decide_fmp_negotiation,
 };
-use crate::proto::settle::output::Why;
+use crate::proto::settle::links::{Dir, Holder, LinkNo};
+use crate::proto::settle::output::{Output, Why};
 use crate::time::HostClock;
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket, TransportError, TransportId};
 use crate::utils::index::SessionIndex;
@@ -121,11 +122,12 @@ impl Node {
         );
     }
 
-    /// A session of `peer` carried its first authenticated frame: drop the
-    /// identity's silent-session record, and log how many of its refusal
-    /// lines were not logged.
-    pub(in crate::node) fn note_peer_heard(&mut self, peer: &NodeAddr) {
-        let refused = diag::withheld(self.silent_sessions.heard(peer));
+    /// A session of `peer` carried its first authenticated frame, which the
+    /// settlement core took as the frame that drops the identity's
+    /// silent-session record: log how many of the record's refusal lines,
+    /// `refused`, taken from it before the frame, were not logged.
+    pub(in crate::node) fn note_peer_heard(&self, peer: &NodeAddr, refused: u32) {
+        let refused = diag::withheld(refused);
         if refused > 0 {
             debug!(
                 peer = %self.peer_display_name(peer),
@@ -186,9 +188,10 @@ impl Node {
     ///
     /// Two ways to be a promoted peer at this `(transport_id, addr)`:
     ///
-    /// 1. The link index maps the tuple to a link that some entry in `peers`
-    ///    owns. Catches the peer whose registered `TransportAddr` form matches
-    ///    the form inbound packets carry.
+    /// 1. The link index maps the tuple to a link a peer holds, by the
+    ///    settlement core's record of the link (`LinkTable::held_at`).
+    ///    Catches the peer whose registered `TransportAddr` form matches the
+    ///    form inbound packets carry.
     /// 2. The tuple is a peer's active path (`path_match` answers
     ///    `Proven { active: true, .. }`), whose address is `current_addr()`.
     ///    `current_addr` is seeded at promotion from the handshake's source
@@ -197,10 +200,15 @@ impl Node {
     ///    link index key is hostname-form because `initiate_connection`
     ///    populated it from a hostname-bearing peer config.
     ///
-    /// Cost: one O(1) map lookup plus one O(peers) scan covering both limbs,
-    /// run on every inbound msg1 including those about to be refused. The scan
-    /// exists only because the link index is keyed on the *unresolved* dial
-    /// address; correcting that keying reduces this to O(1).
+    /// Cost: three map lookups for the first limb and, when it misses, one
+    /// O(peers) scan for the second, run on every inbound msg1 including
+    /// those about to be refused. The scan exists only because the link index
+    /// is keyed on the *unresolved* dial address; correcting that keying
+    /// reduces this to O(1).
+    ///
+    /// The second limb stays on the peers' bundles: only a bundle knows which
+    /// of its proven paths is the active one, and a link record holds every
+    /// Live or acknowledged path alike.
     pub(in crate::node) fn is_established_link_msg1(
         &self,
         transport_id: crate::transport::TransportId,
@@ -219,21 +227,19 @@ impl Node {
         transport_id: crate::transport::TransportId,
         remote_addr: &crate::transport::TransportAddr,
     ) -> Option<NodeAddr> {
-        let link_at_addr = self
-            .links
-            .index()
-            .get(&(transport_id, remote_addr.clone()))
-            .copied();
-        self.peers
-            .iter()
-            .find(|(_, p)| {
-                Some(p.link_id()) == link_at_addr
-                    || matches!(
-                        p.path_match(transport_id, remote_addr),
-                        Match::Proven { active: true, .. }
-                    )
+        self.links
+            .held_at(self.core.links(), &(transport_id, remote_addr.clone()))
+            .or_else(|| {
+                self.peers
+                    .iter()
+                    .find(|(_, p)| {
+                        matches!(
+                            p.path_match(transport_id, remote_addr),
+                            Match::Proven { active: true, .. }
+                        )
+                    })
+                    .map(|(addr, _)| *addr)
             })
-            .map(|(addr, _)| *addr)
     }
 
     /// Returns true if an inbound msg1 should be admitted past the
@@ -307,6 +313,8 @@ impl Node {
     /// (revealing its own identity), and stores the connection in
     /// pending_inbound to await msg3.
     pub(in crate::node) async fn handle_msg1(&mut self, packet: ReceivedPacket) {
+        #[cfg(test)]
+        self.resync();
         // In a debug build the body's future is boxed: a handler's future is
         // moved at each await there, and with this wrapper the handshake
         // handlers overflow a 2 MiB test thread. Nothing runs at this level
@@ -401,29 +409,46 @@ impl Node {
             }
         };
 
-        // Check for existing connection from this address.
-        //
-        // With XX, we can't do identity-based checks in msg1 (no identity yet).
-        // We can only detect duplicates by address: if we already have an inbound
-        // link from this address with a pending connection that answered this
-        // same msg1, resend its msg2. A different msg1 is a new attempt (a
-        // rekey, a fresh dial after a restart, or a stale leg left by a replay
-        // or an abandoned attempt) and gets its own leg: XX msg2 is bound to
-        // the initiator's ephemeral in msg1, so the pending leg's msg2 cannot
-        // answer it. The pending leg is not replaced, so a msg1 from this
-        // address cannot discard a genuine leg awaiting its msg3.
+        // Pre-crypto: the settlement core answers a resend of the msg1 a
+        // pending answer's leg at this address answered, byte for byte, with
+        // that leg's stored msg2, and refuses a msg1 past the admission cap on
+        // answers whose msg2 is not yet sent. A different msg1 is a new attempt
+        // (a rekey, a fresh dial after a restart, or a stale leg left by a
+        // replay or an abandoned attempt) and gets its own leg: XX msg2 is
+        // bound to the initiator's ephemeral in msg1, so the pending leg's msg2
+        // cannot answer it. The pending leg is not replaced, so a msg1 from
+        // this address cannot discard a genuine leg awaiting its msg3.
+        for o in self.core_arrived(packet.transport_id, &packet.remote_addr, &packet.data) {
+            match o {
+                Output::Answer { link, msg2, .. } => {
+                    self.resend_answer(link, &msg2, &packet).await;
+                    return;
+                }
+                Output::Reject { why, .. } => {
+                    debug!(
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        reason = ?why,
+                        "Msg1 refused by the settlement core before any crypto"
+                    );
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                    return;
+                }
+                other => debug_assert!(false, "a msg1's arrival gave {other:?}"),
+            }
+        }
         // If we have an active peer on this address, it could be a restart or
         // rekey — but we can't tell until msg3 reveals identity. For now, allow
         // the new handshake to proceed. Identity-based checks happen in handle_msg3.
         let addr_key = (packet.transport_id, packet.remote_addr.clone());
-        if let Some(&existing_link_id) = self.links.index().get(&addr_key)
-            && let Some(link) = self.links.get(&existing_link_id)
+        if let Some((existing_link_id, dir, holder)) =
+            self.links.placed(self.core.links(), &addr_key)
         {
-            if link.direction() == LinkDirection::Inbound {
-                // Check if this link belongs to an already-promoted active peer
-                let is_active_peer = self.peers.values().any(|p| p.link_id() == existing_link_id);
-
-                if is_active_peer {
+            if dir == Dir::Inbound {
+                // Check if this link belongs to an already-promoted active peer,
+                // by the core's record of the link
+                if matches!(holder, Holder::Peer(_)) {
                     // Active peer on this address — allow the new handshake.
                     // Identity checks (restart, rekey) deferred to handle_msg3.
                     debug!(
@@ -432,9 +457,13 @@ impl Node {
                         existing_link_id = %existing_link_id,
                         "XX msg1 from address with active peer — proceeding (identity check deferred to msg3)"
                     );
-                } else if self.is_new_msg1_attempt(existing_link_id, &packet.data) {
+                } else if self.core_answers(existing_link_id)
+                    || self.is_new_msg1_attempt(existing_link_id, &packet.data)
+                {
                     // A pending handshake answered a different msg1 — give
                     // this one its own leg and leave that one for its msg3.
+                    // An answer of the core's that repeated this msg1 has
+                    // already resent its msg2 above.
                     debug!(
                         transport_id = %packet.transport_id,
                         remote_addr = %packet.remote_addr,
@@ -442,39 +471,10 @@ impl Node {
                         "Msg1 differs from the one the pending handshake at this address answered; starting a new handshake"
                     );
                 } else {
-                    // Genuinely pending handshake — resend msg2. Like every
-                    // reply on the rx loop it never dials: with the msg1's
-                    // connection gone, a dial to its address (an inbound
-                    // connection's ephemeral port) would hold the loop for up
-                    // to the connect timeout.
-                    let msg2_bytes = self.find_stored_msg2(existing_link_id);
-                    if let Some(msg2) = msg2_bytes {
-                        if let Some(transport) = self.transports.get(&packet.transport_id) {
-                            match transport.send_existing(&packet.remote_addr, &msg2).await {
-                                Ok(_) => debug!(
-                                    remote_addr = %packet.remote_addr,
-                                    transport_id = %packet.transport_id,
-                                    link_id = %existing_link_id,
-                                    "Resent msg2 for duplicate msg1"
-                                ),
-                                Err(e) => debug!(
-                                    remote_addr = %packet.remote_addr,
-                                    error = %e,
-                                    transport_id = %packet.transport_id,
-                                    link_id = %existing_link_id,
-                                    "Failed to resend msg2"
-                                ),
-                            }
-                        }
-                    } else {
-                        debug!(
-                            remote_addr = %packet.remote_addr,
-                            "Duplicate msg1 but no stored msg2 to resend"
-                        );
-                        self.stats_mut().record_reject(RejectReason::Handshake(
-                            HandshakeReject::UnknownConnection,
-                        ));
-                    }
+                    // A pending handshake the core holds no answer for, which
+                    // only a test plants past the core: its control machine's
+                    // stored msg2 is resent, as for a leg of the core's.
+                    self.resend_planted(existing_link_id, &packet).await;
                     return;
                 }
             } else {
@@ -541,6 +541,26 @@ impl Node {
             }
         };
 
+        // The settlement core opens the msg1's link, which the link table
+        // numbers by the core's record once the link is added below.
+        let asked = {
+            let rekey_of = match class {
+                Msg1Class::EstablishedLink => {
+                    self.established_peer_at(packet.transport_id, &packet.remote_addr)
+                }
+                Msg1Class::Stranger => None,
+            };
+            self.core_anon(
+                link_id,
+                packet.transport_id,
+                &packet.remote_addr,
+                &packet.data,
+                noise_msg1,
+                rekey_of,
+                interval_ms,
+            )
+        };
+
         // XX: identity is NOT learned from msg1 (only ephemeral exchange).
         // Identity will be learned from msg3 in handle_msg3. The IK-protocol
         // version of this branch (on the maint+master lineage) carries the
@@ -559,6 +579,9 @@ impl Node {
                 error = %crate::utils::index::IndexError::Exhausted,
                 "Failed to allocate session index for inbound"
             );
+            if let Some(link) = asked {
+                self.core_unasked(link);
+            }
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -580,7 +603,10 @@ impl Node {
         // or restart msg1) or our own outbound dial (a crossing msg1). The leg,
         // the newest link there, names it while it lives, and the key names
         // that link again once `remove_link` disposes of the leg.
-        self.links.open(link);
+        match asked {
+            Some(no) => self.links.bind(self.core.parts_mut().0, link, no),
+            None => self.links.open(self.core.parts_mut().0, link),
+        }
 
         // Build the msg2 response, storing it on the surviving carrier for
         // potential resend before the machine enters the registry below.
@@ -600,6 +626,25 @@ impl Node {
         machine.set_conn_handshake_msg2(wire_msg2.clone());
         machine.set_conn_handshake_msg1(packet.data.clone(), 0);
         self.peer_machines.add(link_id, machine);
+        // The answer's leg starts in the settlement core's legs, holding its
+        // lease and the msg1 and msg2 until the core decides its msg3, and
+        // the core's answer is the msg2 sent below. A link the core asked
+        // for no answer on is given up, as a refused msg1 is.
+        let answer = self
+            .peer_machines
+            .get_mut(&link_id)
+            .and_then(PeerMachine::take_our_index)
+            .and_then(|lease| self.core_hello(link_id, lease, &wire_msg2, interval_ms));
+        let Some(wire_msg2) = answer else {
+            debug!(
+                link_id = %link_id,
+                "The settlement core asked for no answer to this msg1"
+            );
+            self.drop_leg(link_id);
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+            return;
+        };
 
         // The msg2 goes back on the msg1's connection and never dials: if that
         // connection has closed, a dial to its address (for an inbound
@@ -618,8 +663,12 @@ impl Node {
                         bytes,
                         "Sent msg2 response"
                     );
+                    self.core_sent(link_id, true);
                 }
                 Err(e) => {
+                    if !e.is_transient() {
+                        self.core_sent(link_id, false);
+                    }
                     if !self.msg2_failed(link_id, &e) {
                         return;
                     }
@@ -687,11 +736,74 @@ impl Node {
         self.remove_peer_machine(link);
     }
 
+    /// Whether the settlement core holds the pending answer on the node's
+    /// link `link`, whose stored msg2 its stored-answer rule resends.
+    fn core_answers(&self, link: LinkId) -> bool {
+        self.core_no(link)
+            .is_some_and(|no| self.core.flow().answer(no).is_some())
+    }
+
+    /// Resend `msg2`, the stored msg2 of the answer's leg on the core's link
+    /// `no`, in answer to `packet`'s msg1, which repeats the msg1 it answers.
+    async fn resend_answer(&self, no: LinkNo, msg2: &[u8], packet: &ReceivedPacket) {
+        self.resend_msg2(self.core_link(no), msg2, packet).await;
+    }
+
+    /// Resend the stored msg2 of the pending inbound handshake on `link`, a
+    /// handshake a test planted past the settlement core, in answer to
+    /// `packet`'s msg1; one with none to resend records the reject.
+    async fn resend_planted(&mut self, link: LinkId, packet: &ReceivedPacket) {
+        match self.find_stored_msg2(link) {
+            Some(msg2) => self.resend_msg2(Some(link), &msg2, packet).await,
+            None => {
+                debug!(
+                    remote_addr = %packet.remote_addr,
+                    "Duplicate msg1 but no stored msg2 to resend"
+                );
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
+            }
+        }
+    }
+
+    /// Resend `msg2`, the stored msg2 of the pending inbound handshake on
+    /// `link`, in answer to `packet`'s msg1. Like every reply on the rx loop
+    /// it never dials: with the msg1's connection gone, a dial to its address
+    /// (an inbound connection's ephemeral port) would hold the loop for up to
+    /// the connect timeout.
+    async fn resend_msg2(&self, link: Option<LinkId>, msg2: &[u8], packet: &ReceivedPacket) {
+        let Some(transport) = self.transports.get(&packet.transport_id) else {
+            return;
+        };
+        match transport.send_existing(&packet.remote_addr, msg2).await {
+            Ok(_) => debug!(
+                remote_addr = %packet.remote_addr,
+                transport_id = %packet.transport_id,
+                link_id = %OrNone(link),
+                "Resent msg2 for duplicate msg1"
+            ),
+            Err(e) => debug!(
+                remote_addr = %packet.remote_addr,
+                error = %e,
+                transport_id = %packet.transport_id,
+                link_id = %OrNone(link),
+                "Failed to resend msg2"
+            ),
+        }
+    }
+
     /// Whether `msg1` is a different attempt from the one the pending inbound
-    /// leg on `link` answered. A leg with no machine or no recorded msg1 is
-    /// treated as answering it, which keeps the duplicate path's behaviour for
-    /// it.
+    /// leg on `link` answered: the answer's leg in the settlement core's legs
+    /// stores no msg2 for it. A leg not in the legs, which only a test plants,
+    /// is compared by the msg1 its carrier recorded. A leg with no machine or
+    /// no recorded msg1 is treated as answering it, which keeps the duplicate
+    /// path's behaviour for it.
     fn is_new_msg1_attempt(&self, link: LinkId, msg1: &[u8]) -> bool {
+        if let Some(no) = self.core_no(link)
+            && self.legs().msg2(no).is_some()
+        {
+            return self.legs().stored(no, msg1).is_none();
+        }
         self.peer_machines
             .get(&link)
             .and_then(|machine| machine.conn_handshake_msg1())
@@ -842,11 +954,15 @@ impl Node {
 
     /// Find stored msg2 bytes for a given link (pre- or post-promotion).
     ///
-    /// Checks the control machine's carrier (if still pending) and then the
+    /// Checks the pending answer's leg (if still pending) and then the
     /// ActivePeer (if already promoted).
     fn find_stored_msg2(&self, link_id: LinkId) -> Option<Vec<u8>> {
-        // Check pending connection first (its stored msg2 lives on the control
-        // machine's carrier).
+        // Check pending connection first: its stored msg2 is its leg's in the
+        // settlement core's legs, or, for a leg a test planted past them, its
+        // control machine's carrier's.
+        if let Some(msg2) = self.core_no(link_id).and_then(|no| self.legs().msg2(no)) {
+            return Some(msg2.to_vec());
+        }
         if let Some(msg2) = self
             .peer_machines
             .get(&link_id)
@@ -1000,7 +1116,22 @@ impl Node {
                 },
                 decide,
             ) {
-                Ok(DialMsg2Step::Completed(msg3, negotiation)) => (msg3, negotiation),
+                Ok(DialMsg2Step::Completed(msg3, negotiation)) => {
+                    // The handshake completed: the dial's leg in the
+                    // settlement core's legs sends no more resends, and keeps
+                    // its lease until the core decides the msg2, which hands
+                    // it back to the machine for the promotion, the crossing
+                    // or the reaper.
+                    if let Some(link) = self.links.core_no(&link_id) {
+                        let _ = self.core.step(
+                            fips_core::proto::settle::input::Input::Flow(
+                                fips_core::proto::fmp::flow::In::Quiet { link },
+                            ),
+                            crate::peer::peer_now(),
+                        );
+                    }
+                    (msg3, negotiation)
+                }
                 Ok(DialMsg2Step::Unreadable(e)) => {
                     // The index this msg2 names travels in cleartext in our
                     // msg1, so the msg2 may be a forgery rather than the peer's
@@ -1052,6 +1183,7 @@ impl Node {
                         error = %e,
                         "Handshake completion failed"
                     );
+                    let learned = machine.conn_expected_identity().map(|i| *i.node_addr());
                     // The leg had no handshake to read with, or completing an
                     // accepted msg2 failed after the handshake was taken: the
                     // leg cannot continue. Drop the Noise handle and record the
@@ -1065,6 +1197,10 @@ impl Node {
                     machine.mark_send_failed();
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                    self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Failed {
+                        link,
+                        learned,
+                    });
                     return;
                 }
             };
@@ -1075,6 +1211,7 @@ impl Node {
                     Ok(()) => {}
                     Err(e) => {
                         warn!(link_id = %link_id, our_profile = %our_profile, error = %e, "FMP negotiation failed");
+                        let learned = machine.conn_expected_identity().map(|i| *i.node_addr());
                         // Failure moves to the machine (`send_failed`); the phase
                         // stays `Handshaking{SentMsg1}` so the sweep reclaims the
                         // handshake exactly as the pre-collapse mark did.
@@ -1082,6 +1219,10 @@ impl Node {
                         machine.mark_send_failed();
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                        self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Failed {
+                            link,
+                            learned,
+                        });
                         return;
                     }
                 }
@@ -1126,6 +1267,10 @@ impl Node {
             )
             .is_err()
         {
+            self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Refused {
+                link,
+                retry: dialed_peer,
+            });
             self.pending_outbound.forget(&key);
             // Drop the machine persisted at dial — this leg never promotes,
             // and its pending connection and the lease on the index it drew
@@ -1170,6 +1315,10 @@ impl Node {
             // the link being removed, so it correctly leaves the live inbound
             // leg's mapping alone. A hand-rolled removal would destroy it.
             debug!(link_id = %link_id, "Discovered self via shared-media beacon, dropping");
+            self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Refused {
+                link,
+                retry: Some(peer_node_addr),
+            });
             self.pending_outbound.forget(&key);
             self.remove_peer_machine(link_id);
             self.remove_link(&link_id);
@@ -1191,16 +1340,28 @@ impl Node {
             return;
         }
 
-        // The snapshot the establish decision below reads, taken before the
-        // msg3 goes: nothing between here and the decision changes it. A
-        // second dial of ours that was already in flight when another dial of
-        // ours installed the held session, with nothing heard under it since,
-        // sends no msg3, so the peer completes only the handshake the held
-        // session came from, whatever order the two transports deliver the
-        // msg3s in (`OutboundDecision::OwnDialKeep`).
+        // The settlement core decides the msg2: a second dial of ours that
+        // was already in flight when another dial of ours installed the held
+        // session, with nothing heard under it since, sends no msg3, so the
+        // peer completes only the handshake the held session came from,
+        // whatever order the two transports deliver the msg3s in
+        // (`OutboundDecision::OwnDialKeep`). Any other decision waits for the
+        // msg3's send. On a link the core does not number, which only a test
+        // makes, next's own decision is read from a snapshot taken before the
+        // msg3 goes, which nothing between here and the decision changes.
+        let msg2_out = self
+            .core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Msg2 {
+                link,
+                epoch: epoch.unwrap_or_default(),
+                from: crate::node::settle::decide::pair(packet.transport_id, &packet.remote_addr),
+                peer: peer_node_addr,
+            })
+            .unwrap_or_default();
         let out_snap = self.outbound_snapshot(&peer_node_addr, link_id);
-        let withhold =
-            self.fmp.establish_outbound(&out_snap, epoch) == OutboundDecision::OwnDialKeep;
+        let withhold = crate::node::settle::decide::withholds(&msg2_out).unwrap_or_else(|| {
+            self.fmp.establish_outbound(&out_snap, epoch) == OutboundDecision::OwnDialKeep
+        });
+        let mut sent_out = Vec::new();
 
         // Build and send msg3, on the msg2's connection. A reply on the rx
         // loop, so it never dials: with that connection gone the send fails
@@ -1228,6 +1389,11 @@ impl Node {
                         bytes,
                         "Sent msg3, outbound handshake completing"
                     );
+                    sent_out = self
+                        .core_flow(link_id, |link| fips_core::proto::fmp::flow::In::FinalSent {
+                            link,
+                        })
+                        .unwrap_or_default();
                 }
                 Err(e) => {
                     warn!(
@@ -1235,6 +1401,9 @@ impl Node {
                         error = %e,
                         "Failed to send msg3"
                     );
+                    self.core_flow(link_id, |link| {
+                        fips_core::proto::fmp::flow::In::FinalFailed { link }
+                    });
                     // Failure moves to the machine (`send_failed`); the phase
                     // stays `Handshaking{SentMsg1}` (promote has not run yet) so
                     // the sweep reclaims the handshake exactly as the
@@ -1248,7 +1417,26 @@ impl Node {
                     return;
                 }
             }
+        } else {
+            // No transport to send on: next promotes as on a sent msg3.
+            sent_out = self
+                .core_flow(link_id, |link| fips_core::proto::fmp::flow::In::FinalSent {
+                    link,
+                })
+                .unwrap_or_default();
         }
+
+        // The establish decision the machine carries out: the core's, made
+        // at the msg2 and the msg3's send, or next's own where the core made
+        // none.
+        let decision = if withhold {
+            OutboundDecision::OwnDialKeep
+        } else {
+            let mut decided = msg2_out;
+            decided.append(&mut sent_out);
+            crate::node::settle::decide::outbound(&decided)
+                .unwrap_or_else(|| self.fmp.establish_outbound(&out_snap, epoch))
+        };
 
         debug!(
             peer = %self.peer_display_name(&peer_node_addr),
@@ -1274,11 +1462,11 @@ impl Node {
         // and resolves its msg3 by the same address order. A dial already in
         // flight when a dial of ours installed the held session, with nothing
         // heard under it since, is kept, and sent no msg3 (above).
-        // The machine is the sole computation site of the establish decision:
-        // the shell builds the outbound snapshot, steps the machine once here,
-        // and routes on the returned decision — a cross-connection resolves as
-        // a single `ResolveCrossConnection { swap }` action, a net-new
-        // establish as the promote action sequence. A swap moves the already
+        // The machine carries out the establish decision: the shell steps it
+        // once here with the decision, and routes on the returned actions — a
+        // cross-connection resolves as a single `ResolveCrossConnection
+        // { swap }` action, a net-new establish as the promote action
+        // sequence. A swap moves the already
         // promoted peer here, via `move_session`, for which no `PeerAction`
         // exists, and the rest of a swap or a keep runs through the
         // settlement executor. The machine was persisted at DIAL, so the
@@ -1291,7 +1479,7 @@ impl Node {
                 machine.step(
                     PeerEvent::OutboundMsg2 {
                         their_index: header.sender_idx,
-                        out: out_snap,
+                        decision,
                     },
                     interval_ms,
                     &mut self.index_allocator,
@@ -1317,7 +1505,7 @@ impl Node {
                 let actions = machine.step(
                     PeerEvent::OutboundMsg2 {
                         their_index: header.sender_idx,
-                        out: out_snap,
+                        decision,
                     },
                     interval_ms,
                     &mut self.index_allocator,
@@ -1363,7 +1551,7 @@ impl Node {
                 }
             };
 
-            if crate::node::settle::exec::Run::swaps(swap) {
+            if swap {
                 // We're the smaller node, or the peer's answer to this dial
                 // supersedes our earlier dial's. Swap to outbound session +
                 // indices. The peer keeps the session it answered this dial
@@ -1750,6 +1938,9 @@ impl Node {
                 }
             };
 
+            // The answer's leg stays in the settlement core's legs, holding
+            // its lease, until the core decides the msg3, which hands the
+            // lease back onto the read.
             // Read msg3 on a fork of the leg's handshake: it learns the
             // initiator's identity, epoch and negotiation payload.
             match machine.read_final(
@@ -1777,6 +1968,10 @@ impl Node {
                         error = %e,
                         "Msg3 processing failed"
                     );
+                    self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Refused {
+                        link,
+                        retry: None,
+                    });
                     self.drop_leg(link_id);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -1815,6 +2010,10 @@ impl Node {
                     // This arm sits ahead of the inbound ACL gate, so any
                     // peer able to complete a Noise msg3 reaches it without
                     // being authorized; the leg's lease goes back with it.
+                    self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Refused {
+                        link,
+                        retry: None,
+                    });
                     self.drop_leg(link_id);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -1830,6 +2029,10 @@ impl Node {
                     // the leg's index would let any peer that can complete a
                     // msg3 grow the allocator set one entry per malformed
                     // marker; the lease goes back with the leg.
+                    self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Refused {
+                        link,
+                        retry: None,
+                    });
                     self.drop_leg(link_id);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -1893,6 +2096,10 @@ impl Node {
             // The leg's lease is released after the send: the reject signal is
             // built from state on the machine and is this arm's user-visible
             // behaviour.
+            self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Refused {
+                link,
+                retry: None,
+            });
             self.drop_leg(link_id);
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -1901,6 +2108,10 @@ impl Node {
 
         if peer_node_addr == *self.identity().node_addr() {
             debug!(link_id = %link_id, "Received msg3 from self, dropping");
+            self.core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Refused {
+                link,
+                retry: None,
+            });
             self.drop_leg(link_id);
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -1920,9 +2131,9 @@ impl Node {
         // Identity-based restart/rekey/cross-connection classification.
         //
         // Now that we know the initiator's identity from msg3, classify this
-        // inbound handshake against any existing active peer. The leg's machine
-        // evaluates the pure `establish_inbound` decision once and returns it with
-        // the arm's action stream; the driver routes on the decision below,
+        // inbound handshake against any existing active peer. The settlement
+        // core decides; the leg's machine carries the decision out and returns it
+        // with the arm's action stream; the driver routes on the decision below,
         // running the actions through the executor and owning only the residual
         // shell bookkeeping (link/map removal, reject records, the duplicate-msg2
         // resend). The snapshot resolves the sender's rekey declaration and every
@@ -1953,8 +2164,13 @@ impl Node {
             remote_epoch,
         };
         let silent_backoff = self
-            .silent_sessions
-            .refusing(&peer_node_addr, crate::time::mono_ms());
+            .gates()
+            .refusing(&peer_node_addr, crate::peer::peer_now())
+            .map(|b| ActiveBackoff {
+                epoch: b.epoch,
+                silent: b.silent,
+                remaining_ms: b.remaining.as_millis() as u64,
+            });
         let snap = match self.peers.get(&peer_node_addr) {
             Some(existing_peer) => EstablishSnapshot {
                 has_existing_peer: true,
@@ -1966,19 +2182,10 @@ impl Node {
                 our_node_addr,
                 // On the peer clock, which a step of the system clock does
                 // not move.
-                peering_idle_ms: if node_fault!(GateOnWall) {
-                    existing_peer.idle_time(Self::now_ms())
-                } else {
-                    crate::peer::since(existing_peer.heard_at()).as_millis() as u64
-                },
-                epoch_restart_dampened: self.restart_dampener.get(&peer_node_addr).is_some_and(
-                    |t| {
-                        crate::time::mono_now()
-                            .saturating_duration_since(*t)
-                            .as_secs()
-                            < EPOCH_RESTART_MIN_INTERVAL_SECS
-                    },
-                ),
+                peering_idle_ms: crate::peer::since(existing_peer.heard_at()).as_millis() as u64,
+                epoch_restart_dampened: self.gates().stamp(&peer_node_addr).is_some_and(|t| {
+                    crate::peer::since(t).as_secs() < EPOCH_RESTART_MIN_INTERVAL_SECS
+                }),
                 silent_backoff,
             },
             None => EstablishSnapshot {
@@ -1997,19 +2204,33 @@ impl Node {
         };
 
         // Single inbound classification site. The leg's PERSISTENT machine — born
-        // at msg1, parked `SentMsg2` — evaluates `establish_inbound` once and
-        // returns both the decision (for the driver to route on) and the arm's
-        // action stream. The terminal reject/duplicate arms carry their
+        // at msg1, parked `SentMsg2` — carries out the decision and returns both
+        // the decision (for the driver to route on) and the arm's action
+        // stream. The terminal reject/duplicate arms carry their
         // `FreeIndex` (releasing the lease the leg drew at msg1) as a machine
         // action; a declared rekey leaves the leg's read, with the lease, for
         // the peer's link rekey machine. The driver owns only the link/map
         // removal and the reject bookkeeping, since the machine cannot remove
         // itself from the map.
+        //
+        // The settlement core decides the msg3. On a link the core does not
+        // number, which only a test makes, or for a msg3 the core holds no
+        // answer for, next's own decision is read from the snapshot.
+        let decided = self
+            .core_flow(link_id, |link| fips_core::proto::fmp::flow::In::Msg3 {
+                link,
+                peer: peer_node_addr,
+                epoch: remote_epoch.unwrap_or_default(),
+                claim: rekey_claim,
+                from: crate::node::settle::decide::pair(packet.transport_id, &packet.remote_addr),
+            })
+            .and_then(|out| crate::node::settle::decide::inbound(&out, snap.stored_msg2.clone()))
+            .unwrap_or_else(|| self.fmp.establish_inbound(&snap, &wire));
         let (decision, actions) = match self.peer_machines.get_mut(&link_id) {
             // Disjoint field borrow: `self.peer_machines` (the map entry) and
             // `self.index_allocator` (the capability) are separate fields.
             Some(machine) => {
-                machine.inbound_msg3(wire, snap, interval_ms, &mut self.index_allocator)
+                machine.inbound_msg3(wire, decided, interval_ms, &mut self.index_allocator)
             }
             None => {
                 // The machine was read a few lines above and nothing between
@@ -2072,8 +2293,8 @@ impl Node {
                 // Counted on the identity's record, since a refused handshake
                 // has no peer entry to count on.
                 let shown = self
-                    .silent_sessions
-                    .note_refused(&peer_node_addr)
+                    .core
+                    .count_refused(&peer_node_addr)
                     .is_none_or(|n| self.show(&peer_node_addr, HsLine::Refused, n));
                 if shown {
                     debug!(
@@ -2164,14 +2385,10 @@ impl Node {
                         peer = %self.peer_display_name(peer),
                         "Peer restart detected (epoch mismatch), removing stale session"
                     );
-                    // Stamped on acceptance only. A refusal that slid the window
-                    // would let a sustained replay starve a genuinely restarting
-                    // peer for as long as it kept sending.
-                    let cutoff = Duration::from_secs(EPOCH_RESTART_MIN_INTERVAL_SECS);
-                    self.restart_dampener.retain(|_, t| {
-                        crate::time::mono_now().saturating_duration_since(*t) < cutoff
-                    });
-                    self.restart_dampener.insert(*peer, crate::time::mono_now());
+                    // The settlement core stamped the dampener as it took the
+                    // msg3, on acceptance only: a refusal that slid the window
+                    // would let a sustained replay starve a genuinely
+                    // restarting peer for as long as it kept sending.
                 }
                 // Machine-driven inbound establish/rekey resolution. The leg's
                 // PERSISTENT machine emitted the action stream alongside the

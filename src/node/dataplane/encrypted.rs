@@ -463,6 +463,20 @@ impl Node {
         let mut heard_from = false;
         let mut roamed = None;
         let intake = self.config().node.path.enabled;
+        // A session's first frame forgets its identity's silent-session
+        // record as the settlement core takes it, so the refusals the record
+        // counted are taken first, for the line that reports them.
+        let refused = if self.peers.get(node_addr).is_some_and(|p| !p.heard()) {
+            self.core.take_refused(node_addr)
+        } else {
+            0
+        };
+        self.core_heard(
+            *node_addr,
+            frame.transport_id,
+            frame.remote_addr,
+            link_message.first().copied().unwrap_or(0),
+        );
         if let Some(peer) = self.peers.get_mut(node_addr) {
             present = true;
             let msg_type = link_message.first().copied().unwrap_or(0);
@@ -505,6 +519,9 @@ impl Node {
                 wake = peer.bundle().and_then(PeerBundle::next_wake);
                 let from = match &roam {
                     Roam::Roamed { from } => Some(from.clone()),
+                    // The mutation lane's break: the pair a standby path
+                    // left goes untold.
+                    Roam::Standby { .. } if node_fault!(StandbyRoamUnfed) => None,
                     Roam::Standby { .. } => standby,
                     Roam::Bound | Roam::Unmoved => None,
                 };
@@ -550,7 +567,7 @@ impl Node {
         // silent-session record: one identity has one peer entry, and a
         // record grows only when an unheard session ends.
         if first_frame {
-            self.note_peer_heard(node_addr);
+            self.note_peer_heard(node_addr, refused);
         }
         // A roam: address rotation invalidates the per-peer connect()-ed UDP
         // socket, which is still pinned to the old 5-tuple, so the executor

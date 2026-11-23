@@ -20,7 +20,7 @@ use crate::proto::fmp::RekeyClaim;
 use crate::proto::settle::flow::Outs;
 use crate::proto::settle::gates::{Ask, Epoch, Liveness, Refusal, Source};
 use crate::proto::settle::links::{LinkNo, Pair};
-use crate::proto::settle::output::{Build, Denial, Output, Transition, Why};
+use crate::proto::settle::output::{Denial, Output, Transition, Why};
 use crate::proto::settle::table::Ops;
 use crate::time::Instant;
 
@@ -44,13 +44,13 @@ pub(super) fn msg3<I: Instant>(
     if ops.legs().get(link).is_none() || ops.flow().reaped.contains(&link) {
         return;
     }
-    let Some((old, held, liveness)) = ops.held(&peer).map(|h| {
+    let Some((held, liveness)) = ops.held(&peer).map(|h| {
         let liveness = Liveness {
             heard: true,
             installed: h.installed,
             last: h.last,
         };
-        (h.link, h.epoch, liveness)
+        (h.epoch, liveness)
     }) else {
         let any = xx_fault!(SilentRefusalAnyEpoch) || node_fault!(SilentRefusalAnyEpoch);
         let silenced = if any {
@@ -63,7 +63,7 @@ pub(super) fn msg3<I: Instant>(
             deny(ops, link, peer, Source::NotHeld, why, out);
             return;
         }
-        if !barred(ops, peer, link, out) {
+        if !barred(ops, peer, link, true, out) {
             install(ops, peer, link, answer, epoch, false, now, out);
         }
         return;
@@ -87,7 +87,7 @@ pub(super) fn msg3<I: Instant>(
         }
         RekeyClaim::Matches if !crossed => rekey(ops, link, peer, out),
         RekeyClaim::None | RekeyClaim::Matches => {
-            cross(ops, link, peer, old, answer, epoch, from, now, out);
+            cross(ops, link, peer, answer, epoch, from, now, out);
         }
     }
 }
@@ -127,7 +127,7 @@ fn restart<I: Instant>(
         return;
     }
     ops.remove(peer, Why::Restart, now, out);
-    if !barred(ops, peer, link, out) {
+    if !barred(ops, peer, link, true, out) {
         install(ops, peer, link, answer, epoch, true, now, out);
     }
 }
@@ -199,18 +199,18 @@ fn rekey<I: Instant>(
 }
 
 /// A fresh dial crossing this node's at msg3. The larger node's inbound
-/// wins: it moves the peer onto the answer, at the msg3's pair, a move
-/// whose rekey machine is rebuilt from the closed one's carry, and retires
-/// the link it held, closing nothing, as next keeps both connections. The
-/// smaller node keeps its own and drops the answer, a keep. Each is told as
-/// the column next's node runs for it (`Transition::Move` and
-/// `Transition::Keep`, both `inbound`, in `src/node/settle/table.rs`).
+/// wins: it keeps the peer on the link it holds and takes the answer's
+/// session and lease there, at the msg3's pair, a move whose rekey machine
+/// is rebuilt from the closed one's carry, and retires the answer's link,
+/// closing nothing, as next keeps both connections. The smaller node keeps
+/// its own and drops the answer, a keep. Each is told as the column next's
+/// node runs for it (`Transition::Move` and `Transition::Keep`, both
+/// `inbound`, in `src/node/settle/table.rs`).
 #[allow(clippy::too_many_arguments)]
 fn cross<I: Instant>(
     ops: &mut Ops<'_, I, Xx>,
     link: LinkNo,
     peer: NodeAddr,
-    old: LinkNo,
     answer: Answer,
     epoch: Epoch,
     from: Pair,
@@ -229,20 +229,5 @@ fn cross<I: Instant>(
     let Some(leg) = ops.legs_mut().take(link) else {
         return;
     };
-    let start = out.len();
-    ops.install_answer(peer, leg, from, epoch, answer.ephemeral, false, now, out);
-    // The table installs a responder's answer as a promote; this one moves
-    // a held peer, so its outputs say so.
-    for o in &mut out[start..] {
-        if let Output::Install(i) = o {
-            i.rekey = Build::FromCarry;
-        } else if let Output::Reset { transition, .. } = o {
-            *transition = Transition::Move;
-        }
-    }
-    let _ = ops.links_mut().retire(old);
-    out.push(Output::Retire {
-        link: old,
-        closes: Vec::new(),
-    });
+    ops.hold_answer(peer, leg, from, epoch, answer.ephemeral, now, out);
 }

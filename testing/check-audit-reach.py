@@ -43,11 +43,17 @@ SHARE_FLOOR = 97.0
 # adds pairs at random, so this sits under that range rather than inside it.
 COUNT_FLOOR = 2200
 # Most pairs `links-mirror` may skip for a peer a test changed past the feed:
-# the count at both multipath settings when the clause was added. On next it is
-# 44: 33 in tests master shares and 11 in next's own, the cells tests of the
-# crossing settled at the msg3 and of the restart at the msg3, and a beacon
-# test, each of which changes a bundle with a test mutator.
-UNMIRRORED_CEILING = 44
+# the count at both multipath settings when the clause was added. On next it
+# was 44: 33 in tests master shares and 11 in next's own, the cells tests of
+# the crossing settled at the msg3 and of the restart at the msg3, and a beacon
+# test, each of which changes a bundle with a test mutator; a later run, before
+# the tests below, measured 42. Tests next added since add five, so it is 47,
+# the same at both settings: the cells tests of a crossing lost on another
+# transport and of a restart on a BLE link, two each, whose dirtying of a
+# bundle's paths goes through a test mutator as every cells test's does, and
+# the test of a standby path's roam, whose premise is a lone path that is not
+# active, which the path machine never leaves past a step.
+UNMIRRORED_CEILING = 47
 
 OUTCOMES = ("audited", "planted", "unmirrored")
 

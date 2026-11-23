@@ -171,7 +171,7 @@ fn attempt(node: &Node, link: LinkId) -> Attempt {
         expected: machine.conn_expected_identity().map(|id| *id.node_addr()),
         remote_epoch: machine.conn_remote_epoch(),
         resend_count: machine.resend_count(),
-        retransmit_at: timers.and_then(|t| t.get(&TimerKind::HandshakeRetransmit).copied()),
+        retransmit_at: node.resend_at(link),
         timeout_at: timers.and_then(|t| t.get(&TimerKind::HandshakeTimeout).copied()),
         last_activity: machine.conn_last_activity(),
     }

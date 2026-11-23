@@ -60,7 +60,6 @@ pub(super) fn hello<I: Instant>(
     ops.open_answer(link, named, asked.msg1, msg2.clone(), lease, now, out);
     let answer = Answer {
         ephemeral: asked.ephemeral,
-        rekey_of: asked.rekey_of,
         sent: false,
     };
     ops.flow_mut().answers.insert(link, answer);

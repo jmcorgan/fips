@@ -41,6 +41,8 @@ const SNAPSHOT: &str = "a read copy the tick republishes from the live state";
 const PACING: &str = "a node-wide pacing stamp";
 const ANCHOR: &str = "a stateless decision anchor";
 const TEST: &str = "a test's override of a clock or a tick";
+const REPLANT: &str =
+    "what the test-only resync of a test's planted state into the core keeps; it decides nothing";
 const BY_DEST: &str =
     "keyed by a destination, a link peer or not; no change to a held peer writes it";
 const BUDGET: &str = "a rate budget that refills on its own clock; no change to a peer clears it";
@@ -101,8 +103,8 @@ const NODE: &[(&str, Held)] = &[
     ("msgtype_budget", Exempt(LATCH)),
     ("pending_outbound", Table),
     ("pending_inbound", Table),
-    ("restart_dampener", Facets(&[Facet::Dampener])),
-    ("silent_sessions", Facets(&[Facet::Silent])),
+    ("core", Facets(&[Facet::Dampener, Facet::Silent])),
+    ("replanted", Exempt(REPLANT)),
     (
         "paths",
         Facets(&[
@@ -415,7 +417,7 @@ fn every_exemption_has_a_reason_every_facet_a_field_and_every_map_wrapper_the_ta
 
     for (_, field, ty) in fields(&NODE_SOURCE, "Node") {
         let listed = NODE.iter().find(|(f, _)| *f == field).map(|(_, held)| held);
-        let wrapper = ty.starts_with("settle::");
+        let wrapper = ty.starts_with("settle::") && ty != "settle::Core";
         assert_eq!(
             wrapper,
             matches!(listed, Some(Table)),

@@ -251,6 +251,18 @@ impl<E> XxFinal<E> {
     pub fn into_lease(self) -> Option<IndexLease> {
         self.lease
     }
+
+    /// Take `lease` as the leg's lease, for a read made while the leg's
+    /// lease was held elsewhere: the settlement core holds an answer's
+    /// lease until it decides the msg3. Returns `lease` again if the read
+    /// already holds one.
+    pub fn give(&mut self, lease: IndexLease) -> Option<IndexLease> {
+        if self.lease.is_some() {
+            return Some(lease);
+        }
+        self.lease = Some(lease);
+        None
+    }
 }
 
 impl<E: EntropySource + 'static> XxFinal<E> {

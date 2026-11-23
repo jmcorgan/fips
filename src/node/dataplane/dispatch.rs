@@ -126,7 +126,15 @@ impl Node {
 
         let addr = *from;
         let removed = self.remove(from, Why::Disconnect);
-        self.note_link_dead(addr, Self::peering_now());
+        // The settlement core's word on the reconnect where it held the
+        // peer; a peer it did not hold is noted as next notes it.
+        if removed
+            .as_ref()
+            .and_then(|r| r.decided.as_ref())
+            .is_none_or(|d| d.retry)
+        {
+            self.note_link_dead(addr, Self::peering_now());
+        }
         removed.map(|r| Removed { noted: true, ..r })
     }
 }

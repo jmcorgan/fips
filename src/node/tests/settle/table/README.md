@@ -21,6 +21,10 @@ in the `node-synthetic` group with the rest of `settle`.
   - `dirty(node, peer)` makes every row differ from a fresh peering's, but
     those `dirty_misses(on)` lists with the reason, through accessors and map
     writers and never `raw`. The peering still carries frames afterwards.
+    What it writes past the settlement join, a spare path admitted and
+    acked and another released, the core is told of after it as the join
+    would tell it, and the restart gates it writes are the node's table's,
+    so each close and gate is one the core decides too.
   - `check_cells(before, after, &t, &others)` and `assert_cells`, the same
     failing at `defect:`, hold each row against `cell(row, &t)`. `expect`
     turns a cell into what the reading must do: kept, changed, or stated by

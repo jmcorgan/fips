@@ -16,8 +16,11 @@ it (`Table<TestInstant, Xx>`), declared from `../mod.rs` as `tests`.
   frame mark.
 - `msg1.rs`: the anonymous answer, its send, and the admission cap.
 - `msg2.rs`: this node's dials, the anonymous ones included, the decision
-  parked until the msg3 is sent, the own-dial keep, address order, the
-  restart, the promote refusals, and the shell's failures and refusals.
+  parked until the msg3 is sent, the own-dial keep, address order and the
+  connection the smaller node's move leaves open, the restart, the promote
+  refusals, the shell's failures and refusals, the retries of a dial past
+  its deadline and of an identified dial's failed connection, and a dialed
+  session that ends unheard, which counts as no silent session.
 - `msg3.rs`: the promote, the restart gate, the claims, the crossing,
   the silent-session refusal, and the promote refusals at msg3.
 - `chars.rs`: characterisations of where the flow on the shared table
@@ -80,7 +83,7 @@ is the check that the transcription stands.
 | `peer/data.rs`, `heard_at` set at the install | `:148` | `Peer::heard` at the install |
 | `handshake.rs`, the stamp on an accepted msg3 restart | `:2174` | `dampener` |
 | `handshake.rs`, `RepeatMsg2` and `PeerRekey` | `:2121`, `:2098` | the two claims |
-| `peer_actions.rs`, `ResolveInboundCrossConnection` | `:553-690` | the crossing at msg3: the larger node moves onto its inbound at the msg3's pair, the link left retired; the smaller keeps |
+| `peer_actions.rs`, `ResolveInboundCrossConnection` | `:553-690` | the crossing at msg3: the larger node moves onto its inbound's session at the msg3's pair, on the link it holds, the leg's link retired; the smaller keeps |
 | `peer/active.rs`, `predates`, `heard_on_session` | `:1504`, `:1514` | `Peer::mark`, `Peer::framed` |
 | `config/node.rs`, the handshake and heartbeat defaults | `:147-150`, `:1756-1757` | the world's constants and `LINKDEAD` |
 

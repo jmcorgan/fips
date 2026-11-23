@@ -431,8 +431,8 @@ async fn test_acl_rejected_msg3_leaves_no_registry_trace() {
         .next()
         .expect("msg1 parks a machine on the responder");
     let machine_b = node_b.peer_machines.get(&link_id_b).unwrap();
-    let our_index_b = machine_b
-        .our_index()
+    let our_index_b = node_b
+        .handshake_index(link_id_b)
         .expect("msg1 allocates the responder's session index");
     let wire_msg2 = machine_b
         .conn_handshake_msg2()
