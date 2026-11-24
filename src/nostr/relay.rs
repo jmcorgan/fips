@@ -21,6 +21,7 @@ use std::time::Duration;
 use futures::Stream;
 use nostr::event::Event;
 use nostr::filter::Filter;
+use nostr::message::SubscriptionId;
 use nostr::types::RelayUrl;
 use nostr_sdk::authenticator::Authenticator;
 use nostr_sdk::client::{Client, ClientBuilder, ClientNotification, ReqTarget};
@@ -168,19 +169,44 @@ impl RelayClient {
         self.client.notifications()
     }
 
-    /// Open a long-lived subscription to `filter` on `urls`, under an id the
-    /// client chooses. Returns how many relays took it.
+    /// Open a long-lived subscription to `filter` on `urls` under `id`.
+    /// Returns how many relays took it. A relay that already holds a
+    /// subscription under `id` refuses it, before any REQ is sent, and keeps
+    /// the one it holds; that refusal is per relay, not an error.
     pub(super) async fn subscribe(
         &self,
         urls: Vec<String>,
         filter: Filter,
+        id: SubscriptionId,
     ) -> Result<usize, Error> {
         let targets: Vec<(String, Vec<Filter>)> = urls
             .into_iter()
             .map(|url| (url, vec![filter.clone()]))
             .collect();
-        let output = self.client.subscribe(ReqTarget::manual(targets)).await?;
+        let output = self
+            .client
+            .subscribe(ReqTarget::manual(targets))
+            .with_id(id)
+            .await?;
         Ok(output.success.len())
+    }
+
+    /// Close every relay connection and end the notification stream.
+    pub(super) async fn shutdown(&self) {
+        self.client.shutdown().await;
+    }
+
+    /// The pool's relays, whose status a test reads; a shut-down client
+    /// holds none, so a test takes them before.
+    #[cfg(test)]
+    pub(super) async fn relays(&self) -> Vec<nostr_sdk::relay::Relay> {
+        self.client.relays().await.into_values().collect()
+    }
+
+    /// How many subscriptions the client holds.
+    #[cfg(test)]
+    pub(super) async fn subscription_count(&self) -> usize {
+        self.client.subscriptions().await.len()
     }
 
     /// The events `urls` hold that match `filter`, collected until every

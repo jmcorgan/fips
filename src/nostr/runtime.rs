@@ -265,8 +265,7 @@ pub struct NostrRendezvous {
     /// The task that reads the signal router's channel.
     signal_task: Mutex<Option<JoinHandle<()>>>,
     traversal: Arc<TraversalShared>,
-    /// The relay client, for the tests that add relays to it.
-    #[cfg(test)]
+    /// The relay client, closed at shutdown.
     client: RelayClient,
     /// The pump's count of relay operations in flight.
     #[cfg(test)]
@@ -1375,7 +1374,6 @@ impl NostrRendezvous {
             pump_task: Mutex::new(Some(pump_task)),
             signal_task: Mutex::new(Some(signal_task)),
             traversal,
-            #[cfg(test)]
             client,
             #[cfg(test)]
             in_flight,
@@ -1546,6 +1544,9 @@ impl NostrRendezvous {
         if let Some(handle) = self.signal_task.lock().await.take() {
             handle.abort();
         }
+        // Tell the relays the connections are closed rather than leave them
+        // to time out.
+        self.client.shutdown().await;
         Ok(())
     }
 }
@@ -2048,6 +2049,11 @@ impl NostrRendezvous {
             .await
             .map(|inspection| inspection.protected.into_iter().collect())
             .unwrap_or_default()
+    }
+
+    /// The relay client's relays, for their connection status.
+    pub(crate) async fn relays_for_test(&self) -> Vec<nostr_sdk::relay::Relay> {
+        self.client.relays().await
     }
 
     /// How many sets of transports the engine has been handed.

@@ -127,7 +127,12 @@ async fn b_cached(engine: &NostrRendezvous) -> bool {
 async fn pump(
     params: Params,
     pooled: &[String],
-) -> (Inbox, tokio::task::JoinHandle<()>, Arc<AtomicUsize>) {
+) -> (
+    Inbox,
+    tokio::task::JoinHandle<()>,
+    Arc<AtomicUsize>,
+    RelayClient,
+) {
     let (inbox, rx) = mpsc::unbounded_channel();
     let (router, signals) = SignalRouter::new();
     let forwarder = router.forwarder();
@@ -143,7 +148,7 @@ async fn pump(
     let machine = Rendezvous::new(params, signer(NODE_A_SECRET), npub(NODE_A_SECRET), now());
     let pump = Pump::new(
         machine,
-        client,
+        client.clone(),
         inbox.clone(),
         Box::new(|_| {}),
         forwarder,
@@ -151,7 +156,12 @@ async fn pump(
     );
     let in_flight = pump.in_flight();
     drop(signals);
-    (inbox, tokio::spawn(pump.run(notifications, rx)), in_flight)
+    (
+        inbox,
+        tokio::spawn(pump.run(notifications, rx)),
+        in_flight,
+        client,
+    )
 }
 
 /// A relay requiring NIP-42 to read and write: the pump answers its
@@ -186,7 +196,7 @@ async fn a_failed_subscribe_is_retried_on_the_machines_deadline_under_paused_tim
         dm_relays: Vec::new(),
         ..Params::from(&crate::config::NostrRendezvousConfig::default())
     };
-    let (inbox, _pump, _) = pump(params, &[]).await;
+    let (inbox, _pump, _, _) = pump(params, &[]).await;
     inbox.send(Msg::Input(Input::Start)).unwrap();
     tokio::time::sleep(Duration::from_millis(1_900)).await;
     assert_eq!(failures(), 1);
@@ -447,5 +457,65 @@ async fn the_advert_learns_its_public_address_from_a_loopback_stun_server() {
             .line("advert: udp public=true bound to wildcard but STUN observation failed; advertising no UDP endpoint. Either set transports.udp.external_addr, bind to a specific public IP, or ensure node.rendezvous.nostr.stun_servers is reachable")
             .is_none(),
         "the advert names the learned address"
+    );
+}
+
+/// A subscribe retried after a whole-call failure (its advert relay is not
+/// in the pool) names the subscriptions of the first attempt, so the relay
+/// that took the first attempt's signal subscription is not given a second.
+#[tokio::test(start_paused = true)]
+async fn a_retried_subscribe_reuses_the_ids_of_the_first() {
+    let (_relay, url) = relay(false).await;
+    let params = Params {
+        dm_relays: vec![url.clone()],
+        advert_relays: vec!["wss://not-in-pool.example".to_string()],
+        ..Params::from(&crate::config::NostrRendezvousConfig::default())
+    };
+    let (capture, _guard) = crate::testutil::capture_logs_scoped();
+    let (inbox, _pump, _, client) = pump(params, std::slice::from_ref(&url)).await;
+    inbox.send(Msg::Input(Input::Start)).unwrap();
+    let retried = crate::testutil::wait_until(
+        || {
+            capture
+                .lines_with("failed to subscribe to Nostr discovery relays")
+                .len()
+                >= 2
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(retried, "setup: the subscribe failed and was retried");
+    assert_eq!(client.subscription_count().await, 1);
+}
+
+/// Shutdown closes the engine's relay connections rather than leaving them
+/// to time out.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_closes_the_relay_connections() {
+    use nostr_sdk::relay::RelayStatus;
+    let (_relay, url) = relay(false).await;
+    let engine = started(&url).await;
+    let relays = engine.relays_for_test().await;
+    assert_eq!(relays.len(), 1);
+    let connected = crate::testutil::wait_until(
+        || relays.iter().all(|r| r.status() == RelayStatus::Connected),
+        SOON,
+    )
+    .await;
+    assert!(connected, "setup: the relay connected");
+    engine.shutdown().await.unwrap();
+    let closed = crate::testutil::wait_until(
+        || {
+            relays
+                .iter()
+                .all(|r| matches!(r.status(), RelayStatus::Terminated | RelayStatus::Shutdown))
+        },
+        SOON,
+    )
+    .await;
+    assert!(
+        closed,
+        "a relay connection outlived shutdown: {:?}",
+        relays.iter().map(|r| r.status()).collect::<Vec<_>>()
     );
 }

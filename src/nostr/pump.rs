@@ -20,6 +20,7 @@ use std::future::Future;
 
 use futures::StreamExt;
 use nostr::event::{Event, Kind};
+use nostr::message::SubscriptionId;
 use nostr::types::RelayUrl;
 use nostr_sdk::client::ClientNotification;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -29,7 +30,7 @@ use super::log::{self, FirstEvent};
 use super::machine::adverts::assemble::AdvertTransportSnapshot;
 use super::machine::error::Error as MachineError;
 use super::machine::rendezvous::{
-    Action, Input, Now, Outcome, PeerKey, Rendezvous, Reply, ReplyId,
+    Action, Input, Now, Outcome, PeerKey, Rendezvous, Reply, ReplyId, SubId,
 };
 use super::relay::{Notifications, RelayClient};
 use super::runtime::Feed;
@@ -145,6 +146,9 @@ pub(super) struct Pump {
     inbox: Inbox,
     replies: HashMap<ReplyId, Replier>,
     next_reply: u64,
+    /// The relay subscription id each of the machine's subscriptions was
+    /// first opened under, so a retry reuses it.
+    subscriptions: HashMap<SubId, SubscriptionId>,
     tasks: JoinSet<()>,
     reset_streak: ResetStreak,
     /// The machine's UDP sockets.
@@ -199,6 +203,7 @@ impl Pump {
             inbox,
             replies: HashMap::new(),
             next_reply: 1,
+            subscriptions: HashMap::new(),
             tasks: JoinSet::new(),
             reset_streak,
             signals,
@@ -386,6 +391,20 @@ impl Pump {
         }
     }
 
+    /// The relay subscription id for the machine's `sub`: drawn the first
+    /// time, as 16 random bytes in 32 hex characters (the shape the client's
+    /// own ids have), and the same on every retry.
+    fn subscription_id(&mut self, sub: SubId) -> SubscriptionId {
+        self.subscriptions
+            .entry(sub)
+            .or_insert_with(|| {
+                let mut bytes = [0u8; 16];
+                <OsEntropy as fips_core::entropy::EntropySource>::fill(&mut bytes);
+                SubscriptionId::new(hex::encode(bytes))
+            })
+            .clone()
+    }
+
     /// Run `operation` in a task of its own and post the input it gives.
     fn spawn(&mut self, operation: impl Future<Output = Input> + Send + 'static) {
         let inbox = self.inbox.clone();
@@ -405,11 +424,15 @@ impl Pump {
         match action {
             Action::Subscribe { req, subs, timeout } => {
                 let client = self.client.clone();
+                let subs: Vec<_> = subs
+                    .into_iter()
+                    .map(|(sub, relays, filter)| (self.subscription_id(sub), relays, filter))
+                    .collect();
                 self.spawn(async move {
                     let subscribe = async {
                         let mut reached = 0;
-                        for (_, relays, filter) in subs {
-                            reached += client.subscribe(relays, filter).await?;
+                        for (id, relays, filter) in subs {
+                            reached += client.subscribe(relays, filter, id).await?;
                         }
                         Ok::<usize, super::relay::Error>(reached)
                     };

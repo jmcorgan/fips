@@ -27,7 +27,9 @@ code; the test files that use them (`tests/mod.rs` and its children, and
 shell makes on the client (adding and connecting relays, the notification
 channel, subscribing, fetching, sending, reading the pool) goes through its
 `RelayClient`, one method per call, and each caller maps the client's error
-onto `BootstrapError`. The client answers a relay's NIP-42 challenge through
+onto `BootstrapError`. Each of the machine's subscriptions is opened under an
+id the pump draws once and reuses on every retry, so a relay that already
+holds it is not given a second. The client answers a relay's NIP-42 challenge through
 `PumpAuthenticator`, which asks the pump, so the node key signs only in the
 machine.
 
@@ -56,7 +58,9 @@ the pump can no longer answer gets an empty answer (`Disabled`, `Skipped`,
 nothing), never a hang. `start` builds the client, the machine and the pump,
 takes the client's stream before the pump can send the first subscribe, then
 connects and sends `Start`; start-up waits for the first advert to be
-assembled, as it always has.
+assembled, as it always has. `shutdown` stops the pump (which aborts its
+operations in flight), stops the signal task, and closes the relay client's
+connections.
 
 ## The traversal half, until it moves into the machine
 

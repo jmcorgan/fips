@@ -85,6 +85,11 @@ fn advert(signer: &NodeSigner) -> Event {
     .expect("advert")
 }
 
+/// A fixed subscription id named `name`.
+fn test_id(name: &str) -> nostr::message::SubscriptionId {
+    nostr::message::SubscriptionId::new(name)
+}
+
 /// The filter for every node's advert.
 fn adverts() -> Filter {
     Filter::new()
@@ -150,7 +155,7 @@ async fn the_adapter_subscribes_fetches_and_sends_through_a_plain_relay() {
     let (to_b, _) = adapter(b, &url).await;
 
     let mut stream = to_b.notifications();
-    to_b.subscribe(vec![url.to_string()], adverts())
+    to_b.subscribe(vec![url.to_string()], adverts(), test_id("adverts"))
         .await
         .expect("subscribe");
     let event = advert(&a);
@@ -207,10 +212,11 @@ async fn the_router_takes_a_signal_off_the_stream_onto_its_own_channel() {
             .kind(Kind::Custom(SIGNAL_KIND))
             .pubkey(b.public_key())
             .limit(0),
+        test_id("signals"),
     )
     .await
     .expect("subscribe to signals");
-    to_b.subscribe(vec![url.to_string()], adverts())
+    to_b.subscribe(vec![url.to_string()], adverts(), test_id("adverts"))
         .await
         .expect("subscribe to adverts");
     // The relay keeps no copy of a signal, whose kind is ephemeral, so one
@@ -337,7 +343,7 @@ async fn a_stream_taken_before_a_subscribe_receives_the_relays_stored_replay() {
 
     let (to_b, _) = adapter(b, &url).await;
     let mut stream = to_b.notifications();
-    to_b.subscribe(vec![url.to_string()], adverts())
+    to_b.subscribe(vec![url.to_string()], adverts(), test_id("adverts"))
         .await
         .expect("subscribe");
     assert!(
@@ -364,4 +370,20 @@ async fn a_send_to_a_pooled_relay_that_is_not_connected_reaches_none() {
         .await
         .expect("the client accepts the send");
     assert_eq!(reached, 0);
+}
+
+/// A subscribe repeated under the id of one the client holds is refused by
+/// the client for that relay, before any REQ is sent, so the client keeps
+/// one subscription rather than two.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscribe_repeated_under_its_id_leaves_the_client_one_subscription() {
+    let (_relay, url) = relay(false).await;
+    let (client, _) = adapter(signer(NODE_B_SECRET), &url).await;
+    for _ in 0..2 {
+        client
+            .subscribe(vec![url.to_string()], adverts(), test_id("adverts"))
+            .await
+            .expect("the subscribe call succeeds as a whole");
+    }
+    assert_eq!(client.subscription_count().await, 1);
 }

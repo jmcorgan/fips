@@ -124,8 +124,10 @@ Tests of one file, each named `nostr::<file>::tests::...`:
   in well under a second of real time; a signal that reached the pool's
   stream is opened by the signal task; a request to a stopped pump gets the
   empty answer; a query sees every input sent before it; shutdown cancels a
-  relay operation in flight; and the start-up assembly waits for the public
-  address the pump learns from a loopback STUN server.
+  relay operation in flight; the start-up assembly waits for the public
+  address the pump learns from a loopback STUN server; a retried subscribe
+  reuses the first attempt's ids, so the client holds one subscription, not
+  two; and shutdown closes the relay connections.
 - `offer_admission.rs`, of `offer_admission.rs`: the per-npub allowance of
   concurrent inbound offers, and that idle senders are reclaimed.
 - `sockets.rs`, of `sockets.rs`: a bound socket's datagrams reach the pump's
@@ -140,7 +142,8 @@ Tests of one file, each named `nostr::<file>::tests::...`:
   a client with no authenticator as `auth-required`; and a stream taken
   before a subscribe receives the relay's stored replay; and a send to a
   relay in the pool but not connected is accepted and counted as reaching
-  none. The adapters here
+  none; a subscribe repeated under its id leaves the client one
+  subscription. The adapters here
   answer authentication with `SignerAuthenticator`, so these tests check the
   adapter's wiring; the pump's own answer is `pump.rs`'s.
 - `signal_route.rs`, of `signal_route.rs`: the admission policy takes a
