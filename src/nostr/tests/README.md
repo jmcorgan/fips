@@ -6,7 +6,11 @@ module itself and two kinds of test file beside it.
 - `mod.rs` is `nostr::tests`, declared from `src/nostr/mod.rs` as
   `#[cfg(test)] mod tests;`. It holds the tests that span several files of
   `src/nostr/` (the runtime, signalling, traversal and advert paths
-  together), and the helpers its child modules share.
+  together), and the helpers its child modules share. Among them, the
+  stale-advert refetch tests: one finds a newer advert by the peer on an
+  in-process relay and refreshes the cached entry, the only refetch outcome
+  that runs the full ingest check (`ingest::check` in
+  `machine/adverts/ingest.rs`).
 - Child modules of `mod.rs`, which declares each as `mod <name>;`. Each is a
   child of `nostr::tests` and reaches the `pub(super)` items of the files in
   `src/nostr/` and the private helpers of `mod.rs` (such as `send_probe`).

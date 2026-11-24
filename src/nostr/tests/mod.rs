@@ -2426,6 +2426,77 @@ fn short_id_truncates_a_multibyte_session_id_on_a_character_boundary_without_pan
     assert_eq!(short_id(""), "");
 }
 
+/// A stale-advert refetch that finds a newer, valid advert by the peer on
+/// the advert relays caches it in place of the older one: the only refetch
+/// outcome that runs the full ingest check.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refetch_that_finds_a_newer_advert_refreshes_the_cached_entry() {
+    use nostr::key::SecretKey;
+    use nostr::nips::nip19::ToBech32;
+    use nostr_sdk::local_relay::LocalRelay;
+
+    let relay = LocalRelay::builder().build();
+    relay.run().await.expect("the in-process relay starts");
+    let url = relay.url().await.to_string();
+
+    let peer = NodeSigner::new(
+        SecretKey::from_hex("b7e151628aed2a6abf7158809cf4f3c762e7160f38b4da56a784d9045190cfef")
+            .unwrap(),
+    );
+    let peer_npub = peer.public_key().to_bech32().unwrap();
+    let now_secs = now_ms() / 1_000;
+    let mut runtime = NostrRendezvous::new_for_test();
+    let config = crate::config::NostrRendezvousConfig::default();
+    let body = OverlayAdvert {
+        identifier: ADVERT_IDENTIFIER.to_string(),
+        version: ADVERT_VERSION,
+        endpoints: vec![OverlayEndpointAdvert {
+            transport: OverlayTransportKind::Tcp,
+            addr: "8.8.8.8:443".to_string(),
+        }],
+        signal_relays: None,
+        stun_servers: None,
+    };
+    let newer = super::machine::event::advert::advert_event(
+        &peer,
+        serde_json::to_string(&body).unwrap(),
+        ADVERT_IDENTIFIER,
+        &config.app,
+        config.advert_ttl_secs,
+        now_secs * 1_000,
+        [0u8; 32],
+    )
+    .unwrap();
+    let publisher = nostr_sdk::client::ClientBuilder::new().build();
+    publisher.add_relay(url.as_str()).await.unwrap();
+    publisher.connect().await;
+    publisher
+        .send_event(&newer)
+        .await
+        .expect("the relay stores the advert");
+
+    runtime.set_advert_relays_for_test(vec![url]).await;
+    let older = NostrRendezvous::cached_advert_for_test(
+        peer_npub.clone(),
+        OverlayEndpointAdvert {
+            transport: OverlayTransportKind::Tcp,
+            addr: "203.0.113.11:443".to_string(),
+        },
+        now_secs - 100,
+    );
+    runtime
+        .insert_advert_for_test(peer_npub.clone(), older)
+        .await;
+
+    let outcome = runtime.refetch_advert_for_stale_check(&peer_npub).await;
+    assert_eq!(outcome, crate::nostr::NostrRefetchOutcome::Refreshed);
+    assert_eq!(
+        runtime.cached_created_at_for_test(&peer_npub).await,
+        Some(now_secs),
+        "the newer advert did not replace the cached one"
+    );
+}
+
 /// The advert cache holds adverts under the canonical lower-case npub, and
 /// a configured npub may be written in upper case. Resolving that peer's
 /// advert finds the cached entry instead of missing it and going to the

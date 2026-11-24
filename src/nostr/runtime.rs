@@ -24,6 +24,7 @@ use super::handoff::EstablishedTraversal;
 use super::machine::NodeSigner;
 use super::machine::adverts;
 use super::machine::adverts::cache::{AdvertAdmission, Cache};
+use super::machine::adverts::ingest::{self, MAX_ADVERT_CONTENT_BYTES, MAX_ADVERT_LIST_ENTRIES};
 use super::machine::adverts::publisher::{PublishPlan, Publisher};
 use super::machine::event::{advert as advert_codec, inbox as inbox_codec};
 use super::machine::params::Params;
@@ -53,21 +54,10 @@ use crate::config::{NostrRendezvousConfig, PeerConfig};
 use crate::time::{HostClock, HostInstant};
 use fips_core::time::Clock;
 
-const ADVERT_CACHE_STALE_GRACE_MULTIPLIER: u64 = 2;
-
 /// The longest `sessionId` or `nonce`, in bytes, an inbound traversal offer
 /// may carry. The seen-sessions memory keys on the session id, and the nonce
 /// is copied into the answer. Ours are about 30 bytes (`traversal::nonce`).
 const MAX_OFFER_FIELD_BYTES: usize = 128;
-
-/// The largest advert event content, in bytes, that is parsed at all.
-const MAX_ADVERT_CONTENT_BYTES: usize = 8 * 1024;
-
-/// The most entries an advert's `endpoints`, `signalRelays` or `stunServers`
-/// list may carry. The cache keeps the parsed advert, where each entry costs
-/// a string header on top of its bytes, so the content bound alone would let
-/// thousands of one-character entries through.
-const MAX_ADVERT_LIST_ENTRIES: usize = 32;
 
 /// Refuse an inbound offer whose session id or nonce is longer than
 /// `MAX_OFFER_FIELD_BYTES`. An honest peer never sends one.
@@ -78,47 +68,17 @@ fn check_offer_bounds(offer: &TraversalOffer) -> Result<(), BootstrapError> {
     Ok(())
 }
 
-/// Refuse an advert any of whose lists has more than
-/// `MAX_ADVERT_LIST_ENTRIES` entries. The whole advert is refused, not cut,
-/// so what is cached is always what the author signed.
-fn check_advert_lists(advert: &OverlayAdvert) -> Result<(), BootstrapError> {
-    let lists = [
-        ("endpoints", Some(advert.endpoints.len())),
-        ("signalRelays", advert.signal_relays.as_ref().map(Vec::len)),
-        ("stunServers", advert.stun_servers.as_ref().map(Vec::len)),
-    ];
-    for (name, len) in lists {
-        if let Some(len) = len
-            && len > MAX_ADVERT_LIST_ENTRIES
-        {
-            return Err(BootstrapError::InvalidAdvert(format!(
-                "{name} has {len} entries, over the bound of {MAX_ADVERT_LIST_ENTRIES}"
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// Cut each of our own advert's lists to `MAX_ADVERT_LIST_ENTRIES`, keeping
 /// the configured order, so peers do not refuse it. Warns for each list cut.
 fn clamp_own_advert(advert: &mut OverlayAdvert) {
-    fn clamp<T>(list: &mut Vec<T>, name: &str) {
-        if list.len() > MAX_ADVERT_LIST_ENTRIES {
-            warn!(
-                list = name,
-                configured = list.len(),
-                published = MAX_ADVERT_LIST_ENTRIES,
-                "advert: list longer than peers accept; publishing only its first entries"
-            );
-            list.truncate(MAX_ADVERT_LIST_ENTRIES);
-        }
-    }
-    clamp(&mut advert.endpoints, "endpoints");
-    if let Some(relays) = advert.signal_relays.as_mut() {
-        clamp(relays, "signalRelays");
-    }
-    if let Some(servers) = advert.stun_servers.as_mut() {
-        clamp(servers, "stunServers");
+    for cut in ingest::clamp_own(advert) {
+        warn!(
+            target: "fips::nostr::runtime",
+            list = cut.list,
+            configured = cut.configured,
+            published = MAX_ADVERT_LIST_ENTRIES,
+            "advert: list longer than peers accept; publishing only its first entries"
+        );
     }
 }
 
@@ -136,7 +96,7 @@ pub(super) fn advert_cache(npub: String, params: &Params) -> Cache<HostInstant> 
 
 /// The grace-extended max age of a cached advert, in ms.
 fn advert_max_age_ms(config: &NostrRendezvousConfig) -> u64 {
-    config.advert_ttl_secs * 1000 * ADVERT_CACHE_STALE_GRACE_MULTIPLIER
+    ingest::max_age_ms(config.advert_ttl_secs)
 }
 
 /// The key `npub` names, and its canonical npub: the text the advert cache,
@@ -826,7 +786,7 @@ impl NostrRendezvous {
             Err(_) => return NostrRefetchOutcome::Skipped,
         };
 
-        let Some(ev) = Self::newest_event_by_author(events.iter(), target_pubkey) else {
+        let Some(ev) = ingest::newest_by_author(events.iter(), target_pubkey) else {
             if !events.is_empty() {
                 // The relays answered, but nothing they returned was signed by
                 // this peer. That is no evidence of absence, so keep the entry.
@@ -843,17 +803,19 @@ impl NostrRendezvous {
         match cached_created_at {
             Some(cached) if relay_created_at <= cached => NostrRefetchOutcome::SameAdvert,
             _ => {
-                let Some(valid_until_ms) = self.event_valid_until_ms(ev) else {
-                    return NostrRefetchOutcome::Skipped;
-                };
-                let Ok(advert) = Self::parse_overlay_advert_event(ev, &self.config.app) else {
+                let Some(checked) = ingest::check(
+                    ev,
+                    &self.config.app,
+                    advert_max_age_ms(&self.config),
+                    now_ms(),
+                ) else {
                     return NostrRefetchOutcome::Skipped;
                 };
                 let updated = CachedOverlayAdvert {
                     author_npub: peer_npub.to_string(),
-                    advert,
-                    created_at: relay_created_at,
-                    valid_until_ms,
+                    advert: checked.advert,
+                    created_at: checked.created_at,
+                    valid_until_ms: checked.valid_until_ms,
                 };
                 let admission = self.cache().insert_fetched(peer_npub, updated, now_ms());
                 if let AdvertAdmission::Refused { first_at_bound } = admission {
@@ -1038,23 +1000,23 @@ impl NostrRendezvous {
     /// Cache an advert a relay delivered, if it is valid and current, then
     /// prune the cache.
     fn handle_advert(&self, event: &Event) {
-        let author_npub = event.pubkey.to_bech32().expect("infallible");
-        if let Some(valid_until_ms) = self.event_valid_until_ms(event)
-            && let Ok(advert) = Self::parse_overlay_advert_event(event, &self.config.app)
-        {
-            let endpoints = endpoint_summary(&advert.endpoints);
-            // Clamped forward to the signal path's skew
-            // tolerance: an unbounded future `created_at` would
-            // win every replacement comparison in
-            // `observe_advert` and buy a proportionally distant
-            // validity horizon.
-            let created_at =
-                adverts::effective_created_at_secs(event.created_at.as_secs(), now_ms());
+        // `check` clamps `created_at` forward to the signal path's skew
+        // tolerance: an unbounded future `created_at` would win every
+        // replacement comparison in `observe_advert` and buy a
+        // proportionally distant validity horizon.
+        if let Some(checked) = ingest::check(
+            event,
+            &self.config.app,
+            advert_max_age_ms(&self.config),
+            now_ms(),
+        ) {
+            let author_npub = checked.author_npub;
+            let endpoints = endpoint_summary(&checked.advert.endpoints);
             let admission = self.cache().observe_advert(
                 &author_npub,
-                advert,
-                created_at,
-                valid_until_ms,
+                checked.advert,
+                checked.created_at,
+                checked.valid_until_ms,
                 now_ms(),
             );
             match admission {
@@ -1922,28 +1884,27 @@ impl NostrRendezvous {
 
         let mut best: Option<CachedOverlayAdvert> = None;
         for event in events.iter() {
-            let Some(valid_until_ms) = self.event_valid_until_ms(event) else {
+            let Some(checked) = ingest::check(
+                event,
+                &self.config.app,
+                advert_max_age_ms(&self.config),
+                now_ms(),
+            ) else {
                 continue;
             };
-            let Ok(advert) = Self::parse_overlay_advert_event(event, &self.config.app) else {
-                continue;
-            };
-            let author_npub = event.pubkey.to_bech32().expect("infallible");
-            if author_npub != peer_npub {
+            if checked.author_npub != peer_npub {
                 continue;
             }
-            let created_at =
-                adverts::effective_created_at_secs(event.created_at.as_secs(), now_ms());
             let replace = best
                 .as_ref()
-                .map(|current| created_at >= current.created_at)
+                .map(|current| checked.created_at >= current.created_at)
                 .unwrap_or(true);
             if replace {
                 best = Some(CachedOverlayAdvert {
-                    author_npub,
-                    advert,
-                    created_at,
-                    valid_until_ms,
+                    author_npub: checked.author_npub,
+                    advert: checked.advert,
+                    created_at: checked.created_at,
+                    valid_until_ms: checked.valid_until_ms,
                 });
             }
         }
@@ -2026,7 +1987,7 @@ impl NostrRendezvous {
                 return Ok(self.config.dm_relays.clone());
             }
         };
-        let newest = Self::newest_event_by_author(events.iter(), target_pubkey);
+        let newest = ingest::newest_by_author(events.iter(), target_pubkey);
         if let Some(event) = newest {
             let relays = inbox_relays(event);
             if !relays.is_empty() {
@@ -2034,37 +1995,6 @@ impl NostrRendezvous {
             }
         }
         Ok(self.config.dm_relays.clone())
-    }
-
-    pub(super) fn parse_overlay_advert_event(
-        event: &Event,
-        expected_app: &str,
-    ) -> Result<OverlayAdvert, BootstrapError> {
-        let advertised_app = advert_codec::protocol(event).ok_or_else(|| {
-            BootstrapError::InvalidAdvert("missing required protocol tag".to_string())
-        })?;
-        if advertised_app != expected_app {
-            return Err(BootstrapError::InvalidAdvert(format!(
-                "unsupported protocol '{}'",
-                advertised_app
-            )));
-        }
-
-        if event.content.len() > MAX_ADVERT_CONTENT_BYTES {
-            return Err(BootstrapError::InvalidAdvert(format!(
-                "content of {} bytes, over the bound of {MAX_ADVERT_CONTENT_BYTES}",
-                event.content.len()
-            )));
-        }
-        let advert: OverlayAdvert = serde_json::from_str(&event.content)?;
-        Self::validate_overlay_advert(advert)
-    }
-
-    pub(super) fn validate_overlay_advert(
-        advert: OverlayAdvert,
-    ) -> Result<OverlayAdvert, BootstrapError> {
-        check_advert_lists(&advert)?;
-        adverts::validate_overlay_advert(advert).map_err(Into::into)
     }
 
     /// Log one planning call's refused punch candidates, giving at most one
@@ -2088,47 +2018,6 @@ impl NostrRendezvous {
                 "advert cache over cap; evicted unprotected entries"
             );
         }
-    }
-
-    fn event_valid_until_ms(&self, event: &Event) -> Option<u64> {
-        Self::compute_advert_valid_until_ms(event, advert_max_age_ms(&self.config), now_ms())
-    }
-
-    /// Newest event in `events` that was actually signed by `author`.
-    ///
-    /// The relay pool verifies each event's signature but does not check a
-    /// reply against the REQ filter unless `verify_subscriptions` or
-    /// `ban_relay_on_mismatch` is set, and neither is. A relay may therefore
-    /// answer an author-filtered request with an event it signed itself, so
-    /// the author test happens here, before the timestamp contest, not after:
-    /// a future-dated foreign event must not be able to suppress the genuine
-    /// one by winning `created_at`.
-    pub(super) fn newest_event_by_author<'a>(
-        events: impl Iterator<Item = &'a Event>,
-        author: PublicKey,
-    ) -> Option<&'a Event> {
-        events
-            .filter(|event| event.pubkey == author)
-            .max_by_key(|event| event.created_at.as_secs())
-    }
-
-    /// The time `event`, an advert, stops being valid at `now_ms`, or `None`
-    /// if it already has. Its `expiration` tag is read as the relay client
-    /// reads it, so the client and this agree on whether it has expired.
-    pub(super) fn compute_advert_valid_until_ms(
-        event: &Event,
-        advert_max_age_ms: u64,
-        now_ms: u64,
-    ) -> Option<u64> {
-        if event.is_expired_at(Timestamp::from(now_ms / 1000)) {
-            return None;
-        }
-        adverts::advert_valid_until_ms(
-            event.created_at.as_secs(),
-            event.tags.expiration().map(|timestamp| timestamp.as_secs()),
-            advert_max_age_ms,
-            now_ms,
-        )
     }
 
     async fn send_signal<T: Serialize>(
@@ -2270,6 +2159,44 @@ pub(super) fn signal_relays(
 
 #[cfg(test)]
 impl NostrRendezvous {
+    /// The advert `event` carries, if it is for `expected_app` and passes
+    /// every content rule (`ingest::parse`).
+    pub(super) fn parse_overlay_advert_event(
+        event: &Event,
+        expected_app: &str,
+    ) -> Result<OverlayAdvert, BootstrapError> {
+        ingest::parse(event, expected_app).map_err(|e| match e {
+            ingest::ParseError::Invalid(e) => e.into(),
+            ingest::ParseError::Json(e) => BootstrapError::Serde(e),
+        })
+    }
+
+    /// A peer's advert body, checked (`ingest::validate`).
+    pub(super) fn validate_overlay_advert(
+        advert: OverlayAdvert,
+    ) -> Result<OverlayAdvert, BootstrapError> {
+        Ok(ingest::validate(advert)?)
+    }
+
+    /// Newest event in `events` that was actually signed by `author`
+    /// (`ingest::newest_by_author`).
+    pub(super) fn newest_event_by_author<'a>(
+        events: impl Iterator<Item = &'a Event>,
+        author: PublicKey,
+    ) -> Option<&'a Event> {
+        ingest::newest_by_author(events, author)
+    }
+
+    /// The time `event`, an advert, stops being valid at `now_ms`, or `None`
+    /// if it already has (`ingest::valid_until_ms`).
+    pub(super) fn compute_advert_valid_until_ms(
+        event: &Event,
+        advert_max_age_ms: u64,
+        now_ms: u64,
+    ) -> Option<u64> {
+        ingest::valid_until_ms(event, advert_max_age_ms, now_ms)
+    }
+
     /// Build a minimal `NostrRendezvous` for unit tests. No relay client is
     /// connected and no background tasks are spawned; only the in-memory
     /// `advert_cache` and `npub` are usable. Intended for cache-injection

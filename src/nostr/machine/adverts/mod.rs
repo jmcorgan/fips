@@ -3,8 +3,9 @@
 //! clamp on a peer's `created_at`, and the arithmetic of an advert's validity
 //! horizon. Reading the Nostr event (its tags, its expiration, whether it has
 //! expired) stays in the shell, which passes the numbers in. The cache of
-//! peers' adverts is `cache.rs`, and the local advert and its publishing
-//! decision are `publisher.rs`.
+//! peers' adverts is `cache.rs`, the local advert's assembly from the
+//! node's transports is `assemble.rs`, and the local advert and its
+//! publishing decision are `publisher.rs`.
 
 use alloc::format;
 use alloc::string::ToString;
@@ -17,7 +18,9 @@ use super::types::{
     ADVERT_IDENTIFIER, ADVERT_VERSION, OverlayAdvert, OverlayEndpointAdvert, OverlayTransportKind,
 };
 
+pub mod assemble;
 pub mod cache;
+pub mod ingest;
 pub mod publisher;
 
 /// Addresses an advert must not name as a directly dialable endpoint: the

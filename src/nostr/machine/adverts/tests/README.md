@@ -9,6 +9,18 @@ Unit tests of `src/nostr/machine/adverts/`.
 - The tests of one file, declared from that file as
   `#[cfg(test)] #[path = "tests/<file>.rs"] mod tests;`, so each is its
   file's child module and reaches its private items:
+  - `assemble.rs`, of `assemble.rs`: each transport's precedence (external
+    address, specific bind, learned address), the notes for a wildcard
+    transport that cannot be advertised, the `udp:nat` relays and STUN
+    servers, Tor, the `advertise` gate, and which transports need a learned
+    address, in snapshot order.
+  - `ingest.rs`, of `ingest.rs`: an expired advert is refused before it is
+    parsed (seen through a counting parse), an advert for another app and
+    an oversized one are refused (the latter before decoding), a future
+    `created_at` is clamped, the newest event is chosen only among the
+    author's, our own advert's long lists are cut and named, and the
+    validity horizon and the endpoint rule hold FRC-1601 Appendix C.3's
+    and C.8's rows.
   - `cache.rs`, of `cache.rs`: admission and replacement, pruning, the size
     cap and the protection of configured and linked authors against a flood
     of new keys, the open-discovery candidates (drawn from a seeded entropy

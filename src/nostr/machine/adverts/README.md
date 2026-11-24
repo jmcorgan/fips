@@ -2,7 +2,8 @@
 
 The overlay advert, with no Nostr types: what an advert may name, the checks
 a peer's advert must pass, when it stops being valid, which peers' adverts
-the node holds, and which advert of its own it publishes. The shell reads
+the node holds, how its own advert is assembled from its transports, and
+which advert of its own it publishes. The shell reads
 the Nostr event (its `protocol` tag, its JSON content, its `created_at` and
 NIP-40 expiration, and whether it has expired) and passes the body and the
 numbers in; it signs and sends the advert this directory tells it to
@@ -27,6 +28,29 @@ publish.
     from reading more than `FRESHNESS_SKEW_TOLERANCE_MS` ahead of our clock;
   - `advert_valid_until_ms`, the validity horizon's arithmetic: the clamped
     `created_at` plus the maximum age, cut short by the NIP-40 expiration.
+- `assemble.rs`: the local advert's assembly. `AdvertTransportSnapshot` is
+  the node's snapshot of one transport's advertisable inputs (re-exported by
+  the shell's `driver.rs` at its old path). `learned_wanted` names the
+  transports whose public address must be learned first (advertised, public
+  UDP, bound to a wildcard, no external address), in snapshot order, and
+  `assemble` turns the snapshot and the learned addresses into the advert
+  body, with an `AssemblyNote` for each transport it had to leave out. The
+  precedence per transport (external address, then a specific bind address,
+  then the learned one) and the endpoint order are the node's long-standing
+  ones; the shell learns the addresses and logs the notes.
+- `ingest.rs`: the checks every advert a relay delivers passes before it is
+  cached. `check` runs the validity horizon (`valid_until_ms`, which reads
+  the event's NIP-40 expiration as the relay client does) before anything
+  is parsed, then `parse` (the `protocol` tag, the 8 KiB content bound
+  before decoding, the JSON, the 32-entry list bound before unusable
+  endpoints are dropped, then `validate_overlay_advert`), then the clamp on
+  a future `created_at`. All three ingest paths call it: the subscription's
+  stream, the targeted fetch on a dial, and the stale-advert refetch, which
+  calls it only after comparing `created_at` with the cached entry's. The
+  author test (`newest_by_author`, and the fetch's own test) stays with
+  each path. Also the lifetime arithmetic (`max_age_ms`: two advert
+  lifetimes) and `clamp_own`, which cuts our own advert's lists to the
+  bound peers accept and names each list it cut.
 - `cache.rs`: `Cache`, the peers' adverts keyed by author npub. An author
   already cached has its entry replaced by an advert no older than it; a new
   author is admitted while there is room; at the cap, a protected author (a
@@ -42,7 +66,8 @@ publish.
   whether it advertises at all, and `plan_publish`, which stamps our
   identifier and version, drops endpoints no peer could use, and applies the
   `udp:nat` rule.
-- `tests/`: the unit tests of `cache.rs` and `publisher.rs`.
+- `tests/`: the unit tests of `assemble.rs`, `cache.rs`, `ingest.rs` and
+  `publisher.rs`.
 
 ## Rules for changing it
 
@@ -53,18 +78,18 @@ publish.
 - The runtime holds the cache and the publisher each behind one
   `std::sync::Mutex`, and binds what a call returns before acting on it, so
   no lock is held while it logs or awaits.
-- The shell's `NostrRendezvous::validate_overlay_advert` first refuses an
-  advert any of whose lists is over the shell's entry bound
-  (`check_advert_lists` in `runtime.rs`), before unusable endpoints are
-  dropped, then delegates here and maps the error onto
-  `BootstrapError::InvalidAdvert` with the same text; its callers and tests
-  use it.
+- The shell's `NostrRendezvous::validate_overlay_advert`,
+  `parse_overlay_advert_event`, `newest_event_by_author` and
+  `compute_advert_valid_until_ms` are test-only wrappers over `ingest.rs`,
+  kept at their paths for the shell's tests; they map the machine's error
+  onto `BootstrapError` with the same text, and a JSON error onto
+  `BootstrapError::Serde`.
 - The refusal texts are what operators see in the log and what the shell's
   tests read; change them only on purpose.
 
 ## Tests
 
-The cache and the publisher are tested in `tests/`. The rules in `mod.rs`
+The assembly, the cache and the publisher are tested in `tests/`. The rules in `mod.rs`
 are tested through the shell, in `src/nostr/tests/mod.rs`: validation, the
 endpoint filter, the never-routable ranges, the clamp and the validity
 horizon; so are the cache's lapse grace (its `advert_lapse` module) and the

@@ -8,7 +8,7 @@
 //! home while leaving the transport/connection-table mutations that consume
 //! this state on `Node`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -18,36 +18,12 @@ use crate::NodeAddr;
 use crate::config::{NostrRendezvousConfig, NostrRendezvousPolicy, PeerAddress, PeerConfig};
 use crate::transport::TransportId;
 
+use super::machine::adverts::assemble::{self, AssemblyNote};
 use super::{
-    ADVERT_IDENTIFIER, ADVERT_VERSION, BootstrapError, NostrRendezvous, OverlayAdvert,
-    OverlayEndpointAdvert, OverlayTransportKind,
+    BootstrapError, NostrRendezvous, OverlayAdvert, OverlayEndpointAdvert, OverlayTransportKind,
 };
 
-/// Snapshot of a single operational transport's advertisable endpoint
-/// inputs, captured on `Node` at advert-build time so the driver can
-/// assemble the overlay advert without borrowing the transport table.
-/// Only transports whose type matched a configured listener are included;
-/// the `advertise` gate is carried verbatim so the driver reproduces the
-/// original per-transport branch logic exactly.
-pub enum AdvertTransportSnapshot {
-    Udp {
-        advertise: bool,
-        is_public: bool,
-        external_addr: Option<SocketAddr>,
-        local_addr: Option<SocketAddr>,
-        transport_key: u32,
-    },
-    Tcp {
-        advertise: bool,
-        external_addr: Option<SocketAddr>,
-        local_addr: Option<SocketAddr>,
-    },
-    Tor {
-        advertise: bool,
-        onion_addr: Option<String>,
-        advertised_port: u16,
-    },
-}
+pub use super::machine::adverts::assemble::AdvertTransportSnapshot;
 
 /// The peer a bootstrap transport was adopted for: who it is and the address
 /// the traversal reached it at.
@@ -393,8 +369,9 @@ impl RendezvousDriver {
     }
 
     /// Assemble the local `OverlayAdvert` from the per-transport `snapshot`.
-    /// The STUN `learn_public_udp_addr` await for wildcard-bound public UDP
-    /// sockets is reached through the `bootstrap` handle.
+    /// The public address of each advertised public UDP transport bound to a
+    /// wildcard is learned first, one transport at a time in snapshot order,
+    /// through the `bootstrap` handle's STUN cache.
     async fn build_overlay_advert(
         &self,
         bootstrap: &Arc<NostrRendezvous>,
@@ -405,144 +382,49 @@ impl RendezvousDriver {
             return None;
         }
 
-        let mut endpoints = Vec::new();
-        let mut has_udp_nat = false;
-
-        for entry in snapshot {
-            match entry {
-                AdvertTransportSnapshot::Udp {
-                    advertise,
-                    is_public,
-                    external_addr,
-                    local_addr,
-                    transport_key,
-                } => {
-                    if !advertise {
-                        continue;
-                    }
-                    if is_public {
-                        // Precedence:
-                        // 1. operator-supplied `external_addr` (skips STUN)
-                        // 2. non-wildcard `local_addr` (operator bound to
-                        //    a specific public IP directly)
-                        // 3. STUN auto-discovery against ephemeral socket
-                        // 4. loud warn + omit endpoint
-                        if let Some(explicit) = external_addr {
-                            endpoints.push(OverlayEndpointAdvert {
-                                transport: OverlayTransportKind::Udp,
-                                addr: explicit.to_string(),
-                            });
-                        } else {
-                            match local_addr {
-                                Some(addr) if !addr.ip().is_unspecified() => {
-                                    endpoints.push(OverlayEndpointAdvert {
-                                        transport: OverlayTransportKind::Udp,
-                                        addr: addr.to_string(),
-                                    });
-                                }
-                                Some(addr) => {
-                                    let key = transport_key;
-                                    let port = addr.port();
-                                    if let Some(public) =
-                                        bootstrap.learn_public_udp_addr(key, port).await
-                                    {
-                                        endpoints.push(OverlayEndpointAdvert {
-                                            transport: OverlayTransportKind::Udp,
-                                            addr: public.to_string(),
-                                        });
-                                    } else {
-                                        warn!(
-                                            transport_id = key,
-                                            bind_addr = %addr,
-                                            "advert: udp public=true bound to wildcard but \
-                                            STUN observation failed; advertising no UDP \
-                                            endpoint. Either set transports.udp.external_addr, \
-                                            bind to a specific public IP, or ensure \
-                                            node.rendezvous.nostr.stun_servers is reachable"
-                                        );
-                                    }
-                                }
-                                None => {}
-                            }
-                        }
-                    } else {
-                        endpoints.push(OverlayEndpointAdvert {
-                            transport: OverlayTransportKind::Udp,
-                            addr: "nat".to_string(),
-                        });
-                        has_udp_nat = true;
-                    }
-                }
-                AdvertTransportSnapshot::Tcp {
-                    advertise,
-                    external_addr,
-                    local_addr,
-                } => {
-                    if !advertise {
-                        continue;
-                    }
-                    // Precedence:
-                    // 1. operator-supplied `external_addr` (only path that
-                    //    works on cloud-NAT setups where the public IP is
-                    //    not on a host interface).
-                    // 2. non-wildcard `local_addr` (operator bound to a
-                    //    specific public IP directly).
-                    // 3. loud warn + omit endpoint (no TCP STUN equivalent).
-                    if let Some(explicit) = external_addr {
-                        endpoints.push(OverlayEndpointAdvert {
-                            transport: OverlayTransportKind::Tcp,
-                            addr: explicit.to_string(),
-                        });
-                    } else {
-                        match local_addr {
-                            Some(addr) if !addr.ip().is_unspecified() => {
-                                endpoints.push(OverlayEndpointAdvert {
-                                    transport: OverlayTransportKind::Tcp,
-                                    addr: addr.to_string(),
-                                });
-                            }
-                            Some(addr) => {
-                                warn!(
-                                    bind_addr = %addr,
-                                    "advert: tcp advertise_on_nostr=true bound to wildcard \
-                                    and no transports.tcp.external_addr set; advertising no \
-                                    TCP endpoint. Either set external_addr to the public \
-                                    IP (recommended for cloud 1:1-NAT setups) or bind \
-                                    explicitly to the public IP"
-                                );
-                            }
-                            None => {}
-                        }
-                    }
-                }
-                AdvertTransportSnapshot::Tor {
-                    advertise,
-                    onion_addr,
-                    advertised_port,
-                } => {
-                    if !advertise {
-                        continue;
-                    }
-                    if let Some(addr) = onion_addr {
-                        endpoints.push(OverlayEndpointAdvert {
-                            transport: OverlayTransportKind::Tor,
-                            addr: format!("{}:{}", addr, advertised_port),
-                        });
-                    }
-                }
-            }
+        let mut learned = BTreeMap::new();
+        for (key, port) in assemble::learned_wanted(&snapshot) {
+            let public = bootstrap.learn_public_udp_addr(key, port).await;
+            learned.insert(key, public);
         }
-
-        if endpoints.is_empty() {
-            return None;
+        let assembly = assemble::assemble(
+            &snapshot,
+            &learned,
+            &nostr_cfg.dm_relays,
+            &nostr_cfg.stun_servers,
+        );
+        for note in &assembly.notes {
+            log_assembly_note(note);
         }
+        assembly.advert
+    }
+}
 
-        Some(OverlayAdvert {
-            identifier: ADVERT_IDENTIFIER.to_string(),
-            version: ADVERT_VERSION,
-            endpoints,
-            signal_relays: has_udp_nat.then(|| nostr_cfg.dm_relays.clone()),
-            stun_servers: has_udp_nat.then(|| nostr_cfg.stun_servers.clone()),
-        })
+/// Warn that the assembly left a transport out of the advert, and how the
+/// operator can make it advertisable.
+fn log_assembly_note(note: &AssemblyNote) {
+    match note {
+        AssemblyNote::UdpUnlearned {
+            transport_id,
+            bind_addr,
+        } => warn!(
+            target: "fips::nostr::driver",
+            transport_id = *transport_id,
+            bind_addr = %bind_addr,
+            "advert: udp public=true bound to wildcard but \
+            STUN observation failed; advertising no UDP \
+            endpoint. Either set transports.udp.external_addr, \
+            bind to a specific public IP, or ensure \
+            node.rendezvous.nostr.stun_servers is reachable"
+        ),
+        AssemblyNote::TcpWildcard { bind_addr } => warn!(
+            target: "fips::nostr::driver",
+            bind_addr = %bind_addr,
+            "advert: tcp advertise_on_nostr=true bound to wildcard \
+            and no transports.tcp.external_addr set; advertising no \
+            TCP endpoint. Either set external_addr to the public \
+            IP (recommended for cloud 1:1-NAT setups) or bind \
+            explicitly to the public IP"
+        ),
     }
 }

@@ -70,8 +70,9 @@ host, under the `#[cfg(test)]` the guard requires, and may use `std`.
   `types.rs` re-exports every one.
 - `adverts/`: the overlay advert's rules (which endpoints it may name, the
   checks on a peer's advert, the `udp:nat` rule, the `created_at` clamp and
-  the validity horizon's arithmetic), the cache of peers' adverts, and the
-  local advert with its publishing decision.
+  the validity horizon's arithmetic), the cache of peers' adverts, the
+  local advert's assembly from the node's transports, and the local advert
+  with its publishing decision.
 - `punch/`: the punch packet's prefixes and codec, punch planning, and the
   suspicious-offer warning limit.
 - `stun/`: the STUN codec and local-candidate selection.
