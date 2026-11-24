@@ -104,7 +104,10 @@
 #                    GitHub only (testing/root-tests/privileged.sh says why).
 #   Local-only stages — cross-check-*: zig compiles of the macOS, Windows
 #                    and FreeBSD targets, which GitHub builds on their own
-#                    runners.
+#                    runners. root-explorers and mutations-explorers: the
+#                    root crate's real-node walks and the mutation lane's
+#                    explorer lines, which run at incus tier 2 only
+#                    (operator, 2026-11-24), never in a workflow (below).
 #
 # ── What each step runs ──
 # A name says nothing about a command, so each mapped step must also contain
@@ -129,8 +132,10 @@
 # feature (in any form of --features list), a test run with --all-features,
 # or FIPS_MUTATION_EXPLORERS. That covers ci.yml and the package workflows;
 # a step's matrix values are put in place before the match, so a feature
-# supplied from a matrix is caught too. The explorers run only in the
-# nightly run.
+# supplied from a matrix is caught too. The root crate's real-node walks
+# and the mutation lane's explorer lines run at the internal builder's tier
+# 2 (ci-local.sh --tier 2), and fips-core's explorers only in its nightly
+# run (--tier 3).
 #
 # Matching by fragment has limits this check does not close: a command can
 # keep every fragment and still be made to run nothing by shell this check
@@ -521,7 +526,11 @@ GITHUB_ONLY_STEPS = {
         "native release builds on the arm64, macOS and Windows legs; on "
         "ubuntu-latest the .deb build (deb-build) is the release build",
 }
-LOCAL_ONLY = {"cross-check-*": "zig compiles of targets GitHub builds natively"}
+LOCAL_ONLY = {
+    "cross-check-*": "zig compiles of targets GitHub builds natively",
+    "root-explorers": "the real-node walks run at incus tier 2 only (operator, 2026-11-24)",
+    "mutations-explorers": "the real-node walks run at incus tier 2 only (operator, 2026-11-24)",
+}
 
 # Per job and step, as keyed in STEPS, what the step's command must contain:
 # each fragment is taken from what ci-local.sh runs for the step's result, so
@@ -695,8 +704,9 @@ SUITE_CMDS = {
          ['bash testing/rpm-install/test.sh --deb "$deb" ${{ matrix.scenario }}']),
 }
 # What no step may run, in any job of any workflow a push or a pull request
-# starts, mapped or not: the explorers run only in the nightly run
-# (ci-local.sh --tier 3). Matched against the step's env, run lines and
+# starts, mapped or not: the root crate's real-node walks run at the
+# internal builder's tier 2 (ci-local.sh --tier 2) and fips-core's
+# explorers in its nightly run (--tier 3), never on GitHub. Matched against the step's env, run lines and
 # action inputs, with each matrix leg's values put in place.
 FORBIDDEN = [
     (re.compile(r"slow-explorers"), "fips-core's slow-explorers feature"),

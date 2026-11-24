@@ -71,11 +71,11 @@
 #   FIPS_MUTATION_EXPLORERS  1 to build the root crate's library tests with
 #                          its `explorers` feature and run every line; only
 #                          to build with it and run just the lines whose
-#                          test that feature compiles (EXPLORER_ONLY). The
-#                          nightly run uses only, as its own stage
-#                          (testing/ci-local.sh with --explorers, --tier 3 or
-#                          --part root-explorers), and no run a push starts
-#                          sets it. Any other value exits 2.
+#                          test that feature compiles (EXPLORER_ONLY).
+#                          testing/ci-local.sh uses only, as its own stage,
+#                          with --explorers and at tiers 2 and 3; no GitHub
+#                          workflow and no tier 1 run sets it. Any other
+#                          value exits 2.
 # FIPS_NODE_FAULTS from the caller's environment is ignored: the lane sets
 # it per run.
 #

@@ -6,9 +6,13 @@
 # --build-only rejects --root-tests and --explorers, whose stages it would
 # skip; and --explorers= takes only core or root. --tier takes 1, 2 or 3 and
 # refuses every option that changes what runs; --plan needs a tier and prints
-# that tier's stages, and no tier a push starts (1 or 2) lists an explorer.
-# --part takes one of the three parts of tier 3 and needs that tier, and each
-# part's plan lists exactly its own results.
+# that tier's stages: tier 1, which every branch push runs, lists no
+# explorer, tier 2 lists the root crate's walks and their mutation lines and
+# not the core's explorers, and tier 3 lists both. --part takes one of the
+# two parts of tier 3 and needs that tier, and each part's plan lists
+# exactly its own results; the root-explorers part, retired when tier 2
+# took the walks, is refused with exit 2, which the builder's nightly probe
+# of it reads.
 #
 # Every case invokes ci-local.sh with arguments that end during parsing, before
 # the load sampler, traps, containers or any build, so the suite is hermetic and
@@ -194,8 +198,8 @@ expect_plan "--tier 1 --plan" \
     "mutations musl-tests build-integration chaos-tcp-mesh agreement-break core-explorers root-explorers mutations-explorers build deb-build" \
     --tier 1 --plan
 expect_plan "--tier 2 --plan" \
-    "root-tests mutations musl-tests build-integration chaos-tcp-mesh agreement-break rpm-install deb-build" \
-    "core-explorers root-explorers mutations-explorers chaos-batch1-tcp-mesh chaos-maelstrom tor-socks5 build" \
+    "root-tests mutations musl-tests root-explorers mutations-explorers build-integration chaos-tcp-mesh agreement-break rpm-install deb-build" \
+    "core-explorers chaos-batch1-tcp-mesh chaos-maelstrom tor-socks5 build" \
     --tier 2 --plan
 # The break lane runs after the chaos scenarios, whose run it follows in the
 # integration stage, so it comes after the last of them.
@@ -222,14 +226,16 @@ check "--tier 1 under FIPS_CI_SLOW_TESTS=1: says the switches are ignored" \
 # suites go with the chaos part alone.
 expect_usage_error "--part without a value" "--part needs a value" --tier 3 --part
 expect_usage_error "--part with an unknown name" \
-    "--part takes core-explorers, root-explorers or chaos, not: bogus" --tier 3 --part bogus
+    "--part takes core-explorers or chaos, not: bogus" --tier 3 --part bogus
+expect_usage_error "--part root-explorers, retired into tier 2" \
+    "--part takes core-explorers or chaos, not: root-explorers" --tier 3 --part root-explorers
+expect_usage_error "--part root-explorers --plan, the builder's nightly probe" \
+    "--part takes core-explorers or chaos, not: root-explorers" --tier 3 --part root-explorers --plan
 expect_usage_error "--part without a tier" "--part needs --tier 3" --part chaos
 expect_usage_error "--part with --tier 2" "--part needs --tier 3" --tier 2 --part chaos
 expect_usage_error "--part --plan without a tier" "--part needs --tier 3" --part chaos --plan
 expect_usage_error "--part core-explorers with --with-tor" \
     "--with-tor combines only with --part chaos" --tier 3 --part core-explorers --with-tor
-expect_usage_error "--part root-explorers with --with-tor" \
-    "--with-tor combines only with --part chaos" --with-tor --part root-explorers --tier 3
 expect_usage_error "--part with --slow-tests" \
     "--tier 3 cannot be combined with --slow-tests" --tier 3 --part chaos --slow-tests
 
@@ -248,10 +254,8 @@ expect_part_plan() {
 }
 expect_part_plan "--part core-explorers --plan" "core-explorers" \
     --tier 3 --part core-explorers --plan
-expect_part_plan "--part root-explorers --plan" "root-explorers mutations-explorers" \
-    --tier 3 --part root-explorers --plan
-FIPS_CI_TIER=3 expect_part_plan "FIPS_CI_TIER=3 --part root-explorers --plan" \
-    "root-explorers mutations-explorers" --part root-explorers --plan
+FIPS_CI_TIER=3 expect_part_plan "FIPS_CI_TIER=3 --part core-explorers --plan" \
+    "core-explorers" --part core-explorers --plan
 n_chaos=$(invoke --list; grep -c '^    chaos-' <<<"$OUT")
 n_runs=$(sed -n 's/^NIGHTLY_CHAOS_RUNS=\([0-9]*\)$/\1/p' "$CI_LOCAL")
 n_long=$(sed -n '/^NIGHTLY_LONG=(/,/^)/p' "$CI_LOCAL" | grep -c '^    "')
