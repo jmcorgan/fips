@@ -8,8 +8,11 @@ node does it, and does it.
 
 A site builds a `Run`: the peer, the `Transition`, and what the effects
 read beyond it. `Node::run` takes each `Effect` of `plan(&r.t)` in turn and
-carries it out. A transition whose list is empty, a cutover, runs its own
-statements at its site.
+carries it out, through `Node::run_with`, which runs a list a site chose
+itself. A transition whose list is empty, a cutover, runs its own
+statements at its site. One site chooses its own list: a redial proven on
+the held link (`handlers/redial.rs`'s `adopt_redial`) is told as a move
+that stays on its link, and runs `ADOPT`.
 
 ## Files
 
@@ -22,7 +25,11 @@ statements at its site.
   pair); and the call of every other effect's function in its file.
 - `plan.rs`: `Effect`, one step the node takes for a transition, and
   `plan`, the effects of each transition in their order, each list the
-  statements its sites ran.
+  statements its sites ran. `ADOPT` is the move's effects that apply to a
+  move that stays on its link, in the move's order, with the reason for
+  each left out; no transition selects it, and `adopt` returns it, or under
+  the mutation lane's `AdoptSkipsAnnounce` the same list without the tree
+  announce and the filter.
 - `install.rs`: a promotion's effects, and the promotion a replacement
   ends with, with their `Facts`; `Node::install`, the part of a promotion a
   test may run alone through `install_handshake`, which builds the peer's

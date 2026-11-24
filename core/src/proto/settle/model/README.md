@@ -65,7 +65,13 @@ follows a named rule (`judge::LocalRule`). Each says what it decides:
   replaces on a young one, is answered into a redial beside the peering,
   which is left as it is. The peer's first frame under the redial's
   session replaces the peering, keeping the link's connection, and stamps
-  the dampener. One redial is pending at a time: a later one replaces it
+  the dampener. A first frame that arrives on another transport than the
+  redial's, at an address of the held link, instead moves the held link
+  onto the redial's session, keeping its link, addresses and age and the
+  session's start, retires the redial's link by the close rule, and
+  stamps the dampener as a replacement does: the peer moved sessions
+  without moving address (FRC-1201 Section 5.7 gives the peer the
+  candidate's link at any proof). One redial is pending at a time: a later one replaces it
   once it is as old as the unheard floor and is refused before (the `Slot`
   refusal). The dampener holds a redial; the heard floor does not. A
   peering not heard from is never redialed and keeps rules 3.3 and 4.1.

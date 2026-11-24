@@ -308,6 +308,25 @@ fn session(w: &World, x: usize, y: usize) -> Option<super::super::model::history
         .map(|p| p.cur)
 }
 
+/// The handshake that set up the link node `x` holds node `y` on, and that
+/// link's address.
+fn link(
+    w: &World,
+    x: usize,
+    y: usize,
+) -> Option<(
+    super::super::model::history::Hs,
+    super::super::model::history::Addr,
+)> {
+    let id = w.ids[y];
+    w.parties[x]
+        .view()
+        .peers
+        .iter()
+        .find(|p| p.peer == id)
+        .map(|p| (p.link, p.at))
+}
+
 /// Two nodes on one connection-oriented transport, node 0 dialing node 1,
 /// settled.
 fn stream_pair() -> World {
@@ -471,4 +490,84 @@ fn a_second_restart_inside_the_dampener_interval_is_refused() {
         Some(first),
         "node 0 refused the second restart inside the dampener interval"
     );
+}
+
+/// A model of the deployed release (`legacy::maint`, `v0.5.3`) at node 0 and
+/// a joint node at multipath off at node 1.
+fn maint_first(
+    ix: usize,
+    me: super::super::model::history::Node,
+    configured: Vec<super::party::Configured>,
+) -> alloc::boxed::Box<dyn super::world::Party> {
+    if ix == 0 {
+        super::legacy::maint::maint(ix, me, configured)
+    } else {
+        off(ix, me, configured)
+    }
+}
+
+/// Start 26 with the deployed release dialing: node 1 has heard node 0 on
+/// UDP when node 0's dial of its TCP address arrives, and answers it as a
+/// redial; node 0 takes the answer as its own dial's and, by the address
+/// tie-break, either keeps its session or swaps onto the answer's, keeping
+/// its UDP link and address either way, and closes the TCP connection.
+/// Both ends must hold one session once healed, and no liveness timer may
+/// have ended a split.
+fn deployed_second_dial() {
+    let mut w = built(maint_first, 26, "another transport, heard");
+    assert!(
+        session(&w, 1, 0).is_some() && session(&w, 1, 0) == session(&w, 0, 1),
+        "precondition: one session after the first dial"
+    );
+    let first = session(&w, 0, 1);
+    let held = link(&w, 1, 0);
+    let st = start(26, "another transport, heard");
+    let _ = (st.script)(&mut w);
+    // The release sends under the session it keeps before it closes its
+    // second connection, so its frames reach node 1 ahead of that close.
+    // The joint party reaps a responder's leg at its connection's close,
+    // where the node keeps it to its handshake timeout (the legacy
+    // README's transcription differences).
+    let frames: Vec<u64> = w
+        .net
+        .flight
+        .iter()
+        .filter(|f| f.to == 1 && matches!(f.pkt, Pkt::Frame { .. }) && w.net.deliverable(f))
+        .map(|f| f.id)
+        .collect();
+    for id in frames {
+        w.deliver(id);
+    }
+    heal(&mut w);
+    let (at0, at1) = (session(&w, 0, 1), session(&w, 1, 0));
+    if at0 != first {
+        assert_eq!(
+            link(&w, 1, 0),
+            held,
+            "defect: node 1 left the link it held for the redial's, though the release kept its address"
+        );
+    }
+    assert!(
+        at0.is_some() && at0 == at1 && w.ended.is_empty(),
+        "defect: the deployed release's second dial on another transport left node 0 on {at0:?} and node 1 on {at1:?}, with timers ending {:?}",
+        w.ended
+    );
+    let broken: Vec<_> = healed(&w)
+        .into_iter()
+        .map(|b| alloc::format!("{:?} at n{}: {}", b.oracle, b.node, b.what))
+        .collect();
+    assert!(
+        broken.is_empty(),
+        "defect: the healed world breaks a settlement property: {broken:#?}"
+    );
+}
+
+#[test]
+fn a_deployed_releases_late_second_dial_on_another_transport_leaves_one_session_smaller_dialer() {
+    deployed_second_dial();
+}
+
+#[test]
+fn a_deployed_releases_late_second_dial_on_another_transport_leaves_one_session_larger_dialer() {
+    super::starts::flipped(deployed_second_dial);
 }

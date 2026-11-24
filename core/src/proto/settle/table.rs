@@ -1128,19 +1128,7 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         let link = leg.link();
         if let Some(held) = self.held.get(&peer).map(|h| h.link) {
             self.seat(peer, held, pair.clone(), epoch, ephemeral, now);
-            self.links.renewed(held);
-            out.push(Output::Install(Install {
-                peer,
-                link: held,
-                pair,
-                rekey: Build::FromCarry,
-                initiator: false,
-                lease: leg.lease(),
-            }));
-            out.push(Output::Reset {
-                peer,
-                transition: Transition::Move,
-            });
+            self.rehold(peer, held, pair, leg.lease(), out);
         } else {
             out.push(Output::Free { lease: leg.lease() });
         }
@@ -1148,6 +1136,34 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         out.push(Output::Retire {
             link,
             closes: Vec::new(),
+        });
+    }
+
+    /// The part of keeping the held `peer` on its link `held`, at `pair`,
+    /// with another handshake's session that follows its seating: the
+    /// link's bundle renewed, as at every move, so its record no longer
+    /// holds the peer capable; the peer's rekey machine rebuilt from the
+    /// closed one's carry with `lease`, as responder; and told as a move.
+    fn rehold(
+        &mut self,
+        peer: NodeAddr,
+        held: LinkNo,
+        pair: Pair,
+        lease: IndexLease,
+        out: &mut Vec<Outs<I, F>>,
+    ) {
+        self.links.renewed(held);
+        out.push(Output::Install(Install {
+            peer,
+            link: held,
+            pair,
+            rekey: Build::FromCarry,
+            initiator: false,
+            lease,
+        }));
+        out.push(Output::Reset {
+            peer,
+            transition: Transition::Move,
         });
     }
 
@@ -1333,7 +1349,64 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         else {
             return;
         };
+        if self.proven_off(peer, link, &from) {
+            self.hold_redial(peer, link, now, out);
+            return;
+        }
         self.swap(peer, link, Some(from), now, out);
+    }
+
+    /// Whether the frame from `from` that proved the redial leg on `link`
+    /// arrived on a transport other than the transport the leg's link was
+    /// set up on, at a pair attributed to the link `peer` is held on: the
+    /// peer moved onto the redial's session without moving address, as a
+    /// deployed release that wins the tie-break between its two dials
+    /// does. Both conditions are needed: under multipath the held link can
+    /// hold a counting path on the leg's transport, and a peer that moved
+    /// to the leg sends from there.
+    fn proven_off(&self, peer: NodeAddr, link: LinkNo, from: &Pair) -> bool {
+        if fault!(RedialProofLeavesHeldLink) || node_fault!(RedialProofLeavesHeldLink) {
+            return false;
+        }
+        let (Some(h), Some(r)) = (self.held.get(&peer), self.links.get(link)) else {
+            return false;
+        };
+        (r.setup.transport != from.transport || fault!(RedialProofAnyTransport))
+            && self.attributed(h, from)
+    }
+
+    /// Keep the held `peer` on the link it holds, at its pair, and give it
+    /// the session of the redial leg on `link` instead. The peer is seated
+    /// as [`Table::move_answer`] seats it, with the msg1's ephemeral in the
+    /// replay memory, keeping whether it was heard, its install instant and
+    /// its last frame, since the peering is the same one. The adoption
+    /// counts as a swap for the dampener and forgets the redial memory, as
+    /// [`Table::swap`] does, so adoptions cannot move a session between two
+    /// processes of one key faster than swaps can. Then [`Table::rehold`],
+    /// and the leg's link retired, closing each of its pairs no remaining
+    /// link uses.
+    fn hold_redial(&mut self, peer: NodeAddr, link: LinkNo, now: I, out: &mut Vec<Outs<I, F>>) {
+        let Some((held, pair, live)) = self
+            .held
+            .get(&peer)
+            .map(|h| (h.link, h.current.clone(), h.liveness()))
+        else {
+            return;
+        };
+        let (Some(leg), Some(a)) = (self.legs.take(link), self.answered.remove(&link)) else {
+            return;
+        };
+        self.redials.remove(&peer);
+        self.seat(peer, held, pair.clone(), a.epoch, a.ephemeral, now);
+        if let Some(h) = self.held.get_mut(&peer) {
+            h.heard = live.heard;
+            h.installed = live.installed;
+            h.last = live.last;
+        }
+        self.gates.swapped(peer, true, now);
+        self.rehold(peer, held, pair, leg.lease(), out);
+        let closes = self.links.retire(link);
+        out.push(Output::Retire { link, closes });
     }
 
     /// Replace the peer held for `peer`, if any, by the redial's leg on

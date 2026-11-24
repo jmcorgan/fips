@@ -529,6 +529,16 @@ faults! {
     /// and by the settlement core, whose disconnect abandons the pending
     /// redial as the node drops it.
     RedialKeptAtDisconnect,
+    /// A redial proven by a frame from another transport than the
+    /// redial's, at a pair of the held link, replaces the peering on the
+    /// redial's link, as any proof does, rather than moving the held link
+    /// onto the redial's session: the node then sends on the connection a
+    /// peer that kept its address has left. Read by the settlement core.
+    RedialProofLeavesHeldLink,
+    /// A redial proven on the held link moves the held link onto the
+    /// redial's session and sends the peer no tree announce and no filter,
+    /// though anything sent under the session the peer discarded is lost.
+    AdoptSkipsAnnounce,
     /// A redial the ACL passed and no session index could be drawn for
     /// leaves no mark in the redial memory, so its resends and the
     /// ephemerals after it are judged as if it never arrived. Read by the

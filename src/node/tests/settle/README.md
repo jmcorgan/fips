@@ -177,6 +177,31 @@ files run off, which is what they test.
   it a miss. Each is ignored and inventoried as `helper`. The known-defect
   lane pins three of the file's line numbers, so a new test goes last. They
   are not tests of the node.
+- `legacy_dialer.rs`: a deployed release's dialer on two transports, which
+  wins the tie-break between its dials and moves onto its second dial's
+  session without moving address, against this node as the responder. A
+  test-only device makes a node of this tree send as one: a relay the
+  driver applies as it hands packets over, off at the start of each cycle,
+  engaged once the client holds the server on its transport-2 link (the
+  client's transport-2 packets reach the server on transport 1 from its
+  transport-1 address, the server's to the client's transport-1 address
+  reach the client on transport 2, and the server's to the client's
+  transport-2 address are lost), and off again once the client drops the
+  server. The driver runs `roam_redial.rs`'s frozen clock and timer tick,
+  and redials both transports at once where a test asks, in place of a
+  configured peer's reconnect, since two loopback transports share a type.
+  The tests: the reproduction at both address orders and multipath
+  settings (the server keeps the held link and pair with the redial's
+  session, the redial's link and entry go, the index allocators hold
+  exactly the sessions' indices, the client is sent a tree announce and a
+  filter, heartbeats and the audit); a 300 s run with the second transport
+  4 s behind, one promotion and no drop at either end, and a link rekey at
+  each; a dialer of this tree that moves to its second dial, swapped as
+  before, multipath off and on; and the adopted redial's msg1 sent again,
+  refused. Before the fix, a debug build stops at the node's live audit at
+  the proof (`held-cache`), where the core and the node disagree about the
+  peer's pair; a release test build reaches each test's `defect:`
+  assertion.
 - `links.rs`: the `(transport, address)` index derived from the link
   records, on real nodes: after a crossed dial won from another address or
   on another transport, the smaller node's link is named at the msg2's

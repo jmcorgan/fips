@@ -2,7 +2,9 @@
 //! fresh same-epoch msg1 off the established link of a held peering that
 //! has been heard from is answered into a redial beside the peering, which
 //! only the peer's first frame under the redial's session replaces. A
-//! peering not yet heard from keeps the replacement at the msg1.
+//! peering not yet heard from keeps the replacement at the msg1. A first
+//! frame from another transport than the redial's, at the held link's
+//! address, moves the held link onto the redial's session instead.
 
 use super::*;
 use crate::proto::settle::model::judge::{Class, Gate, LocalRule, Reply, Transition};
@@ -124,4 +126,82 @@ fn a_redial_whose_peering_is_lost_first_installs_the_peer_at_its_frame() {
     let s = j.step(frame(11, at(8)));
     assert_eq!(s.change, Some(Transition::Promote));
     assert_eq!(j.settled(), Some((Hs(11), LinkId(11), at(8))));
+}
+
+/// An address on a second transport.
+fn second(port: u16) -> Addr {
+    Addr {
+        transport: 2,
+        at: port,
+    }
+}
+
+/// A fresh msg1 of the peer's on a connection to the second transport,
+/// from `second(8)`.
+fn redial_second(hs: u32) -> Event {
+    msg1(hs, hs * 10, E1, hs, second(8), Binding::Connected)
+}
+
+#[test]
+fn a_redial_proven_at_the_held_address_from_another_transport_moves_the_held_link_onto_its_session()
+{
+    let mut j = responder(SMALL, LARGE);
+    j.run(&[wait(AGED), redial_second(11)]);
+    let s = j.step(frame(11, at(9)));
+    assert_eq!(s.change, Some(Transition::Move));
+    assert_eq!(s.rule, Some(LocalRule::DeferredRedial));
+    assert_eq!(s.closes, alloc::vec![second(8)], "the redial's connection");
+    assert_eq!(j.settled(), Some((Hs(11), LinkId(1), at(9))));
+    assert!(j.redial.is_none());
+    assert_eq!(j.stamp, Some(AGED), "stamped as a replacement is");
+    let p = j.peering.as_ref().expect("held");
+    assert!(p.heard && p.setup == at(9) && p.linkborn == 0);
+}
+
+#[test]
+fn a_redial_proven_at_its_own_address_on_another_transport_replaces_the_peering() {
+    let mut j = responder(SMALL, LARGE);
+    j.run(&[wait(AGED), redial_second(11)]);
+    let s = j.step(frame(11, second(8)));
+    assert_eq!(s.change, Some(Transition::Replace));
+    assert_eq!(j.settled(), Some((Hs(11), LinkId(11), second(8))));
+}
+
+#[test]
+fn a_redial_proven_from_a_third_transport_not_of_the_held_link_replaces_the_peering() {
+    let mut j = responder(SMALL, LARGE);
+    j.run(&[wait(AGED), redial_second(11)]);
+    let third = Addr {
+        transport: 3,
+        at: 6,
+    };
+    let s = j.step(frame(11, third));
+    assert_eq!(s.change, Some(Transition::Replace));
+    assert_eq!(j.settled(), Some((Hs(11), LinkId(11), third)));
+}
+
+#[test]
+fn an_adopted_redials_msg1_sent_again_is_refused_and_opens_no_redial() {
+    let mut j = responder(SMALL, LARGE);
+    j.run(&[wait(AGED), redial_second(11), frame(11, at(9))]);
+    let again = last(&mut j, &[wait(1_000), redial_second(11)]);
+    assert_eq!(again.reply, Some(Reply::Silent));
+    assert_eq!(again.change, None);
+    assert!(j.redial.is_none());
+    assert_eq!(j.settled(), Some((Hs(11), LinkId(1), at(9))));
+}
+
+#[test]
+fn a_redial_within_the_dampener_of_an_adoption_is_refused() {
+    let mut j = responder(SMALL, LARGE);
+    j.run(&[wait(AGED), redial_second(11), frame(11, at(9))]);
+    let held = last(
+        &mut j,
+        &[
+            wait(5_000),
+            msg1(12, 120, E1, 12, second(7), Binding::Connected),
+        ],
+    );
+    assert_eq!(held.class, Some(Class::Redial));
+    assert_eq!(held.refused, Some(Gate::Dampened));
 }

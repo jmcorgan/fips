@@ -19,6 +19,18 @@
 //! when it closed a heard one. A leg no frame proves is reaped at the
 //! handshake timeout like any inbound leg, changing nothing.
 //!
+//! A proving frame that arrived on another transport than the leg's, at a
+//! pair of the held link, comes from a peer that moved onto the leg's
+//! session without moving address, as a deployed release that wins the
+//! tie-break between its two dials does: it frees the old session's index
+//! with no drain, sends under the new session on the held link's transport
+//! and closes the connection the leg runs on. The core then keeps the peer
+//! on the held link and pair, and [`Node::adopt_redial`] moves that link
+//! onto the leg's session and retires the leg's link. No peer is removed,
+//! so the end-to-end session stays; the peer is sent a tree announce and
+//! its filter again, since what was sent under the session it discarded is
+//! lost.
+//!
 //! Only a heard peering is redialed (operator decision, 2026-11-17): the
 //! link machine asks for a redial only when the held peering has been heard
 //! from. A fresh msg1 off the link of an unheard peering, such as one a
@@ -46,9 +58,12 @@ use crate::node::Node;
 use crate::node::acl::PeerAclContext;
 use crate::node::diag::{self, HsLine};
 use crate::node::handlers::handshake::Armed;
+use crate::node::handlers::path::NodeFacts;
 use crate::node::reject::{DataplaneReject, HandshakeReject, RejectReason};
 use crate::node::settle::Redial;
+use crate::node::settle::exec::plan::adopt;
 use crate::node::settle::exec::{Ambient, By, Removed, Run};
+use crate::peer::{LinkCaps, PathCaps};
 use crate::proto::bloom::BloomFilter;
 use crate::proto::fmp::wire::{EncryptedHeader, build_msg2};
 use crate::proto::fmp::{ActiveBackoff, WireOutcome};
@@ -403,7 +418,9 @@ impl Node {
     /// lease the core installs it with, and the end-to-end session opened
     /// again if the teardown closed a heard one. `swapping` is what the
     /// node read of the held peering before the core stepped, and `now_ms`
-    /// the wall stamp of the packet that proved the redial.
+    /// the wall stamp of the packet that proved the redial. An install on
+    /// the held link's own number is the core keeping the peer there
+    /// ([`Node::adopt_redial`]).
     async fn swap_redial(
         &mut self,
         peer: NodeAddr,
@@ -412,6 +429,18 @@ impl Node {
         swapping: Swapping,
         now_ms: u64,
     ) {
+        let held = self
+            .peers
+            .get(&peer)
+            .and_then(|p| self.links.no(&p.link_id()));
+        if let Some(held) = held
+            && out
+                .iter()
+                .any(|o| matches!(o, Output::Install(i) if i.link == held))
+        {
+            self.adopt_redial(peer, link, out).await;
+            return;
+        }
         let Some((identity, transport_id, remote_addr)) = self
             .handshakes
             .get(&link)
@@ -529,6 +558,136 @@ impl Node {
                 ),
             }
         }
+    }
+}
+
+impl Node {
+    /// Run the core's adoption of the redial's session on `link` by the
+    /// held `peer`, `out`: the proof arrived on the held link, so the peer
+    /// stays on that link and pair. The leg's session, lease and the peer's
+    /// index leave the handshake entry; `adopt_dial` rebuilds the peer's
+    /// link machine on them, keeping the link, and settles the peer's
+    /// record as a move does; the move's effects that apply to a move that
+    /// stays on its link run (`plan::ADOPT`); and the leg's link is retired. The
+    /// paths the bundle's renewal released are queued to close by their
+    /// release, in `RunRenewed`. A session that authenticated another key,
+    /// which a leg of the same identity should never hold, hands its lease
+    /// back and leaves the peer as it was.
+    async fn adopt_redial(&mut self, peer: NodeAddr, link: LinkId, out: Vec<Output>) {
+        let mut install = None;
+        let mut closes = Vec::new();
+        for o in out {
+            match o {
+                Output::Install(i) => install = Some(i),
+                Output::Retire { closes: c, .. } => closes = c,
+                Output::Free { lease } => self.free_lease(lease),
+                Output::Reset { .. } => {}
+                other => debug_assert!(false, "a redial's adoption gave {other:?}"),
+            }
+        }
+        let Some(install) = install else {
+            self.retired_leg(link, closes).await;
+            return;
+        };
+        // The leg's session, its lease and the peer's index leave the
+        // handshake entry, so retiring the entry frees none of them.
+        let Some(entry) = self.handshakes.get_mut(&link) else {
+            self.free_lease(install.lease);
+            self.retired_leg(link, closes).await;
+            return;
+        };
+        if let Some(old) = entry.set_conn_our_index(install.lease) {
+            let _ = self.index_allocator.free(SessionIndex::new(old.release()));
+        }
+        let lease = entry.take_our_index();
+        let theirs = entry.conn_their_index();
+        let identity = entry.conn_expected_identity().copied();
+        let session = entry.take_leg().and_then(|mut c| c.noise_session.take());
+        let to = self.peer_link(&peer);
+        let (Some(lease), Some(theirs), Some(identity), Some(session), Some(to)) =
+            (lease, theirs, identity, session, to)
+        else {
+            debug!(
+                peer = %self.peer_display_name(&peer),
+                link_id = %link,
+                "Redial proven on the held link, but its leg is incomplete; dropping it"
+            );
+            self.retired_leg(link, closes).await;
+            return;
+        };
+        let ours = SessionIndex::new(lease.index());
+        let local = self.session_node_keys();
+        let me = *self.identity().node_addr();
+        let params = crate::node::handlers::rekey::link_params(&self.config().node);
+        let path_params = crate::node::handlers::path::path_params(&self.config().node);
+        let workers = self.link_workers();
+        let facts = NodeFacts {
+            transports: &self.transports,
+            denied: false,
+        };
+        let Some(p) = self.peers.get_mut(&peer) else {
+            let _ = self
+                .index_allocator
+                .free(SessionIndex::new(lease.release()));
+            self.retired_leg(link, closes).await;
+            return;
+        };
+        let held = p.link_id();
+        let mut caps = LinkCaps {
+            indices: &mut self.index_allocator,
+            local: &local,
+            me,
+            params,
+            record: fips_core::proto::rekey::Record::new(),
+            workers,
+            path: PathCaps {
+                params: path_params,
+                facts: &facts,
+            },
+        };
+        let (lout, paths) =
+            p.adopt_dial(session, lease, theirs, to.clone(), held, false, &mut caps);
+        let built = p.our_index() == Some(ours);
+        if !built {
+            debug!(
+                peer = %self.peer_display_name(&peer),
+                link_id = %link,
+                "Redial proven on the held link, but its session could not be adopted"
+            );
+            self.run_link_outputs(&peer, lout);
+            self.retired_leg(link, closes).await;
+            return;
+        }
+        let mut run = Run::new(
+            peer,
+            crate::node::settle::table::Transition::Move {
+                dial: held,
+                own: false,
+                built,
+            },
+        );
+        let f = run.crossing();
+        f.out = lout;
+        f.paths = paths;
+        f.ours = Some(ours);
+        f.theirs = Some(theirs);
+        f.to = Some(to);
+        f.own_dial = false;
+        f.loser = None;
+        f.key = Some(crate::ipv6tun::link::PeerKey::from_xonly(
+            &identity.pubkey(),
+        ));
+        self.run_with(&mut run, adopt()).await;
+        self.stats_mut().handshake.redials_adopted += 1;
+        debug!(
+            peer = %self.peer_display_name(&peer),
+            link_id = %link,
+            held_link = %held,
+            new_our_index = %ours,
+            new_their_index = %theirs,
+            "Redial proven on the held link; moved the held link onto the redial's session"
+        );
+        self.retired_leg(link, closes).await;
     }
 }
 

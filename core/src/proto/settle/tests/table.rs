@@ -3047,3 +3047,305 @@ fn moving_a_peer_not_held_frees_the_answers_lease_and_retires_its_link() {
     assert!(table.links().get(inbound).is_none());
     assert!(table.links().get(dialed).is_some(), "the held link stays");
 }
+
+/// The pair at `port` on a third transport.
+fn third(port: u16) -> Pair {
+    Pair {
+        transport: TransportId::new(3),
+        addr: TransportAddr::from_string(&alloc::format!("10.0.0.1:{port}")),
+    }
+}
+
+/// Redial `n` of the larger node from `from`, answered and sent at `at`:
+/// the leg's link.
+fn redialed_from(table: &mut Table<TestInstant>, n: u32, from: Pair, at: u64) -> LinkNo {
+    let mut read = read(large(), n, 0, E1);
+    read.from = from;
+    let out = greet(table, Input::Redial(read), n, at);
+    let link = answered(&out);
+    go(table, Input::Sent { link }, at);
+    assert_eq!(
+        table.redialing(&large()),
+        Some(link),
+        "precondition: the redial is pending"
+    );
+    link
+}
+
+/// [`held_heard`] with a redial from port 8 of the second transport
+/// pending: the table, the held link and the leg's link.
+fn redialed_on_the_second_transport() -> (Table<TestInstant>, LinkNo, LinkNo) {
+    let mut table = held_heard();
+    let held = table.held(&large()).map(|h| h.link).expect("held");
+    let leg = redialed_from(&mut table, 2, other(8), 40_100);
+    (table, held, leg)
+}
+
+/// Whether `out` replaced the held peering for the redial: a removal for a
+/// redial and a replacement's reset.
+fn swapped_for_redial(out: &[Output]) -> bool {
+    out.iter().any(|o| {
+        matches!(
+            o,
+            Output::Remove {
+                why: Why::Redial,
+                ..
+            }
+        )
+    }) && out.iter().any(|o| {
+        matches!(
+            o,
+            Output::Reset {
+                transition: Transition::Replace,
+                ..
+            }
+        )
+    })
+}
+
+/// A redial answered on the second transport, proven by a frame that
+/// arrived on the first, at the held link's pair: the peer moved onto the
+/// redial's session without moving address, as a deployed release that
+/// wins the tie-break between its two dials does. The held link keeps the
+/// peer, at its pair, rebuilt on the leg's session from the carry and told
+/// as a move; the leg's link is retired, closing its connection, which no
+/// other link uses; nothing is removed; and the peering keeps whether it
+/// was heard, its install instant and its last frame, with the msg1's
+/// ephemeral in the replay memory.
+#[test]
+fn a_redial_proven_at_the_held_pair_from_another_transport_moves_the_held_link_onto_its_session() {
+    let (mut table, held, leg) = redialed_on_the_second_transport();
+    let before = table.held(&large()).map(|h| (h.installed, h.last));
+    let out = go(
+        &mut table,
+        Input::LegHeard {
+            link: leg,
+            from: pair(9),
+        },
+        40_200,
+    );
+    assert_eq!(
+        out,
+        alloc::vec![
+            Output::Opened { link: held },
+            Output::Reset {
+                peer: large(),
+                transition: Transition::Move,
+            },
+            Output::Retire {
+                link: leg,
+                closes: alloc::vec![other(8)],
+            },
+        ],
+        "defect: the proof on the held link did not move the held link onto the redial's session"
+    );
+    let h = table.held(&large()).expect("the peer stays held");
+    assert_eq!(
+        (h.link, h.current.clone(), h.heard),
+        (held, pair(9), true),
+        "on the link it held, at that link's pair, still heard"
+    );
+    assert_eq!(
+        Some((h.installed, h.last)),
+        before,
+        "the same peering keeps its install instant and its last frame"
+    );
+    assert_eq!(h.setup, Some(eph(2)), "from the redial's msg1");
+    assert_eq!(table.gates().replays(&large()), 1);
+    assert_eq!(table.redialing(&large()), None);
+    assert!(table.legs().get(leg).is_none() && table.links().get(leg).is_none());
+}
+
+/// The redial's install on the held link rebuilds the peer's machine from
+/// the closed one's carry, as responder, with the leg's lease.
+#[test]
+fn a_redial_proven_at_the_held_pair_from_another_transport_rebuilds_from_the_carry_with_the_legs_lease()
+ {
+    let (mut table, held, leg) = redialed_on_the_second_transport();
+    let out = table.step(
+        Input::LegHeard {
+            link: leg,
+            from: pair(9),
+        },
+        t(40_200),
+    );
+    let install = out.into_iter().find_map(|o| {
+        if let Output::Install(i) = o {
+            Some(i)
+        } else {
+            None
+        }
+    });
+    let install = install.expect("defect: the proof on the held link installed nothing");
+    assert_eq!(
+        (
+            install.link,
+            install.pair.clone(),
+            install.rekey,
+            install.initiator,
+            install.lease.index()
+        ),
+        (held, pair(9), Build::FromCarry, false, 2),
+        "defect: the held link was not rebuilt from the carry with the leg's lease"
+    );
+    install.lease.release();
+}
+
+/// A proof from the leg's own pair, on its own transport, is today's swap.
+#[test]
+fn a_redial_proven_at_the_legs_own_pair_replaces_the_peering() {
+    let (mut table, _, leg) = redialed_on_the_second_transport();
+    let out = go(
+        &mut table,
+        Input::LegHeard {
+            link: leg,
+            from: other(8),
+        },
+        40_200,
+    );
+    assert!(
+        swapped_for_redial(&out),
+        "defect: a proof at the leg's pair did not replace the peering: {out:?}"
+    );
+    let h = table.held(&large()).expect("held");
+    assert_eq!((h.link, h.current.clone()), (leg, other(8)));
+}
+
+/// Under multipath the held link can hold a counting path on the leg's
+/// transport. A proof from that path is attributed to the held link, but
+/// it arrived on the leg's transport, as a peer that moved to the leg
+/// sends: today's swap, not the adoption.
+#[test]
+fn a_redial_proven_at_a_counting_path_of_the_held_link_on_the_legs_transport_replaces_the_peering()
+{
+    let (mut table, held, leg) = redialed_on_the_second_transport();
+    let state = Input::State {
+        link: held,
+        pair: other(7),
+        proven: Proven::Live,
+    };
+    go(&mut table, state, 40_150);
+    let mut probe = read(large(), 31, 0, E1);
+    probe.from = other(7);
+    let probe = Input::Msg1 {
+        read: probe,
+        reachable: true,
+    };
+    assert!(
+        go(&mut table, probe, 40_160)
+            .iter()
+            .any(|o| matches!(o, Output::Rekey { arrival, .. } if arrival.on_link)),
+        "precondition: the held link's path on the leg's transport counts as on the link"
+    );
+    let out = go(
+        &mut table,
+        Input::LegHeard {
+            link: leg,
+            from: other(7),
+        },
+        40_200,
+    );
+    assert!(
+        swapped_for_redial(&out),
+        "defect: a proof on the leg's transport moved the held link onto the redial: {out:?}"
+    );
+    assert_eq!(table.held(&large()).map(|h| h.link), Some(leg));
+}
+
+/// A proof from a third transport at a pair the held link does not hold
+/// is today's swap.
+#[test]
+fn a_redial_proven_at_a_third_transports_pair_not_of_the_held_link_replaces_the_peering() {
+    let (mut table, _, leg) = redialed_on_the_second_transport();
+    let out = go(
+        &mut table,
+        Input::LegHeard {
+            link: leg,
+            from: third(6),
+        },
+        40_200,
+    );
+    assert!(
+        swapped_for_redial(&out),
+        "defect: a proof from a pair not of the held link moved the held link onto the redial: {out:?}"
+    );
+    assert_eq!(table.held(&large()).map(|h| h.link), Some(leg));
+}
+
+/// The adopted redial's msg1 sent again from the leg's pair after the
+/// adoption is refused and opens no redial: the adoption stamped the
+/// dampener, and the msg1's ephemeral is in the replay memory. In the node
+/// the held link's machine, rebuilt from the carry, also holds it in its
+/// record, so the copy never reaches the core as a redial.
+#[test]
+fn a_redial_msg1_sent_again_after_an_adoption_is_refused_and_opens_no_redial() {
+    let (mut table, held, leg) = redialed_on_the_second_transport();
+    go(
+        &mut table,
+        Input::LegHeard {
+            link: leg,
+            from: pair(9),
+        },
+        40_200,
+    );
+    assert_eq!(
+        (
+            table.held(&large()).map(|h| h.link),
+            table.redialing(&large())
+        ),
+        (Some(held), None),
+        "precondition: the proof on the held link was adopted"
+    );
+    let mut again = read(large(), 2, 0, E1);
+    again.from = other(8);
+    let out = greet(&mut table, Input::Redial(again), 2, 41_000);
+    assert!(
+        asked(&out).is_none()
+            && out.iter().any(|o| matches!(
+                o,
+                Output::Reject {
+                    why: Denial::Gate(Refusal::Dampened),
+                    ..
+                }
+            )),
+        "defect: the adopted redial's msg1 sent again was answered: {out:?}"
+    );
+    assert_eq!(table.redialing(&large()), None);
+}
+
+/// A redial within the dampener's interval of an adoption is refused by
+/// the dampener, as one after a swap is
+/// (`a_redial_within_the_dampener_of_a_swap_is_refused`).
+#[test]
+fn a_redial_within_the_dampener_of_an_adoption_is_refused() {
+    let (mut table, held, leg) = redialed_on_the_second_transport();
+    go(
+        &mut table,
+        Input::LegHeard {
+            link: leg,
+            from: pair(9),
+        },
+        40_200,
+    );
+    assert_eq!(
+        (
+            table.held(&large()).map(|h| h.link),
+            table.redialing(&large())
+        ),
+        (Some(held), None),
+        "precondition: the proof on the held link was adopted"
+    );
+    let mut next = read(large(), 3, 0, E1);
+    next.from = other(7);
+    let again = greet(&mut table, Input::Redial(next), 3, 45_000);
+    assert!(
+        again.iter().any(|o| matches!(
+            o,
+            Output::Reject {
+                why: Denial::Gate(Refusal::Dampened),
+                ..
+            }
+        )),
+        "defect: a redial within the dampener of an adoption was answered: {again:?}"
+    );
+}

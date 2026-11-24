@@ -123,8 +123,11 @@ builds, and changes no line of the core, the machine or the bundle.
   messages carried beside the packets' abstract fields, keeps each
   link's handshake until the core installs it, builds the peer's
   machines at an install (the record taken from the node's record store,
-  the setup noted for a responder), moves them at a move, closes them at
-  a removal and files the record; hands a held peer's same-epoch msg1 to
+  the setup noted for a responder), moves them at a move (onto the held
+  link itself, from this node's address for the held pair, where the core
+  keeps a peer on its link with the session of a handshake whose link the
+  same step retires, as at a redial proven on the held link), closes them
+  at a removal and files the record; hands a held peer's same-epoch msg1 to
   its machine and a replacement the machine asks for to the core's gates;
   takes frames by their receiver index through the machine, the bundle
   and the core's `Heard`, and a path message on to the bundle; seals the

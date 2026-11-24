@@ -1613,6 +1613,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that pending state after the handshake timeout. Nothing on the wire
   changes.
 
+- A v0.5.x node that dials a node of this release over UDP and a second
+  transport (Tor or TCP) at once no longer loses the link about every 90 s.
+  When the older node won the tie-break between its two dials, it took the
+  second dial's session but kept sending over UDP and closed the second
+  connection, and its first frame on the new session moved the peering onto
+  that closed connection; the link then went dead and both ends dialed
+  again. The node now keeps the peering on the link the frame arrived on,
+  moves it onto the new session, and sends the peer its tree position and
+  filter again. Nothing on the wire changes.
+
 - With multipath enabled, a dial to a peer that times out after the peer came
   up on another link now leaves its address as a path candidate, where before
   the address was dropped with the dial. A dial that loses that race, or whose

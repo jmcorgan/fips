@@ -1,11 +1,12 @@
 //! Tests for `../exec/plan.rs` and the plan-reading parts of `../exec/mod.rs`:
 //! each transition's effects are the statements its sites ran, in the same
 //! order; every transition but a cutover has a list and every effect is in
-//! one; each transition that announces logs its own sites' failure line; and
-//! both files deny wildcard arms.
+//! one; each transition that announces logs its own sites' failure line;
+//! a redial proven on the held link runs the move's effects that keep the
+//! link, in the move's order; and both files deny wildcard arms.
 
 use crate::node::settle::exec::announce_line;
-use crate::node::settle::exec::plan::{Effect, plan};
+use crate::node::settle::exec::plan::{ADOPT, Effect, adopt, plan};
 use crate::node::settle::table::Transition;
 use crate::node::settle::table::tests::{CASES, Case, denies_wildcards, transition, wildcard_arms};
 use crate::testutil::with_lf;
@@ -298,6 +299,61 @@ fn statements(case: Case) -> Vec<(Effect, &'static str)> {
         | Case::RemoveDead
         | Case::RemoveAdmin => REMOVE.to_vec(),
     }
+}
+
+/// The move's effects a redial proven on the held link leaves out: the pair
+/// does not change, no link is left, the dial is not this node's, and the
+/// site retires the redial's leg itself.
+const NOT_ADOPTED: &[Effect] = &[
+    Effect::HoldDial,
+    Effect::MovedRead,
+    Effect::ClearUdpIfMoved,
+    Effect::SeedMtuIfMoved,
+    Effect::RelinkIfMoved,
+    Effect::UnpinIfOwn,
+    Effect::MoveNote,
+    Effect::DialForget,
+    Effect::LoserClose,
+    Effect::LoserRemoved,
+];
+
+/// A redial proven on the held link runs the rest of a move's effects, in
+/// the move's order: the closed machine's outputs, the bundle's renewal,
+/// the tree announce and filter, the back-off and the replay record. No
+/// transition selects that list; the site chooses it.
+#[test]
+fn a_redial_proven_on_the_held_link_runs_the_moves_effects_that_keep_the_link_in_their_order() {
+    let kept: Vec<Effect> = MOVE
+        .iter()
+        .map(|(e, _)| *e)
+        .filter(|e| !NOT_ADOPTED.contains(e))
+        .collect();
+    assert_eq!(
+        ADOPT,
+        &[
+            Effect::RunLinkOutputs,
+            Effect::RunRenewed,
+            Effect::PathsRenewed,
+            Effect::TreeAnnounce,
+            Effect::BloomMark,
+            Effect::BackoffReset,
+            Effect::ReplayForget,
+        ],
+    );
+    assert_eq!(
+        ADOPT,
+        kept.as_slice(),
+        "the move's order, less the left out"
+    );
+    assert!(
+        !CASES.iter().any(|c| plan(&transition(*c)) == ADOPT),
+        "no transition selects the list"
+    );
+    assert_eq!(
+        adopt(),
+        ADOPT,
+        "defect: the adoption runs another list than its own, so the peer is not sent what the session it discarded lost"
+    );
 }
 
 /// Each transition's plan is the statements its sites ran, in their order:

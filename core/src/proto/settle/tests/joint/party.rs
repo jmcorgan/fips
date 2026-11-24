@@ -945,6 +945,21 @@ impl JointParty {
 
     /// Carry out the core's outputs.
     fn effects(&mut self, net: &mut Net, out: Vec<Output>, fx: &mut Fx) {
+        // A link the same step retires whose handshake completed: an
+        // install on a link whose own handshake has not is the core keeping
+        // a held peer on its link with that handshake's session (a redial
+        // proven on the held link).
+        let retiring: Vec<LinkNo> = out
+            .iter()
+            .filter_map(|o| {
+                if let Output::Retire { link, .. } = o {
+                    Some(*link)
+                } else {
+                    None
+                }
+            })
+            .filter(|l| self.s.runs.get(l).is_some_and(|r| r.done.is_some()))
+            .collect();
         for o in out {
             match o {
                 Output::Opened { link } => fx.opened.push(link),
@@ -954,7 +969,11 @@ impl JointParty {
                 Output::Answer { link, stored, msg2 } => fx.answers.push((link, stored, msg2)),
                 Output::Resend { link, bytes } => fx.resends.push((link, bytes)),
                 Output::Rekey { arrival, .. } => fx.arrival = Some(arrival),
-                Output::Install(i) => self.install(net, i, fx),
+                Output::Install(i) => {
+                    let own = self.s.runs.get(&i.link).is_some_and(|r| r.done.is_some());
+                    let from = retiring.iter().copied().find(|l| !own && *l != i.link);
+                    self.install(net, i, from, fx);
+                }
                 Output::Reset { peer, transition } => {
                     let m = change(transition);
                     if matches!(m, M::Keep | M::Move)
@@ -1132,10 +1151,14 @@ impl JointParty {
     }
 
     /// The core installed a peer: build its machines on the completed
-    /// handshake, or move them onto it.
-    fn install(&mut self, net: &mut Net, i: Install, fx: &mut Fx) {
+    /// handshake, or move them onto it. The handshake is the install
+    /// link's own, or that of `from`, a link the same step retires, when
+    /// the core keeps the peer on the link it holds with that handshake's
+    /// session: the machines then move onto it on the held link, renewed
+    /// from this node's own address for the held pair.
+    fn install(&mut self, net: &mut Net, i: Install, from: Option<LinkNo>, fx: &mut Fx) {
         let now = net.now;
-        let Some(run) = self.s.runs.get_mut(&i.link) else {
+        let Some(run) = self.s.runs.get_mut(&from.unwrap_or(i.link)) else {
             self.s.audit.push(format!(
                 "install on {:?}, which no handshake opened",
                 i.link
@@ -1192,8 +1215,16 @@ impl JointParty {
             }
             (Build::FromCarry, Some(old)) => {
                 owed = old.owed;
+                let stays = old.link == i.link;
+                let local = if stays {
+                    old.machines
+                        .local(to)
+                        .unwrap_or_else(|| net.home(self.s.ix, to.transport))
+                } else {
+                    local
+                };
                 let (m, ev) = old.machines.moved(&mut self.s.kit, now, setup, to, local);
-                let off = Some(old.link);
+                let off = (!stays).then_some(old.link);
                 (m, ev, Vec::new(), old.answered, old.beat, old.heard, off)
             }
             (Build::FromCarry, None) if beside => {

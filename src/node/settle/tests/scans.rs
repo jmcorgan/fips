@@ -594,13 +594,23 @@ const ACTIVE: &[(&str, &str)] = &[
 /// The functions outside the executor that call the active peer's
 /// functions which ask for a change of machines, as `(file, function,
 /// callee, why)`.
-const SITES: &[(&str, &str, &str, &str)] = &[(
-    "node/handlers/handshake.rs",
-    "msg2_body",
-    "adopt_dial",
-    "a crossing's move, whose machine part a test may run alone: the site \
-     calls it, then runs the rest of the move through the executor",
-)];
+const SITES: &[(&str, &str, &str, &str)] = &[
+    (
+        "node/handlers/handshake.rs",
+        "msg2_body",
+        "adopt_dial",
+        "a crossing's move, whose machine part a test may run alone: the site \
+         calls it, then runs the rest of the move through the executor",
+    ),
+    (
+        "node/handlers/redial.rs",
+        "adopt_redial",
+        "adopt_dial",
+        "a redial proven on the held link moves the held link onto the \
+         redial's session: the site calls it, then runs the adoption's \
+         effects through the executor",
+    ),
+];
 
 /// Each call in the code of `source` of the active peer's functions that
 /// ask the join for a change of machines, as `(line, function, callee)`:

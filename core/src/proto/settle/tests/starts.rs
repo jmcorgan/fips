@@ -610,6 +610,32 @@ fn walled_script(w: &mut World) -> Vec<Act> {
     run(w, &[Do::Then(Act::Wall), Do::Get(1, Want::Msg1, None)])
 }
 
+/// Node 0 dials node 1 on UDP and node 1 has heard it; then node 0 dials
+/// node 1's TCP address, as a deployed release dials a peer on each of its
+/// transports and the second dial trails the first.
+fn late_other(mk: Maker) -> World {
+    let mut w = pair(mk, A, &[&[(1, UDP)], &[]]);
+    dial_home(&mut w, 0, 1, UDP);
+    settle(&mut w);
+    w.run_until(2_000);
+    settle(&mut w);
+    dial_home(&mut w, 0, 1, TCP);
+    w
+}
+
+/// The second dial's connection opens, node 1 reads its msg1 and node 0
+/// the answer.
+fn late_other_script(w: &mut World) -> Vec<Act> {
+    run(
+        w,
+        &[
+            Do::Open(0),
+            Do::Get(1, Want::Msg1, Some(0)),
+            Do::Get(0, Want::Msg2, Some(1)),
+        ],
+    )
+}
+
 /// Every named start.
 pub fn starts() -> Vec<Start> {
     let s = |number, name, build: Build, script: fn(&mut World) -> Vec<Act>, depth, cap| Start {
@@ -741,6 +767,14 @@ pub fn starts() -> Vec<Start> {
             walled_script,
             4,
             900
+        ),
+        s(
+            26,
+            "late second dial on another transport, heard",
+            late_other,
+            late_other_script,
+            5,
+            3_200
         ),
     ];
     for st in &mut v {

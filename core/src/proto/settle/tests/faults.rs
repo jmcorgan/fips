@@ -764,14 +764,30 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::RedialInstallsAtSent,
-        &[(TABLE, "a_redial_opens_a_leg_and_leaves_the_held_peer")],
+        &[
+            (TABLE, "a_redial_opens_a_leg_and_leaves_the_held_peer"),
+            (
+                REGRESS,
+                "a_deployed_releases_late_second_dial_on_another_transport_leaves_one_session_larger_dialer",
+            ),
+        ],
     ),
     (
         Fault::LegHeardIgnored,
-        &[(
-            TABLE,
-            "a_frame_under_a_sent_redial_leg_replaces_the_held_peer_for_redial",
-        )],
+        &[
+            (
+                TABLE,
+                "a_frame_under_a_sent_redial_leg_replaces_the_held_peer_for_redial",
+            ),
+            (
+                TABLE,
+                "a_redial_proven_at_the_legs_own_pair_replaces_the_peering",
+            ),
+            (
+                TABLE,
+                "a_redial_proven_at_a_third_transports_pair_not_of_the_held_link_replaces_the_peering",
+            ),
+        ],
     ),
     (
         Fault::RedialUngated,
@@ -814,7 +830,17 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::RedialSkipsDampener,
-        &[(TABLE, "a_redial_within_the_dampener_of_a_swap_is_refused")],
+        &[
+            (TABLE, "a_redial_within_the_dampener_of_a_swap_is_refused"),
+            (
+                TABLE,
+                "a_redial_within_the_dampener_of_an_adoption_is_refused",
+            ),
+            (
+                TABLE,
+                "a_redial_msg1_sent_again_after_an_adoption_is_refused_and_opens_no_redial",
+            ),
+        ],
     ),
     (
         Fault::RedialTearsDownAtMsg1,
@@ -1098,6 +1124,37 @@ pub const ROWS: &[Row] = &[
         &[(
             TABLE,
             "a_redials_swap_installs_the_peer_unheard_and_its_frames_heard_hears_it",
+        )],
+    ),
+    // In the joint world only against the model of the deployed release:
+    // a joint node of this tree moves onto its own second dial at its msg2,
+    // so its first frame under the redial's session reaches the responder
+    // on the redial's transport.
+    (
+        Fault::RedialProofLeavesHeldLink,
+        &[
+            (
+                TABLE,
+                "a_redial_proven_at_the_held_pair_from_another_transport_moves_the_held_link_onto_its_session",
+            ),
+            (
+                TABLE,
+                "a_redial_proven_at_the_held_pair_from_another_transport_rebuilds_from_the_carry_with_the_legs_lease",
+            ),
+            (
+                REGRESS,
+                "a_deployed_releases_late_second_dial_on_another_transport_leaves_one_session_smaller_dialer",
+            ),
+        ],
+    ),
+    // Not in the joint world: no joint test, scripted start or sweep has a
+    // peer prove a redial from a path the held link holds on the redial's
+    // transport, and whether one can is not established.
+    (
+        Fault::RedialProofAnyTransport,
+        &[(
+            TABLE,
+            "a_redial_proven_at_a_counting_path_of_the_held_link_on_the_legs_transport_replaces_the_peering",
         )],
     ),
     // Not in the joint world: no joint node is told of an operator

@@ -67,6 +67,16 @@
 # (FRC-1201 Section 5.6's own-dial rule), and holds the dialer's TCP
 # connection, heard, once the heal delivers the dialer's first frame under
 # it. The joint world and real nodes then gave the same lines.
+#
+# A redial proven by a frame from another transport than the redial's, at
+# the held link's address, moves the held link onto the redial's session
+# instead of replacing the peering. No script here reaches it: a node of
+# this tree moves onto its second dial at the msg2 and sends its first
+# frame under that dial's session on the dial's transport, so the
+# `redial-transport` scripts keep their swap, and their lines are
+# unchanged. A deployed release's dialer, which keeps its address, is not
+# a node either side runs; `src/node/tests/settle/legacy_dialer.rs` in the
+# root crate makes a node send as one.
 
 script crossing-udp-smaller-first-off off off
 1 n0 none

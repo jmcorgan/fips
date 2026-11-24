@@ -171,6 +171,49 @@ const REPLACE_IN: &[Effect] = &[
     Effect::BackoffReset,
 ];
 
+/// A redial proven on the held link: the peer moved onto the redial's
+/// session and stays on its link and pair. The move's effects that apply to
+/// a move that stays on its link, in the move's order: the closed machine's
+/// outputs, which release the old index; the bundle's renewal; the tree
+/// announce and filter, which crossed dials resolved resends since the
+/// peer discarded the old session with no drain; the dial back-off and the
+/// replay record. Left out: `HoldDial`, since no link is left, and its
+/// carrier rekey would copy the leg's readings over the held link's;
+/// `MovedRead`, `ClearUdpIfMoved`, `SeedMtuIfMoved` and `RelinkIfMoved`,
+/// since the pair does not change; `UnpinIfOwn`, since the dial is not this
+/// node's; `MoveNote`, whose lines describe a crossing; and `DialForget`,
+/// `LoserClose` and `LoserRemoved`, which with no loser named fall back to
+/// the dial, here the held link. The site retires the redial's leg itself.
+/// It is chosen by the site, never by a transition.
+pub(in crate::node) const ADOPT: &[Effect] = &[
+    Effect::RunLinkOutputs,
+    Effect::RunRenewed,
+    Effect::PathsRenewed,
+    Effect::TreeAnnounce,
+    Effect::BloomMark,
+    Effect::BackoffReset,
+    Effect::ReplayForget,
+];
+
+/// [`ADOPT`] with no tree announce and no filter: the mutation lane's
+/// break of the resend.
+const ADOPT_QUIET: &[Effect] = &[
+    Effect::RunLinkOutputs,
+    Effect::RunRenewed,
+    Effect::PathsRenewed,
+    Effect::BackoffReset,
+    Effect::ReplayForget,
+];
+
+/// The effects a redial proven on the held link runs: [`ADOPT`].
+pub(in crate::node) fn adopt() -> &'static [Effect] {
+    if node_fault!(AdoptSkipsAnnounce) {
+        ADOPT_QUIET
+    } else {
+        ADOPT
+    }
+}
+
 /// The effects `t` runs, in their order.
 pub(in crate::node) fn plan(t: &Transition) -> &'static [Effect] {
     match t {

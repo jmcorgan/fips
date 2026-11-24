@@ -55,7 +55,9 @@ tests.
 - `plan.rs`: each transition's plan against the statements its sites ran,
   in their order, written beside each effect; that every transition but a
   cutover has a list and every effect is in one; each announcing
-  transition's failure line; and the scan that `../exec/plan.rs` and
+  transition's failure line; that a redial proven on the held link runs
+  the move's effects that keep the link, in the move's order, through a
+  list no transition selects; and the scan that `../exec/plan.rs` and
   `../exec/mod.rs` deny wildcard arms and hold none, through `table.rs`'s.
   That scan reads both files with LF line endings, and a test runs it on
   CRLF copies. The tests read the cases of `table.rs`, so a new case is
@@ -83,7 +85,8 @@ tests.
   `pathed_core` and `release_core`, each with its reason; that only
   `src/peer/active.rs` asks the join for a change of machines, one function
   for each, and that only `../exec/` calls those functions in the node's
-  code but for a crossing's move at its site; and that the settlement
+  code but for a crossing's move and a redial proven on the held link at
+  their sites; and that the settlement
   core's gate constants, the rekey machine's parameters and constants and
   the node-address ordering (`cross_connection_winner`, and a comparison
   or `cmp` of a node address) appear in the root crate only on its exempt

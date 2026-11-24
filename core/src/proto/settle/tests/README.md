@@ -104,6 +104,13 @@ can rebuild any state by replaying the path that reached it.
   with no paths, for the model, and rebuilt on real bundles in
   `joint/starts.rs`); `flipped` builds a thread's two-node
   starts with their identities exchanged, for the other address order.
+  Start 26 is a late second dial on another transport after the
+  responder has heard the dialer: node 0 dials node 1 on UDP, the pair
+  settles, and node 0 dials node 1's TCP address, as a deployed release
+  dials a peer on each of its transports. Its caps, here and in
+  `joint/starts.rs`, are its reach at depth 5 at each pairing (2,084 to
+  2,107 states) times 1.5, rounded up to a hundred; depth 6 reaches about
+  6,000.
 - `explore.rs`: the breadth-first explorer, its events (the leap over the
   bundles' wakes offered only where a bundle wakes first, and a node's
   dial, offered only on a start marked `cold`, once per node) and budgets,
@@ -193,7 +200,16 @@ can rebuild any state by replaying the path that reached it.
   and its reset, a stored answer whose send failed, a dial judged on one
   clock across a wall step, a replayed msg1 that promoted an unheard
   peering, an own dial answered by a restarted peer, and a second restart
-  inside the dampener's interval.
+  inside the dampener's interval. And start 26 with a model of the
+  deployed release (`legacy/maint.rs`) dialing a joint node, in both
+  address orders: once healed, one session at both nodes, no liveness
+  timer ended anything, no oracle is broken, and where the release kept
+  its address and moved onto its second dial's session (the smaller
+  dialer, winning the tie-break) the joint node keeps the link it held
+  (`RedialProofLeavesHeldLink` reds that order, `RedialInstallsAtSent`
+  the other). The test hands the release's frames to the joint node
+  before the close of its second connection, as the release sends them,
+  for the reason the legacy README's transcription differences give.
 - `sim.rs`: seeded long runs of joint nodes at both ends, multipath off,
   from a cold start on each transport model (connectionless,
   connection-oriented, BLE, one of each), with loss, duplication, a heavy-tailed delay (one past the next
@@ -232,9 +248,16 @@ can rebuild any state by replaying the path that reached it.
   it is admitted and after any teardown, with the link of an answer the
   shell refused retired; the max-peers cap at a msg1, at a sent
   answer and at a completed dial; the test hook's reap of one leg,
-  which reaps that leg alone and only from its deadline; and the facade's
+  which reaps that leg alone and only from its deadline; the facade's
   hold of a held peer on its link with an answer's session and lease,
-  which no IK rule calls, and of a peer not held.
+  which no IK rule calls, and of a peer not held; and a redial answered on
+  a second transport and proven by a frame from another transport at the
+  held link's pair, which keeps the peer on the held link with the
+  redial's session and lease, rebuilt from the carry, against a proof at
+  the leg's own pair, at a path the held link holds on the leg's
+  transport and at a third transport's pair, each of which replaces the
+  peering, with the adopted msg1 sent again and a redial within the
+  dampener of the adoption refused.
 - `links.rs`: the unit tests of `../links.rs`, attached from it with
   `#[path]` (so it is that module's child, not declared in `mod.rs`): the
   derived index, the close rule's cases with a link a leg holds, a

@@ -185,6 +185,16 @@ pub(crate) enum Fault {
     RedialSwapHeard,
     /// An operator disconnect of a held peer leaves its pending redial.
     RedialKeptAtDisconnect,
+    /// A redial proven by a frame from another transport than the
+    /// redial's, at a pair of the held link, replaces the peering as any
+    /// proof does, rather than moving the held link onto the redial's
+    /// session.
+    RedialProofLeavesHeldLink,
+    /// A redial proven at a pair of the held link moves the held link onto
+    /// the redial's session whatever transport the proof arrived on, so a
+    /// peer that moved to the redial and sends from a path the held link
+    /// holds on the redial's transport is kept on the link it left.
+    RedialProofAnyTransport,
     /// A redial's answer given up as unsendable leaves the redial's mark.
     UnsendableKeepsRedial,
     /// A msg1 counts as on the link only from the link's setup address.
@@ -482,6 +492,8 @@ impl Fault {
         Self::RedialMemoryLapses,
         Self::RedialSwapHeard,
         Self::RedialKeptAtDisconnect,
+        Self::RedialProofLeavesHeldLink,
+        Self::RedialProofAnyTransport,
         Self::UnsendableKeepsRedial,
         Self::AttributeBySetupOnly,
         Self::AttributeByCurrent,

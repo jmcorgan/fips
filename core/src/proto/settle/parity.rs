@@ -825,6 +825,10 @@ pub const UNSHARED: &[(&str, &str)] = &[
         "22, a NAT rebound of the second path",
         "a NAT's rebinding of a source address, after the capability exchange",
     ),
+    (
+        "26, a late second dial on another transport, heard",
+        "the dialer it is for, a deployed release, is a node neither side runs; between nodes of this tree its schedule is `redial-transport`'s, after two seconds' run where that script runs a minute",
+    ),
 ];
 
 /// What in `script` names a node or a transport the script does not hold,

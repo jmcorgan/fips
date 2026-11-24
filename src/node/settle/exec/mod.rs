@@ -98,10 +98,16 @@ pub(in crate::node) fn announce_line(t: &Transition) -> Option<&'static str> {
 impl Node {
     /// Run `r`'s plan: each of its transition's effects, in their order.
     pub(in crate::node) async fn run(&mut self, r: &mut Run) {
+        self.run_with(r, plan(&r.t)).await;
+    }
+
+    /// Run `effects` for `r`, in their order: a plan a site chose itself
+    /// in place of its transition's.
+    pub(in crate::node) async fn run_with(&mut self, r: &mut Run, effects: &'static [Effect]) {
         // Boxed once here, so that no effect boxes anything: an effect can
         // reach the peer action executor, which can run another transition.
         Box::pin(async move {
-            for effect in plan(&r.t) {
+            for effect in effects {
                 self.effect(*effect, r).await;
             }
         })

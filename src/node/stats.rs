@@ -215,6 +215,10 @@ pub struct HandshakeStats {
     /// Pending redials that a frame from the peer proved, replacing the
     /// peering.
     pub redials_proven: u64,
+    /// Pending redials that a frame from the peer proved on the held link,
+    /// from another transport than the redial's, moving the held link onto
+    /// the redial's session.
+    pub redials_adopted: u64,
     /// End-to-end sessions opened again after a redial's swap closed a
     /// heard one.
     pub redial_session_reopens: u64,
@@ -236,6 +240,7 @@ impl HandshakeStats {
             redial_dampened: self.redial_dampened,
             redials: self.redials,
             redials_proven: self.redials_proven,
+            redials_adopted: self.redials_adopted,
             redial_session_reopens: self.redial_session_reopens,
         }
     }
@@ -528,6 +533,7 @@ pub struct HandshakeStatsSnapshot {
     pub redial_dampened: u64,
     pub redials: u64,
     pub redials_proven: u64,
+    pub redials_adopted: u64,
     pub redial_session_reopens: u64,
 }
 

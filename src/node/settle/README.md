@@ -197,8 +197,9 @@ field, at once.
 - A peer's rekey and path machines are built, moved and closed only through
   the settlement core's join, which only `src/peer/active.rs` asks for a
   change of machines, and only `exec/` asks the active peer, but for a
-  crossing's move at its site. `tests/scans.rs` holds the code to each, with
-  its exemptions and their reasons.
+  crossing's move at its site and a redial proven on the held link at its
+  site (`handlers/redial.rs`'s `adopt_redial`). `tests/scans.rs` holds the
+  code to each, with its exemptions and their reasons.
   Its rule states what the code does today; a cell the code does not match is
   a wrong cell or a wrong site, and a change of what a transition does changes
   the cell and its golden line in the same commit.
