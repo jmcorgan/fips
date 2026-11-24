@@ -96,14 +96,13 @@ those modules, its lines (`run.sh`'s `EXPLORER_ONLY`) are skipped and
 counted. Each skipped line's test must still be defined as `fn <name>(` in
 its module's file, so a misspelled or renamed name is a miss in every
 build. The lane then prints the switches left with no line to run: as of
-this change `CrossedRunsKeep`, `MoveSkipsWorkerOffer` and
-`WorldSkipsWorkerWait`, which only explorer lines show red, so a run a push
-starts does not show them. With `FIPS_MUTATION_EXPLORERS=1` the lane builds
+this change `MoveSkipsWorkerOffer` and `WorldSkipsWorkerWait`, which only
+explorer lines show red, so a run a push starts does not show them. With `FIPS_MUTATION_EXPLORERS=1` the lane builds
 the root crate's library tests with the feature and every line must resolve
 and run.
 
 `FIPS_MUTATION_EXPLORERS=only` builds with the feature and runs those lines
-alone, 26 of them over 10 switches as of this change: every other line is
+alone, 22 of them over 7 switches as of this change: every other line is
 skipped, and the normal-build fence is left out, since the plain lane runs
 it on the same tree. A manifest in which no line's test is in an
 `EXPLORER_ONLY` module fails with exit 1 before anything is built, so a

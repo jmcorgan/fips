@@ -11,13 +11,12 @@
 //! directory adds. One function ([`join`]) joins a peer's rekey
 //! machine and path bundle to the core: it makes their builds, moves and
 //! closes, and says which of their outputs are core inputs. The reference
-//! model (`model`) beside it
-//! is compiled for tests and the `test-hooks` feature alone, with the
+//! model (`model`) beside it is compiled for tests alone, with the
 //! deterministic world its tests explore both in. No core file refers to
 //! the model, and the model refers to no core item. The schedules a real
 //! node and the joint world both run, with what each end holds after each
-//! step (`parity`), are compiled the same way, so the root crate's tests
-//! read them too.
+//! step (`parity`), are compiled for tests and the `test-hooks` feature, so
+//! the root crate's tests read them too.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
@@ -46,7 +45,7 @@ pub mod input;
 pub mod join;
 pub mod legs;
 pub mod links;
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(test)]
 pub mod model;
 pub mod output;
 pub mod params;

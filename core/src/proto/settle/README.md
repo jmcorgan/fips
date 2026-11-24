@@ -8,8 +8,8 @@ every handshake and removal through it: `src/node/settle/decide.rs` steps
 the node's one copy of `Table` and is, with two path feeds, the only
 caller of `Table::step`, `poll`, `reap_leg` and `close`, which a root
 scan (`src/node/settle/tests/scans.rs`) holds. The reference model is
-declared in `mod.rs` under `#[cfg(any(test, feature = "test-hooks"))]`,
-so it reaches no normal or release build.
+declared in `mod.rs` under `#[cfg(test)]`, so it reaches no normal or
+release build, nor the root crate's `test-hooks` build.
 
 ## Files
 

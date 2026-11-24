@@ -10,9 +10,8 @@
 //! when they disagree, the question is whether the model misreads the FRC,
 //! the code breaks it, or a local rule decides it.
 //!
-//! `no_std` with `alloc`, and compiled only for tests and the `test-hooks`
-//! feature: every item is `pub`, so the root crate's `test-hooks` build has
-//! nothing unused.
+//! `no_std` with `alloc`, and compiled only for tests. Every item is `pub`,
+//! so none is reported unused because only the model's own tests use it.
 
 pub mod history;
 pub mod judge;

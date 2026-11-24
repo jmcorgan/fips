@@ -21,7 +21,6 @@ use super::super::super::spanning_tree::{
 };
 use super::super::super::*;
 use super::super::{heartbeat_reaches, loopback_node, resolve_connect, settled, with_path};
-use super::model::Tap;
 use super::script::{Kind, Step, run};
 use crate::config::TcpConfig;
 use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG1, PHASE_MSG2};
@@ -106,10 +105,6 @@ pub(super) struct World {
     /// Whether established frames flow after each step (`flow`); when not,
     /// they wait, with everything else, for a `heal`.
     flowing: bool,
-    /// The reference model beside the nodes, where a test set one: told of
-    /// every packet sent and handed over, every advance of the clock, rekey
-    /// and restart, and every rekey poll handed to it to run.
-    pub(super) tap: Option<Tap>,
     /// Every BLE node's radio, by its address, for the mock connects.
     #[cfg(ble_available)]
     radio: ble::Radio,
@@ -153,7 +148,6 @@ impl World {
             ends,
             held: vec![VecDeque::new(); count],
             flowing: true,
-            tap: None,
             #[cfg(ble_available)]
             radio,
         }
@@ -265,14 +259,7 @@ impl World {
     pub(super) async fn deliver(&mut self, to: usize, kind: Kind, nth: usize) {
         let i = self.find(to, kind, nth).await;
         let packet = self.held[to].remove(i).expect("a found packet is held");
-        give(
-            &mut self.nodes[to].node,
-            &mut self.tap,
-            &self.ends,
-            to,
-            packet,
-        )
-        .await;
+        self.nodes[to].node.process_packet(packet).await;
         self.flow().await;
     }
 
@@ -288,14 +275,7 @@ impl World {
     pub(super) async fn duplicate(&mut self, to: usize, kind: Kind, nth: usize) {
         let i = self.find(to, kind, nth).await;
         let copy = self.held[to][i].clone();
-        give(
-            &mut self.nodes[to].node,
-            &mut self.tap,
-            &self.ends,
-            to,
-            copy,
-        )
-        .await;
+        self.nodes[to].node.process_packet(copy).await;
         self.flow().await;
     }
 
@@ -335,7 +315,7 @@ impl World {
     /// same source arrived before.
     async fn frames(&mut self) -> usize {
         let mut handed = self.results().await;
-        for (at, (tn, held)) in self.nodes.iter_mut().zip(self.held.iter_mut()).enumerate() {
+        for (tn, held) in self.nodes.iter_mut().zip(self.held.iter_mut()) {
             let mut blocked = Vec::new();
             let mut kept = VecDeque::with_capacity(held.len());
             let mut free = Vec::new();
@@ -352,7 +332,7 @@ impl World {
             }
             *held = kept;
             for packet in free {
-                give(&mut tn.node, &mut self.tap, &self.ends, at, packet).await;
+                tn.node.process_packet(packet).await;
                 handed += 1;
             }
         }
@@ -416,11 +396,8 @@ impl World {
     /// Move what has reached each node's receive channel into the world's
     /// hold, after what is already there.
     fn collect(&mut self) {
-        for (at, (tn, held)) in self.nodes.iter_mut().zip(self.held.iter_mut()).enumerate() {
+        for (tn, held) in self.nodes.iter_mut().zip(self.held.iter_mut()) {
             while let Ok(packet) = tn.packet_rx.try_recv() {
-                if let Some(tap) = self.tap.as_mut() {
-                    tap.sent(at, &packet, &self.ends);
-                }
                 held.push_back(packet);
             }
         }
@@ -432,9 +409,9 @@ impl World {
     async fn hand(&mut self) -> usize {
         let mut handed = self.results().await;
         self.collect();
-        for (at, (tn, held)) in self.nodes.iter_mut().zip(self.held.iter_mut()).enumerate() {
+        for (tn, held) in self.nodes.iter_mut().zip(self.held.iter_mut()) {
             for packet in std::mem::take(held) {
-                give(&mut tn.node, &mut self.tap, &self.ends, at, packet).await;
+                tn.node.process_packet(packet).await;
                 handed += 1;
             }
         }
@@ -445,11 +422,8 @@ impl World {
     /// its timers once.
     pub(super) async fn advance(&mut self, ms: u64) {
         crate::time::advance(Duration::from_millis(ms));
-        if let Some(tap) = self.tap.as_mut() {
-            tap.advance(ms);
-        }
-        for (at, tn) in self.nodes.iter_mut().enumerate() {
-            tick(&mut tn.node, at, &mut self.tap).await;
+        for tn in self.nodes.iter_mut() {
+            tick(&mut tn.node).await;
         }
         self.flow().await;
     }
@@ -460,9 +434,6 @@ impl World {
     /// would reach it.
     pub(super) async fn restart(&mut self, at: usize) {
         self.collect();
-        if let Some(tap) = self.tap.as_mut() {
-            tap.restart(at);
-        }
         let config = self.config.clone();
         let mut fresh = match self.medium {
             Medium::Loopback => restarted_node(&self.nodes[at], config),
@@ -533,9 +504,6 @@ impl World {
         let age = Duration::from_secs(after + crate::node::REKEY_JITTER_SECS as u64 + 1);
         let floor = fips_core::proto::rekey::DEPLOYED_SESSION_FLOOR + Duration::from_secs(5);
         let me = *self.nodes[at].node.node_addr();
-        if let Some(tap) = self.tap.as_mut() {
-            tap.rekey(at, age, floor);
-        }
         let peers: Vec<NodeAddr> = self.nodes[at].node.peers.keys().copied().collect();
         for peer in &peers {
             self.nodes[at]
@@ -561,43 +529,22 @@ impl World {
             "precondition: node {at} started a rekey"
         );
         self.flow().await;
-        if let Some(tap) = self.tap.as_mut() {
-            tap.rekeyed();
-        }
     }
 }
 
 /// One pass of node `at`'s timers, in the order its receive loop's tick
 /// runs them: handshake timeouts, transport connects, msg1 resends,
 /// retries, link heartbeats and rekeys, then the path machines when any is
-/// armed. The rekey poll, where a rekey's initiator cuts over, goes through
-/// the world's tap where it has one.
-async fn tick(node: &mut Node, at: usize, tap: &mut Option<Tap>) {
+/// armed.
+async fn tick(node: &mut Node) {
     node.check_timeouts().await;
     node.poll_pending_connects().await;
     node.drive_peer_timers(Node::interval_ms()).await;
     node.process_pending_retries(Node::peering_now()).await;
     node.check_link_heartbeats().await;
-    match tap {
-        Some(tap) => tap.poll(at, node).await,
-        None => node.poll_link_rekeys().await,
-    }
+    node.poll_link_rekeys().await;
     if node.paths.armed() {
         node.path_tick().await;
-    }
-}
-
-/// Hand `packet` to node `at`, through the world's tap where it has one.
-async fn give(
-    node: &mut Node,
-    tap: &mut Option<Tap>,
-    ends: &[Vec<(TransportId, TransportAddr)>],
-    at: usize,
-    packet: ReceivedPacket,
-) {
-    match tap {
-        Some(tap) => tap.give(at, node, packet, ends).await,
-        None => node.process_packet(packet).await,
     }
 }
 

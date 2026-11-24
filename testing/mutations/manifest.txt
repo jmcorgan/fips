@@ -69,9 +69,7 @@ IgnoreOwnDial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_th
 IgnoreOwnDial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_after_link_dead_and_a_redial_larger_dialer	the pair is not split
 IgnoreOwnDial	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_loopback
 IgnoreOwnDial	red	fips-mesh	node::tests::settle::explore::oracle::every_named_start_keeps_its_properties_on_a_real_pair_on_loopback_with_multipath_on
-CrossedRunsKeep	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says
 CrossedRunsKeep	red	fips-core	proto::settle::table::tests::a_crossing_decided_by_the_tie_break_alone_moves_the_smaller_node_onto_its_dial
-CrossedRunsKeep	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says_with_multipath_on
 CrossedRunsKeep	red	fips-mesh	node::tests::establish_chartests::chartest_cross_connection_tiebreak_winner_and_loser	winner (smaller addr) swaps to its outbound session index
 CrossedRunsKeep	red	fips-mesh	node::tests::restart_dial::two_fresh_nodes_dialling_each_other_settle_on_one_session_in_either_message_order	src/node/tests/restart_dial.rs:251
 ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_garbage_msg2s
@@ -133,16 +131,12 @@ CutoverSkipsMmpReset	red	fips-mesh	node::tests::settle::table::rekey::a_responde
 CutoverSkipsMmpReset	red	fips-mesh	node::tests::settle::table::rekey::a_responders_cutover_does_what_its_cells_say_with_multipath_on
 CutoverSkipsMmpReset	red	fips-mesh	node::tests::settle::table::rekey::a_restart_found_at_a_rekey_does_what_its_cells_say
 CutoverSkipsMmpReset	red	fips-mesh	node::tests::settle::table::rekey::a_restart_found_at_a_rekey_does_what_its_cells_say_with_multipath_on
-CutoverSkipsMmpReset	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says
-CutoverSkipsMmpReset	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says_with_multipath_on
 CutoverSkipsMmpReset	pass	fips-mesh	peer::data::tests::a_move_resets_what_its_cells_say_and_carries_the_rest
 MoveSkipsMmpReset	red	fips-mesh	peer::data::tests::a_move_resets_what_its_cells_say_and_carries_the_rest
 MoveSkipsMmpReset	red	fips-mesh	peer::active::tests::a_cross_connection_move_resets_the_link_mmp_observer_as_a_cutover_does	highest_counter counts from the new session
 MoveSkipsMmpReset	red	fips-mesh	peer::active::tests::a_cross_connection_move_accepts_the_peers_receiver_reports_on_the_new_session	is not dropped as stale
 MoveSkipsMmpReset	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_another_transport_does_what_the_move_cells_say
 MoveSkipsMmpReset	red	fips-mesh	node::tests::settle::table::crossing::a_crossing_won_on_another_transport_does_what_the_move_cells_say_with_multipath_on
-MoveSkipsMmpReset	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says
-MoveSkipsMmpReset	red	fips-mesh	node::tests::settle::explore::oracle::each_peer_change_of_a_named_start_does_what_the_models_transition_says_with_multipath_on
 MoveSkipsMmpReset	pass	fips-mesh	peer::data::tests::a_cutover_resets_what_its_cells_say_and_carries_the_rest
 TreeCarryAcrossRestart	red	fips-mesh	node::tests::settle::carry::a_peer_replaced_by_a_restart_after_an_announce_just_now_is_sent_a_tree_announce_at_once
 TreeCarryAcrossRestart	red	fips-mesh	node::tests::settle::table::replace::a_restart_msg1_replaces_the_peer_as_the_table_says

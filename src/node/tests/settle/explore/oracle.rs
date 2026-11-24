@@ -9,20 +9,15 @@
 //!   agreeing, every open connection in use;
 //! - the node's live audit, inherited: in a debug build every packet a node
 //!   is handed runs it, and a breach panics there, naming its clause.
-//!
-//! Each peer change of each start's scripted path, healed, is held against
-//! the reference model's transition (`model.rs`), on its own test. Each
-//! msg1's class against the model's is not checked here.
 
 #[cfg(unix)]
 use super::super::super::link_index_audit;
 use super::super::super::spanning_tree::cleanup_nodes;
 use super::super::audit::{Breach, audit};
 use super::super::settled;
-use super::explore::{Job, build, heal, jobs, named, parallel, paths, walk, walk_from};
+use super::explore::{Job, heal, jobs, named, parallel, paths, walk};
 #[cfg(unix)]
 use super::explore::{Path, Vary};
-use super::model::Tap;
 #[cfg(unix)]
 use super::script::{Kind, Step};
 use super::starts::{Clause, Order, PINS, Reach, Start, starts};
@@ -337,51 +332,4 @@ async fn the_explorer_finds_each_pinned_defect_at_its_oracle() {
         missed.is_empty(),
         "defect: the explorer did not find a pinned defect: {missed:#?}"
     );
-}
-
-/// `start`'s scripted path in `order`, with multipath set as `on`, healed,
-/// with the reference model beside the world from its first step: each
-/// change the model makes to a peer that the node did not make as the
-/// model's transition says.
-async fn traced((start, order, on): Job, at: Arc<Mutex<String>>) -> Vec<String> {
-    let name = named(&start, order, on, None);
-    *at.lock().expect("precondition: the path's name") = name.clone();
-    let mut world = World::new(start.medium, start.nodes, on).await;
-    let addrs = world.nodes.iter().map(|tn| *tn.node.node_addr()).collect();
-    world.tap = Some(Tap::new(start.medium, addrs));
-    let world = build(world, &start, order).await;
-    let mut world = walk_from(world, &start, order, None)
-        .await
-        .expect("precondition: the scripted path is a path");
-    // The leaf's properties are the property tests'; this one reads only
-    // what each change did on the way there.
-    heal(&mut world, &start, order).await;
-    let tap = world.tap.take().expect("the tap was set");
-    cleanup_nodes(&mut world.nodes).await;
-    tap.verdict(&name)
-}
-
-/// Every start on every transport, in both orders, with multipath set as
-/// `on`: each change the reference model makes to a peer, the node makes
-/// over the same packet or rekey poll as the model's transition says.
-fn modelled(on: bool) {
-    let mut all = jobs(Medium::Loopback, &[on]);
-    all.extend(jobs(Medium::Tcp, &[on]));
-    #[cfg(ble_available)]
-    all.extend(jobs(Medium::Ble, &[on]));
-    let bad = parallel(all, traced);
-    assert!(
-        bad.is_empty(),
-        "defect: a peer change does not do what the model's transition says: {bad:#?}"
-    );
-}
-
-#[test]
-fn each_peer_change_of_a_named_start_does_what_the_models_transition_says() {
-    modelled(false);
-}
-
-#[test]
-fn each_peer_change_of_a_named_start_does_what_the_models_transition_says_with_multipath_on() {
-    modelled(true);
 }

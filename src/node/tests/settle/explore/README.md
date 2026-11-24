@@ -43,10 +43,6 @@ helper that seeds a handshake machine by hand.
     past its rekey trigger, its peers' ends past the 30 s floor below which
     a msg1 is a fresh dial, then a rekey poll). Every step but `heal` ends
     with `flow`, below. `held` counts what a node holds of one class.
-  - `tap`: the reference model beside the nodes, where a test sets one
-    (`model.rs`). The world tells it of each packet a node is sent and
-    hands each packet and each rekey poll to it to run, and tells it of each
-    advance of the clock, rekey and restart.
   - A node that runs a decrypt-worker pool hands a frame under a delegated
     session to its workers; each round of `flow` and `heal` first waits for
     every worker to handle what it was sent before (bounded at 60 s), then
@@ -94,7 +90,7 @@ helper that seeds a handshake machine by hand.
     as a worker thread descheduled on a loaded host is.
 - `explore.rs`: the explorer. `paths` gives a start's scripted path and one
   path per variation, `walk` runs one path to its leaf (`build` and
-  `walk_from` are its two halves, for a world a test made itself), and
+  `walk_from` are its two halves), and
   `heal` heals the leaf (below); `spawn_walk` starts one walk on a thread
   of its own, with an 8 MiB stack, since a walk in a debug build comes
   within a few per cent of the default 2 MiB, and a runtime of its own, once
@@ -113,17 +109,11 @@ helper that seeds a handshake machine by hand.
 - `oracle.rs`: what is checked at each leaf (`judge`), and the explorer's
   tests over the starts: every path of every start keeps its properties, per
   transport and setting; each pinned defect the map gives a start is found
-  there (none has one at present); and each peer change of every start's
-  scripted path, healed, does what the reference model's transition says,
-  per setting, every transport in one test (below). And the crossing with a
+  there (none has one at present). And the crossing with a
   decrypt-worker pool (`pooled`): every path heals to one session per pair
   with every node's current session held by its workers, the session a
   crossing moves its peer onto among them; and the same on each path of the
   crossing whose workers lag (`lagging`) that drops a msg1.
-- `model.rs`: `Tap`, the reference model of `fips-core`
-  (`proto::settle::model`) beside a world, one judge per node and peer: the
-  world's packets turned into the model's history, and each change the
-  model makes held against what the node did (below).
 - `parity.rs`: the schedules `fips-core` shares with its settlement world
   (`proto::settle::parity`) run on a real pair, each end's mark after each
   step compared with the node's lines of the committed trace, at each
@@ -264,48 +254,11 @@ node tests in `../crossing.rs` named
 `..._with_its_msg2_first_..._after_link_dead_and_a_redial_...` assert it
 and its end at link-dead and a redial.
 
-Each msg1's class against the model's is not checked here.
-
-## Each peer change against the model
-
-`each_peer_change_of_a_named_start_does_what_the_models_transition_says`
-and its `_with_multipath_on` sibling run every start's scripted path in
-both orders, healed, with a `Tap` on the world from its first step. The
-tap turns what the world does into the model's history for each node and
-peer: a msg1 is named by the ephemeral key it carries in the clear, which
-both ends see, and its exact bytes; a msg2 and an established frame by the
-session index they carry, which the msg1 and msg2 of a handshake give each
-end; a frame counts only where the node holds a session of that index for
-the peer. A node's new msg1 is its dial, or its rekey's while the world is
-starting one; its own cutover is seen when its index becomes its pending
-rekey's; the world's rekey ages the model's session and link as it ages the
-nodes'; a restart starts the node's judges again, and its packets carry the
-next epoch.
-
-Each step of the model that changes a peer is held against the node over
-the same packet or rekey poll. The model's transition is mapped onto the
-node's (`mapped`), and each row of the peer's state, read before and after,
-is held to that transition's cell (`table::check_decided`): a row the cell
-keeps must read the same; a row the cell changes is held to change where
-that can be seen, which is from a peer not held before, or a row of the
-record made to differ from a fresh one's first (only those rows the
-transition changes, so the start runs as written); and a row whose cell
-turns on the script is held to change where the model's own state says it
-must (a peer held anew, the peer's session moved). A step where the model
-changes nothing must leave the session and link the node holds the peer on.
-The tree announce's own send writes two rows of the record at a transition
-that announces, which is not the transition's cell, so those two are not
-held there. A change the mapping has no node transition for is listed and
-not checked: the model's return, at a frame, to the session a later dial
-moved off, a restart found at a rekey, and the model's roam at a frame to
-a peer the node held on more than one path. The model holds one path per
-link; the node's roaming rule moves a link's one path only, so it accounts
-such a frame to its path and moves none. That roam is held as a step where
-the model changes nothing: the node must keep the session and link.
-
-Measured at the first run, 2026-11-10: every start's scripted path gives
-four changes per order (six for start 11) and every one is held, at either
-setting. The test fails on a start that holds none.
+Nothing here holds the node against the settlement core's reference model
+(`fips-core`, `proto::settle::model`): the test that held each peer change
+of a start's scripted path against the model's transition was retired on
+2026-11-24 by the operator's decision, since the model is a second,
+hand-written account of the node's behaviour.
 
 ## Parity with the core's world
 

@@ -5,8 +5,7 @@ one node saw of one peer identity and says what that node does: each
 msg1's class (FRC-1201 Section 5.7), whether a restart gate refused it
 (Section 5.5), the reply, the peer change, the connections the change
 closes (Section 5.6's close clause), and which `(transport, address)` each
-live link still needs. Tests on real nodes and, later, the settlement core
-are compared with it.
+live link still needs. The settlement core's tests are compared with it.
 
 It is written from FRC-1201 Sections 5.5 to 5.8 and the operator's
 decisions only, by an author who had not read the handshake code, so the
@@ -120,7 +119,8 @@ becomes of the larger node's own rekey is left open.
 - Change the model only from the FRC or an operator decision, never from
   the code. A new local rule gets a `LocalRule` variant, a line above, and
   a test of its value.
-- Every item is `pub`: the root crate's `test-hooks` build compiles the
-  model outside `cfg(test)`, where a private item only the model's own
-  tests use would be dead code.
+- Every item is `pub`. The model is compiled only under `cfg(test)`, where
+  an unused `pub` item of a `pub mod` raises no dead-code warning, so
+  nothing in it is marked or removed as unused because only the model's
+  own tests use it.
 - `no_std` with `alloc`; at most one underscore in a name outside tests.
