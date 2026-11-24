@@ -133,7 +133,10 @@ so it reaches no normal or release build.
   lease, at a pair the flow names, and retires the leg's link; it seats
   the peer as `install_answer` does, through the same step, forgets the
   held link's capable flag, since the shell renews the peer's bundle at
-  that move. `move_answer` moves a held peer onto a responder leg's link,
+  that move. What follows the seating (the capable flag forgotten, the
+  install from the carry on the held link, the move's reset) is the
+  table's `rehold`, which the IK flow's adoption of a redial proven on the
+  held link also runs (below). `move_answer` moves a held peer onto a responder leg's link,
   session and lease, at a pair the flow names, seated the same way but
   keeping whether the peering was heard, its install instant and its last
   frame, as the dialer's move at msg2 does, and retires the link it held,
@@ -153,7 +156,14 @@ so it reaches no normal or release build.
   is not capable and the index names the link there), takes the machine's
   replacement request back through the gate, answers its redial request
   by a leg beside the held peer (one per identity) that the first frame
-  under it (`LegHeard`) installs in the peer's place, opens a dial's link
+  under it (`LegHeard`) installs in the peer's place, unless that frame
+  arrived on another transport than the one the leg's link was set up on,
+  at a pair attributed to the held link (`proven_off`): the peer moved onto
+  the leg's session without moving address, as a deployed release that
+  wins the tie-break between its two dials does, and `hold_redial` keeps
+  it on the held link and pair with the leg's session, seated as
+  `move_answer` seats it, counted for the dampener as a swap is, then
+  `rehold`, and retires the leg's link, opens a dial's link
   when the node starts it (before its msg1 for a dial on a connection
   still to be opened), completes this node's own dials (install, restart,
   the own-dial move and the crossing's tie-break), removes peers, and

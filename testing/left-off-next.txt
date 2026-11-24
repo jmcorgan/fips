@@ -665,14 +665,19 @@ test          no-site    a_peer_moved_onto_another_link_past_the_core_breaks_the
 
 # The pending redial a msg1 off the link arms on master, the redial memory that bounds how many
 # are answered (eight in 15 s), and the swap that replaces the peering at the redial's first
-# frame, with its handling of the held peer's identity, end-to-end session and ACL. Their code
+# frame, with its handling of the held peer's identity, end-to-end session and ACL, and the move
+# of the held link onto the redial's session when a frame from another transport proves the
+# redial on the held link, with the effect list the executor runs for it. Their code
 # (src/node/handlers/redial.rs, and the redial arm of the removal) is not on next, which has no
-# pending redial and no redial memory.
+# pending redial and no redial memory. The settlement core's side of that move comes with
+# fips-core, with its switch RedialProofLeavesHeldLink and its core tests; the node's
+# legacy_dialer.rs drives master's node as a deployed release's dialer, and is not carried.
 switch        no-site    RedialChargesHeld  core/src/faults.rs
 switch        no-site    RedialDropsIdentity  core/src/faults.rs
 switch        no-site    RedialNoSessionReopen  core/src/faults.rs
 switch        no-site    RedialSkipsAcl  core/src/faults.rs
 switch        no-site    RedialSwapsUnproven  core/src/faults.rs
+switch        no-site    AdoptSkipsAnnounce  core/src/faults.rs
 test          no-site    a_byte_identical_resend_to_a_sent_unpromoted_leg_still_draws_its_stored_msg2  src/node/tests/roam_replay.rs
 test          no-site    a_capture_of_the_previous_links_setup_msg1_arms_no_redial  src/node/tests/roam_replay.rs
 test          no-site    a_frame_that_fails_to_open_under_a_pending_redial_changes_nothing_and_charges_the_held_peer_no_failure  src/node/tests/roam_replay.rs
@@ -691,6 +696,15 @@ test          no-site    a_second_redial_within_1_s_of_the_first_is_refused_and_
 test          no-site    nine_distinct_replayed_msg1s_within_15_s_draw_at_most_eight_msg2s  src/node/tests/roam_replay.rs
 test          no-site    redials_refused_for_want_of_a_session_index_fill_the_redial_memory_and_the_ninth_is_refused  src/node/tests/roam_replay.rs
 test          no-site    a_second_redial_over_tcp_on_a_pending_redials_connection_keeps_the_connection_and_is_answered  src/node/tests/tcp.rs
+test          no-site    a_legacy_winners_redial_proven_on_the_held_link_keeps_the_server_on_that_link_client_smaller  src/node/tests/settle/legacy_dialer.rs
+test          no-site    a_legacy_winners_redial_proven_on_the_held_link_keeps_the_server_on_that_link_client_larger  src/node/tests/settle/legacy_dialer.rs
+test          no-site    a_legacy_winners_redial_proven_on_the_held_link_keeps_the_server_on_that_link_client_smaller_with_multipath_on  src/node/tests/settle/legacy_dialer.rs
+test          no-site    a_legacy_winners_redial_proven_on_the_held_link_keeps_the_server_on_that_link_client_larger_with_multipath_on  src/node/tests/settle/legacy_dialer.rs
+test          no-site    a_legacy_winner_dialing_over_two_transports_keeps_one_session_for_300_s  src/node/tests/settle/legacy_dialer.rs
+test          no-site    a_redial_of_a_dialer_that_moved_to_its_second_transport_is_swapped  src/node/tests/settle/legacy_dialer.rs
+test          no-site    a_redial_of_a_dialer_that_moved_to_its_second_transport_is_swapped_with_multipath_on  src/node/tests/settle/legacy_dialer.rs
+test          no-site    an_adopted_redials_msg1_sent_again_is_refused_and_opens_no_redial  src/node/tests/settle/legacy_dialer.rs
+test          no-site    a_redial_proven_on_the_held_link_runs_the_moves_effects_that_keep_the_link_in_their_order  src/node/settle/tests/plan.rs
 
 # The stream reader's handshake sizes. next's reader states its own XX set (an exact msg1,
 # minimum msg2 and msg3) rather than master's two exact IK sizes from the FMP wire module.

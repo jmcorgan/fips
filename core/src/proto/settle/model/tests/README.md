@@ -21,8 +21,12 @@ operator's decision whose value it asserts.
   the link answered and left pending until the peer's frame, young or
   eligible; the floors and the slot that refuse one; the timeout that
   drops one; the dampener stamped at the swap of a heard peering; copies
-  and resends of an armed redial; and a redial whose peering is lost
-  first.
+  and resends of an armed redial; a redial whose peering is lost
+  first; and a redial on a second transport proven at the held link's
+  address, which moves the held link onto its session, against one proven
+  at its own address or from a third transport, which replaces the
+  peering, with the adopted msg1's resend and a redial within the
+  dampener of the adoption refused.
 - `roam.rs`: where the peer is, which follows the path bundle of its link
   (the README's "Where the peer is"): a switch of the active path, the
   bundle's follow of the path the peer is at, and a frame's roam of the

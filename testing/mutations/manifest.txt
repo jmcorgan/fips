@@ -297,6 +297,13 @@ OrphanedNoRetry	red	fips-core	proto::settle::table::tests::an_orphaned_bundles_p
 RestartNoRetry	red	fips-core	proto::settle::table::tests::a_restarted_or_replaced_peer_is_retried_in_each_of_the_three_ways
 RedialNoRetry	red	fips-core	proto::settle::table::tests::a_peer_a_redials_swap_replaces_is_retried
 RedialSwapHeard	red	fips-core	proto::settle::table::tests::a_redials_swap_installs_the_peer_unheard_and_its_frames_heard_hears_it
+RedialProofLeavesHeldLink	red	fips-core	proto::settle::table::tests::a_redial_proven_at_the_held_pair_from_another_transport_moves_the_held_link_onto_its_session
+RedialProofLeavesHeldLink	red	fips-core	proto::settle::table::tests::a_redial_proven_at_the_held_pair_from_another_transport_rebuilds_from_the_carry_with_the_legs_lease
+RedialProofLeavesHeldLink	red	fips-core	proto::settle::tests::regress::a_deployed_releases_late_second_dial_on_another_transport_leaves_one_session_smaller_dialer	node 1 left the link it held
+RedialProofLeavesHeldLink	pass	fips-core	proto::settle::tests::regress::a_deployed_releases_late_second_dial_on_another_transport_leaves_one_session_larger_dialer
+RedialProofLeavesHeldLink	pass	fips-core	proto::settle::table::tests::a_redial_proven_at_the_legs_own_pair_replaces_the_peering
+RedialProofLeavesHeldLink	pass	fips-core	proto::settle::table::tests::a_redial_proven_at_a_counting_path_of_the_held_link_on_the_legs_transport_replaces_the_peering
+RedialProofLeavesHeldLink	pass	fips-core	proto::settle::table::tests::a_redial_proven_at_a_third_transports_pair_not_of_the_held_link_replaces_the_peering
 RemovalClosesEveryPair	red	fips-core	proto::settle::table::tests::an_orphaned_peer_closes_its_bundles_paths_and_not_a_setup_pair_released_to_keep
 RemovalClosesEveryPair	red	fips-core	proto::settle::table::tests::an_operator_disconnect_closes_the_peers_pair_though_a_dial_uses_it
 CapableIgnored	red	fips-core	proto::settle::table::tests::a_capable_peers_bare_setup_pair_is_off_the_link_in_the_table

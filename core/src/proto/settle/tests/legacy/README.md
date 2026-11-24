@@ -223,6 +223,29 @@ therefore the model's, and is not shown of the deployed node: a scratch edit
 giving the model the timer removes every one of them from the runs at
 multipath off.
 
+### Against the joint party, at a deployed release's late second dial
+
+Start 26 with this model dialing a joint node (`../regress.rs`) meets two
+places where the joint world and the node differ, both outside this model:
+
+- The joint party reaps a responder's leg when its connection closes
+  (`JointParty::closed`). The node keeps it to the handshake timeout: the
+  TCP transport drops a closed connection from its pool and tells the node
+  nothing (`src/transport/tcp/mod.rs`, the receive loop's clean-up), and
+  no other site gives a responder's leg up at a close. When this model
+  wins the tie-break it moves onto its second dial's session, sends on
+  UDP and closes the TCP connection; a joint node that reads that close
+  before the frame loses the redial and splits from the model until its
+  liveness timer, where the node would have kept the leg and moved its
+  held link onto the session at the frame. The scripted test delivers the
+  frame first, as the deployed release sends it first.
+- Before the redial proven on the held link moved the held link, the core
+  replaced the peering at the proof's pair, which the joint party installs
+  at, while the node promoted the redial's leg at its own connection's
+  source. So the joint world converged where the node split; the test
+  shows the old shape by the joint node's link instead, which then was the
+  redial's.
+
 ## Rules for changing it
 
 - `master.rs` is the current node, not the FRC: where the two differ, it

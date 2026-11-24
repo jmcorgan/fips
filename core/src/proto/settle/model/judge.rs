@@ -171,7 +171,12 @@ pub enum LocalRule {
     /// A fresh same-epoch msg1 off the established link of a held peering
     /// heard from is answered into a redial beside the peering, which is left as it is (the operator's decision,
     /// 2026-11-17). The first frame under the redial's session replaces the
-    /// peering, keeping the link's connection, and stamps the dampener. One
+    /// peering, keeping the link's connection, and stamps the dampener; a
+    /// first frame that arrives on another transport than the redial's, at
+    /// an address of the held link, instead moves the held link onto the
+    /// redial's session and retires the redial's link, stamping the
+    /// dampener as a replacement does (FRC-1201 Section 5.7 makes the
+    /// candidate's link the peer's at any proof). One
     /// redial is pending at a time: a later one replaces it once it is as
     /// old as [`Params::unheard`] and is refused before. A redial is held by
     /// the dampener, not by the heard floor; its msg1 joins the record
@@ -588,11 +593,18 @@ impl Judge {
 
     /// The pending redial's session is proven by the peer's frame from
     /// `from`: it replaces the peering, or installs the peer if none is
-    /// held by now ([`LocalRule::DeferredRedial`]).
+    /// held by now ([`LocalRule::DeferredRedial`]). A frame from another
+    /// transport than the redial's, at an address of the held link, moves
+    /// the held link onto the redial's session instead ([`Judge::adopted`]).
     fn swapped(&mut self, from: Addr) -> Step {
         let Some(Redial { leg, .. }) = self.redial.take() else {
             return Step::default();
         };
+        if from.transport != leg.from.transport
+            && self.peering.as_ref().is_some_and(|p| self.onlink(p, from))
+        {
+            return self.adopted(leg);
+        }
         let held = self.peering.as_ref().map(|p| p.heard);
         if held == Some(true) {
             self.stamp = Some(self.now);
@@ -607,6 +619,31 @@ impl Judge {
         } else {
             Transition::Promote
         });
+        step.rule = Some(LocalRule::DeferredRedial);
+        step
+    }
+
+    /// The peer proved the redial `leg` on the held link: it moved onto the
+    /// redial's session without moving address. The peering keeps its
+    /// link, the link's addresses and its age, and takes the redial's
+    /// session and epoch, keeping the session's start as a move does
+    /// (FRC-1201 Section 5.6); the frame hears it. The redial's link is
+    /// retired by the close rule, and the dampener stamped, as at a
+    /// replacement ([`LocalRule::DeferredRedial`]).
+    fn adopted(&mut self, leg: Leg) -> Step {
+        let now = self.now;
+        let p = self
+            .peering
+            .as_mut()
+            .expect("an adoption keeps a held peer");
+        p.hs = leg.hs;
+        p.epoch = leg.epoch;
+        p.pending = None;
+        p.heard = true;
+        p.last = Some(now);
+        self.stamp = Some(now);
+        let mut step = change(Transition::Move);
+        step.closes = self.close(leg.link, leg.from, leg.binding);
         step.rule = Some(LocalRule::DeferredRedial);
         step
     }
