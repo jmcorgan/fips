@@ -62,12 +62,32 @@ pub(super) const UNRUN: &[(&str, &str)] = &[
     ("crossing-mixed-larger-off", MIXED),
     ("crossing-mixed-smaller-on", MIXED),
     ("crossing-mixed-larger-on", MIXED),
+    ("redial-transport-smaller-off", REDIAL_MIXED),
+    ("redial-transport-larger-off", REDIAL_MIXED),
+    ("redial-transport-smaller-on", REDIAL_MIXED),
+    ("redial-transport-larger-on", REDIAL_MIXED),
 ];
 
 /// Why the crossing over two transports is not run.
 const MIXED: &str = "its dials go over UDP and TCP between the same two nodes, and a world's \
                      nodes run one medium: only a loopback world takes a second transport, and \
                      that one is a loopback one";
+
+/// Why the redial over a second transport is not run, and where real nodes
+/// hold its mechanism instead.
+const REDIAL_MIXED: &str = "its second dial goes over TCP to a pair settled over UDP, and a \
+                            world's nodes run one medium: only a loopback world takes a second \
+                            transport, and that one is a loopback one. Real nodes hold the \
+                            mechanism elsewhere: `roam_redial.rs` answers a redial of a heard \
+                            peering from a new address and promotes it at its first frame \
+                            (`a_redial_from_a_new_address_on_a_young_link_is_answered_and_\
+                            settles_before_the_responder_would_reap_*`), `second_path_msg1.rs` \
+                            answers a msg1 on another transport as a redial (`a_second_path_\
+                            msg1_on_an_aged_session_is_answered_as_a_redial_and_a_genuine_\
+                            rekey_on_the_link_then_completes`), and `crossed_dial.rs` moves a \
+                            crossed dial won on another transport onto that transport \
+                            (`a_crossed_dial_won_on_another_transport_moves_the_link_to_the_\
+                            msg2s_transport_and_address`)";
 
 /// Why `script` is not run here: it is listed in [`UNRUN`], or it runs on
 /// a transport this build does not have.

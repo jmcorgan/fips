@@ -160,6 +160,21 @@ files run off, which is what they test.
   alone dialing and the smaller dropping and redialing, then has the
   larger node dial again: with its link turned, that dial is decided by
   the node address ordering, and the pair stays on the smaller node's dial.
+- `rekey_cross.rs`: the core's start 9 scripted by hand on two loopback
+  nodes with two transports each, outside the explorer's world: a pair
+  settled on one transport, one node's rekey, crossed dials on the second
+  transport, the packets read in the start's order (and a variant that
+  loses the rekeying node's dial msg1 on the second transport), then the
+  explorer's leaf heal run on to 60 s. Each run prints a record of the
+  packets sent, the peer changes and their causes, and each node's peer,
+  pending rekey session and live links with their index entries at each
+  checkpoint; each test judges the pair at the explorer's leaf, at 31 s
+  and at 60 s, and asserts it coherent at all three. Every test here is a
+  known defect, ignored and run by the known-defect lane: a pending redial
+  leg taking the held link's index entry (smaller order), the crossed
+  redials splitting the pair until link-dead (larger order), and a resent
+  dial msg1 answered as a rekey the peer cannot adopt (larger order, the
+  msg1 lost). The explorer's start 9 pins each where it finds it.
 - `restart.rs`: a restarted node that reads a late rekey msg1 of its
   peer's previous run, past the unheard floor, after the peer has moved
   onto its new run: a split accepted as behaviour in every placement of the

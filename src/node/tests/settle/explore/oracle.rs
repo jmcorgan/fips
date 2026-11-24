@@ -15,9 +15,9 @@ use super::super::super::link_index_audit;
 use super::super::super::spanning_tree::cleanup_nodes;
 use super::super::audit::{Breach, audit};
 use super::super::settled;
-use super::explore::{Job, heal, jobs, named, parallel, paths, walk};
 #[cfg(unix)]
-use super::explore::{Path, Vary};
+use super::explore::Vary;
+use super::explore::{Job, Path, heal, jobs, named, parallel, paths, walk};
 #[cfg(unix)]
 use super::script::{Kind, Step};
 use super::starts::{Clause, Order, PINS, Reach, Start, starts};
@@ -82,8 +82,8 @@ pub(super) async fn judge(world: &mut World, start: &Start, order: Order) -> Vec
 }
 
 /// Every path of `start` in `order`, with multipath set as `on`: what
-/// breaks at each leaf, but for the clauses the start names as pinned.
-/// `at` names the path being walked.
+/// breaks at each leaf, but for the clauses the start pins in that order on
+/// that path. `at` names the path being walked.
 async fn walked((start, order, on): Job, at: Arc<Mutex<String>>) -> Vec<String> {
     let mut bad = Vec::new();
     for path in paths(&start) {
@@ -95,7 +95,7 @@ async fn walked((start, order, on): Job, at: Arc<Mutex<String>>) -> Vec<String> 
         let found = judge(&mut world, &start, order).await;
         cleanup_nodes(&mut world.nodes).await;
         for f in found {
-            if !start.pinned.contains(&f.clause) {
+            if !start.excuses(order, path, f.clause) {
                 bad.push(format!(
                     "{name}: {:?} at node {:?}: {}",
                     f.clause, f.node, f.what
@@ -108,7 +108,7 @@ async fn walked((start, order, on): Job, at: Arc<Mutex<String>>) -> Vec<String> 
 
 /// Every path of every start on `medium`, in both orders, with multipath
 /// set as `on`, keeps every property at its leaf, but for the clauses a
-/// start names as pinned. Each start and order runs on a thread of its own,
+/// start pins in that order on that path. Each start and order runs on a thread of its own,
 /// side by side (`parallel`).
 fn properties(medium: Medium, on: bool) {
     let bad = parallel(jobs(medium, &[on]), walked);
@@ -278,44 +278,48 @@ fn a_crossing_whose_decrypt_workers_lag_heals_to_one_session_on_each_dropped_msg
     lagged(true);
 }
 
-/// Each pinned defect the map gives a start is found there: the start's
-/// scripted path, in the pin's order and at its setting, healed and checked,
+/// Each pinned defect the map gives a start is found there: the pin's path
+/// of the start, in the pin's order and at its setting, healed and checked,
 /// breaks the pin's clause at the pin's node.
-/// Each start, order and setting runs once for all the pins it holds.
+/// Each start, order, path and setting runs once for all the pins it holds.
 #[tokio::test]
 async fn the_explorer_finds_each_pinned_defect_at_its_oracle() {
     let all = starts();
-    let mut runs: Vec<(&str, Order, bool)> = Vec::new();
+    let mut runs: Vec<(&str, Order, Path, bool)> = Vec::new();
     for (_, on, reach) in PINS {
-        if let Reach::Start { name, order, .. } = *reach
+        if let Reach::Start {
+            name, order, path, ..
+        } = *reach
             && all.iter().any(|s| s.name == name)
-            && !runs.contains(&(name, order, *on))
+            && !runs.contains(&(name, order, path, *on))
         {
-            runs.push((name, order, *on));
+            runs.push((name, order, path, *on));
         }
     }
     let mut missed = Vec::new();
-    for (name, order, on) in runs {
+    for (name, order, path, on) in runs {
         let start = all
             .iter()
             .find(|s| s.name == name)
             .expect("precondition: the start is run on this build");
-        let mut world = walk(start, order, on, None)
+        let mut world = walk(start, order, on, path)
             .await
-            .expect("precondition: the scripted path is a path");
+            .expect("precondition: the pin's path is a path");
         let found = judge(&mut world, start, order).await;
         cleanup_nodes(&mut world.nodes).await;
+        let walked = named(start, order, on, path);
         for (pin, pinned_on, reach) in PINS {
             let Reach::Start {
                 name: at,
                 order: in_order,
+                path: on_path,
                 clause,
                 node,
             } = *reach
             else {
                 continue;
             };
-            if at != name || in_order != order || *pinned_on != on {
+            if at != name || in_order != order || on_path != path || *pinned_on != on {
                 continue;
             }
             if !found
@@ -323,7 +327,7 @@ async fn the_explorer_finds_each_pinned_defect_at_its_oracle() {
                 .any(|f| f.clause == clause && node.is_none_or(|n| f.node == Some(n)))
             {
                 missed.push(format!(
-                    "{pin}: no {clause:?} at node {node:?} on {name} ({order:?}, multipath on {on}); found {found:#?}"
+                    "{pin}: no {clause:?} at node {node:?} on {walked}; found {found:#?}"
                 ));
             }
         }

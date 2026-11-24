@@ -10,6 +10,7 @@
 //! [`Order::Larger`] runs it with nodes 0 and 1 exchanged, so the larger
 //! node does what the script gives node 0, as the core's `flipped` does.
 
+use super::explore::{Path, Vary};
 use super::script::{Kind, Step};
 use super::world::Medium;
 #[cfg(unix)]
@@ -135,16 +136,28 @@ pub(super) struct Start {
     /// class is held, so a script of `n` handshake steps has between
     /// `1 + 2n` and `1 + 3n`.
     pub(super) reach: usize,
-    /// The clauses not asserted on any of the start's paths, because a
-    /// pinned defect, or a split accepted as behaviour, breaks them on its
-    /// scripted path. The map names a defect's pin, and
-    /// `the_explorer_finds_each_pinned_defect_at_its_oracle` asserts it
-    /// there; an accepted split has no pin, and the node tests that assert
-    /// it end at link-dead and a redial name it instead.
-    pub(super) pinned: &'static [Clause],
+    /// The clauses not asserted where a pinned defect, or a split accepted
+    /// as behaviour, breaks them: each in one order, on one path, or on
+    /// every path of that order where the pin's path is `None`. The map
+    /// names a defect's pin, and
+    /// `the_explorer_finds_each_pinned_defect_at_its_oracle` asserts it on
+    /// the pin's own path; an accepted split has no pin, and the node tests
+    /// that assert it end at link-dead and a redial name it instead.
+    pub(super) pinned: &'static [Pin],
 }
 
+/// A clause a start does not assert: in the order given, on the path
+/// given, or on every path of that order where the path is `None`.
+pub(super) type Pin = (Order, Path, Clause);
+
 impl Start {
+    /// Whether the start does not assert `clause` on `path` in `order`.
+    pub(super) fn excuses(&self, order: Order, path: Path, clause: Clause) -> bool {
+        self.pinned
+            .iter()
+            .any(|&(o, p, c)| o == order && c == clause && (p.is_none() || p == path))
+    }
+
     /// The dials the start makes, in the world's indices for `order`: each
     /// dialer's (node, peer, transport). A leaf's heal redials each one
     /// whose dialer holds neither the peer nor a dial in progress.
@@ -343,7 +356,14 @@ pub(super) fn starts() -> Vec<Start> {
         // redial end (`crossing.rs`, the tests named `..._with_its_msg2_first_
         // ..._after_link_dead_and_a_redial_...`).
         Start {
-            pinned: &[Clause::Settled, Clause::Split, Clause::Quiet],
+            pinned: &[
+                (Order::Smaller, None, Clause::Settled),
+                (Order::Smaller, None, Clause::Split),
+                (Order::Smaller, None, Clause::Quiet),
+                (Order::Larger, None, Clause::Settled),
+                (Order::Larger, None, Clause::Split),
+                (Order::Larger, None, Clause::Quiet),
+            ],
             ..s(
                 6,
                 "late second dial, second msg2 first",
@@ -361,15 +381,33 @@ pub(super) fn starts() -> Vec<Start> {
             RESTARTED,
             5,
         ),
+        // Eleven paths: at step 3 node 0 holds two msg2s, its rekey's answer
+        // and node 1's answer to its transport 1 dial, which node 1 answers
+        // as a redial of the peering it holds, so a swap applies there too.
+        // Three known defects of the node break it, each pinned where the
+        // explorer finds it (`PINS`, `../rekey_cross.rs`): in the smaller
+        // order, on every path, node 0's pending redial leg takes its held
+        // link's index entry (`MapsAgree`); in the larger order, on every
+        // path, the crossed redials split the pair until link-dead (`Split`,
+        // `Settled`, `Quiet`); and in the larger order with node 0's dial
+        // msg1 lost at step 1, the resent msg1 is answered as a rekey the
+        // peer cannot adopt (`Unadoptable`).
         Start {
             transports: 2,
+            pinned: &[
+                (Order::Smaller, None, Clause::MapsAgree),
+                (Order::Larger, None, Clause::Split),
+                (Order::Larger, None, Clause::Settled),
+                (Order::Larger, None, Clause::Quiet),
+                (Order::Larger, Some((1, Vary::Drop)), Clause::Unadoptable),
+            ],
             ..s(
                 9,
                 "crossing during a rekey",
                 Medium::Loopback,
                 REKEYING,
                 CROSSING_REKEY,
-                10,
+                11,
             )
         },
         Start {
@@ -454,19 +492,13 @@ pub(super) const NOT_RUN: &[(u8, &str)] = &[
 /// Where the explorer finds a pinned defect of the node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Reach {
-    /// On the scripted path of the start named, in the order given: the
-    /// clause given breaks, at the node given (in the world's indices) or at
-    /// any node.
-    #[cfg_attr(
-        feature = "explorers",
-        expect(
-            dead_code,
-            reason = "no pin names a start since the start-6 split became accepted behaviour; the map and the oracle still read the variant for the next pin a start reaches"
-        )
-    )]
+    /// On the path given of the start named (`None` for its scripted
+    /// path), in the order given: the clause given breaks, at the node given
+    /// (in the world's indices) or at any node.
     Start {
         name: &'static str,
         order: Order,
+        path: Path,
         clause: Clause,
         node: Option<usize>,
     },
@@ -479,8 +511,9 @@ const AGED: &str = "the dial is to a second address of the peer on the link's ow
 
 /// Every `fips-mesh` known-defect line of `testing/ignored-tests.txt`, by
 /// the test's path and its multipath setting, and where the explorer finds
-/// its defect. Written before the explorer's first run, so a miss cannot
-/// be reclassified afterwards.
+/// its defect. The first entries were written before the explorer's first
+/// run, so a miss cannot be reclassified afterwards; later ones name where
+/// the explorer found the defect their test reproduces.
 pub(super) const PINS: &[(&str, bool, Reach)] = &[
     (
         "transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full",
@@ -509,4 +542,75 @@ pub(super) const PINS: &[(&str, bool, Reach)] = &[
         true,
         Reach::None(AGED),
     ),
+    // Added with their scripted node tests, which reproduce each defect on
+    // real nodes outside the explorer's world.
+    (
+        "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session",
+        false,
+        Reach::Start {
+            name: REKEY_CROSS,
+            order: Order::Smaller,
+            path: None,
+            clause: Clause::MapsAgree,
+            node: None,
+        },
+    ),
+    (
+        "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_with_multipath_on",
+        true,
+        Reach::Start {
+            name: REKEY_CROSS,
+            order: Order::Smaller,
+            path: None,
+            clause: Clause::MapsAgree,
+            node: None,
+        },
+    ),
+    (
+        "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first",
+        false,
+        Reach::Start {
+            name: REKEY_CROSS,
+            order: Order::Larger,
+            path: None,
+            clause: Clause::Split,
+            node: None,
+        },
+    ),
+    (
+        "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first_with_multipath_on",
+        true,
+        Reach::Start {
+            name: REKEY_CROSS,
+            order: Order::Larger,
+            path: None,
+            clause: Clause::Split,
+            node: None,
+        },
+    ),
+    (
+        "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first",
+        false,
+        Reach::Start {
+            name: REKEY_CROSS,
+            order: Order::Larger,
+            path: Some((1, Vary::Drop)),
+            clause: Clause::Unadoptable,
+            node: None,
+        },
+    ),
+    (
+        "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first_with_multipath_on",
+        true,
+        Reach::Start {
+            name: REKEY_CROSS,
+            order: Order::Larger,
+            path: Some((1, Vary::Drop)),
+            clause: Clause::Unadoptable,
+            node: None,
+        },
+    ),
 ];
+
+/// Start 9's name, as the map names it.
+const REKEY_CROSS: &str = "crossing during a rekey";

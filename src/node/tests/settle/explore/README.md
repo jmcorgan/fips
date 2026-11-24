@@ -78,8 +78,10 @@ helper that seeds a handshake machine by hand.
     and 1, as the core's `flipped` does.
   - `PINS`: every `fips-mesh` known-defect line of
     `testing/ignored-tests.txt`, at its setting, and where the explorer
-    finds its defect: a start, an order and the clause that breaks, or no
-    start, with the reason. It was written before the explorer first ran.
+    finds its defect: a start, an order, a path (the scripted one or one
+    variation) and the clause that breaks, or no start, with the reason. The
+    first entries were written before the explorer first ran; later ones name
+    where the explorer found the defect their test reproduces.
   - `NOT_RUN`: the core's start numbers no real pair runs, with reasons.
   - `Start.workers`: the decrypt-worker pool each node runs, if any: none,
     the production worker, or a worker that sleeps a set time before each
@@ -109,7 +111,7 @@ helper that seeds a handshake machine by hand.
 - `oracle.rs`: what is checked at each leaf (`judge`), and the explorer's
   tests over the starts: every path of every start keeps its properties, per
   transport and setting; each pinned defect the map gives a start is found
-  there (none has one at present). And the crossing with a
+  there (start 9's three). And the crossing with a
   decrypt-worker pool (`pooled`): every path heals to one session per pair
   with every node's current session held by its workers, the session a
   crossing moves its peer onto among them; and the same on each path of the
@@ -190,7 +192,15 @@ steps, no swap applies), 11 for starts 5 and 6 (two swaps apply), 10 for
 starts 9 and 11 (one), and 5 for start 8 (two handshake steps), the same in
 either order and at either setting; each start states its count, and the
 reach test reds on any other. That is 166 paths per setting on a build with
-the BLE transport, 148 without. Every start and order runs on a thread of
+the BLE transport, 148 without.
+
+Start 9 has walked 11 paths in either order and at either setting since the
+node began answering a fresh msg1 from a held, heard peer off its link as a
+redial (2026-11-18): node 1 answers node 0's dial on the second transport
+with a msg2 from a pending redial leg, where it had refused that msg1, so at
+step 3 node 0 holds two msg2s, its rekey's answer and the redial's, and a
+swap applies there as well as at step 0. That makes 168 paths per setting
+with the BLE transport and 150 without. Every start and order runs on a thread of
 its own, each with its own runtime, and so its own test clock: a loopback
 start takes 3 to 11 s, a TCP or BLE crossing 23 s, and the whole module 23 s
 of wall time, inside the default lane's 120 s, in nextest's `node-synthetic`
@@ -246,13 +256,27 @@ Then, at the leaf:
   walking, at its own `defect:` assertion.
 
 A start names the clauses a pinned defect, or a split accepted as
-behaviour, breaks on its scripted path (`pinned`): start 6's split, which
-the leaf's heal does not mend. They are not asserted on any of that start's
-paths. A defect's pin is named in the map, and the finder asserts it on the
-scripted path; start 6's split is accepted behaviour with no pin, and the
-node tests in `../crossing.rs` named
+behaviour, breaks (`pinned`), each in one order and on one path, or on every
+path of that order: start 6's split, in both orders on every path, which
+the leaf's heal does not mend. A pinned clause is not asserted where its pin
+names, and is asserted everywhere else: a pin in one order leaves the other
+order checked, and a pin on one variation leaves every other path checked.
+A defect's pin is named in the map with its start, order and path, and the
+finder walks that path and asserts the clause there; start 6's split is
+accepted behaviour with no pin, and the node tests in `../crossing.rs` named
 `..._with_its_msg2_first_..._after_link_dead_and_a_redial_...` assert it
 and its end at link-dead and a redial.
+
+Start 9 carries three known defects of the node, each reproduced by a
+scripted node test in `../rekey_cross.rs` that is ignored as a known defect
+and mapped in `PINS`: in the smaller order, on every path, a pending redial
+leg takes its held link's index entry (`MapsAgree`); in the larger order, on
+every path, the crossed redials split the pair until link-dead (`Split`,
+`Settled`, `Quiet`); and in the larger order on the path that drops step 1's
+msg1, node 0's dial msg1, the resent msg1 is answered as a rekey the peer
+cannot adopt (`Unadoptable`). Each is pinned in that order and on that path
+only, and the finder walks the scripted path for the first two and the drop
+at step 1 for the third.
 
 Nothing here holds the node against the settlement core's reference model
 (`fips-core`, `proto::settle::model`): the test that held each peer change
@@ -296,8 +320,11 @@ start 6's late second dials, start 8's restart, start 18's BLE dials lost
 to the first dial's deadline (on only), an own rekey, the peer's rekey and a
 rekey after a TCP crossing, each in both address orders. Not run:
 `crossing-mixed`, start 2's crossing over UDP and TCP (and start 15's,
-the same schedule), since a world's nodes share one medium; and every BLE
-script on a build without the BLE transport.
+the same schedule), and `redial-transport`, a second dial over TCP to a
+pair settled over UDP and answered as a redial, since a world's nodes
+share one medium (real nodes hold the redial in `roam_redial.rs`,
+`second_path_msg1.rs` and `crossed_dial.rs`, as `UNRUN`'s reason names);
+and every BLE script on a build without the BLE transport.
 
 What the trace cannot show: a mark says whose dial an end's session came
 from, own or the peer's, not which of its own dials. So a dialer left on

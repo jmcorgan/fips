@@ -422,8 +422,9 @@ fn each_walk_runs_on_a_thread_named_for_the_test_that_started_it() {
 /// Every `fips-mesh` known-defect line of the inventory is in the map once,
 /// at its setting, and the map holds no other; each start it names runs on
 /// this build or is the BLE start of a build with no BLE transport, and
-/// names a node its world holds; every named start number of the core's,
-/// 1 to 14, is run here or listed as not run, with a reason.
+/// names a node its world holds and a path the start has; every path a
+/// start pins a clause on is one of its paths; every named start number of
+/// the core's, 1 to 14, is run here or listed as not run, with a reason.
 #[test]
 fn every_pinned_defect_of_the_node_is_mapped_to_a_start_or_to_none() {
     let inventory = include_str!("../../../../../testing/ignored-tests.txt");
@@ -452,9 +453,13 @@ fn every_pinned_defect_of_the_node_is_mapped_to_a_start_or_to_none() {
             Reach::Start {
                 name: start,
                 order,
+                path,
                 clause,
                 node,
             } => match all.iter().find(|s| s.name == *start) {
+                Some(s) if path.is_some() && !paths(s).contains(path) => {
+                    bad.push(format!("{name}: {start} has no path {path:?}"));
+                }
                 Some(s) if node.is_none_or(|n| n < s.nodes) => {
                     let bare = name.trim_end_matches("_with_multipath_on");
                     let larger = bare.ends_with("larger_first") || bare.ends_with("larger_dialer");
@@ -471,6 +476,16 @@ fn every_pinned_defect_of_the_node_is_mapped_to_a_start_or_to_none() {
             },
             Reach::None("") => bad.push(format!("{name}: no reason")),
             Reach::None(_) => {}
+        }
+    }
+    for s in &all {
+        for (order, path, clause) in s.pinned {
+            if path.is_some() && !paths(s).contains(path) {
+                bad.push(format!(
+                    "start {} pins {clause:?} ({order:?}) on a path it does not have: {path:?}",
+                    s.number
+                ));
+            }
         }
     }
     for number in 1..=14u8 {

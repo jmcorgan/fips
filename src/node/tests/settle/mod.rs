@@ -27,6 +27,7 @@ mod links;
 mod live;
 pub(super) mod readings;
 mod redialed;
+mod rekey_cross;
 mod restart;
 mod table;
 
