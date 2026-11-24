@@ -14,7 +14,6 @@ use nostr::prelude::{
     Timestamp,
 };
 use nostr_sdk::client::ClientNotification;
-use tokio::sync::broadcast;
 
 use super::super::ADVERT_KIND;
 use super::super::machine::NodeSigner;
@@ -73,12 +72,13 @@ fn advert_event() -> Event {
 }
 
 /// Deliver our peer's answer to `first`, then `flood` advertisements, through
-/// the runtime's relay client before the notify loop reads any of them, as
-/// when a burst arrives while the loop is busy. `pool` stands in for the relay
-/// pool's notification channel, `POOL_CHANNEL` deep as the pool makes it. Then
-/// start the loop, wait for that answer, deliver a second answer, to `second`,
-/// and report whether each answer reached its waiting traversal, and how many
-/// notifications were waiting unread on `pool` when the loop started.
+/// the runtime's relay client before the signal task reads any of them, as
+/// when a burst arrives while it is busy. The advertisements go to the
+/// runtime's stand-in for the relay pool's notification channel,
+/// `POOL_CHANNEL` deep as the pool makes it. Then start the signal task, wait
+/// for that answer, deliver a second answer, to `second`, and report whether
+/// each answer reached its waiting traversal, and how many notifications
+/// were waiting unread on the stand-in when the task started.
 async fn answers_handed_over_after_a_flood(flood: usize) -> (bool, bool, usize) {
     let runtime = Arc::new(NostrRendezvous::new_for_test());
     let our_npub = runtime.npub_for_test().to_string();
@@ -86,30 +86,22 @@ async fn answers_handed_over_after_a_flood(flood: usize) -> (bool, bool, usize) 
     let first = runtime.await_answer_for_test("first").await;
     let second = runtime.await_answer_for_test("second").await;
 
-    let (pool, rx) = broadcast::channel(POOL_CHANNEL);
+    let rx = runtime.pool_receiver_for_test();
     runtime
-        .deliver_for_test(
-            &pool,
-            delivered(answer_wrap(&peer, &our_npub, "first").await),
-        )
+        .deliver_for_test(delivered(answer_wrap(&peer, &our_npub, "first").await))
         .await;
     let advert = advert_event();
     for _ in 0..flood {
-        runtime
-            .deliver_for_test(&pool, delivered(advert.clone()))
-            .await;
+        runtime.deliver_for_test(delivered(advert.clone())).await;
     }
     let backlog = rx.len();
-    let notify = runtime.clone().spawn_notify_loop_for_test(rx);
+    let notify = runtime.spawn_signals_for_test();
     let first = tokio::time::timeout(HANDOFF_WAIT, first).await;
 
-    // Delivered only once the loop has read the queue, so it overwrites
+    // Delivered only once the task has read the queue, so it overwrites
     // nothing.
     runtime
-        .deliver_for_test(
-            &pool,
-            delivered(answer_wrap(&peer, &our_npub, "second").await),
-        )
+        .deliver_for_test(delivered(answer_wrap(&peer, &our_npub, "second").await))
         .await;
     let second = tokio::time::timeout(HANDOFF_WAIT, second).await;
     notify.abort();

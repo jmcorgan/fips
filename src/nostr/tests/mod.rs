@@ -21,8 +21,7 @@ use super::machine::punch::plan::{
 use super::machine::tests::TestInstant;
 use super::machine::traversal::election::suppress_responder_for_own_initiator;
 use super::runtime::{
-    INBOX_LOOKBACK, NostrRendezvous, adversarial_offer_reject, inbox_relays, short_id,
-    signal_relays,
+    NostrRendezvous, adversarial_offer_reject, inbox_relays, short_id, signal_relays,
 };
 use super::signal::{
     FreshnessOutcome, build_signal_event, create_traversal_answer, create_traversal_offer,
@@ -2327,79 +2326,27 @@ fn live_handle() -> tokio::task::JoinHandle<()> {
     tokio::spawn(std::future::pending::<()>())
 }
 
-/// The regression case: `connect_task` returns by design (`Client::connect()`
-/// only kicks off per-relay connection tasks), and `relay_startup_task` is
-/// unwatched because a failed inbox relay list publish is not a loss of
-/// liveness, so a node with both handles finished must still report live.
 #[tokio::test]
-async fn nostr_liveness_ignores_the_connect_and_relay_startup_tasks() {
+async fn nostr_liveness_fires_when_the_pump_dies() {
     let runtime = NostrRendezvous::new_for_test();
     runtime
-        .install_tasks_for_test(
-            finished_handle().await,
-            finished_handle().await,
-            live_handle(),
-            live_handle(),
-            live_handle(),
-        )
+        .install_task_handles_for_test(finished_handle().await, live_handle())
         .await;
     assert!(
-        !runtime.is_finished(),
-        "a node whose connect/relay-startup tasks have returned normally is healthy"
+        runtime.is_finished(),
+        "a dead pump means no advert is ever received or published again"
     );
 }
 
 #[tokio::test]
-async fn nostr_liveness_fires_when_the_notify_loop_dies() {
+async fn nostr_liveness_fires_when_the_signal_task_dies() {
     let runtime = NostrRendezvous::new_for_test();
     runtime
-        .install_tasks_for_test(
-            live_handle(),
-            live_handle(),
-            finished_handle().await,
-            live_handle(),
-            live_handle(),
-        )
+        .install_task_handles_for_test(live_handle(), finished_handle().await)
         .await;
     assert!(
         runtime.is_finished(),
-        "a dead inbound notify loop means no advert or signal is ever received again"
-    );
-}
-
-#[tokio::test]
-async fn nostr_liveness_fires_when_the_publish_loop_dies() {
-    let runtime = NostrRendezvous::new_for_test();
-    runtime
-        .install_tasks_for_test(
-            live_handle(),
-            live_handle(),
-            live_handle(),
-            finished_handle().await,
-            live_handle(),
-        )
-        .await;
-    assert!(
-        runtime.is_finished(),
-        "a dead publish loop means this node stops being discoverable"
-    );
-}
-
-#[tokio::test]
-async fn nostr_liveness_fires_when_the_advertise_loop_dies() {
-    let runtime = NostrRendezvous::new_for_test();
-    runtime
-        .install_tasks_for_test(
-            live_handle(),
-            live_handle(),
-            live_handle(),
-            live_handle(),
-            finished_handle().await,
-        )
-        .await;
-    assert!(
-        runtime.is_finished(),
-        "a dead advertise ticker means the advert is never refreshed"
+        "a dead signal task means no traversal signal is ever received again"
     );
 }
 
@@ -2408,6 +2355,14 @@ async fn nostr_liveness_fires_when_the_advertise_loop_dies() {
 #[tokio::test]
 async fn nostr_liveness_reports_finished_once_the_handles_are_taken() {
     let runtime = NostrRendezvous::new_for_test();
+    runtime
+        .install_task_handles_for_test(live_handle(), live_handle())
+        .await;
+    assert!(
+        !runtime.is_finished(),
+        "control: two live tasks read as live"
+    );
+    runtime.take_task_handles_for_test().await;
     assert!(
         runtime.is_finished(),
         "no installed handles (post-shutdown) reads as finished"
@@ -2445,7 +2400,7 @@ async fn a_refetch_that_finds_a_newer_advert_refreshes_the_cached_entry() {
     );
     let peer_npub = peer.public_key().to_bech32().unwrap();
     let now_secs = now_ms() / 1_000;
-    let mut runtime = NostrRendezvous::new_for_test();
+    let runtime = NostrRendezvous::new_for_test();
     let config = crate::config::NostrRendezvousConfig::default();
     let body = OverlayAdvert {
         identifier: ADVERT_IDENTIFIER.to_string(),
@@ -2495,6 +2450,55 @@ async fn a_refetch_that_finds_a_newer_advert_refreshes_the_cached_entry() {
         Some(now_secs),
         "the newer advert did not replace the cached one"
     );
+}
+
+/// The cache read path intake uses parses a peer's npub as it always has,
+/// which differs from every other advert entry point: it finds an advert
+/// from the lower-case npub and from the key in hex, and not from the npub
+/// in upper case, where the dial path finds it from either case and refuses
+/// hex as not a NIP-19 npub.
+#[tokio::test]
+async fn cached_endpoints_parses_the_npub_as_the_cache_read_did() {
+    use nostr::nips::nip19::ToBech32;
+    let runtime = NostrRendezvous::new_for_test();
+    let keys = nostr::key::Keys::generate();
+    let npub = keys.public_key().to_bech32().unwrap();
+    let hex = keys.public_key().to_hex();
+    let endpoint = OverlayEndpointAdvert {
+        transport: OverlayTransportKind::Udp,
+        addr: "203.0.113.7:2121".to_string(),
+    };
+    let advert =
+        NostrRendezvous::cached_advert_for_test(npub.clone(), endpoint.clone(), now_ms() / 1_000);
+    runtime.insert_advert_for_test(npub.clone(), advert).await;
+
+    assert_eq!(
+        runtime.cached_endpoints(&npub).await,
+        Some(vec![endpoint.clone()])
+    );
+    assert_eq!(
+        runtime.cached_endpoints(&hex).await,
+        Some(vec![endpoint.clone()]),
+        "the cache read takes the key in hex"
+    );
+    assert_eq!(
+        runtime.cached_endpoints(&npub.to_uppercase()).await,
+        None,
+        "the cache read does not take an upper-case npub"
+    );
+
+    assert!(matches!(
+        runtime.advert_endpoints_for_peer(&npub).await,
+        Ok(found) if found == vec![endpoint.clone()]
+    ));
+    assert!(matches!(
+        runtime.advert_endpoints_for_peer(&npub.to_uppercase()).await,
+        Ok(found) if found == vec![endpoint.clone()]
+    ));
+    assert!(matches!(
+        runtime.advert_endpoints_for_peer(&hex).await,
+        Err(BootstrapError::InvalidPeerNpub { .. })
+    ));
 }
 
 /// The advert cache holds adverts under the canonical lower-case npub, and
@@ -2558,6 +2562,39 @@ fn offer_between(session: &str, from: &str, to: &str) -> super::TraversalOffer {
         Vec::new(),
         None,
     )
+}
+
+/// A NIP-42 authenticator that answers a relay's challenge with an
+/// authentication event signed directly by `signer`, created now, with fresh
+/// randomness for its signature: the node's answer, without the pump.
+#[derive(Debug)]
+pub(super) struct SignerAuthenticator {
+    pub(super) signer: std::sync::Arc<NodeSigner>,
+}
+
+impl nostr_sdk::authenticator::Authenticator for SignerAuthenticator {
+    fn make_auth_event<'a>(
+        &'a self,
+        relay_url: &'a nostr::types::RelayUrl,
+        challenge: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<nostr::event::Event, nostr_sdk::error::Error>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            super::machine::event::auth::auth_event(
+                &self.signer,
+                relay_url,
+                challenge,
+                now_ms(),
+                super::relay::aux(),
+            )
+            .map_err(|e| nostr_sdk::error::Error::other(e.to_string()))
+        })
+    }
 }
 
 /// A relay URL the test runtime adds to its pool without connecting. A send
@@ -2910,7 +2947,10 @@ mod advert_lapse {
     /// from this node's own `advert_refresh_secs`.
     #[test]
     fn the_runtime_takes_the_grace_from_the_advert_refresh_interval() {
-        let m = super::super::runtime::advert_cache(
+        let m = super::super::machine::rendezvous::advert_cache::<
+            crate::time::HostInstant,
+            crate::identity::OsEntropy,
+        >(
             "npub1self".to_string(),
             &Params::from(&nostr_config_with_refresh(1_200)),
         );
@@ -2937,90 +2977,6 @@ fn inbox_list_with_tags(tags: Vec<Tag>) -> nostr::event::Event {
 /// `url` as the relay pool normalizes it.
 fn normalized(url: &str) -> String {
     RelayUrl::parse(url).unwrap().to_string()
-}
-
-/// The inbox relay list this node publishes must be readable by the lookup
-/// every other node runs on it, or a peer's list never takes part in choosing
-/// the relays a traversal signal goes to.
-#[tokio::test]
-async fn the_inbox_relay_list_this_node_publishes_is_read_back_as_its_dm_relays() {
-    let relays = vec![
-        UNCONNECTED_RELAY.to_string(),
-        "ws://127.0.0.1:2".to_string(),
-    ];
-    let runtime = NostrRendezvous::new_for_test_with_config(crate::config::NostrRendezvousConfig {
-        dm_relays: relays.clone(),
-        ..Default::default()
-    });
-    for relay in &relays {
-        runtime.add_unconnected_relay_for_test(relay).await;
-    }
-
-    runtime
-        .publish_inbox_relays_for_test()
-        .await
-        .expect("a send to pooled relays succeeds");
-    let sent = runtime.inbox_sent_for_test();
-    assert_eq!(sent.len(), 1, "one list should have been published");
-    let event = &sent[0].1;
-    assert_eq!(event.kind, Kind::InboxRelays);
-    assert_eq!(event.tags.len(), 2, "the list should name both DM relays");
-
-    let expected = relays.iter().map(|r| normalized(r)).collect::<Vec<_>>();
-    assert_eq!(inbox_relays(event), expected);
-}
-
-/// Peers look up inbox relay lists no older than `INBOX_LOOKBACK`, so a node
-/// that publishes its list only at startup drops out of their lookup once it
-/// has run that long. No gap between publishes may reach the window.
-#[tokio::test(start_paused = true)]
-async fn the_inbox_relay_list_is_republished_before_it_ages_out_of_the_lookup_window() {
-    use std::time::Duration;
-    let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test_with_config(
-        crate::config::NostrRendezvousConfig {
-            dm_relays: vec![UNCONNECTED_RELAY.to_string()],
-            advert_relays: vec![UNCONNECTED_RELAY.to_string()],
-            ..Default::default()
-        },
-    ));
-    runtime
-        .add_unconnected_relay_for_test(UNCONNECTED_RELAY)
-        .await;
-    let start = tokio::time::Instant::now();
-    let task = runtime.clone().spawn_relay_startup_loop_for_test();
-
-    tokio::time::sleep(Duration::from_secs(120)).await;
-    assert_eq!(
-        runtime.inbox_sent_for_test().len(),
-        1,
-        "setup: the first subscribe succeeds, so startup publishes exactly once"
-    );
-
-    for _ in 0..31 {
-        tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
-    }
-    let now = tokio::time::Instant::now();
-    let sent = runtime.inbox_sent_for_test();
-    task.abort();
-
-    assert!(sent.len() >= 2, "the list should have been published again");
-    let mut last = start;
-    for (at, _) in &sent {
-        assert!(
-            at.duration_since(last) < INBOX_LOOKBACK,
-            "a gap between publishes reached the lookup window"
-        );
-        last = *at;
-    }
-    assert!(
-        now.duration_since(last) < INBOX_LOOKBACK,
-        "the newest list has aged out of the lookup window"
-    );
-    assert_eq!(
-        sent.len(),
-        32,
-        "one startup publish and one a day for 31 days"
-    );
 }
 
 /// The NIP-17 `relay` tag form is read.
@@ -3085,6 +3041,11 @@ fn the_machine_params_copy_each_value_from_its_own_config_key() {
         advertise: false,
         advert_cache_max_entries: 29,
         advert_refresh_secs: 31,
+        app: "app-37".to_string(),
+        advert_relays: vec!["wss://adverts-41.example".to_string()],
+        dm_relays: vec!["wss://dm-43.example".to_string()],
+        stun_servers: vec!["stun:stun-47.example:3478".to_string()],
+        advert_ttl_secs: 53,
         ..Default::default()
     };
     let params = Params::from(&config);
@@ -3097,6 +3058,11 @@ fn the_machine_params_copy_each_value_from_its_own_config_key() {
     assert!(!params.advertise);
     assert_eq!(params.advert_cache_max_entries, 29);
     assert_eq!(params.advert_refresh_secs, 31);
+    assert_eq!(params.app, "app-37");
+    assert_eq!(params.advert_relays, vec!["wss://adverts-41.example"]);
+    assert_eq!(params.dm_relays, vec!["wss://dm-43.example"]);
+    assert_eq!(params.stun_servers, vec!["stun:stun-47.example:3478"]);
+    assert_eq!(params.advert_ttl_secs, 53);
     // The flag's other value too, so a conversion that ignores it fails.
     let config = crate::config::NostrRendezvousConfig {
         advertise: true,

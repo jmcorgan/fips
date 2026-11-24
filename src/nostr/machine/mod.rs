@@ -18,8 +18,11 @@
 pub mod adverts;
 pub mod error;
 pub mod event;
+pub mod inbox;
 pub mod params;
 pub mod punch;
+pub mod relays;
+pub mod rendezvous;
 pub mod signal;
 pub mod stun;
 pub mod traversal;

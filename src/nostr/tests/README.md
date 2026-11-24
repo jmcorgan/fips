@@ -6,11 +6,20 @@ module itself and two kinds of test file beside it.
 - `mod.rs` is `nostr::tests`, declared from `src/nostr/mod.rs` as
   `#[cfg(test)] mod tests;`. It holds the tests that span several files of
   `src/nostr/` (the runtime, signalling, traversal and advert paths
-  together), and the helpers its child modules share. Among them, the
-  stale-advert refetch tests: one finds a newer advert by the peer on an
-  in-process relay and refreshes the cached entry, the only refetch outcome
-  that runs the full ingest check (`ingest::check` in
-  `machine/adverts/ingest.rs`).
+  together), and the helpers its child modules share, among them
+  `SignerAuthenticator`, a NIP-42 authenticator that signs with a node key
+  directly, for clients a test builds outside the pump. Among its tests:
+  the stale-advert refetch tests, one of which finds a newer advert by the
+  peer on an in-process relay and refreshes the cached entry, the only
+  refetch outcome that runs the full ingest check (`ingest::check` in
+  `machine/adverts/ingest.rs`); the liveness tests, which install a live
+  and a finished task handle and find the engine finished when either the
+  pump or the signal task has ended, or once both handles are taken; and a
+  test that pins how `cached_endpoints` parses a peer's npub (the
+  lower-case npub and the key in hex are found, an upper-case npub is not),
+  unlike the dial path, which takes either case and refuses hex. The inbox
+  relay list's publish tests are the machine's now
+  (`machine/rendezvous/tests/startup.rs`).
 - Child modules of `mod.rs`, which declares each as `mod <name>;`. Each is a
   child of `nostr::tests` and reaches the `pub(super)` items of the files in
   `src/nostr/` and the private helpers of `mod.rs` (such as `send_probe`).
@@ -39,17 +48,19 @@ Child modules of `mod.rs`:
   `compute_advert_valid_until_ms` gives an advert over 18 `expiration` tag
   shapes, where four rows follow nostr 0.45's reading, which the relay
   client applies before the shell sees the event.
-- `notify_channels.rs`: the notify loop in `runtime.rs` logs a lag on the
-  signals' channel and reads on, and ends when that channel closes or the
-  relay client's notification stream ends.
+- `notify_channels.rs`: the signal task in `runtime.rs` logs a lag on the
+  signals' channel and reads on, and ends when that channel closes; the
+  pump ends when the relay client's notification stream ends (the test
+  closes the runtime's stand-in for it).
 - `npub_spelling.rs`: a peer named by its npub in any letter case is
   handled by its key. `request_connect` addresses the offer to the canonical
   npub and registers the initiator under it, so an upper-case configured
-  peer still wins the dual-init election; the stale-advert check evicts the
-  canonical cache entry; `advert_endpoints_for_peer` finds the cached advert
-  from an upper- or mixed-case npub; and a cooldown recorded under one
-  spelling holds for the canonical npub. A spelling that is not a NIP-19 npub
-  (a bech32m checksum, non-zero padding bits) finds no advert.
+  peer still wins the dual-init election (these two run on a runtime built
+  with no STUN servers, so no STUN exchange runs); the stale-advert check
+  evicts the canonical cache entry; `advert_endpoints_for_peer` finds the
+  cached advert from an upper- or mixed-case npub; and a cooldown recorded
+  under one spelling holds for the canonical npub. A spelling that is not a
+  NIP-19 npub (a bech32m checksum, non-zero padding bits) finds no advert.
 - `punch_recv_error.rs`: a punch attempt (`run_punch_attempt` in
   `traversal.rs`) is not ended early by a receive error on its socket. An
   attempt whose only target is a closed port runs to its timeout, on the
@@ -90,7 +101,8 @@ Child modules of `mod.rs`:
 - `signal_lag.rs`: a traversal answer delivered ahead of a flood of
   advertisements twice the relay client's notification channel size still
   reaches the traversal waiting for it, through the relay client's
-  admission policy and the notify loop in `runtime.rs`.
+  admission policy and the signal task in `runtime.rs`; the flood goes to
+  the runtime's stand-in for the client's notification channel.
 - `unknown_transport.rs`: an overlay advert with an endpoint of a transport
   kind this node does not know keeps its known endpoints
   (`OverlayTransportKind::Unknown` in `machine/types.rs`, dropped by
@@ -100,8 +112,25 @@ Child modules of `mod.rs`:
 
 Tests of one file, each named `nostr::<file>::tests::...`:
 
+- `log.rs`, of `log.rs`: the golden list of the lines the rendezvous machine
+  asks the shell to log, and the pump's three notify-loop lines, each with
+  the level, text, fields and target it was logged with before the code
+  moved.
+- `pump.rs`, of `pump.rs`: the pump against nostr-sdk's in-process relay. It
+  answers a relay that requires NIP-42 through the machine, and the stored
+  advert the relay replays to the first subscribe is cached, which needs the
+  stream taken before that subscribe, as `start` takes it; a failed
+  subscribe is retried on the machine's deadline under tokio's paused clock,
+  in well under a second of real time; a signal that reached the pool's
+  stream is opened by the signal task; a request to a stopped pump gets the
+  empty answer; a query sees every input sent before it; shutdown cancels a
+  relay operation in flight; and the start-up assembly waits for the public
+  address the pump learns from a loopback STUN server.
 - `offer_admission.rs`, of `offer_admission.rs`: the per-npub allowance of
   concurrent inbound offers, and that idle senders are reclaimed.
+- `sockets.rs`, of `sockets.rs`: a bound socket's datagrams reach the pump's
+  channel and its sends go out, on loopback; a send that fails (to the
+  broadcast address, without `SO_BROADCAST`) is reported with its error.
 - `relay.rs`, of `relay.rs`: the adapter against nostr-sdk's in-process
   relay. A round trip through a plain relay (a subscription delivers a
   peer's advert on the stream, a fetch by author finds it, a send naming a
@@ -109,7 +138,11 @@ Tests of one file, each named `nostr::<file>::tests::...`:
   router's channel, opens to its sender and never reaches the stream; the
   adapter answers a relay that requires NIP-42 authentication, which refuses
   a client with no authenticator as `auth-required`; and a stream taken
-  before a subscribe receives the relay's stored replay.
+  before a subscribe receives the relay's stored replay; and a send to a
+  relay in the pool but not connected is accepted and counted as reaching
+  none. The adapters here
+  answer authentication with `SignerAuthenticator`, so these tests check the
+  adapter's wiring; the pump's own answer is `pump.rs`'s.
 - `signal_route.rs`, of `signal_route.rs`: the admission policy takes a
   traversal signal off the pool's channel and queues it on its own, once
   however many relays deliver it, and leaves every other event to the pool.

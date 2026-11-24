@@ -13,12 +13,17 @@ use nostr::event::FinalizeEvent;
 use nostr::nips::nip19::ToBech32;
 use nostr::prelude::{EventBuilder, Kind, Tag};
 
+use nostr::key::SecretKey;
+
+use super::super::machine::NodeSigner;
+use super::super::machine::params::Params;
+use super::super::machine::rendezvous::{Action, Input, Rendezvous};
 use super::super::runtime::{NostrRendezvous, adversarial_offer_reject};
 use super::super::traversal::nonce;
 use super::super::types::BootstrapError;
 use super::super::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, AdvertTransportSnapshot, OverlayAdvert,
-    OverlayEndpointAdvert, OverlayTransportKind, RendezvousDriver,
+    OverlayEndpointAdvert, OverlayTransportKind,
 };
 use super::offer_between;
 use crate::config::NostrRendezvousConfig;
@@ -413,9 +418,10 @@ fn an_advert_of_one_character_relays_under_the_byte_bound_is_refused() {
     );
 }
 
-/// A runtime with discovery enabled on `config`, and the advert it would
-/// publish once the driver builds the local advert from `snapshot`, parsed as
-/// a peer would parse it.
+/// The advert a node with discovery enabled on `config` publishes once its
+/// advert is assembled from `snapshot`, taken from the publish the
+/// rendezvous machine asks for, and that advert parsed as a peer would parse
+/// it.
 async fn published(
     config: NostrRendezvousConfig,
     snapshot: Vec<AdvertTransportSnapshot>,
@@ -424,14 +430,27 @@ async fn published(
         enabled: true,
         ..config
     };
-    let runtime = Arc::new(NostrRendezvous::new_for_test_with_config(config.clone()));
-    RendezvousDriver::default()
-        .refresh_overlay_advert(&runtime, snapshot, &config)
-        .await
-        .expect("local advert set");
-    let event = runtime
-        .signed_advert_for_test()
-        .expect("advert signed")
+    let signer = Arc::new(NodeSigner::new(SecretKey::generate()));
+    let npub = signer.public_key().to_bech32().expect("bech32");
+    let now = super::super::pump::now();
+    let mut machine = Rendezvous::<crate::time::HostInstant, crate::identity::OsEntropy>::new(
+        Params::from(&config),
+        signer,
+        npub,
+        now,
+    );
+    machine.handle(
+        Input::Transports {
+            snapshot,
+            reply: None,
+        },
+        now,
+    );
+    let event = std::iter::from_fn(|| machine.poll_action())
+        .find_map(|action| match action {
+            Action::Publish { event, .. } => Some(event),
+            _ => None,
+        })
         .expect("an advert to publish");
     let advert = NostrRendezvous::parse_overlay_advert_event(&event, &config.app)
         .expect("defect: a peer refuses the advert this node publishes");

@@ -3192,7 +3192,7 @@ fn spawn_blackhole_relay() -> String {
 #[tokio::test]
 async fn refetch_still_evicts_a_cached_advert_when_the_relays_return_nothing() {
     let peer_npub = Identity::generate().npub();
-    let mut bootstrap = crate::nostr::NostrRendezvous::new_for_test();
+    let bootstrap = crate::nostr::NostrRendezvous::new_for_test();
     bootstrap
         .set_advert_relays_for_test(vec![spawn_blackhole_relay()])
         .await;
@@ -3246,7 +3246,7 @@ async fn process_pending_retries_does_not_await_advert_refetch() {
 
     let mut node = make_node_with_max_peers(64);
 
-    let mut bootstrap = crate::nostr::NostrRendezvous::new_for_test();
+    let bootstrap = crate::nostr::NostrRendezvous::new_for_test();
     bootstrap
         .set_advert_relays_for_test(vec![spawn_blackhole_relay()])
         .await;
@@ -3348,8 +3348,8 @@ async fn poll_nostr_rendezvous_established_gated_at_capacity() {
     );
 }
 
-#[test]
-fn nostr_rendezvous_outbound_admission_atomic_roundtrip() {
+#[tokio::test]
+async fn nostr_rendezvous_outbound_admission_atomic_roundtrip() {
     // Verifies the runtime-side plumbing for the two NAT-traversal gate
     // points: the setter mutates the atomic and the (super-visible)
     // reader observes the value the Node-side wiring would publish.

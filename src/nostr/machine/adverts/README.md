@@ -65,7 +65,13 @@ publish.
 - `publisher.rs`: `Publisher`, the advert this node wants to publish and
   whether it advertises at all, and `plan_publish`, which stamps our
   identifier and version, drops endpoints no peer could use, and applies the
-  `udp:nat` rule.
+  `udp:nat` rule. `PublishSchedule`, when it is published: on request and
+  every refresh interval from start, one publish at a time, with requests
+  made during one coalesced into one more after it. `LocalTransports`, the
+  node's transports and the public addresses learned for them, observed one
+  at a time in snapshot order and kept for their time to live (a success
+  for `max(advert_refresh_secs, 60)` s, a failure for 60 s), and the
+  requests waiting for the advert assembled from them.
 - `tests/`: the unit tests of `assemble.rs`, `cache.rs`, `ingest.rs` and
   `publisher.rs`.
 
@@ -75,9 +81,11 @@ publish.
   `fips_core::utils::hash::HashMap` under a hasher the shell keys from the
   host's entropy; nothing decides by its iteration order. The protected set
   is only tested for membership and is a `BTreeSet`.
-- The runtime holds the cache and the publisher each behind one
-  `std::sync::Mutex`, and binds what a call returns before acting on it, so
-  no lock is held while it logs or awaits.
+- The rendezvous machine owns the cache and the publisher outright; nothing
+  here locks. The cache also says when its next prune is due
+  (`earliest_expiry_ms`) and when its cache-full latch would be released
+  (`bound_release_at`), so the machine prunes on a step past the first and
+  sets a deadline at the second.
 - The shell's `NostrRendezvous::validate_overlay_advert`,
   `parse_overlay_advert_event`, `newest_event_by_author` and
   `compute_advert_valid_until_ms` are test-only wrappers over `ingest.rs`,

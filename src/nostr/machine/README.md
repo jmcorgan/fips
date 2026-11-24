@@ -56,9 +56,10 @@ host, under the `#[cfg(test)]` the guard requires, and may use `std`.
   a node signs or opens: the advert, the inbox relay list, the NIP-42
   authentication, and the traversal signal's rumor, seal and wrap. Each takes
   the time and the random bytes it needs from its caller.
-- `params.rs`: `Params`, the configuration values the machine's pieces read.
-  The machine cannot name the node's configuration, so the shell's `types.rs`
-  converts `NostrRendezvousConfig` into it, one field per key.
+- `params.rs`: `Params`, the configuration values the machine's pieces read,
+  and the fixed waits of its relay operations and schedules. The machine
+  cannot name the node's configuration, so the shell's `types.rs` converts
+  `NostrRendezvousConfig` into it, one field per key.
 - `signal.rs`: the traversal offer and answer bodies and their checks:
   freshness against the caller's wall-clock reading, with
   `FRESHNESS_SKEW_TOLERANCE_MS` of grace (configuration validation reads the
@@ -79,5 +80,15 @@ host, under the `#[cfg(test)]` the guard requires, and may use `std`.
 - `traversal/`: what the node remembers about traversal attempts: the
   failure streaks and cooldowns, the initiator election and the seen-sessions
   cache, and the rate limit on inbound traversal signals.
+- `rendezvous/`: `Rendezvous`, the machine the shell's pump steps. It owns
+  the advert half: the peer advert cache, this node's advert and its publish
+  schedule, the transports it is assembled from and the public addresses
+  learned for them, the relay subscriptions and the inbox relay list. Its
+  inputs, actions and ids are in `io.rs`, its log lines in `log.rs`.
+- `relays.rs`: `relays::Book`, the two subscriptions opened at start and the
+  retry of a failed subscribe, 2 s doubling to 60 s, under the same
+  subscriptions.
+- `inbox.rs`: `inbox::Lists`, this node's inbox relay list's daily republish
+  and the publish in flight.
 - `tests/`: the unit tests of the files above, and helpers the machine's
   tests share.

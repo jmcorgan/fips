@@ -10,6 +10,7 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use super::error::Error;
 
 pub mod candidates;
+pub mod client;
 
 pub fn parse_stun_url(input: &str) -> Result<StunEndpoint, Error> {
     let raw = input.strip_prefix("stun:").unwrap_or(input);

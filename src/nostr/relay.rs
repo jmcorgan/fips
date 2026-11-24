@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
+#[cfg(test)]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,10 +27,8 @@ use nostr_sdk::client::{Client, ClientBuilder, ClientNotification, ReqTarget};
 #[cfg(test)]
 use nostr_sdk::policy::AdmitPolicy;
 
-use super::machine::NodeSigner;
-use super::machine::event::auth::auth_event;
+use super::pump::{Inbox, Msg, ask};
 use super::signal_route::SignalRouter;
-use super::traversal::now_ms;
 
 /// The error every relay-client call returns.
 pub(super) type Error = nostr_sdk::error::Error;
@@ -56,29 +55,47 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 /// this keeps.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(7);
 
-/// The client's NIP-42 authenticator: it answers a relay's challenge with an
-/// authentication event signed by the node key.
+/// The client's NIP-42 authenticator: it posts a relay's challenge to the
+/// pump, whose machine answers it with an authentication event signed by
+/// the node key, and awaits that answer.
 #[derive(Debug)]
-struct NodeAuthenticator {
-    signer: Arc<NodeSigner>,
+pub(super) struct PumpAuthenticator {
+    inbox: Inbox,
 }
 
-impl Authenticator for NodeAuthenticator {
-    /// The node's answer to `relay_url`'s `challenge`, created now, with
-    /// fresh randomness for its signature.
+impl PumpAuthenticator {
+    /// An authenticator asking the pump behind `inbox`.
+    pub(super) fn new(inbox: Inbox) -> Self {
+        Self { inbox }
+    }
+}
+
+impl Authenticator for PumpAuthenticator {
+    /// The machine's answer to `relay_url`'s `challenge`. A pump that has
+    /// stopped answers nothing, and the relay is told so.
     fn make_auth_event<'a>(
         &'a self,
         relay_url: &'a RelayUrl,
         challenge: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Event, Error>> + Send + 'a>> {
         Box::pin(async move {
-            auth_event(&self.signer, relay_url, challenge, now_ms(), aux())
-                .map_err(|e| Error::other(e.to_string()))
+            let answer = ask(&self.inbox, |tx| Msg::Auth {
+                relay: relay_url.clone(),
+                challenge: challenge.to_string(),
+                tx,
+            })
+            .await;
+            match answer {
+                Some(Ok(event)) => Ok(event),
+                Some(Err(e)) => Err(Error::other(e.to_string())),
+                None => Err(Error::other("rendezvous stopped")),
+            }
         })
     }
 }
 
 /// Fresh auxiliary randomness for a signature, from the host's source.
+#[cfg(test)]
 pub(super) fn aux() -> [u8; 32] {
     let mut bytes = [0u8; 32];
     <crate::identity::OsEntropy as fips_core::entropy::EntropySource>::fill(&mut bytes);
@@ -87,9 +104,11 @@ pub(super) fn aux() -> [u8; 32] {
 
 /// The relay client, with inbound traversal signals taken off its
 /// notification channel by a [`SignalRouter`], and relay authentication
-/// answered with the node key. It holds no signer of its own: the events it
-/// sends are signed before they reach it. One client serves signals and
-/// adverts alike, so the signals' channel adds no relay connection.
+/// answered by the authenticator it was built with. It holds no signer of
+/// its own: the events it sends are signed before they reach it. One client
+/// serves signals and adverts alike, so the signals' channel adds no relay
+/// connection. Clones share the one client.
+#[derive(Clone)]
 pub(super) struct RelayClient {
     client: Client,
     /// The admission policy the client was built with, as the client holds
@@ -100,17 +119,17 @@ pub(super) struct RelayClient {
 }
 
 impl RelayClient {
-    /// A client answering relay authentication with `signer` and admitting
-    /// each delivered event through `router`. It connects to nothing until
-    /// [`Self::connect`].
+    /// A client answering relay authentication with `authenticator` and
+    /// admitting each delivered event through `router`. It connects to
+    /// nothing until [`Self::connect`].
     ///
     /// `verify_subscriptions` and `ban_relay_on_mismatch` stay off, their
     /// default in both nostr-sdk 0.44 and 0.45: the callers check what a
     /// relay returns themselves.
-    pub(super) fn build(signer: Arc<NodeSigner>, router: SignalRouter) -> Self {
+    pub(super) fn build(authenticator: impl Authenticator + 'static, router: SignalRouter) -> Self {
         let builder = ClientBuilder::new()
             .admit_policy(router)
-            .authenticator(NodeAuthenticator { signer })
+            .authenticator(authenticator)
             .connect_timeout(CONNECT_TIMEOUT)
             .notification_channel_size(POOL_CHANNEL_SIZE);
         #[cfg(test)]
@@ -150,14 +169,18 @@ impl RelayClient {
     }
 
     /// Open a long-lived subscription to `filter` on `urls`, under an id the
-    /// client chooses.
-    pub(super) async fn subscribe(&self, urls: Vec<String>, filter: Filter) -> Result<(), Error> {
+    /// client chooses. Returns how many relays took it.
+    pub(super) async fn subscribe(
+        &self,
+        urls: Vec<String>,
+        filter: Filter,
+    ) -> Result<usize, Error> {
         let targets: Vec<(String, Vec<Filter>)> = urls
             .into_iter()
             .map(|url| (url, vec![filter.clone()]))
             .collect();
-        self.client.subscribe(ReqTarget::manual(targets)).await?;
-        Ok(())
+        let output = self.client.subscribe(ReqTarget::manual(targets)).await?;
+        Ok(output.success.len())
     }
 
     /// The events `urls` hold that match `filter`, collected until every
@@ -186,16 +209,18 @@ impl RelayClient {
         Ok(events.into_iter().collect())
     }
 
-    /// Send `event` to `urls`. An error means the send was refused as a
-    /// whole, as when one of `urls` is not in the pool; relays that took the
-    /// send and then failed it do not make it an error.
-    pub(super) async fn send(&self, urls: &[String], event: &Event) -> Result<(), Error> {
-        self.client
+    /// Send `event` to `urls`, returning how many relays accepted it. An
+    /// error means the send was refused as a whole, as when one of `urls` is
+    /// not in the pool; relays that took the send and then failed it do not
+    /// make it an error, and are not counted.
+    pub(super) async fn send(&self, urls: &[String], event: &Event) -> Result<usize, Error> {
+        let output = self
+            .client
             .send_event(event)
             .to(urls)
             .authentication_timeout(AUTH_TIMEOUT)
             .await?;
-        Ok(())
+        Ok(output.success.len())
     }
 
     /// The relays in the client's pool.

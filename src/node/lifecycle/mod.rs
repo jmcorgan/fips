@@ -1146,7 +1146,6 @@ impl Node {
         // msg1 gate in handshake.rs remains the authoritative cap.
         bootstrap.set_outbound_admission(self.outbound_admission_check());
         self.push_advert_protection();
-        bootstrap.maintain_advert_cache();
         let peers = &self.peers;
         self.supervisor
             .nostr_rendezvous
@@ -2062,7 +2061,7 @@ impl Node {
                             // adverts, which a full cache would refuse for
                             // configured peers it did not know were protected.
                             self.install_advert_protection(&runtime);
-                            if let Err(err) = self.refresh_overlay_advert(&runtime).await {
+                            if let Err(err) = self.publish_initial_advert(&runtime).await {
                                 warn!(error = %err, "Failed to publish initial Nostr overlay advert");
                             }
                             self.supervisor.nostr_rendezvous.set_engine(runtime);
@@ -3295,13 +3294,28 @@ impl Node {
     }
 
     async fn refresh_overlay_advert(
-        &self,
+        &mut self,
         bootstrap: &std::sync::Arc<NostrRendezvous>,
     ) -> Result<(), crate::nostr::BootstrapError> {
         let snapshot = self.advert_transport_snapshot();
+        let config = std::sync::Arc::clone(&self.context.config);
         self.supervisor
             .nostr_rendezvous
-            .refresh_overlay_advert(bootstrap, snapshot, &self.config().node.rendezvous.nostr)
+            .refresh_overlay_advert(bootstrap, snapshot, &config.node.rendezvous.nostr)
+            .await
+    }
+
+    /// Assemble and publish the first advert, waiting until it has been
+    /// assembled, which is after any public address it needs is learned.
+    async fn publish_initial_advert(
+        &mut self,
+        bootstrap: &std::sync::Arc<NostrRendezvous>,
+    ) -> Result<(), crate::nostr::BootstrapError> {
+        let snapshot = self.advert_transport_snapshot();
+        let config = std::sync::Arc::clone(&self.context.config);
+        self.supervisor
+            .nostr_rendezvous
+            .publish_initial_advert(bootstrap, snapshot, &config.node.rendezvous.nostr)
             .await
     }
 

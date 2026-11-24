@@ -11,8 +11,9 @@
 # its log must show "advert: peer cached" for every seeded key, and it must
 # not panic.
 #
-# This guards the order in NostrRendezvous::start (src/nostr/runtime.rs): the
-# relay pool's notification receiver is taken before the advert REQ is sent.
+# This guards the order in which NostrRendezvous::start (src/nostr/runtime.rs)
+# starts the pump, the task that owns the advert cache: the relay pool's
+# notification receiver is taken before the pump can send the advert REQ.
 # Taken after it, the replay is dropped, and with no configured peers nothing
 # else puts those adverts in the cache until their authors publish again.
 

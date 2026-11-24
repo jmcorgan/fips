@@ -106,6 +106,13 @@ impl SignalRouter {
         };
         (router, receiver)
     }
+
+    /// A sender onto the router's channel, for a signal that reached the
+    /// pool's stream some other way. Taken before the router moves into the
+    /// relay client.
+    pub(super) fn forwarder(&self) -> broadcast::Sender<ClientNotification> {
+        self.signals.clone()
+    }
 }
 
 impl AdmitPolicy for SignalRouter {

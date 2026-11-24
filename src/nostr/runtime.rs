@@ -1,12 +1,11 @@
 use portable_atomic::AtomicU64;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use futures::StreamExt;
 use nostr::event::{Event, Kind};
 use nostr::filter::Filter;
 use nostr::key::{PublicKey, SecretKey};
@@ -16,23 +15,27 @@ use nostr_sdk::client::ClientNotification;
 #[cfg(test)]
 use nostr_sdk::policy::AdmitStatus;
 use serde::Serialize;
-use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 use super::handoff::EstablishedTraversal;
+use super::log::FirstEvent;
 use super::machine::NodeSigner;
-use super::machine::adverts;
-use super::machine::adverts::cache::{AdvertAdmission, Cache};
-use super::machine::adverts::ingest::{self, MAX_ADVERT_CONTENT_BYTES, MAX_ADVERT_LIST_ENTRIES};
-use super::machine::adverts::publisher::{PublishPlan, Publisher};
-use super::machine::event::{advert as advert_codec, inbox as inbox_codec};
+use super::machine::adverts::assemble::AdvertTransportSnapshot;
+#[cfg(test)]
+use super::machine::event::advert as advert_codec;
+use super::machine::event::inbox as inbox_codec;
 use super::machine::params::Params;
+use super::machine::rendezvous::{Input, PeerKey, Rendezvous};
 use super::machine::traversal::election::{Election, OfferDisposition, SeenDecision};
 use super::machine::traversal::failures::FailureState;
 use super::machine::traversal::gate::SignalGate;
 use super::offer_admission::{AdmissionReject, OfferAdmission};
-use super::relay::{Notifications, RelayClient, aux};
+use super::pump::{self, Inbox, Msg, Pump, ask};
+#[cfg(test)]
+use super::relay::aux;
+use super::relay::{PumpAuthenticator, RelayClient};
 use super::signal::{
     FreshnessOutcome, SignalEnvelope, build_signal_event, create_traversal_answer,
     create_traversal_offer, estimate_clock_skew, rumor, unwrap_signal_event,
@@ -44,10 +47,12 @@ use super::traversal::{
     PunchTargetTally, RefusalWarnGate, bind_traversal, nonce, now_ms, planned_remote_endpoints,
     run_punch_attempt,
 };
+#[cfg(test)]
+use super::types::ADVERT_IDENTIFIER;
 use super::types::{
-    ADVERT_IDENTIFIER, ADVERT_KIND, BootstrapError, BootstrapEvent, CachedOverlayAdvert,
-    NostrFailureDecision, NostrPeerFailureView, NostrRefetchOutcome, OverlayAdvert,
-    OverlayEndpointAdvert, PunchHint, SIGNAL_KIND, TraversalAnswer, TraversalOffer,
+    BootstrapError, BootstrapEvent, NostrFailureDecision, NostrPeerFailureView,
+    NostrRefetchOutcome, OverlayAdvert, OverlayEndpointAdvert, PunchHint, SIGNAL_KIND,
+    TraversalAnswer, TraversalOffer,
 };
 use crate::PeerIdentity;
 use crate::config::{NostrRendezvousConfig, PeerConfig};
@@ -66,37 +71,6 @@ fn check_offer_bounds(offer: &TraversalOffer) -> Result<(), BootstrapError> {
         return Err(BootstrapError::Protocol("oversized-offer".to_string()));
     }
     Ok(())
-}
-
-/// Cut each of our own advert's lists to `MAX_ADVERT_LIST_ENTRIES`, keeping
-/// the configured order, so peers do not refuse it. Warns for each list cut.
-fn clamp_own_advert(advert: &mut OverlayAdvert) {
-    for cut in ingest::clamp_own(advert) {
-        warn!(
-            target: "fips::nostr::runtime",
-            list = cut.list,
-            configured = cut.configured,
-            published = MAX_ADVERT_LIST_ENTRIES,
-            "advert: list longer than peers accept; publishing only its first entries"
-        );
-    }
-}
-
-/// The advert cache for `params`: the configured cache cap, and one
-/// republish interval of lapse grace after an entry's horizon, so an honest
-/// author that misses one republish keeps its slot during a flood.
-pub(super) fn advert_cache(npub: String, params: &Params) -> Cache<HostInstant> {
-    Cache::new(
-        npub,
-        params.advert_cache_max_entries,
-        fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
-    )
-    .with_lapse_grace(params.advert_refresh_secs.saturating_mul(1000))
-}
-
-/// The grace-extended max age of a cached advert, in ms.
-fn advert_max_age_ms(config: &NostrRendezvousConfig) -> u64 {
-    ingest::max_age_ms(config.advert_ttl_secs)
 }
 
 /// The key `npub` names, and its canonical npub: the text the advert cache,
@@ -120,7 +94,7 @@ fn canonical_npub(npub: &str) -> String {
     peer_key(npub).map_or_else(|_| npub.to_string(), |(_, canonical)| canonical)
 }
 
-fn short_npub(npub: &str) -> String {
+pub(super) fn short_npub(npub: &str) -> String {
     npub.strip_prefix("npub1")
         .filter(|s| s.len() >= 8)
         .map(|s| format!("npub1{}..{}", &s[..4], &s[s.len() - 4..]))
@@ -158,7 +132,7 @@ pub(super) fn received(
             ControlFlow::Continue(None)
         }
         Err(broadcast::error::RecvError::Closed) => {
-            warn!(channel = ?Feed::Signals, "nostr notification channel closed; notify loop exiting");
+            super::log::channel_closed(Feed::Signals);
             ControlFlow::Break(())
         }
     }
@@ -264,7 +238,8 @@ fn log_refusals(tally: &PunchTargetTally, peer: &str, session: &str, warn: Optio
     }
 }
 
-fn endpoint_summary(endpoints: &[OverlayEndpointAdvert]) -> String {
+/// The endpoints as one field value, `transport:addr` per endpoint.
+pub(super) fn endpoint_summary(endpoints: &[OverlayEndpointAdvert]) -> String {
     endpoints
         .iter()
         .map(|e| format!("{:?}:{}", e.transport, e.addr).to_lowercase())
@@ -272,43 +247,59 @@ fn endpoint_summary(endpoints: &[OverlayEndpointAdvert]) -> String {
         .join(",")
 }
 
-/// Cached STUN-derived public address for an advert-eligible UDP transport
-/// bound to a wildcard. Lives on `NostrRendezvous` so the freshness window
-/// survives advert refresh cycles.
-struct CachedPublicUdpAddr {
-    /// Most recent STUN observation. `None` means the last attempt failed
-    /// (recorded so we don't re-spam STUN every refresh tick on broken
-    /// network conditions).
-    addr: Option<SocketAddr>,
-    fetched_at: Instant,
-}
-
-/// Cache lifetime for a *failed* STUN observation. Held briefly so that
-/// transient flakes (slow startup network, momentary STUN-server
-/// blip) get retried within ~a minute and the advert grows its UDP
-/// endpoint as soon as STUN starts working — rather than waiting a
-/// full `advert_refresh_secs` (30 min) for the success-path TTL to
-/// expire. Successful results use the longer per-config TTL.
-const PUBLIC_UDP_ADDR_FAILURE_TTL: Duration = Duration::from_secs(60);
-const RELAY_STARTUP_OP_TIMEOUT: Duration = Duration::from_secs(5);
-const ADVERT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 /// How far back a peer's kind 10050 inbox relay list is looked up.
 pub(super) const INBOX_LOOKBACK: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-/// How often our own inbox relay list is republished, well inside
-/// `INBOX_LOOKBACK` so peers always find a current one.
-const INBOX_REPUBLISH: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// The node's handle on Nostr rendezvous.
+///
+/// The advert half (the peer advert cache, this node's advert, the relay
+/// subscriptions and the inbox relay list) is owned by one task, the pump,
+/// which steps the rendezvous machine; the handle's advert methods post to
+/// it. The traversal half is [`TraversalShared`], served here until the
+/// traversal flows move into the machine.
 pub struct NostrRendezvous {
+    /// The pump's inbox.
+    inbox: Inbox,
+    /// The pump.
+    pump_task: Mutex<Option<JoinHandle<()>>>,
+    /// The task that reads the signal router's channel.
+    signal_task: Mutex<Option<JoinHandle<()>>>,
+    traversal: Arc<TraversalShared>,
+    /// The relay client, for the tests that add relays to it.
+    #[cfg(test)]
     client: RelayClient,
-    /// The node key, shared with the relay client's authenticator.
+    /// The pump's count of relay operations in flight.
+    #[cfg(test)]
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    /// The test's stand-in for the relay client's notification channel,
+    /// which the pump reads; `None` once a test closes it.
+    #[cfg(test)]
+    pool: std::sync::Mutex<Option<broadcast::Sender<ClientNotification>>>,
+    /// The signal router's receiver until a test starts the signal task on
+    /// it.
+    #[cfg(test)]
+    signal_rx: std::sync::Mutex<Option<broadcast::Receiver<ClientNotification>>>,
+    /// Shared by the pump and the signal task.
+    #[cfg(test)]
+    first: Arc<FirstEvent>,
+}
+
+/// The traversal half of Nostr rendezvous, shared by the handle, the signal
+/// task and the traversal tasks: the initiator election and seen sessions,
+/// the answers awaited and offers in flight, the offer admission, the
+/// signal gate and the failure state. Served by the flows below until they
+/// move into the machine; until then they reach the advert half only
+/// through the pump (a peer's advert), and the pump reaches them only to
+/// reset a failure streak.
+pub(super) struct TraversalShared {
+    /// The relay client, for the traversal signals and inbox lookups.
+    client: RelayClient,
+    /// The node key, shared with the machine.
     signer: Arc<NodeSigner>,
-    pubkey: PublicKey,
     npub: String,
     config: NostrRendezvousConfig,
-    /// The peer advert cache.
-    adverts: std::sync::Mutex<Cache<HostInstant>>,
-    /// The local advert and the decision to publish it.
-    publisher: std::sync::Mutex<Publisher>,
+    /// The pump's inbox, for a peer's advert.
+    inbox: Inbox,
     traversal: std::sync::Mutex<Election>,
     pending_answers: Mutex<HashMap<String, oneshot::Sender<SignalEnvelope<TraversalAnswer>>>>,
     /// Our outbound offer per peer npub while we wait for its answer, kept so
@@ -318,14 +309,6 @@ pub struct NostrRendezvous {
     /// tests can observe what was sent.
     #[cfg(test)]
     sent_signals: std::sync::Mutex<Vec<String>>,
-    /// Every inbox relay list `publish_inbox_relays` sent, with the tokio time
-    /// it was sent, so unit tests can observe when it is published.
-    #[cfg(test)]
-    inbox_sent: std::sync::Mutex<Vec<(tokio::time::Instant, Event)>>,
-    /// The signal channel's receiver until a unit test starts the notify loop
-    /// on it; `None` from `start`, which hands it to the loop.
-    #[cfg(test)]
-    signal_rx: std::sync::Mutex<Option<broadcast::Receiver<ClientNotification>>>,
     admission: OfferAdmission,
     signal_gate: std::sync::Mutex<SignalGate<HostInstant>>,
     /// Limits the suspicious-offer warning to one a minute.
@@ -334,17 +317,7 @@ pub struct NostrRendezvous {
     shed_signals: AtomicU64,
     event_tx: mpsc::UnboundedSender<BootstrapEvent>,
     event_rx: Mutex<mpsc::UnboundedReceiver<BootstrapEvent>>,
-    connect_task: Mutex<Option<JoinHandle<()>>>,
-    relay_startup_task: Mutex<Option<JoinHandle<()>>>,
-    publish_task: Mutex<Option<JoinHandle<()>>>,
-    publish_notify: Notify,
-    notify_task: Mutex<Option<JoinHandle<()>>>,
-    advertise_task: Mutex<Option<JoinHandle<()>>>,
     failure_state: std::sync::Mutex<FailureState>,
-    /// STUN-derived public address per advert-eligible UDP transport
-    /// (keyed by `TransportId.as_u32()`). Populated on demand by
-    /// `learn_public_udp_addr()` and refreshed by TTL.
-    public_udp_addr_cache: RwLock<HashMap<u32, CachedPublicUdpAddr>>,
     /// Outbound-admission flag refreshed once per Node tick from
     /// `Node::outbound_admission_check()`. Used to suppress NAT-traversal
     /// punch initiation (initiator path) and offer acceptance (responder
@@ -354,167 +327,93 @@ pub struct NostrRendezvous {
     outbound_admission: AtomicBool,
 }
 
-impl NostrRendezvous {
-    /// Whether the Nostr subsystem has stopped being able to do its job
-    /// (runtime liveness).
-    ///
-    /// "Nostr exited" is defined as *any* of the three service loops that never
-    /// return by design having finished:
-    ///
-    /// - `notify_task` — the inbound receive loop. Without it no advert and no
-    ///   traversal signal is ever observed again.
-    /// - `publish_task` — the advert publisher. Without it this node stops being
-    ///   discoverable.
-    /// - `advertise_task` — the refresh ticker that drives the publisher.
-    ///
-    /// Each of these is an unconditional `loop` (the notify loop's only `break`
-    /// is the client's notification stream ending or the signals' channel
-    /// closing, i.e. the client is gone), so a finished handle means the task
-    /// panicked or was aborted:
-    /// unrecoverable, which matches the one-way `ChildExited` → `Degraded`
-    /// latch in the supervisor FSM.
-    ///
-    /// Deliberately *not* watched: `connect_task` and `relay_startup_task`.
-    /// `Client::connect()` only spawns a per-relay background connection task
-    /// and returns, so `connect_task` finishes moments after start on a
-    /// perfectly healthy node; watching it reports Degraded on every node
-    /// forever. `relay_startup_task` does not return once its retry loop has
-    /// subscribed (it goes on republishing the inbox relay list), but a list
-    /// that fails to publish is not a loss of liveness.
-    ///
-    /// Each handle is `Some` for the engine's whole running life (installed in
-    /// `start`); `shutdown` takes them all, leaving `None` — a taken handle
-    /// means the engine has been shut down, which counts as finished, so a
-    /// `None` inner maps to `true` (this lets the liveness poll monitor
-    /// terminate after a stop rather than spinning forever). The slots are
-    /// `tokio::sync::Mutex`es, so this sync accessor uses the non-blocking
-    /// `try_lock`: a momentarily-contended lock (only start/stop hold it,
-    /// briefly) reports "not finished", the safe direction — the 2s liveness
-    /// poll re-checks next tick and never spuriously degrades a healthy node.
-    pub fn is_finished(&self) -> bool {
-        Self::task_finished(&self.notify_task)
-            || Self::task_finished(&self.publish_task)
-            || Self::task_finished(&self.advertise_task)
-    }
-
-    /// Liveness of one task slot: finished if the handle is gone (shut down) or
-    /// the task has completed; "not finished" when the slot is momentarily
-    /// locked by start/stop.
-    fn task_finished(slot: &Mutex<Option<JoinHandle<()>>>) -> bool {
-        slot.try_lock()
-            .map(|g| g.as_ref().is_none_or(|h| h.is_finished()))
-            .unwrap_or(false)
-    }
-
-    pub async fn start(
-        identity: &crate::Identity,
+impl TraversalShared {
+    /// The traversal half for the node whose key `signer` holds, sending on
+    /// `client` and asking the pump behind `inbox` for adverts.
+    fn new(
+        client: RelayClient,
+        signer: Arc<NodeSigner>,
+        npub: String,
         config: NostrRendezvousConfig,
-    ) -> Result<Arc<Self>, BootstrapError> {
-        if !config.enabled {
-            return Err(BootstrapError::Disabled);
-        }
-
-        // Two copies of the private key are made to reach the signer: the
-        // keypair and its secret key. Each is bound and cleared here; nostr's
-        // `SecretKey`, which the signer holds, clears its own on drop.
-        let mut our_keypair = identity.keypair();
-        let mut secret = our_keypair.secret_key();
-        let signer = Arc::new(NodeSigner::new(SecretKey::from(secret)));
-        secret.non_secure_erase();
-        our_keypair.non_secure_erase();
-        let (router, signals) = SignalRouter::new();
-        let client = RelayClient::build(Arc::clone(&signer), router);
-
-        let mut relay_union = HashSet::new();
-        relay_union.extend(config.advert_relays.iter().cloned());
-        relay_union.extend(config.dm_relays.iter().cloned());
-        client
-            .add_relays(&relay_union)
-            .await
-            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
-        let pubkey = signer.public_key();
-        let npub = crate::encode_npub(&identity.pubkey());
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let admission = OfferAdmission::new(
-            config.max_concurrent_incoming_offers,
-            config.max_concurrent_offers_per_npub,
-        );
-
+        inbox: Inbox,
+    ) -> Self {
         let params = Params::from(&config);
-        let failure_state = FailureState::new(
-            params.failure_streak_threshold,
-            params.extended_cooldown_secs,
-            params.warn_log_interval_secs,
-            params.failure_state_max_entries,
-            fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
-        );
-
-        let adverts = advert_cache(npub.clone(), &params);
-        let publisher = Publisher::new(params.advertise);
-        let traversal = Election::new(
-            params.replay_window_secs * 1000,
-            params.seen_sessions_max_entries,
-            fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
-        );
-        let runtime = Arc::new(Self {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        Self {
             client,
             signer,
-            pubkey,
             npub,
+            inbox,
+            admission: OfferAdmission::new(
+                config.max_concurrent_incoming_offers,
+                config.max_concurrent_offers_per_npub,
+            ),
+            failure_state: std::sync::Mutex::new(FailureState::new(
+                params.failure_streak_threshold,
+                params.extended_cooldown_secs,
+                params.warn_log_interval_secs,
+                params.failure_state_max_entries,
+                fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
+            )),
+            traversal: std::sync::Mutex::new(Election::new(
+                params.replay_window_secs * 1000,
+                params.seen_sessions_max_entries,
+                fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
+            )),
             config,
-            adverts: std::sync::Mutex::new(adverts),
-            publisher: std::sync::Mutex::new(publisher),
-            traversal: std::sync::Mutex::new(traversal),
             pending_answers: Mutex::new(HashMap::new()),
             inflight_offers: Mutex::new(HashMap::new()),
             #[cfg(test)]
             sent_signals: std::sync::Mutex::new(Vec::new()),
-            #[cfg(test)]
-            inbox_sent: std::sync::Mutex::new(Vec::new()),
-            #[cfg(test)]
-            signal_rx: std::sync::Mutex::new(None),
-            admission,
             signal_gate: std::sync::Mutex::new(SignalGate::new(HostClock.now())),
             refusal_warn: std::sync::Mutex::new(RefusalWarnGate::default()),
             shed_signals: AtomicU64::new(0),
             event_tx,
             event_rx: Mutex::new(event_rx),
-            connect_task: Mutex::new(None),
-            relay_startup_task: Mutex::new(None),
-            publish_task: Mutex::new(None),
-            publish_notify: Notify::new(),
-            notify_task: Mutex::new(None),
-            advertise_task: Mutex::new(None),
-            failure_state: std::sync::Mutex::new(failure_state),
-            public_udp_addr_cache: RwLock::new(HashMap::new()),
             outbound_admission: AtomicBool::new(true),
-        });
+        }
+    }
 
-        // Take the relay client's notification stream BEFORE issuing the
-        // Nostr REQs. The stream reads a broadcast channel that only delivers
-        // messages sent after it subscribes, which it does when it is taken —
-        // historical events that arrive in response to subscribe() (REQ
-        // replays) would otherwise be sent while no subscriber exists yet,
-        // and dropped. Without this,
-        // freshly-restarted nodes with `policy: open` waited up to one
-        // `advert_refresh_secs` interval (default 30 min) for non-configured
-        // peers to re-publish before discovering them. The signals' own
-        // channel needs no such care: its receiver was made with it.
-        let notifications = runtime.client.notifications();
-        *runtime.publish_task.lock().await = Some(runtime.clone().spawn_publish_loop());
-        *runtime.connect_task.lock().await = Some(runtime.clone().spawn_connect_loop());
-        *runtime.relay_startup_task.lock().await = Some(runtime.clone().spawn_relay_startup_loop());
-        *runtime.advertise_task.lock().await = Some(runtime.clone().spawn_advertise_loop());
-        *runtime.notify_task.lock().await =
-            Some(runtime.clone().spawn_notify_loop(notifications, signals));
+    /// Reset `npub`'s failure streak after its advert was refreshed or
+    /// evicted, as the machine asks.
+    fn reset_streak(&self, npub: &str) {
+        self.failures().reset_streak_after_refresh(npub);
+    }
 
-        Ok(runtime)
+    /// Read the signal router's channel until it closes, opening each
+    /// traversal signal: the traversal flows' only inbound feed.
+    async fn run_signals(
+        self: Arc<Self>,
+        mut signals: broadcast::Receiver<ClientNotification>,
+        first: Arc<FirstEvent>,
+    ) {
+        loop {
+            let notification = match received(signals.recv().await) {
+                ControlFlow::Continue(Some(notification)) => notification,
+                ControlFlow::Continue(None) => continue,
+                ControlFlow::Break(()) => break,
+            };
+            first.note();
+            if let ClientNotification::Event { event, .. } = notification
+                && event.kind == Kind::Custom(SIGNAL_KIND)
+            {
+                self.handle_signal(event).await;
+            }
+        }
+    }
+
+    /// `key`'s advert, from the pump: the cache, or else the advert relays.
+    async fn resolve_advert(&self, key: PeerKey) -> Result<OverlayAdvert, BootstrapError> {
+        match ask(&self.inbox, |tx| Msg::ResolveAdvert { key, tx }).await {
+            Some(result) => Ok(result?),
+            None => Err(BootstrapError::Disabled),
+        }
     }
 
     /// Update the cached outbound-admission flag. Called once per Node
     /// tick with the current value of `Node::outbound_admission_check()`.
     /// Cheap atomic store; safe to call unconditionally.
-    pub fn set_outbound_admission(&self, allow: bool) {
+    fn set_outbound_admission(&self, allow: bool) {
         self.outbound_admission.store(allow, Ordering::Relaxed);
     }
 
@@ -524,7 +423,7 @@ impl NostrRendezvous {
         self.outbound_admission.load(Ordering::Relaxed)
     }
 
-    pub async fn request_connect(self: &Arc<Self>, peer_config: PeerConfig) {
+    async fn request_connect(self: &Arc<Self>, peer_config: PeerConfig) {
         // The configuration may name the peer by any spelling of its key. The
         // traversal runs under the canonical npub, so the initiator set dedupes
         // spellings and the offer names the recipient as it names itself; the
@@ -552,20 +451,6 @@ impl NostrRendezvous {
         });
     }
 
-    /// The peer advert cache, under its lock.
-    fn cache(&self) -> std::sync::MutexGuard<'_, Cache<HostInstant>> {
-        self.adverts
-            .lock()
-            .expect("advert-machine cache mutex poisoned")
-    }
-
-    /// The local advert and its publishing decision, under their lock.
-    fn publisher(&self) -> std::sync::MutexGuard<'_, Publisher> {
-        self.publisher
-            .lock()
-            .expect("advert-machine local-advert mutex poisoned")
-    }
-
     /// The initiator election and the seen-sessions cache, under their lock.
     fn election(&self) -> std::sync::MutexGuard<'_, Election> {
         self.traversal
@@ -588,7 +473,7 @@ impl NostrRendezvous {
     /// Record a NAT-traversal failure for `npub`, returning the
     /// resulting decision (WARN suppression + extended cooldown +
     /// threshold-crossing flag for the B6 re-fetch).
-    pub fn record_traversal_failure(&self, npub: &str, now_ms: u64) -> NostrFailureDecision {
+    fn record_traversal_failure(&self, npub: &str, now_ms: u64) -> NostrFailureDecision {
         let d = self
             .failures()
             .record_failure(&canonical_npub(npub), now_ms);
@@ -601,14 +486,14 @@ impl NostrRendezvous {
     }
 
     /// Record a successful traversal — clears the streak/cooldown.
-    pub fn record_traversal_success(&self, npub: &str, now_ms: u64) {
+    fn record_traversal_success(&self, npub: &str, now_ms: u64) {
         self.failures()
             .record_success(&canonical_npub(npub), now_ms);
     }
 
     /// Cooldown wall-clock ms if the peer is currently suppressed,
     /// else None. Used by the open-discovery sweep to skip enqueue.
-    pub fn cooldown_until(&self, npub: &str, now_ms: u64) -> Option<u64> {
+    fn cooldown_until(&self, npub: &str, now_ms: u64) -> Option<u64> {
         self.failures()
             .cooldown_until(&canonical_npub(npub), now_ms)
     }
@@ -622,7 +507,7 @@ impl NostrRendezvous {
     /// much longer than `extended_cooldown_secs` because mismatches are
     /// structural (only resolves when one side upgrades) rather than
     /// transient.
-    pub fn record_protocol_mismatch(&self, npub: &str, now_ms: u64) -> bool {
+    fn record_protocol_mismatch(&self, npub: &str, now_ms: u64) -> bool {
         let cooldown_ms = self
             .config
             .protocol_mismatch_cooldown_secs
@@ -633,12 +518,12 @@ impl NostrRendezvous {
 
     /// Configured protocol-mismatch cooldown in seconds. Exposed so log
     /// emitters can include the duration without re-reading config.
-    pub fn protocol_mismatch_cooldown_secs(&self) -> u64 {
+    fn protocol_mismatch_cooldown_secs(&self) -> u64 {
         self.config.protocol_mismatch_cooldown_secs
     }
 
     /// Snapshot of per-npub failure state for `show_peers` rendering.
-    pub fn failure_state_snapshot(&self) -> Vec<NostrPeerFailureView> {
+    fn failure_state_snapshot(&self) -> Vec<NostrPeerFailureView> {
         self.failures()
             .snapshot()
             .into_iter()
@@ -651,397 +536,13 @@ impl NostrRendezvous {
             .collect()
     }
 
-    /// Discover (or return cached) the public-Internet address for an
-    /// advert-eligible UDP transport bound to a wildcard. Used by
-    /// `build_overlay_advert` to avoid emitting `udp:0.0.0.0:port`,
-    /// which is invalid as an advertised endpoint. Result is the
-    /// reflexive IP (from STUN against the daemon's first
-    /// `stun_servers` reachable) combined with the configured
-    /// `advertise_port`.
-    ///
-    /// Asymmetric cache TTL: a successful observation is cached for
-    /// `advert_refresh_secs` (default 1800 = same as advert refresh)
-    /// so we don't re-STUN every refresh tick. A failed observation
-    /// is cached for `PUBLIC_UDP_ADDR_FAILURE_TTL` (60s) so we retry
-    /// soon after a transient STUN flake at startup, instead of
-    /// blocking advertise-as-public for half an hour. Once a success
-    /// is cached, subsequent ticks are zero-overhead.
-    pub async fn learn_public_udp_addr(
-        &self,
-        transport_id_key: u32,
-        advertise_port: u16,
-    ) -> Option<SocketAddr> {
-        if let Some(entry) = self
-            .public_udp_addr_cache
-            .read()
-            .await
-            .get(&transport_id_key)
-        {
-            let ttl = if entry.addr.is_some() {
-                Duration::from_secs(self.config.advert_refresh_secs.max(60))
-            } else {
-                PUBLIC_UDP_ADDR_FAILURE_TTL
-            };
-            if entry.fetched_at.elapsed() < ttl {
-                return entry.addr;
-            }
-        }
-        let resolved = self.stun_observe_public_ip(advertise_port).await;
-        let mut cache = self.public_udp_addr_cache.write().await;
-        cache.insert(
-            transport_id_key,
-            CachedPublicUdpAddr {
-                addr: resolved,
-                fetched_at: Instant::now(),
-            },
-        );
-        resolved
-    }
-
-    /// Run a one-shot STUN observation against an ephemeral UDP socket
-    /// to learn this host's public IPv4 (or IPv6, if the local STUN
-    /// server returns one). Returns `<reflexive_ip>:<advertise_port>`,
-    /// or `None` if STUN failed or no `stun_servers` are configured.
-    ///
-    /// The STUN-reported port is the ephemeral source port and is
-    /// discarded — what we want to advertise is the bound listener
-    /// port, which the kernel preserves through 1:1 NAT (AWS EIP,
-    /// GCP/Azure external IPs) and which the operator has explicitly
-    /// chosen via `bind_addr`.
-    async fn stun_observe_public_ip(&self, advertise_port: u16) -> Option<SocketAddr> {
-        if self.config.stun_servers.is_empty() {
-            return None;
-        }
-        let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
-            Ok(s) => s,
-            Err(err) => {
-                debug!(error = %err, "public-udp-addr: ephemeral bind failed");
-                return None;
-            }
-        };
-        if let Err(err) = socket.set_nonblocking(true) {
-            debug!(error = %err, "public-udp-addr: set_nonblocking failed");
-            return None;
-        }
-        let observed = match super::stun::observe_traversal_addresses(
-            &socket,
-            &self.config.stun_servers,
-            false,
-            super::stun::ADVERT_STUN_TIMEOUT,
-        )
-        .await
-        {
-            Ok((reflexive, _local, stun_server)) => {
-                debug!(
-                    stun = %stun_server.as_deref().unwrap_or("-"),
-                    reflexive = %reflexive
-                        .as_ref()
-                        .map(|a| format!("{}:{}", a.ip, a.port))
-                        .unwrap_or_else(|| "-".into()),
-                    "public-udp-addr: STUN observation"
-                );
-                reflexive
-            }
-            Err(err) => {
-                debug!(error = %err, "public-udp-addr: STUN failed");
-                return None;
-            }
-        };
-        observed.and_then(|addr| {
-            let parsed_ip: std::net::IpAddr = addr.ip.parse().ok()?;
-            Some(SocketAddr::new(parsed_ip, advertise_port))
-        })
-    }
-
-    /// Stale-advert re-check (B6). Called by lifecycle on the
-    /// streak-threshold transition. Actively re-queries the peer's
-    /// Kind 37195 advert from `advert_relays`; evicts the cache entry
-    /// if absent, refreshes if newer than the cached `created_at`,
-    /// otherwise leaves the cache untouched.
-    pub async fn refetch_advert_for_stale_check(&self, peer_npub: &str) -> NostrRefetchOutcome {
-        // The caller passes the configured text; the cache and the failure
-        // state are keyed by the canonical npub.
-        let Ok((target_pubkey, canonical)) = peer_key(peer_npub) else {
-            return NostrRefetchOutcome::Skipped;
-        };
-        let peer_npub = canonical.as_str();
-        if self.config.advert_relays.is_empty() {
-            return NostrRefetchOutcome::Skipped;
-        }
-        let cached_created_at = self.cache().cached_created_at(peer_npub);
-
-        let events = match self
-            .client
-            .fetch(
-                self.config.advert_relays.clone(),
-                Filter::new()
-                    .author(target_pubkey)
-                    .kind(Kind::Custom(ADVERT_KIND))
-                    .identifier(ADVERT_IDENTIFIER),
-                Duration::from_secs(2),
-            )
-            .await
-        {
-            Ok(e) => e,
-            Err(_) => return NostrRefetchOutcome::Skipped,
-        };
-
-        let Some(ev) = ingest::newest_by_author(events.iter(), target_pubkey) else {
-            if !events.is_empty() {
-                // The relays answered, but nothing they returned was signed by
-                // this peer. That is no evidence of absence, so keep the entry.
-                return NostrRefetchOutcome::Skipped;
-            }
-            // Absent on relays. Evict any stale cache entry.
-            self.cache().remove(peer_npub);
-            self.failures().reset_streak_after_refresh(peer_npub);
-            return NostrRefetchOutcome::Evicted;
-        };
-        let relay_created_at =
-            adverts::effective_created_at_secs(ev.created_at.as_secs(), now_ms());
-
-        match cached_created_at {
-            Some(cached) if relay_created_at <= cached => NostrRefetchOutcome::SameAdvert,
-            _ => {
-                let Some(checked) = ingest::check(
-                    ev,
-                    &self.config.app,
-                    advert_max_age_ms(&self.config),
-                    now_ms(),
-                ) else {
-                    return NostrRefetchOutcome::Skipped;
-                };
-                let updated = CachedOverlayAdvert {
-                    author_npub: peer_npub.to_string(),
-                    advert: checked.advert,
-                    created_at: checked.created_at,
-                    valid_until_ms: checked.valid_until_ms,
-                };
-                let admission = self.cache().insert_fetched(peer_npub, updated, now_ms());
-                if let AdvertAdmission::Refused { first_at_bound } = admission {
-                    // The cache does not hold this advert, so the streak is
-                    // not reset on the strength of it.
-                    self.log_advert_cache_full(first_at_bound);
-                    debug!(
-                        peer = %short_npub(peer_npub),
-                        reason = "cache-full",
-                        "advert cache full; refetched advert not cached"
-                    );
-                    return NostrRefetchOutcome::Skipped;
-                }
-                self.failures().reset_streak_after_refresh(peer_npub);
-                NostrRefetchOutcome::Refreshed
-            }
-        }
-    }
-
-    pub async fn drain_events(&self) -> Vec<BootstrapEvent> {
+    async fn drain_events(&self) -> Vec<BootstrapEvent> {
         let mut out = Vec::new();
         let mut rx = self.event_rx.lock().await;
         while let Ok(event) = rx.try_recv() {
             out.push(event);
         }
         out
-    }
-
-    pub async fn update_local_advert(
-        self: &Arc<Self>,
-        advert: Option<OverlayAdvert>,
-    ) -> Result<(), BootstrapError> {
-        let changed = self.publisher().set_local_advert(advert);
-        if changed {
-            self.request_publish_advert();
-        }
-        Ok(())
-    }
-
-    pub async fn advert_endpoints_for_peer(
-        &self,
-        peer_npub: &str,
-    ) -> Result<Vec<OverlayEndpointAdvert>, BootstrapError> {
-        let (target_pubkey, _) = peer_key(peer_npub)?;
-        let advert = self.fetch_advert(target_pubkey).await?;
-        Ok(advert.endpoints)
-    }
-
-    /// `peer_npub`'s advert endpoints from the cache alone, without asking
-    /// the relays: `None` when no current advert is cached or the npub does
-    /// not parse. For callers on the node's event loop, which must not wait
-    /// on a relay.
-    pub fn cached_endpoints(&self, peer_npub: &str) -> Option<Vec<OverlayEndpointAdvert>> {
-        let canonical = PublicKey::parse(peer_npub).ok()?.to_bech32().ok()?;
-        self.cache()
-            .cached_advert(&canonical, now_ms())
-            .map(|advert| advert.endpoints)
-    }
-
-    /// Replace the set of authors whose cached adverts survive a full cache:
-    /// the configured peers and the authors with an established link.
-    pub fn set_advert_protection(&self, npubs: HashSet<String>) {
-        self.cache().set_protected(npubs);
-    }
-
-    /// The cached adverts the open-discovery sweep should consider: the
-    /// protected entries not in `skip`, plus up to `max` unprotected entries
-    /// not in `skip`, drawn at random on each call.
-    pub async fn cached_open_discovery_candidates(
-        &self,
-        max: usize,
-        skip: &HashSet<String>,
-    ) -> Vec<(String, Vec<OverlayEndpointAdvert>, u64)> {
-        self.prune_advert_cache();
-        self.cache()
-            .open_discovery_candidates::<crate::identity::OsEntropy>(max, now_ms(), |npub| {
-                skip.contains(npub)
-            })
-    }
-
-    /// Expire cached adverts, trim the cache to its cap, and release the
-    /// cache-full warning once the cache has stayed below its cap long
-    /// enough. Called once per node tick.
-    pub fn maintain_advert_cache(&self) {
-        self.prune_advert_cache();
-        let released = self.cache().bound_tick(HostClock.now());
-        if let Some(refused) = released {
-            info!(refused, "advert cache below cap again");
-        }
-    }
-
-    /// The one warning a full advert cache produces until it has been below
-    /// its cap for a minute.
-    fn log_advert_cache_full(&self, first_at_bound: bool) {
-        if first_at_bound {
-            warn!(
-                bound = self.config.advert_cache_max_entries,
-                "advert cache full; refusing adverts from new unconfigured authors"
-            );
-        }
-    }
-
-    pub async fn shutdown(&self) -> Result<(), BootstrapError> {
-        if let Some(handle) = self.advertise_task.lock().await.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.connect_task.lock().await.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.relay_startup_task.lock().await.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.publish_task.lock().await.take() {
-            handle.abort();
-        }
-
-        // Shutdown sends no NIP-09 retraction of the advert.
-        // Parameterized-replaceable semantics handle restart supersedence,
-        // and NIP-40 expiration (advert_ttl_secs) bounds staleness on
-        // permanent shutdown. An explicit retraction races with the next
-        // daemon's republish on strict relays (e.g. Damus rate-limits the
-        // burst, leaving the advert deleted and never restored).
-        if let Some(handle) = self.notify_task.lock().await.take() {
-            handle.abort();
-        }
-
-        Ok(())
-    }
-
-    /// Spawn the task that reads the relay client's notification stream and
-    /// the signals' own channel, and hands each advert and traversal signal
-    /// on.
-    fn spawn_notify_loop(
-        self: Arc<Self>,
-        mut notifications: Notifications,
-        mut signals: broadcast::Receiver<ClientNotification>,
-    ) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            let started_at = Instant::now();
-            let mut first_event_seen = false;
-            info!("nostr notify loop entered");
-            loop {
-                // Neither feed is preferred, so a flood on one cannot starve
-                // the other.
-                let notification = tokio::select! {
-                    next = notifications.next() => match next {
-                        Some(notification) => notification,
-                        None => {
-                            warn!(
-                                channel = ?Feed::Pool,
-                                "nostr notification channel closed; notify loop exiting"
-                            );
-                            break;
-                        }
-                    },
-                    result = signals.recv() => match received(result) {
-                        ControlFlow::Continue(Some(notification)) => notification,
-                        ControlFlow::Continue(None) => continue,
-                        ControlFlow::Break(()) => break,
-                    },
-                };
-                if !first_event_seen {
-                    first_event_seen = true;
-                    info!(
-                        elapsed_ms = started_at.elapsed().as_millis() as u64,
-                        "nostr notify loop received first event"
-                    );
-                }
-                // By kind rather than by channel, so a signal that ever reached
-                // the pool's channel would still be opened rather than lost.
-                if let ClientNotification::Event { event, .. } = notification {
-                    if event.kind == Kind::Custom(ADVERT_KIND) {
-                        self.handle_advert(&event);
-                    } else if event.kind == Kind::Custom(SIGNAL_KIND) {
-                        self.handle_signal(event).await;
-                    }
-                }
-            }
-        })
-    }
-
-    /// Cache an advert a relay delivered, if it is valid and current, then
-    /// prune the cache.
-    fn handle_advert(&self, event: &Event) {
-        // `check` clamps `created_at` forward to the signal path's skew
-        // tolerance: an unbounded future `created_at` would win every
-        // replacement comparison in `observe_advert` and buy a
-        // proportionally distant validity horizon.
-        if let Some(checked) = ingest::check(
-            event,
-            &self.config.app,
-            advert_max_age_ms(&self.config),
-            now_ms(),
-        ) {
-            let author_npub = checked.author_npub;
-            let endpoints = endpoint_summary(&checked.advert.endpoints);
-            let admission = self.cache().observe_advert(
-                &author_npub,
-                checked.advert,
-                checked.created_at,
-                checked.valid_until_ms,
-                now_ms(),
-            );
-            match admission {
-                AdvertAdmission::Admitted | AdvertAdmission::Updated
-                    if author_npub != self.npub =>
-                {
-                    debug!(
-                        peer = %short_npub(&author_npub),
-                        endpoints = %endpoints,
-                        event = %short_id(&event.id.to_string()),
-                        "advert: peer cached"
-                    );
-                }
-                AdvertAdmission::Refused { first_at_bound } => {
-                    self.log_advert_cache_full(first_at_bound);
-                    debug!(
-                        peer = %short_npub(&author_npub),
-                        reason = "cache-full",
-                        "advert cache full; advert not cached"
-                    );
-                }
-                _ => {}
-            }
-        }
-        self.prune_advert_cache();
     }
 
     /// Open an inbound traversal signal, unless the signal gate sheds it, and
@@ -1180,209 +681,12 @@ impl NostrRendezvous {
         }
     }
 
-    fn spawn_advertise_loop(self: Arc<Self>) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(Duration::from_secs(self.config.advert_refresh_secs.max(1)));
-            // Swallow the immediate first tick: Node::start() requests the
-            // initial advert publish via update_local_advert().
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                self.request_publish_advert();
-            }
-        })
-    }
-
-    fn spawn_relay_startup_loop(self: Arc<Self>) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut retry_delay = Duration::from_secs(2);
-            loop {
-                let subscribed =
-                    match tokio::time::timeout(RELAY_STARTUP_OP_TIMEOUT, self.subscribe()).await {
-                        Ok(Ok(())) => true,
-                        Ok(Err(err)) => {
-                            warn!(error = %err, "failed to subscribe to Nostr discovery relays");
-                            false
-                        }
-                        Err(_) => {
-                            warn!(
-                                timeout_ms = RELAY_STARTUP_OP_TIMEOUT.as_millis() as u64,
-                                "Nostr discovery relay subscribe timed out"
-                            );
-                            false
-                        }
-                    };
-                self.publish_inbox().await;
-
-                self.request_publish_advert();
-
-                if subscribed {
-                    break;
-                }
-
-                tokio::time::sleep(retry_delay).await;
-                retry_delay = retry_delay.saturating_mul(2).min(Duration::from_secs(60));
-            }
-
-            // Peers only look up lists younger than INBOX_LOOKBACK, and a relay
-            // that was down at startup has not seen ours at all.
-            let mut republish = tokio::time::interval_at(
-                tokio::time::Instant::now() + INBOX_REPUBLISH,
-                INBOX_REPUBLISH,
-            );
-            republish.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                republish.tick().await;
-                self.publish_inbox().await;
-            }
-        })
-    }
-
-    /// Publish our inbox relay list, warning on failure or timeout.
-    async fn publish_inbox(&self) {
-        match tokio::time::timeout(RELAY_STARTUP_OP_TIMEOUT, self.publish_inbox_relays()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                warn!(error = %err, "failed to publish Nostr inbox relay list");
-            }
-            Err(_) => {
-                warn!(
-                    timeout_ms = RELAY_STARTUP_OP_TIMEOUT.as_millis() as u64,
-                    "Nostr inbox relay publish timed out"
-                );
-            }
-        }
-    }
-
-    fn spawn_connect_loop(self: Arc<Self>) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            self.client.connect().await;
-        })
-    }
-
-    fn spawn_publish_loop(self: Arc<Self>) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            loop {
-                self.publish_notify.notified().await;
-                match tokio::time::timeout(ADVERT_PUBLISH_TIMEOUT, self.publish_advert()).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => {
-                        warn!(error = %err, "failed to publish traversal advert");
-                    }
-                    Err(_) => {
-                        warn!(
-                            timeout_ms = ADVERT_PUBLISH_TIMEOUT.as_millis() as u64,
-                            "Nostr traversal advert publish timed out"
-                        );
-                    }
-                }
-            }
-        })
-    }
-
-    fn request_publish_advert(&self) {
-        self.publish_notify.notify_one();
-    }
-
     fn punch_hint(&self) -> PunchHint {
         PunchHint {
             start_at_ms: now_ms() + self.config.punch_start_delay_ms,
             interval_ms: self.config.punch_interval_ms,
             duration_ms: self.config.punch_duration_ms,
         }
-    }
-
-    async fn subscribe(&self) -> Result<(), BootstrapError> {
-        self.client
-            .subscribe(
-                self.config.dm_relays.clone(),
-                Filter::new()
-                    .kind(Kind::Custom(SIGNAL_KIND))
-                    .pubkey(self.pubkey)
-                    .limit(0),
-            )
-            .await
-            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
-
-        self.client
-            .subscribe(
-                self.config.advert_relays.clone(),
-                Filter::new()
-                    .kind(Kind::Custom(ADVERT_KIND))
-                    .identifier(ADVERT_IDENTIFIER),
-            )
-            .await
-            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
-
-        Ok(())
-    }
-
-    async fn publish_inbox_relays(&self) -> Result<(), BootstrapError> {
-        let event = inbox_list(&self.signer, &self.config.dm_relays)?;
-        self.client
-            .send(&self.config.dm_relays, &event)
-            .await
-            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
-        #[cfg(test)]
-        self.inbox_sent
-            .lock()
-            .expect("inbox_sent lock")
-            .push((tokio::time::Instant::now(), event));
-        Ok(())
-    }
-
-    async fn publish_advert(&self) -> Result<(), BootstrapError> {
-        let plan = self.publisher().plan_publish()?;
-        let advert = match plan {
-            PublishPlan::Nothing => return Ok(()),
-            PublishPlan::Publish(advert) => advert,
-        };
-
-        let (advert, event) = self.sign_advert(advert)?;
-        self.client
-            .send(&self.config.advert_relays, &event)
-            .await
-            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
-        debug!(
-            event = %short_id(&event.id.to_string()),
-            relays = self.config.advert_relays.len(),
-            endpoints = %endpoint_summary(&advert.endpoints),
-            ttl_secs = self.config.advert_ttl_secs,
-            "advert: published"
-        );
-        // Kind 37195 lives in NIP-01's parameterized replaceable range
-        // (30000–39999). Relays supersede the previous event for the same
-        // (pubkey, kind, d-tag) triple by created_at — emitting an explicit
-        // NIP-09 delete here is redundant and races with the replacement
-        // publish, which strict relays (e.g. Damus) honor by removing the
-        // new advert too.
-        Ok(())
-    }
-
-    /// Sign `advert` as our advert event, with its lists cut to what peers
-    /// accept. Returns the advert as published along with the event, and
-    /// warns if the content is still over the bound peers parse.
-    fn sign_advert(
-        &self,
-        mut advert: OverlayAdvert,
-    ) -> Result<(OverlayAdvert, Event), BootstrapError> {
-        clamp_own_advert(&mut advert);
-        let event = advert_event(
-            &self.signer,
-            &advert,
-            &self.config.app,
-            self.config.advert_ttl_secs,
-            now_ms(),
-        )?;
-        if event.content.len() > MAX_ADVERT_CONTENT_BYTES {
-            warn!(
-                bytes = event.content.len(),
-                bound = MAX_ADVERT_CONTENT_BYTES,
-                "advert: larger than peers accept; peers will refuse it"
-            );
-        }
-        Ok((advert, event))
     }
 
     async fn connect_peer(
@@ -1398,8 +702,13 @@ impl NostrRendezvous {
             return Err(BootstrapError::Disabled);
         }
         debug!(peer = %peer_short, "traversal: initiator starting");
-        let (target_pubkey, _) = peer_key(&peer_config.npub)?;
-        let advert = self.fetch_advert(target_pubkey).await?;
+        let (target_pubkey, canonical) = peer_key(&peer_config.npub)?;
+        let advert = self
+            .resolve_advert(PeerKey {
+                pubkey: target_pubkey,
+                npub: canonical,
+            })
+            .await?;
         if !advert.has_udp_nat_endpoint() {
             return Err(BootstrapError::MissingNatEndpoint(peer_config.npub.clone()));
         }
@@ -1845,92 +1154,6 @@ impl NostrRendezvous {
         Ok(())
     }
 
-    /// Resolve `target_pubkey`'s advert from the cache, or else from the
-    /// advert relays, caching what the relays return when there is room.
-    ///
-    /// The cache is keyed by the canonical npub, so it is derived here from
-    /// `target_pubkey` rather than taken from the configured text, which may
-    /// be in upper case.
-    async fn fetch_advert(
-        &self,
-        target_pubkey: PublicKey,
-    ) -> Result<OverlayAdvert, BootstrapError> {
-        let canonical = target_pubkey.to_bech32().expect("infallible");
-        let peer_npub = canonical.as_str();
-        self.prune_advert_cache();
-        let cached = self.cache().cached_advert(peer_npub, now_ms());
-        if let Some(advert) = cached {
-            debug!(
-                peer = %short_npub(peer_npub),
-                source = "cache",
-                endpoints = %endpoint_summary(&advert.endpoints),
-                "advert: resolved"
-            );
-            return Ok(advert);
-        }
-
-        let events = self
-            .client
-            .fetch(
-                self.config.advert_relays.clone(),
-                Filter::new()
-                    .author(target_pubkey)
-                    .kind(Kind::Custom(ADVERT_KIND))
-                    .identifier(ADVERT_IDENTIFIER),
-                Duration::from_secs(2),
-            )
-            .await
-            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
-
-        let mut best: Option<CachedOverlayAdvert> = None;
-        for event in events.iter() {
-            let Some(checked) = ingest::check(
-                event,
-                &self.config.app,
-                advert_max_age_ms(&self.config),
-                now_ms(),
-            ) else {
-                continue;
-            };
-            if checked.author_npub != peer_npub {
-                continue;
-            }
-            let replace = best
-                .as_ref()
-                .map(|current| checked.created_at >= current.created_at)
-                .unwrap_or(true);
-            if replace {
-                best = Some(CachedOverlayAdvert {
-                    author_npub: checked.author_npub,
-                    advert: checked.advert,
-                    created_at: checked.created_at,
-                    valid_until_ms: checked.valid_until_ms,
-                });
-            }
-        }
-
-        let cached = best.ok_or_else(|| BootstrapError::MissingAdvert(peer_npub.to_string()))?;
-        debug!(
-            peer = %short_npub(peer_npub),
-            source = "relay-fetch",
-            endpoints = %endpoint_summary(&cached.advert.endpoints),
-            "advert: resolved"
-        );
-        let admission = self
-            .cache()
-            .insert_fetched(peer_npub, cached.clone(), now_ms());
-        if let AdvertAdmission::Refused { first_at_bound } = admission {
-            self.log_advert_cache_full(first_at_bound);
-            debug!(
-                peer = %short_npub(peer_npub),
-                reason = "cache-full",
-                "advert cache full; fetched advert used for this dial only"
-            );
-        }
-        self.prune_advert_cache();
-        Ok(cached.advert)
-    }
-
     async fn preferred_signal_relays(
         &self,
         target_pubkey: PublicKey,
@@ -1987,7 +1210,8 @@ impl NostrRendezvous {
                 return Ok(self.config.dm_relays.clone());
             }
         };
-        let newest = ingest::newest_by_author(events.iter(), target_pubkey);
+        let newest =
+            super::machine::adverts::ingest::newest_by_author(events.iter(), target_pubkey);
         if let Some(event) = newest {
             let relays = inbox_relays(event);
             if !relays.is_empty() {
@@ -2006,18 +1230,6 @@ impl NostrRendezvous {
             .expect("refusal-warn mutex poisoned")
             .decide(tally, HostClock.now());
         log_refusals(tally, peer, session, warn);
-    }
-
-    fn prune_advert_cache(&self) {
-        let report = self.cache().prune(now_ms());
-        if report.evicted > 0 {
-            debug!(
-                evicted = report.evicted,
-                retained = report.retained,
-                cap = self.config.advert_cache_max_entries,
-                "advert cache over cap; evicted unprotected entries"
-            );
-        }
     }
 
     async fn send_signal<T: Serialize>(
@@ -2046,6 +1258,299 @@ impl NostrRendezvous {
     }
 }
 
+impl NostrRendezvous {
+    /// Whether the Nostr subsystem has stopped being able to do its job
+    /// (runtime liveness).
+    ///
+    /// "Nostr exited" is defined as either of its two tasks having finished:
+    ///
+    /// - the pump, which owns the advert half: it reads the relay client's
+    ///   stream, publishes this node's advert and keeps the relay
+    ///   subscriptions. Without it no advert is received or published again.
+    /// - the signal task, which reads the signal router's channel. Without it
+    ///   no traversal signal is ever received again.
+    ///
+    /// Each runs until the relay client's stream or the signals' channel
+    /// ends, which means the client is gone, or until `shutdown`, so a
+    /// finished handle means the task panicked, was aborted or was stopped:
+    /// unrecoverable, which matches the one-way `ChildExited` → `Degraded`
+    /// latch in the supervisor FSM.
+    ///
+    /// Each handle is `Some` for the engine's whole running life (installed in
+    /// `start`); `shutdown` takes them both, leaving `None` — a taken handle
+    /// means the engine has been shut down, which counts as finished, so a
+    /// `None` inner maps to `true` (this lets the liveness poll monitor
+    /// terminate after a stop rather than spinning forever). The slots are
+    /// `tokio::sync::Mutex`es, so this sync accessor uses the non-blocking
+    /// `try_lock`: a momentarily-contended lock (only start/stop hold it,
+    /// briefly) reports "not finished", the safe direction — the 2s liveness
+    /// poll re-checks next tick and never spuriously degrades a healthy node.
+    pub fn is_finished(&self) -> bool {
+        Self::task_finished(&self.pump_task) || Self::task_finished(&self.signal_task)
+    }
+
+    /// Liveness of one task slot: finished if the handle is gone (shut down) or
+    /// the task has completed; "not finished" when the slot is momentarily
+    /// locked by start/stop.
+    fn task_finished(slot: &Mutex<Option<JoinHandle<()>>>) -> bool {
+        slot.try_lock()
+            .map(|g| g.as_ref().is_none_or(|h| h.is_finished()))
+            .unwrap_or(false)
+    }
+
+    pub async fn start(
+        identity: &crate::Identity,
+        config: NostrRendezvousConfig,
+    ) -> Result<Arc<Self>, BootstrapError> {
+        if !config.enabled {
+            return Err(BootstrapError::Disabled);
+        }
+
+        // Two copies of the private key are made to reach the signer: the
+        // keypair and its secret key. Each is bound and cleared here; nostr's
+        // `SecretKey`, which the signer holds, clears its own on drop.
+        let mut our_keypair = identity.keypair();
+        let mut secret = our_keypair.secret_key();
+        let signer = Arc::new(NodeSigner::new(SecretKey::from(secret)));
+        secret.non_secure_erase();
+        our_keypair.non_secure_erase();
+        let npub = crate::encode_npub(&identity.pubkey());
+
+        let (inbox, inbox_rx) = mpsc::unbounded_channel();
+        let (router, signals) = SignalRouter::new();
+        let forwarder = router.forwarder();
+        let client = RelayClient::build(PumpAuthenticator::new(inbox.clone()), router);
+
+        let mut relay_union = HashSet::new();
+        relay_union.extend(config.advert_relays.iter().cloned());
+        relay_union.extend(config.dm_relays.iter().cloned());
+        client
+            .add_relays(&relay_union)
+            .await
+            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
+
+        let params = Params::from(&config);
+        let machine = Rendezvous::new(params, Arc::clone(&signer), npub.clone(), pump::now());
+        let traversal = Arc::new(TraversalShared::new(
+            client.clone(),
+            signer,
+            npub,
+            config,
+            inbox.clone(),
+        ));
+        let first = Arc::new(FirstEvent::new());
+
+        // Take the relay client's notification stream BEFORE the pump can
+        // issue the Nostr REQs. The stream reads a broadcast channel that
+        // only delivers messages sent after it subscribes, which it does when
+        // it is taken — historical events that arrive in response to a
+        // subscribe (REQ replays) would otherwise be sent while no subscriber
+        // exists yet, and dropped. Without this, freshly-restarted nodes with
+        // `policy: open` waited up to one `advert_refresh_secs` interval
+        // (default 30 min) for non-configured peers to re-publish before
+        // discovering them. The signals' own channel needs no such care: its
+        // receiver was made with it.
+        let notifications = client.notifications();
+        let reset = Arc::clone(&traversal);
+        let pump = Pump::new(
+            machine,
+            client.clone(),
+            inbox.clone(),
+            Box::new(move |npub| reset.reset_streak(npub)),
+            forwarder,
+            Arc::clone(&first),
+        );
+        #[cfg(test)]
+        let in_flight = pump.in_flight();
+        let pump_task = tokio::spawn(pump.run(notifications, inbox_rx));
+        // Starts each relay's connection task and returns, so the first
+        // subscribe meets relays that have left their initial state.
+        client.connect().await;
+        let signal_task =
+            tokio::spawn(Arc::clone(&traversal).run_signals(signals, Arc::clone(&first)));
+        let _ = inbox.send(Msg::Input(Input::Start));
+
+        Ok(Arc::new(Self {
+            inbox,
+            pump_task: Mutex::new(Some(pump_task)),
+            signal_task: Mutex::new(Some(signal_task)),
+            traversal,
+            #[cfg(test)]
+            client,
+            #[cfg(test)]
+            in_flight,
+            #[cfg(test)]
+            pool: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            signal_rx: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            first,
+        }))
+    }
+
+    /// Update the cached outbound-admission flag. Called once per Node
+    /// tick with the current value of `Node::outbound_admission_check()`.
+    /// Cheap atomic store; safe to call unconditionally.
+    pub fn set_outbound_admission(&self, allow: bool) {
+        self.traversal.set_outbound_admission(allow);
+    }
+
+    /// Read the cached outbound-admission flag. Returns `true` when the
+    /// Node is below `max_peers` (or `max_peers == 0`), `false` otherwise.
+    #[cfg(test)]
+    pub(crate) fn outbound_admission_allowed(&self) -> bool {
+        self.traversal.outbound_admission_allowed()
+    }
+
+    pub async fn request_connect(self: &Arc<Self>, peer_config: PeerConfig) {
+        self.traversal.request_connect(peer_config).await;
+    }
+
+    /// Record a NAT-traversal failure for `npub`, returning the
+    /// resulting decision (WARN suppression + extended cooldown +
+    /// threshold-crossing flag for the B6 re-fetch).
+    pub fn record_traversal_failure(&self, npub: &str, now_ms: u64) -> NostrFailureDecision {
+        self.traversal.record_traversal_failure(npub, now_ms)
+    }
+
+    /// Record a successful traversal — clears the streak/cooldown.
+    pub fn record_traversal_success(&self, npub: &str, now_ms: u64) {
+        self.traversal.record_traversal_success(npub, now_ms);
+    }
+
+    /// Cooldown wall-clock ms if the peer is currently suppressed,
+    /// else None. Used by the open-discovery sweep to skip enqueue.
+    pub fn cooldown_until(&self, npub: &str, now_ms: u64) -> Option<u64> {
+        self.traversal.cooldown_until(npub, now_ms)
+    }
+
+    /// Record a fatal protocol mismatch (e.g. `Unknown FMP version` on a
+    /// Nostr-adopted bootstrap transport). Returns `true` if this is a
+    /// fresh observation worth a WARN log; `false` if the peer is already
+    /// inside a comparable mismatch cooldown.
+    pub fn record_protocol_mismatch(&self, npub: &str, now_ms: u64) -> bool {
+        self.traversal.record_protocol_mismatch(npub, now_ms)
+    }
+
+    /// Configured protocol-mismatch cooldown in seconds. Exposed so log
+    /// emitters can include the duration without re-reading config.
+    pub fn protocol_mismatch_cooldown_secs(&self) -> u64 {
+        self.traversal.protocol_mismatch_cooldown_secs()
+    }
+
+    /// Snapshot of per-npub failure state for `show_peers` rendering.
+    pub fn failure_state_snapshot(&self) -> Vec<NostrPeerFailureView> {
+        self.traversal.failure_state_snapshot()
+    }
+
+    /// Stale-advert re-check (B6). Called by lifecycle on the
+    /// streak-threshold transition. Actively re-queries the peer's
+    /// Kind 37195 advert from `advert_relays`; evicts the cache entry
+    /// if absent, refreshes if newer than the cached `created_at`,
+    /// otherwise leaves the cache untouched.
+    pub async fn refetch_advert_for_stale_check(&self, peer_npub: &str) -> NostrRefetchOutcome {
+        // The caller passes the configured text; the cache and the failure
+        // state are keyed by the canonical npub.
+        let Ok((pubkey, npub)) = peer_key(peer_npub) else {
+            return NostrRefetchOutcome::Skipped;
+        };
+        let key = PeerKey { pubkey, npub };
+        ask(&self.inbox, |tx| Msg::Refetch { key, tx })
+            .await
+            .unwrap_or(NostrRefetchOutcome::Skipped)
+    }
+
+    pub async fn drain_events(&self) -> Vec<BootstrapEvent> {
+        self.traversal.drain_events().await
+    }
+
+    /// Hand the node's advertisable transports to the pump, which assembles
+    /// and publishes the advert from them once any public address they need
+    /// is learned. Does not wait.
+    pub fn set_transports(&self, snapshot: Vec<AdvertTransportSnapshot>) {
+        let _ = self.inbox.send(Msg::Input(Input::Transports {
+            snapshot,
+            reply: None,
+        }));
+    }
+
+    /// As [`Self::set_transports`], and wait until the advert has been
+    /// assembled from `snapshot`, which is after any public address it
+    /// needs has been learned.
+    pub async fn assemble_advert(
+        &self,
+        snapshot: Vec<AdvertTransportSnapshot>,
+    ) -> Result<(), BootstrapError> {
+        ask(&self.inbox, |tx| Msg::Assemble { snapshot, tx })
+            .await
+            .ok_or(BootstrapError::Disabled)
+    }
+
+    pub async fn advert_endpoints_for_peer(
+        &self,
+        peer_npub: &str,
+    ) -> Result<Vec<OverlayEndpointAdvert>, BootstrapError> {
+        let (pubkey, npub) = peer_key(peer_npub)?;
+        let key = PeerKey { pubkey, npub };
+        match ask(&self.inbox, |tx| Msg::Endpoints { key, tx }).await {
+            Some(result) => Ok(result?),
+            None => Err(BootstrapError::Disabled),
+        }
+    }
+
+    /// `peer_npub`'s advert endpoints from the cache alone, without asking
+    /// the relays: `None` when no current advert is cached or the npub does
+    /// not parse. For callers on the node's event loop, which must not wait
+    /// on a relay; this waits only for the pump.
+    pub async fn cached_endpoints(&self, peer_npub: &str) -> Option<Vec<OverlayEndpointAdvert>> {
+        let npub = PublicKey::parse(peer_npub).ok()?.to_bech32().ok()?;
+        ask(&self.inbox, |tx| Msg::CachedEndpoints { npub, tx })
+            .await
+            .flatten()
+    }
+
+    /// Replace the set of authors whose cached adverts survive a full cache:
+    /// the configured peers and the authors with an established link.
+    pub fn set_advert_protection(&self, npubs: HashSet<String>) {
+        let _ = self
+            .inbox
+            .send(Msg::Input(Input::Protection(npubs.into_iter().collect())));
+    }
+
+    /// The cached adverts the open-discovery sweep should consider: the
+    /// protected entries not in `skip`, plus up to `max` unprotected entries
+    /// not in `skip`, drawn at random on each call.
+    pub async fn cached_open_discovery_candidates(
+        &self,
+        max: usize,
+        skip: &HashSet<String>,
+    ) -> Vec<(String, Vec<OverlayEndpointAdvert>, u64)> {
+        let skip: BTreeSet<String> = skip.iter().cloned().collect();
+        ask(&self.inbox, |tx| Msg::OpenDiscovery { max, skip, tx })
+            .await
+            .unwrap_or_default()
+    }
+
+    pub async fn shutdown(&self) -> Result<(), BootstrapError> {
+        // Shutdown sends no NIP-09 retraction of the advert.
+        // Parameterized-replaceable semantics handle restart supersedence,
+        // and NIP-40 expiration (advert_ttl_secs) bounds staleness on
+        // permanent shutdown. An explicit retraction races with the next
+        // daemon's republish on strict relays (e.g. Damus rate-limits the
+        // burst, leaving the advert deleted and never restored).
+        let _ = self.inbox.send(Msg::Input(Input::Shutdown));
+        if let Some(handle) = self.pump_task.lock().await.take() {
+            // The pump aborts its relay operations in flight as it ends.
+            let _ = handle.await;
+        }
+        if let Some(handle) = self.signal_task.lock().await.take() {
+            handle.abort();
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 /// Build our kind 37195 advert carrying `advert`, signed by `signer`: the
 /// identifier, `app` as its protocol, the protocol version, and an
 /// expiration `ttl_secs` after `now_ms`.
@@ -2094,6 +1599,7 @@ pub(super) fn signal_event<T: Serialize>(
 
 /// Build our kind 10050 inbox relay list: one `["r", url]` tag per relay that
 /// parses, signed by `signer`.
+#[cfg(test)]
 pub(super) fn inbox_list(signer: &NodeSigner, relays: &[String]) -> Result<Event, BootstrapError> {
     Ok(inbox_codec::inbox_list(signer, relays, now_ms(), aux())?)
 }
@@ -2158,6 +1664,30 @@ pub(super) fn signal_relays(
 }
 
 #[cfg(test)]
+impl TraversalShared {
+    /// Register `offer` as our in-flight offer to `peer_npub`, sent to `relays`,
+    /// with an active initiator, as `connect_peer` would after publishing it.
+    async fn insert_inflight_offer_for_test(
+        &self,
+        peer_npub: &str,
+        offer: TraversalOffer,
+        receiver: PublicKey,
+        relays: Vec<String>,
+    ) {
+        self.election().begin_initiator(peer_npub);
+        self.inflight_offers.lock().await.insert(
+            peer_npub.to_string(),
+            InflightOffer {
+                offer,
+                relays,
+                receiver,
+                resend: Resend::Available,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
 impl NostrRendezvous {
     /// The advert `event` carries, if it is for `expected_app` and passes
     /// every content rule (`ingest::parse`).
@@ -2165,6 +1695,7 @@ impl NostrRendezvous {
         event: &Event,
         expected_app: &str,
     ) -> Result<OverlayAdvert, BootstrapError> {
+        use super::machine::adverts::ingest;
         ingest::parse(event, expected_app).map_err(|e| match e {
             ingest::ParseError::Invalid(e) => e.into(),
             ingest::ParseError::Json(e) => BootstrapError::Serde(e),
@@ -2175,7 +1706,7 @@ impl NostrRendezvous {
     pub(super) fn validate_overlay_advert(
         advert: OverlayAdvert,
     ) -> Result<OverlayAdvert, BootstrapError> {
-        Ok(ingest::validate(advert)?)
+        Ok(super::machine::adverts::ingest::validate(advert)?)
     }
 
     /// Newest event in `events` that was actually signed by `author`
@@ -2184,7 +1715,7 @@ impl NostrRendezvous {
         events: impl Iterator<Item = &'a Event>,
         author: PublicKey,
     ) -> Option<&'a Event> {
-        ingest::newest_by_author(events, author)
+        super::machine::adverts::ingest::newest_by_author(events, author)
     }
 
     /// The time `event`, an advert, stops being valid at `now_ms`, or `None`
@@ -2194,18 +1725,22 @@ impl NostrRendezvous {
         advert_max_age_ms: u64,
         now_ms: u64,
     ) -> Option<u64> {
-        ingest::valid_until_ms(event, advert_max_age_ms, now_ms)
+        super::machine::adverts::ingest::valid_until_ms(event, advert_max_age_ms, now_ms)
     }
 
-    /// Build a minimal `NostrRendezvous` for unit tests. No relay client is
-    /// connected and no background tasks are spawned; only the in-memory
-    /// `advert_cache` and `npub` are usable. Intended for cache-injection
-    /// tests of consumers (e.g. `Node::run_open_discovery_sweep`).
+    /// Build a `NostrRendezvous` for unit tests. Its pump runs, with the
+    /// real relay client, on a stand-in for the client's notification
+    /// channel that [`Self::deliver_for_test`] feeds; it is not started
+    /// (no subscribe, no publish) and its client is connected to nothing
+    /// until a test adds relays. The signal task is not running until
+    /// [`Self::spawn_signals_for_test`]. Needs a tokio runtime.
     pub(crate) fn new_for_test() -> Self {
         Self::new_for_test_with_config(NostrRendezvousConfig::default())
     }
 
     /// As [`Self::new_for_test`], with `config` in place of the default.
+    /// The configuration is fixed here: the pump and the traversal flows
+    /// each hold their copy.
     pub(crate) fn new_for_test_with_config(config: NostrRendezvousConfig) -> Self {
         let secret = loop {
             let mut bytes = [0u8; 32];
@@ -2224,60 +1759,67 @@ impl NostrRendezvous {
         secret_key: SecretKey,
     ) -> Self {
         let signer = Arc::new(NodeSigner::new(secret_key));
-        let pubkey = signer.public_key();
-        let npub = pubkey.to_bech32().expect("bech32 encode");
+        let npub = signer.public_key().to_bech32().expect("bech32 encode");
+        let (inbox, inbox_rx) = mpsc::unbounded_channel();
         let (router, signals) = SignalRouter::new();
-        let client = RelayClient::build(Arc::clone(&signer), router);
-        let admission = OfferAdmission::new(
-            config.max_concurrent_incoming_offers,
-            config.max_concurrent_offers_per_npub,
-        );
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let forwarder = router.forwarder();
+        let client = RelayClient::build(PumpAuthenticator::new(inbox.clone()), router);
         let params = Params::from(&config);
-        let failure_state = FailureState::new(
-            params.failure_streak_threshold,
-            params.extended_cooldown_secs,
-            params.warn_log_interval_secs,
-            params.failure_state_max_entries,
-            fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
-        );
-        let adverts = advert_cache(npub.clone(), &params);
-        let publisher = Publisher::new(params.advertise);
-        let traversal = Election::new(
-            params.replay_window_secs * 1000,
-            params.seen_sessions_max_entries,
-            fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
-        );
-        Self {
-            client,
+        let machine = Rendezvous::new(params, Arc::clone(&signer), npub.clone(), pump::now());
+        let traversal = Arc::new(TraversalShared::new(
+            client.clone(),
             signer,
-            pubkey,
             npub,
             config,
-            adverts: std::sync::Mutex::new(adverts),
-            publisher: std::sync::Mutex::new(publisher),
-            traversal: std::sync::Mutex::new(traversal),
-            pending_answers: Mutex::new(HashMap::new()),
-            inflight_offers: Mutex::new(HashMap::new()),
-            sent_signals: std::sync::Mutex::new(Vec::new()),
-            inbox_sent: std::sync::Mutex::new(Vec::new()),
+            inbox.clone(),
+        ));
+        let first = Arc::new(FirstEvent::new());
+        let (pool, pool_rx) = broadcast::channel(super::relay::POOL_CHANNEL);
+        // Read as the client's stream reads its channel: a lag is skipped
+        // and a closed channel ends the stream (nostr-sdk 0.45.6,
+        // `src/stream.rs`, `NotificationStream`).
+        let stand_in = futures::stream::unfold(pool_rx, |mut receiver| async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(notification) => return Some((notification, receiver)),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        });
+        let reset = Arc::clone(&traversal);
+        let pump = Pump::new(
+            machine,
+            client.clone(),
+            inbox.clone(),
+            Box::new(move |npub| reset.reset_streak(npub)),
+            forwarder,
+            Arc::clone(&first),
+        );
+        let in_flight = pump.in_flight();
+        let pump_task = tokio::spawn(pump.run(Box::pin(stand_in), inbox_rx));
+        Self {
+            inbox,
+            pump_task: Mutex::new(Some(pump_task)),
+            signal_task: Mutex::new(None),
+            traversal,
+            client,
+            in_flight,
+            pool: std::sync::Mutex::new(Some(pool)),
             signal_rx: std::sync::Mutex::new(Some(signals)),
-            admission,
-            signal_gate: std::sync::Mutex::new(SignalGate::new(HostClock.now())),
-            refusal_warn: std::sync::Mutex::new(RefusalWarnGate::default()),
-            shed_signals: AtomicU64::new(0),
-            event_tx,
-            event_rx: Mutex::new(event_rx),
-            connect_task: Mutex::new(None),
-            relay_startup_task: Mutex::new(None),
-            publish_task: Mutex::new(None),
-            publish_notify: Notify::new(),
-            notify_task: Mutex::new(None),
-            advertise_task: Mutex::new(None),
-            failure_state: std::sync::Mutex::new(failure_state),
-            public_udp_addr_cache: RwLock::new(HashMap::new()),
-            outbound_admission: AtomicBool::new(true),
+            first,
         }
+    }
+
+    /// Wait until the pump has handled everything sent to it before this
+    /// call, so a read after it sees the effect of every earlier send.
+    pub(crate) async fn settled_for_test(&self) {
+        let _ = ask(&self.inbox, |tx| Msg::Settle { tx }).await;
+    }
+
+    /// How many relay operations the pump has in flight.
+    pub(crate) fn in_flight_for_test(&self) -> usize {
+        self.in_flight.load(Ordering::SeqCst)
     }
 
     /// Register `offer` as our in-flight offer to `peer_npub`, sent to `relays`,
@@ -2289,22 +1831,16 @@ impl NostrRendezvous {
         receiver: PublicKey,
         relays: Vec<String>,
     ) {
-        self.election().begin_initiator(peer_npub);
-        self.inflight_offers.lock().await.insert(
-            peer_npub.to_string(),
-            InflightOffer {
-                offer,
-                relays,
-                receiver,
-                resend: Resend::Available,
-            },
-        );
+        self.traversal
+            .insert_inflight_offer_for_test(peer_npub, offer, receiver, relays)
+            .await;
     }
 
     /// Whether our in-flight offer to `peer_npub` has been re-sent, or `None`
     /// when there is none.
     pub(crate) async fn inflight_offer_resent_for_test(&self, peer_npub: &str) -> Option<bool> {
-        self.inflight_offers
+        self.traversal
+            .inflight_offers
             .lock()
             .await
             .get(peer_npub)
@@ -2313,7 +1849,8 @@ impl NostrRendezvous {
 
     /// The traversal offers `send_signal` has published, in order.
     pub(crate) fn sent_offers_for_test(&self) -> Vec<TraversalOffer> {
-        self.sent_signals
+        self.traversal
+            .sent_signals
             .lock()
             .expect("sent_signals lock")
             .iter()
@@ -2330,52 +1867,58 @@ impl NostrRendezvous {
         self.client.add_relays([url]).await.expect("add relay");
     }
 
-    /// Spawn the relay-startup task as `start` does, and return its handle.
-    pub(crate) fn spawn_relay_startup_loop_for_test(self: Arc<Self>) -> JoinHandle<()> {
-        self.spawn_relay_startup_loop()
+    /// Close the stand-in for the relay client's notification channel, as
+    /// the client's shutdown ends its stream.
+    pub(super) fn close_pool_for_test(&self) {
+        self.pool.lock().expect("pool lock").take();
     }
 
-    /// Spawn the notify loop as `start` does, on `notifications`, the test's
-    /// stand-in for the relay client's notification channel, and on the
-    /// signals' own channel, and return its handle. The stand-in is read as
-    /// the client's stream reads its channel: a lag is skipped and a closed
-    /// channel ends the stream (nostr-sdk 0.45.6, `src/stream.rs`,
-    /// `NotificationStream`).
-    pub(super) fn spawn_notify_loop_for_test(
-        self: Arc<Self>,
-        notifications: broadcast::Receiver<ClientNotification>,
-    ) -> JoinHandle<()> {
+    /// A receiver of the stand-in for the relay client's notification
+    /// channel, from now on, to count what is queued on it.
+    pub(super) fn pool_receiver_for_test(&self) -> broadcast::Receiver<ClientNotification> {
+        self.pool
+            .lock()
+            .expect("pool lock")
+            .as_ref()
+            .expect("the stand-in is open")
+            .subscribe()
+    }
+
+    /// Start the signal task on the signal router's channel, as `start`
+    /// does, and return its handle.
+    pub(super) fn spawn_signals_for_test(&self) -> JoinHandle<()> {
         let signals = self
             .signal_rx
             .lock()
             .expect("signal_rx lock")
             .take()
             .expect("the signal channel's receiver is taken once");
-        let stream = futures::stream::unfold(notifications, |mut receiver| async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(notification) => return Some((notification, receiver)),
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                }
-            }
-        });
-        self.spawn_notify_loop(Box::pin(stream), signals)
+        tokio::spawn(Arc::clone(&self.traversal).run_signals(signals, Arc::clone(&self.first)))
+    }
+
+    /// Take the pump's handle out of its slot.
+    pub(super) async fn take_pump_for_test(&self) -> Option<JoinHandle<()>> {
+        self.pump_task.lock().await.take()
+    }
+
+    /// End the pump as `shutdown` does and wait for it, leaving the rest of
+    /// the engine, the relay client among it, as it is.
+    pub(super) async fn end_pump_for_test(&self) {
+        let _ = self.inbox.send(Msg::Input(Input::Shutdown));
+        if let Some(handle) = self.take_pump_for_test().await {
+            let _ = handle.await;
+        }
     }
 
     /// Deliver `notification` as the relay client does with an event a relay
-    /// sent: through the admission policy the client was built with, if it
-    /// has one, and if admitted onto `pool`, the test's stand-in for the
-    /// client's notification channel (nostr-sdk 0.45.6, `src/relay/inner.rs`
-    /// lines 1265 to 1320, `handle_event_msg`). Each admitted delivery takes
-    /// one slot of `pool`. The client's step that records an event as seen is
-    /// not modelled; a repeat delivery costs the real channel a slot all the
+    /// sent: through the admission policy the client was built with, and if
+    /// admitted onto the stand-in for the client's notification channel
+    /// (nostr-sdk 0.45.6, `src/relay/inner.rs` lines 1265 to 1320,
+    /// `handle_event_msg`). Each admitted delivery takes one slot of the
+    /// stand-in. The client's step that records an event as seen is not
+    /// modelled; a repeat delivery costs the real channel a slot all the
     /// same, as a relay message rather than an event.
-    pub(super) async fn deliver_for_test(
-        &self,
-        pool: &broadcast::Sender<ClientNotification>,
-        notification: ClientNotification,
-    ) {
+    pub(super) async fn deliver_for_test(&self, notification: ClientNotification) {
         if let ClientNotification::Event {
             relay_url,
             subscription_id,
@@ -2389,47 +1932,39 @@ impl NostrRendezvous {
         {
             return;
         }
-        let _ = pool.send(notification);
+        if let Some(pool) = self.pool.lock().expect("pool lock").as_ref() {
+            let _ = pool.send(notification);
+        }
+    }
+
+    /// Put `notification` on the stand-in for the relay client's
+    /// notification channel without the admission policy, as if a relay's
+    /// event had reached the pool's stream some other way.
+    pub(super) fn deliver_unfiltered_for_test(&self, notification: ClientNotification) {
+        if let Some(pool) = self.pool.lock().expect("pool lock").as_ref() {
+            let _ = pool.send(notification);
+        }
     }
 
     /// Register a traversal waiting for the answer to our offer whose nonce is
     /// `nonce`, as `connect_peer` does once the offer is sent, and return the
-    /// receiver the notify loop hands that answer to.
+    /// receiver the signal task hands that answer to.
     pub(super) async fn await_answer_for_test(
         &self,
         nonce: &str,
     ) -> oneshot::Receiver<SignalEnvelope<TraversalAnswer>> {
         let (tx, rx) = oneshot::channel();
-        self.pending_answers
+        self.traversal
+            .pending_answers
             .lock()
             .await
             .insert(nonce.to_string(), tx);
         rx
     }
 
-    /// Publish our inbox relay list once.
-    pub(crate) async fn publish_inbox_relays_for_test(&self) -> Result<(), BootstrapError> {
-        self.publish_inbox_relays().await
-    }
-
-    /// Every inbox relay list published so far, with the tokio time of each.
-    pub(crate) fn inbox_sent_for_test(&self) -> Vec<(tokio::time::Instant, Event)> {
-        self.inbox_sent.lock().expect("inbox_sent lock").clone()
-    }
-
     /// This runtime's own npub.
     pub(crate) fn npub_for_test(&self) -> &str {
-        &self.npub
-    }
-
-    /// The advert event `publish_advert` would send now, or `None` when there
-    /// is nothing to publish.
-    pub(crate) fn signed_advert_for_test(&self) -> Result<Option<Event>, BootstrapError> {
-        let plan = self.publisher().plan_publish()?;
-        match plan {
-            PublishPlan::Publish(advert) => Ok(Some(self.sign_advert(advert)?.1)),
-            PublishPlan::Nothing => Ok(None),
-        }
+        &self.traversal.npub
     }
 
     /// Run the incoming-offer handler.
@@ -2439,25 +1974,27 @@ impl NostrRendezvous {
         sender: PublicKey,
         sender_npub: String,
     ) -> Result<(), BootstrapError> {
-        self.handle_incoming_offer(offer, sender, sender_npub).await
+        Arc::clone(&self.traversal)
+            .handle_incoming_offer(offer, sender, sender_npub)
+            .await
     }
 
-    /// Install the five background-task handles that `start` would install, so
-    /// liveness tests can drive `is_finished()` without live relays. Each
-    /// argument is the handle to place in the matching slot.
-    pub(crate) async fn install_tasks_for_test(
+    /// Install the pump's and the signal task's handles, so liveness tests
+    /// can drive `is_finished()` without live relays. The handles they
+    /// replace are dropped, which leaves their tasks running.
+    pub(crate) async fn install_task_handles_for_test(
         &self,
-        connect: JoinHandle<()>,
-        relay_startup: JoinHandle<()>,
-        notify: JoinHandle<()>,
-        publish: JoinHandle<()>,
-        advertise: JoinHandle<()>,
+        pump: JoinHandle<()>,
+        signals: JoinHandle<()>,
     ) {
-        *self.connect_task.lock().await = Some(connect);
-        *self.relay_startup_task.lock().await = Some(relay_startup);
-        *self.notify_task.lock().await = Some(notify);
-        *self.publish_task.lock().await = Some(publish);
-        *self.advertise_task.lock().await = Some(advertise);
+        *self.pump_task.lock().await = Some(pump);
+        *self.signal_task.lock().await = Some(signals);
+    }
+
+    /// Take both task handles out of their slots, as `shutdown` does.
+    pub(crate) async fn take_task_handles_for_test(&self) {
+        self.pump_task.lock().await.take();
+        self.signal_task.lock().await.take();
     }
 
     /// Build a `CachedOverlayAdvert` for tests with a single endpoint and
@@ -2466,8 +2003,8 @@ impl NostrRendezvous {
         author_npub: String,
         endpoint: OverlayEndpointAdvert,
         created_at_secs: u64,
-    ) -> CachedOverlayAdvert {
-        CachedOverlayAdvert {
+    ) -> super::types::CachedOverlayAdvert {
+        super::types::CachedOverlayAdvert {
             author_npub: author_npub.clone(),
             advert: OverlayAdvert {
                 identifier: ADVERT_IDENTIFIER.to_string(),
@@ -2481,50 +2018,65 @@ impl NostrRendezvous {
         }
     }
 
-    /// Point the test instance's advert relays at explicit URLs. Unit tests
-    /// that exercise `refetch_advert_for_stale_check` use this to replace the
-    /// default public relay list with a local blackhole, so the refetch runs
-    /// its full 2s timeout without touching the network.
-    pub(crate) async fn set_advert_relays_for_test(&mut self, relays: Vec<String>) {
+    /// Point the advert half's relays at explicit URLs, adding them to the
+    /// pool and connecting. Unit tests that exercise
+    /// `refetch_advert_for_stale_check` use this to replace the default
+    /// public relay list with a local relay or blackhole. The traversal
+    /// half keeps the relays it was built with.
+    pub(crate) async fn set_advert_relays_for_test(&self, relays: Vec<String>) {
         for url in &relays {
             let _ = self.client.add_relays([url]).await;
         }
         self.client.connect().await;
-        self.config.advert_relays = relays;
+        let _ = self.inbox.send(Msg::Input(Input::SetAdvertRelays(relays)));
     }
 
-    /// Insert a cached advert directly into the in-memory cache. Used by
-    /// unit tests to set up consumer-side state without needing live relays.
-    pub(crate) async fn insert_advert_for_test(&self, npub: String, advert: CachedOverlayAdvert) {
-        let _ = self.cache().insert_fetched(&npub, advert, now_ms());
+    /// Insert a cached advert directly into the advert cache. Used by unit
+    /// tests to set up consumer-side state without needing live relays.
+    pub(crate) async fn insert_advert_for_test(
+        &self,
+        npub: String,
+        advert: super::types::CachedOverlayAdvert,
+    ) {
+        let _ = ask(&self.inbox, |tx| Msg::InsertAdvert { npub, advert, tx }).await;
     }
 
     /// The authors the advert cache currently protects.
-    pub(crate) fn advert_protection_for_test(&self) -> HashSet<String> {
-        self.cache().protected().iter().cloned().collect()
+    pub(crate) async fn advert_protection_for_test(&self) -> HashSet<String> {
+        let npub = String::new();
+        ask(&self.inbox, |tx| Msg::Inspect { npub, tx })
+            .await
+            .map(|inspection| inspection.protected.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// How many sets of transports the engine has been handed.
+    pub(crate) async fn transports_received_for_test(&self) -> u64 {
+        let npub = String::new();
+        ask(&self.inbox, |tx| Msg::Inspect { npub, tx })
+            .await
+            .map(|inspection| inspection.transports)
+            .unwrap_or_default()
     }
 
     /// The cached `created_at` for `npub`, or `None` when nothing is cached.
     /// Lets a unit test observe whether a refetch evicted an entry.
     pub(crate) async fn cached_created_at_for_test(&self, npub: &str) -> Option<u64> {
-        self.cache().cached_created_at(npub)
+        let npub = npub.to_string();
+        ask(&self.inbox, |tx| Msg::Inspect { npub, tx })
+            .await
+            .and_then(|inspection| inspection.created_at)
     }
 
     /// Queue a bootstrap event directly for lifecycle tests without live relays
     /// or a running traversal task.
     pub(crate) fn push_event_for_test(&self, event: BootstrapEvent) {
-        let _ = self.event_tx.send(event);
-    }
-
-    /// Replace the configured STUN servers, so a traversal test runs no
-    /// network STUN exchange.
-    pub(crate) fn set_stun_servers_for_test(&mut self, servers: Vec<String>) {
-        self.config.stun_servers = servers;
+        let _ = self.traversal.event_tx.send(event);
     }
 
     /// Whether an outbound initiator is registered under `npub` as written.
     pub(crate) fn initiator_active_for_test(&self, npub: &str) -> bool {
-        let mut election = self.election();
+        let mut election = self.traversal.election();
         if election.begin_initiator(npub) {
             election.end_initiator(npub);
             false

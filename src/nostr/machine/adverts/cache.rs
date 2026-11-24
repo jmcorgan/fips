@@ -5,10 +5,9 @@
 //! Every method here is synchronous, performs no I/O and no `.await`, and
 //! takes the current time as an argument: wall-clock `now_ms: u64` for the
 //! adverts' horizons, and a monotonic instant of any `fips_core::time::Instant`
-//! type for the cache-full log latch. It holds no lock; the runtime keeps the
-//! cache behind one `std::sync::Mutex`. The runtime reads and validates the
-//! Nostr event, offers the advert here, and logs what the returned decision
-//! says.
+//! type for the cache-full log latch. It holds no lock: the rendezvous
+//! machine owns the cache, checks each Nostr event before offering its
+//! advert here, and logs what the returned decision says.
 
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
@@ -236,7 +235,7 @@ impl<I: Instant> Cache<I> {
         }
     }
 
-    /// Offer an advert event received on the notify loop to the cache.
+    /// Offer an advert a relay delivered on the subscription to the cache.
     ///
     /// An author already cached, lapsed or not, has its entry replaced when
     /// this advert's `created_at` is not older than the cached one, keeping
@@ -305,7 +304,7 @@ impl<I: Instant> Cache<I> {
         self.cache.entries.remove(peer_npub);
     }
 
-    /// The admission rule shared by the notify loop and the fetch paths.
+    /// The admission rule shared by the subscription and the fetch paths.
     fn admit(&mut self, npub: &str, cached: CachedOverlayAdvert, now_ms: u64) -> AdvertAdmission {
         let protected = &self.protected;
         let cache = &mut self.cache;
@@ -338,6 +337,31 @@ impl<I: Instant> Cache<I> {
         let first_at_bound = !latch.latched;
         latch.latched = true;
         AdvertAdmission::Refused { first_at_bound }
+    }
+
+    /// The earliest wall-clock ms at which a prune would drop an entry: the
+    /// soonest validity horizon plus the lapse grace, or `None` when the
+    /// cache is empty.
+    pub fn earliest_expiry_ms(&self) -> Option<u64> {
+        let grace = self.cache.lapse_grace_ms;
+        self.cache
+            .entries
+            .values()
+            .map(|entry| entry.cached.valid_until_ms.saturating_add(grace))
+            .min()
+    }
+
+    /// When [`Self::bound_tick`] will release the cache-full latch if the
+    /// cache stays below its cap: `None` unless the latch is set and the
+    /// cache has been seen below its cap since.
+    pub fn bound_release_at(&self) -> Option<I> {
+        let latch = &self.latch;
+        if !latch.latched {
+            return None;
+        }
+        latch
+            .below_since
+            .map(|since| fips_core::time::deadline(since, BOUND_LOG_HOLD))
     }
 
     /// Release the cache-full latch once the cache has stayed below its cap

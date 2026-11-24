@@ -5,6 +5,7 @@ use tokio::net::{UdpSocket, lookup_host};
 use tracing::debug;
 
 use super::machine::stun::candidates::{self, InterfaceAddr};
+use super::machine::stun::client::pick_family;
 use super::machine::stun::create_stun_binding_request;
 pub(super) use super::machine::stun::{parse_stun_binding_success, parse_stun_url};
 use super::types::{BootstrapError, TraversalAddress};
@@ -18,13 +19,6 @@ use super::types::{BootstrapError, TraversalAddress};
 /// Latency-sensitive: keep tight so a misbehaving STUN server doesn't
 /// stretch every traversal attempt.
 pub(super) const TRAVERSAL_STUN_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Per-server STUN response wait used by the advert-publish path's
-/// public-IP discovery. Longer than `TRAVERSAL_STUN_TIMEOUT` because
-/// it's a one-shot at startup (cached afterward) and we'd rather block
-/// the first advert build by a few seconds than skip UDP advertising
-/// over a slow first response. Returns immediately on success.
-pub(super) const ADVERT_STUN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// First retransmission interval for a binding request, doubled after each
 /// retransmission (RFC 8489 Section 6.2.1). Within the 2 s traversal
@@ -186,13 +180,6 @@ async fn resolve_udp_target(
     }
     let results = lookup_host((normalized_host, port)).await?;
     Ok(pick_family(results, want_v4))
-}
-
-/// The server address to send a binding request to, from those resolved:
-/// the first of the socket's family. A socket cannot send to the other
-/// family, so a server with no address of this one is skipped.
-fn pick_family(addrs: impl IntoIterator<Item = SocketAddr>, want_v4: bool) -> Option<SocketAddr> {
-    addrs.into_iter().find(|addr| addr.is_ipv4() == want_v4)
 }
 
 /// The local candidate addresses to offer for a socket: those of its family.

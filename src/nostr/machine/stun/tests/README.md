@@ -14,7 +14,16 @@ Unit tests of `src/nostr/machine/stun/`.
   link-local and documentation addresses out), and selection on raw inputs:
   listing order, then the observed addresses, with down, loopback and public
   interface addresses skipped and unspecified addresses and repeats dropped.
+- `client.rs`, of `client.rs`: the binding exchange as a machine, on a test
+  instant with seeded transaction ids. A success from the server asked ends
+  the observation; a datagram from anywhere else is counted, ignored and
+  reported when the server's wait ends; the request goes out at 0, 500 ms,
+  1.5 s and 3.5 s within 5 s, and at 0, 500 ms and 1.5 s within 2 s; a
+  server that times out, has no address of the socket's family, fails its
+  lookup, has an unparsable URL, or whose first send fails is skipped for
+  the next, with its error, and a failed resend is not.
 
 The STUN URL parser's accepted forms and the binding success round trip are
-tested in `src/nostr/tests/mod.rs`, through the shell's paths; the exchange
-with a server over a socket is tested in `src/nostr/tests/stun.rs`.
+tested in `src/nostr/tests/mod.rs`, through the shell's paths; the traversal
+flows' exchange with a server over a socket is tested in
+`src/nostr/tests/stun.rs`, and the advert's in `src/nostr/tests/pump.rs`.

@@ -63,14 +63,22 @@ fn udp_endpoint(addr: &str) -> OverlayEndpointAdvert {
     }
 }
 
-/// An initiator runtime that runs no STUN exchange, with the unconnected relay
-/// in its pool and, cached under `peer`'s canonical npub, an advert that names
-/// a NAT endpoint and that relay for signalling.
+/// A runtime configured with no STUN servers, so a traversal runs no STUN
+/// exchange.
+fn runtime_without_stun() -> NostrRendezvous {
+    NostrRendezvous::new_for_test_with_config(crate::config::NostrRendezvousConfig {
+        stun_servers: Vec::new(),
+        ..Default::default()
+    })
+}
+
+/// `runtime`, which runs no STUN exchange, with the unconnected relay in its
+/// pool and, cached under `peer`'s canonical npub, an advert that names a NAT
+/// endpoint and that relay for signalling.
 async fn initiator_with_cached_nat_peer(
-    mut runtime: NostrRendezvous,
+    runtime: NostrRendezvous,
     peer: &nostr::key::Keys,
 ) -> (std::sync::Arc<NostrRendezvous>, String) {
-    runtime.set_stun_servers_for_test(Vec::new());
     runtime
         .add_unconnected_relay_for_test(UNCONNECTED_RELAY)
         .await;
@@ -118,7 +126,7 @@ async fn a_peer_configured_in_any_case_is_sent_an_offer_addressed_to_its_canonic
     let canonical = peer.public_key().to_bech32().unwrap();
     for spelling in spellings(&canonical) {
         let (runtime, peer_npub) =
-            initiator_with_cached_nat_peer(NostrRendezvous::new_for_test(), &peer).await;
+            initiator_with_cached_nat_peer(runtime_without_stun(), &peer).await;
         runtime.request_connect(peer_config(&spelling)).await;
         let offer = wait_for_sent_offer(&runtime).await;
         // The responder routes an offer only when its recipient is its own
@@ -136,7 +144,7 @@ async fn a_peer_configured_in_any_case_is_sent_an_offer_addressed_to_its_canonic
 
 #[tokio::test]
 async fn a_peer_configured_in_upper_case_still_wins_the_dual_init_election() {
-    let base = NostrRendezvous::new_for_test();
+    let base = runtime_without_stun();
     let our_npub = base.npub_for_test().to_string();
     // A peer whose NodeAddr sorts after ours: our initiator wins, so its offer
     // is suppressed while ours is in flight.
@@ -161,7 +169,7 @@ async fn a_peer_configured_in_upper_case_still_wins_the_dual_init_election() {
 #[tokio::test]
 async fn a_stale_check_for_a_peer_configured_in_upper_case_evicts_the_canonical_entry() {
     let peer_npub = crate::Identity::generate().npub();
-    let mut runtime = NostrRendezvous::new_for_test();
+    let runtime = NostrRendezvous::new_for_test();
     runtime
         .set_advert_relays_for_test(vec![blackhole_relay()])
         .await;
@@ -232,8 +240,8 @@ async fn a_spelling_that_is_not_a_nip19_npub_finds_no_advert() {
     }
 }
 
-#[test]
-fn a_cooldown_recorded_under_an_upper_case_npub_holds_for_the_canonical_npub() {
+#[tokio::test]
+async fn a_cooldown_recorded_under_an_upper_case_npub_holds_for_the_canonical_npub() {
     let runtime = NostrRendezvous::new_for_test();
     let peer_npub = crate::Identity::generate().npub();
     let now = now_ms();

@@ -62,6 +62,7 @@ impl From<super::machine::error::Error> for BootstrapError {
             Error::InvalidAdvert(reason) => BootstrapError::InvalidAdvert(reason),
             Error::Nostr(reason) => BootstrapError::Nostr(reason),
             Error::EventParse(reason) => BootstrapError::EventParse(reason),
+            Error::MissingAdvert(npub) => BootstrapError::MissingAdvert(npub),
         }
     }
 }
@@ -80,6 +81,11 @@ impl From<&crate::config::NostrRendezvousConfig> for super::machine::params::Par
             advertise: c.advertise,
             advert_cache_max_entries: c.advert_cache_max_entries,
             advert_refresh_secs: c.advert_refresh_secs,
+            app: c.app.clone(),
+            advert_relays: c.advert_relays.clone(),
+            dm_relays: c.dm_relays.clone(),
+            stun_servers: c.stun_servers.clone(),
+            advert_ttl_secs: c.advert_ttl_secs,
         }
     }
 }

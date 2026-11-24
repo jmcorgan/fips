@@ -1,6 +1,7 @@
-//! Tests of how the notify loop treats its two feeds: a lag on the signals'
-//! channel is logged and read past, and the loop ends only when that channel
-//! closes or the relay client's notification stream ends.
+//! Tests of how the two readers of the relay client's feeds end: a lag on
+//! the signals' channel is logged and read past, and the signal task ends
+//! only when that channel closes; the pump ends when the relay client's
+//! notification stream ends.
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -9,7 +10,6 @@ use std::time::Duration;
 use nostr::event::FinalizeEvent;
 use nostr::prelude::{EventBuilder, Keys, Kind, RelayUrl, SubscriptionId};
 use nostr_sdk::client::ClientNotification;
-use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
 use super::super::runtime::{NostrRendezvous, received};
@@ -55,15 +55,14 @@ fn a_closed_signal_channel_ends_the_notify_loop() {
 }
 
 /// The relay client's stream ends when the client shuts down, and can then
-/// deliver nothing more, so the loop must end cleanly rather than poll a
-/// finished stream.
+/// deliver nothing more, so the pump, which reads it, must end cleanly
+/// rather than poll a finished stream.
 #[tokio::test]
 async fn the_pool_stream_ending_ends_the_notify_loop() {
     let runtime = Arc::new(NostrRendezvous::new_for_test());
-    let (pool, receiver) = broadcast::channel(16);
-    let notify = runtime.clone().spawn_notify_loop_for_test(receiver);
-    pool.send(notification()).expect("the loop is reading");
-    drop(pool);
+    let notify = runtime.take_pump_for_test().await.expect("the pump runs");
+    runtime.deliver_for_test(notification()).await;
+    runtime.close_pool_for_test();
     let ended = tokio::time::timeout(Duration::from_secs(5), notify).await;
     assert!(
         matches!(ended, Ok(Ok(()))),

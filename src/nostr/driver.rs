@@ -8,20 +8,17 @@
 //! home while leaving the transport/connection-table mutations that consume
 //! this state on `Node`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::NodeAddr;
 use crate::config::{NostrRendezvousConfig, NostrRendezvousPolicy, PeerAddress, PeerConfig};
 use crate::transport::TransportId;
 
-use super::machine::adverts::assemble::{self, AssemblyNote};
-use super::{
-    BootstrapError, NostrRendezvous, OverlayAdvert, OverlayEndpointAdvert, OverlayTransportKind,
-};
+use super::{BootstrapError, NostrRendezvous, OverlayEndpointAdvert, OverlayTransportKind};
 
 pub use super::machine::adverts::assemble::AdvertTransportSnapshot;
 
@@ -102,6 +99,9 @@ pub struct RendezvousDriver {
     /// route fatal-protocol-mismatch observations back to the
     /// Nostr-discovery `failure_state` for long cooldown application.
     bootstrap_peers: HashMap<TransportId, BootstrapPeer>,
+    /// The transports last handed to the engine, so the tick sends them
+    /// again only when they change.
+    sent_transports: Option<Vec<AdvertTransportSnapshot>>,
 }
 
 impl RendezvousDriver {
@@ -120,8 +120,10 @@ impl RendezvousDriver {
         self.engine = Some(engine);
     }
 
-    /// Take the engine handle for shutdown, clearing it.
+    /// Take the engine handle for shutdown, clearing it and what was last
+    /// handed to it.
     pub fn take_engine(&mut self) -> Option<Arc<NostrRendezvous>> {
+        self.sent_transports = None;
         self.engine.take()
     }
 
@@ -285,9 +287,9 @@ impl RendezvousDriver {
 
     /// [`Self::nostr_peer_fallback_addresses`] from the advert cache alone:
     /// a peer whose advert is not cached, or no longer current, gives none.
-    /// Never waits on a relay, so the node's event loop may call it on
-    /// every tick.
-    pub fn cached_addresses(
+    /// Never waits on a relay, only on the engine's queue, so the node's
+    /// event loop may call it on every tick.
+    pub async fn cached_addresses(
         &self,
         peer_config: &PeerConfig,
         existing: &[PeerAddress],
@@ -297,10 +299,10 @@ impl RendezvousDriver {
         if !Self::nostr_wanted(peer_config, nostr_cfg) {
             return Vec::new();
         }
-        let Some(endpoints) = self
-            .engine_arc()
-            .and_then(|bootstrap| bootstrap.cached_endpoints(&peer_config.npub))
-        else {
+        let Some(bootstrap) = self.engine_arc() else {
+            return Vec::new();
+        };
+        let Some(endpoints) = bootstrap.cached_endpoints(&peer_config.npub).await else {
             return Vec::new();
         };
         Self::fallback_from(endpoints, existing, now_ms)
@@ -351,80 +353,54 @@ impl RendezvousDriver {
         fallback
     }
 
-    /// Publish the local overlay advert built from `snapshot`. When no advert
-    /// results, publishing stops; the advert already on relays is not
-    /// withdrawn and ages out by its NIP-40 expiration.
+    /// Hand the transports in `snapshot` to the engine when they differ from
+    /// those last handed over; the engine assembles the local overlay advert
+    /// from them and publishes it, once any public address it needs has been
+    /// learned, and observes that address again when it ages out. Does not
+    /// wait. When discovery is disabled no transport is advertised, so no
+    /// advert results; publishing then stops, and the advert already on
+    /// relays is not withdrawn but ages out by its NIP-40 expiration.
     /// `bootstrap` is passed explicitly because the startup path refreshes the
     /// advert before the engine handle is installed on the driver.
     pub async fn refresh_overlay_advert(
-        &self,
+        &mut self,
         bootstrap: &Arc<NostrRendezvous>,
         snapshot: Vec<AdvertTransportSnapshot>,
         nostr_cfg: &NostrRendezvousConfig,
     ) -> Result<(), BootstrapError> {
-        let advert = self
-            .build_overlay_advert(bootstrap, snapshot, nostr_cfg)
-            .await;
-        bootstrap.update_local_advert(advert).await
+        let advertised = Self::advertised(snapshot, nostr_cfg);
+        if self.sent_transports.as_ref() == Some(&advertised) {
+            return Ok(());
+        }
+        bootstrap.set_transports(advertised.clone());
+        self.sent_transports = Some(advertised);
+        Ok(())
     }
 
-    /// Assemble the local `OverlayAdvert` from the per-transport `snapshot`.
-    /// The public address of each advertised public UDP transport bound to a
-    /// wildcard is learned first, one transport at a time in snapshot order,
-    /// through the `bootstrap` handle's STUN cache.
-    async fn build_overlay_advert(
-        &self,
+    /// As [`Self::refresh_overlay_advert`], waiting until the advert has
+    /// been assembled from `snapshot`, so start-up reports the node running
+    /// only once its first advert exists.
+    pub async fn publish_initial_advert(
+        &mut self,
         bootstrap: &Arc<NostrRendezvous>,
         snapshot: Vec<AdvertTransportSnapshot>,
         nostr_cfg: &NostrRendezvousConfig,
-    ) -> Option<OverlayAdvert> {
-        if !nostr_cfg.enabled {
-            return None;
-        }
-
-        let mut learned = BTreeMap::new();
-        for (key, port) in assemble::learned_wanted(&snapshot) {
-            let public = bootstrap.learn_public_udp_addr(key, port).await;
-            learned.insert(key, public);
-        }
-        let assembly = assemble::assemble(
-            &snapshot,
-            &learned,
-            &nostr_cfg.dm_relays,
-            &nostr_cfg.stun_servers,
-        );
-        for note in &assembly.notes {
-            log_assembly_note(note);
-        }
-        assembly.advert
+    ) -> Result<(), BootstrapError> {
+        let advertised = Self::advertised(snapshot, nostr_cfg);
+        self.sent_transports = Some(advertised.clone());
+        bootstrap.assemble_advert(advertised).await
     }
-}
 
-/// Warn that the assembly left a transport out of the advert, and how the
-/// operator can make it advertisable.
-fn log_assembly_note(note: &AssemblyNote) {
-    match note {
-        AssemblyNote::UdpUnlearned {
-            transport_id,
-            bind_addr,
-        } => warn!(
-            target: "fips::nostr::driver",
-            transport_id = *transport_id,
-            bind_addr = %bind_addr,
-            "advert: udp public=true bound to wildcard but \
-            STUN observation failed; advertising no UDP \
-            endpoint. Either set transports.udp.external_addr, \
-            bind to a specific public IP, or ensure \
-            node.rendezvous.nostr.stun_servers is reachable"
-        ),
-        AssemblyNote::TcpWildcard { bind_addr } => warn!(
-            target: "fips::nostr::driver",
-            bind_addr = %bind_addr,
-            "advert: tcp advertise_on_nostr=true bound to wildcard \
-            and no transports.tcp.external_addr set; advertising no \
-            TCP endpoint. Either set external_addr to the public \
-            IP (recommended for cloud 1:1-NAT setups) or bind \
-            explicitly to the public IP"
-        ),
+    /// The transports to advertise: `snapshot`, or none when discovery is
+    /// disabled.
+    fn advertised(
+        snapshot: Vec<AdvertTransportSnapshot>,
+        nostr_cfg: &NostrRendezvousConfig,
+    ) -> Vec<AdvertTransportSnapshot> {
+        if nostr_cfg.enabled {
+            snapshot
+        } else {
+            Vec::new()
+        }
     }
 }

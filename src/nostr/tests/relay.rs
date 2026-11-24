@@ -17,8 +17,12 @@ use nostr_sdk::client::{ClientBuilder, ClientNotification};
 use nostr_sdk::local_relay::{LocalRelay, LocalRelayBuilderNip42};
 use tokio::sync::broadcast;
 
+use std::sync::Arc;
+
+use super::super::machine::NodeSigner;
 use super::super::machine::event::advert::advert_event;
 use super::super::machine::event::signal::{open_signal, rumor, seal_and_wrap};
+use super::super::tests::SignerAuthenticator;
 use super::super::traversal::now_ms;
 use super::super::types::{ADVERT_IDENTIFIER, ADVERT_KIND, SIGNAL_KIND};
 use super::*;
@@ -58,7 +62,7 @@ async fn adapter(
     url: &RelayUrl,
 ) -> (RelayClient, broadcast::Receiver<ClientNotification>) {
     let (router, signals) = SignalRouter::new();
-    let client = RelayClient::build(signer, router);
+    let client = RelayClient::build(SignerAuthenticator { signer }, router);
     client
         .add_relays([url.to_string()])
         .await
@@ -340,4 +344,24 @@ async fn a_stream_taken_before_a_subscribe_receives_the_relays_stored_replay() {
         await_event(&mut stream, stored.id).await.is_some(),
         "the stored advert the relay replayed did not reach the stream"
     );
+}
+
+/// A send to a relay that is in the pool but not connected is accepted by
+/// the client and reaches no relay: the count is zero, not an error.
+#[tokio::test(start_paused = true)]
+async fn a_send_to_a_pooled_relay_that_is_not_connected_reaches_none() {
+    let (router, _signals) = SignalRouter::new();
+    let client = RelayClient::build(
+        SignerAuthenticator {
+            signer: signer(NODE_A_SECRET),
+        },
+        router,
+    );
+    client.add_relays(["ws://127.0.0.1:1"]).await.unwrap();
+    let event = advert(&signer(NODE_A_SECRET));
+    let reached = client
+        .send(&["ws://127.0.0.1:1".to_string()], &event)
+        .await
+        .expect("the client accepts the send");
+    assert_eq!(reached, 0);
 }

@@ -18,6 +18,8 @@ pub enum Error {
     Nostr(String),
     /// An event inside a traversal signal was not valid JSON for its type.
     EventParse(String),
+    /// The relays hold no current advert by this peer; the text is its npub.
+    MissingAdvert(String),
 }
 
 impl core::fmt::Display for Error {
@@ -29,6 +31,7 @@ impl core::fmt::Display for Error {
             Error::InvalidAdvert(reason) => write!(f, "invalid overlay advert: {reason}"),
             Error::Nostr(reason) => write!(f, "nostr error: {reason}"),
             Error::EventParse(reason) => write!(f, "event parse error: {reason}"),
+            Error::MissingAdvert(npub) => write!(f, "peer {npub} has no overlay advert"),
         }
     }
 }

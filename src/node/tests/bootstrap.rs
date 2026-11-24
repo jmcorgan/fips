@@ -540,7 +540,7 @@ async fn the_peering_tick_pushes_configured_and_linked_npubs_to_the_advert_cache
     node.supervisor.nostr_rendezvous.set_engine(engine.clone());
 
     node.poll_nostr_rendezvous().await;
-    let protected = engine.advert_protection_for_test();
+    let protected = engine.advert_protection_for_test().await;
     assert!(protected.contains(&linked.npub()), "linked peer protected");
     assert!(
         protected.contains(&configured.npub()),
@@ -550,7 +550,10 @@ async fn the_peering_tick_pushes_configured_and_linked_npubs_to_the_advert_cache
     node.remove_peer(linked.node_addr());
     node.poll_nostr_rendezvous().await;
     assert!(
-        !engine.advert_protection_for_test().contains(&linked.npub()),
+        !engine
+            .advert_protection_for_test()
+            .await
+            .contains(&linked.npub()),
         "a dropped link loses protection on the next tick"
     );
 
@@ -559,7 +562,7 @@ async fn the_peering_tick_pushes_configured_and_linked_npubs_to_the_advert_cache
         .await
         .unwrap();
     node.poll_nostr_rendezvous().await;
-    let protected = engine.advert_protection_for_test();
+    let protected = engine.advert_protection_for_test().await;
     assert!(
         !protected.contains(&configured.npub()),
         "removed peer dropped"
@@ -593,8 +596,60 @@ async fn a_restarted_nostr_engine_receives_the_configured_set_before_any_tick() 
     assert!(
         engine_b
             .advert_protection_for_test()
+            .await
             .contains(&configured.npub())
     );
+}
+
+/// The node tick hands its transports to the engine only when they have
+/// changed since it last did: not on a tick that sees the same ones, and
+/// not on the first tick after start-up, which handed them over already.
+#[tokio::test]
+async fn the_tick_sends_the_transports_only_when_they_change() {
+    let mut node = make_node_with(Config::new());
+    let engine = std::sync::Arc::new(crate::nostr::NostrRendezvous::new_for_test());
+    let nostr_cfg = node.config().node.rendezvous.nostr.clone();
+    node.supervisor
+        .nostr_rendezvous
+        .publish_initial_advert(&engine, Vec::new(), &nostr_cfg)
+        .await
+        .expect("assembled");
+    node.supervisor.nostr_rendezvous.set_engine(engine.clone());
+    assert_eq!(engine.transports_received_for_test().await, 1, "start-up");
+
+    node.poll_nostr_rendezvous().await;
+    node.poll_nostr_rendezvous().await;
+    assert_eq!(
+        engine.transports_received_for_test().await,
+        1,
+        "ticks with the same transports send nothing"
+    );
+
+    let changed = vec![crate::nostr::AdvertTransportSnapshot::Tor {
+        advertise: true,
+        onion_addr: None,
+        advertised_port: 443,
+    }];
+    let nostr_cfg = crate::config::NostrRendezvousConfig {
+        enabled: true,
+        ..nostr_cfg
+    };
+    node.supervisor
+        .nostr_rendezvous
+        .refresh_overlay_advert(&engine, changed.clone(), &nostr_cfg)
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.transports_received_for_test().await,
+        2,
+        "a change is sent"
+    );
+    node.supervisor
+        .nostr_rendezvous
+        .refresh_overlay_advert(&engine, changed, &nostr_cfg)
+        .await
+        .unwrap();
+    assert_eq!(engine.transports_received_for_test().await, 2);
 }
 
 /// A running node with one started UDP transport on loopback, for driving
