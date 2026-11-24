@@ -395,3 +395,28 @@ fn every_machine_log_event_renders_with_todays_target_level_text_and_fields() {
         assert_eq!(targets, vec![RUNTIME], "{message}");
     }
 }
+
+/// The mismatch warning moved from the receive loop into the engine's
+/// handle keeps the receive loop's target, level, text and fields, and a
+/// repeat inside the cooldown logs nothing.
+#[tokio::test]
+async fn the_mismatch_warning_keeps_the_receive_loops_target_text_and_fields() {
+    const MESSAGE: &str = "Datagram from the traversed peer's address carried another FMP version; suppressing re-traversal";
+    let runtime = super::super::runtime::NostrRendezvous::new_for_test();
+    let ((), capture) = capture_logs(|| {
+        for _ in 0..2 {
+            runtime.note_version_mismatch(PEER, "udp1", "192.0.2.7:2121", 1, 0);
+        }
+    });
+    assert_eq!(
+        capture.lines_with(MESSAGE),
+        vec![format!(
+            "WARN message={MESSAGE} peer_npub={PEER} transport_id=udp1 \
+             remote_addr=192.0.2.7:2121 peer_version=1 our_version=0 cooldown_secs=86400"
+        )]
+    );
+    assert_eq!(
+        capture.targets(MESSAGE),
+        vec!["fips::node::dataplane::rx_loop"]
+    );
+}

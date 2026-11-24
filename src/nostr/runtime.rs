@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use nostr::event::{Event, Kind};
 use nostr::key::{PublicKey, SecretKey};
 use nostr::nips::nip19::ToBech32;
@@ -28,6 +29,7 @@ use super::machine::event::advert as advert_codec;
 #[cfg(test)]
 use super::machine::event::inbox as inbox_codec;
 use super::machine::params::Params;
+use super::machine::rendezvous::status::Status;
 use super::machine::rendezvous::{Input, PeerKey, Rendezvous};
 use super::machine::traversal::election::{Election, OfferDisposition, SeenDecision};
 use super::machine::traversal::failures::FailureState;
@@ -53,7 +55,7 @@ use super::traversal::{
 #[cfg(test)]
 use super::types::ADVERT_IDENTIFIER;
 use super::types::{
-    BootstrapError, BootstrapEvent, NostrFailureDecision, NostrPeerFailureView,
+    BootstrapError, BootstrapEvent, FailureReply, NostrFailureDecision, NostrPeerFailureView,
     NostrRefetchOutcome, OverlayAdvert, OverlayEndpointAdvert, PunchHint, SIGNAL_KIND,
     TraversalAnswer, TraversalOffer,
 };
@@ -224,6 +226,9 @@ pub struct NostrRendezvous {
     /// The pump's count of relay operations in flight.
     #[cfg(test)]
     in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    /// How many times the node has sent its capacity.
+    #[cfg(test)]
+    capacity_sent: std::sync::atomic::AtomicUsize,
     /// The test's stand-in for the relay client's notification channel,
     /// which the pump reads; `None` once a test closes it.
     #[cfg(test)]
@@ -271,6 +276,9 @@ pub(super) struct TraversalShared {
     event_tx: mpsc::UnboundedSender<BootstrapEvent>,
     event_rx: Mutex<mpsc::UnboundedReceiver<BootstrapEvent>>,
     failure_state: std::sync::Mutex<FailureState>,
+    /// The failure state as of its last change, which the node's
+    /// synchronous queries read.
+    status: ArcSwap<Status>,
     /// Outbound-admission flag refreshed once per Node tick from
     /// `Node::outbound_admission_check()`. Used to suppress NAT-traversal
     /// punch initiation (initiator path) and offer acceptance (responder
@@ -324,13 +332,14 @@ impl TraversalShared {
             event_tx,
             event_rx: Mutex::new(event_rx),
             outbound_admission: AtomicBool::new(true),
+            status: ArcSwap::from_pointee(Status::default()),
         }
     }
 
     /// Reset `npub`'s failure streak after its advert was refreshed or
     /// evicted, as the machine asks.
     fn reset_streak(&self, npub: &str) {
-        self.failures().reset_streak_after_refresh(npub);
+        self.change_failures(|failures| failures.reset_streak_after_refresh(npub));
     }
 
     /// Read the signal router's channel until it closes, opening each
@@ -416,38 +425,46 @@ impl TraversalShared {
         self.signal_gate.lock().expect("signal-gate mutex poisoned")
     }
 
-    /// The per-peer failure state, under its lock.
-    fn failures(&self) -> std::sync::MutexGuard<'_, FailureState> {
-        self.failure_state
+    /// Change the per-peer failure state with `change`, under its lock,
+    /// and store the status the node reads from it.
+    fn change_failures<R>(&self, change: impl FnOnce(&mut FailureState) -> R) -> R {
+        let mut failures = self
+            .failure_state
             .lock()
-            .expect("failure-state mutex poisoned")
+            .expect("failure-state mutex poisoned");
+        let result = change(&mut failures);
+        self.status.store(Arc::new(Status::of(&failures)));
+        result
     }
 
-    /// Record a NAT-traversal failure for `npub`, returning the
+    /// Record a NAT-traversal failure for `npub` now, returning the
     /// resulting decision (WARN suppression + extended cooldown +
-    /// threshold-crossing flag for the B6 re-fetch).
-    fn record_traversal_failure(&self, npub: &str, now_ms: u64) -> NostrFailureDecision {
-        let d = self
-            .failures()
-            .record_failure(&canonical_npub(npub), now_ms);
-        NostrFailureDecision {
-            consecutive_failures: d.consecutive_failures,
-            should_warn: d.should_warn,
-            cooldown_until_ms: d.cooldown_until_ms,
-            crossed_threshold: d.crossed_threshold,
+    /// threshold-crossing flag for the B6 re-fetch) and the time it used.
+    fn record_traversal_failure(&self, npub: &str) -> FailureReply {
+        let at_ms = now_ms();
+        let d =
+            self.change_failures(|failures| failures.record_failure(&canonical_npub(npub), at_ms));
+        FailureReply {
+            decision: NostrFailureDecision {
+                consecutive_failures: d.consecutive_failures,
+                should_warn: d.should_warn,
+                cooldown_until_ms: d.cooldown_until_ms,
+                crossed_threshold: d.crossed_threshold,
+            },
+            at_ms,
         }
     }
 
     /// Record a successful traversal — clears the streak/cooldown.
     fn record_traversal_success(&self, npub: &str, now_ms: u64) {
-        self.failures()
-            .record_success(&canonical_npub(npub), now_ms);
+        self.change_failures(|failures| failures.record_success(&canonical_npub(npub), now_ms));
     }
 
     /// Cooldown wall-clock ms if the peer is currently suppressed,
     /// else None. Used by the open-discovery sweep to skip enqueue.
     fn cooldown_until(&self, npub: &str, now_ms: u64) -> Option<u64> {
-        self.failures()
+        self.status
+            .load()
             .cooldown_until(&canonical_npub(npub), now_ms)
     }
 
@@ -465,8 +482,9 @@ impl TraversalShared {
             .config
             .protocol_mismatch_cooldown_secs
             .saturating_mul(1000);
-        self.failures()
-            .record_protocol_mismatch(&canonical_npub(npub), now_ms, cooldown_ms)
+        self.change_failures(|failures| {
+            failures.record_protocol_mismatch(&canonical_npub(npub), now_ms, cooldown_ms)
+        })
     }
 
     /// Configured protocol-mismatch cooldown in seconds. Exposed so log
@@ -477,16 +495,7 @@ impl TraversalShared {
 
     /// Snapshot of per-npub failure state for `show_peers` rendering.
     fn failure_state_snapshot(&self) -> Vec<NostrPeerFailureView> {
-        self.failures()
-            .snapshot()
-            .into_iter()
-            .map(|(npub, rec)| NostrPeerFailureView {
-                npub,
-                consecutive_failures: rec.consecutive_failures,
-                cooldown_until_ms: rec.cooldown_until_ms,
-                last_observed_skew_ms: rec.last_observed_skew_ms,
-            })
-            .collect()
+        self.status.load().failure_views()
     }
 
     async fn drain_events(&self) -> Vec<BootstrapEvent> {
@@ -758,11 +767,9 @@ impl TraversalShared {
         if let Some(observed_skew_ms) =
             estimate_clock_skew(&offer, &answer.payload, answer_received_at)
         {
-            self.failures().note_observed_skew(
-                &peer_config.npub,
-                observed_skew_ms,
-                answer_received_at,
-            );
+            self.change_failures(|failures| {
+                failures.note_observed_skew(&peer_config.npub, observed_skew_ms, answer_received_at)
+            });
             if rules::skew_is_significant(observed_skew_ms) {
                 debug!(
                     peer = %peer_short,
@@ -829,7 +836,7 @@ impl TraversalShared {
             "traversal: initiator punch succeeded"
         );
 
-        self.failures().record_success(&peer_config.npub, now_ms());
+        self.change_failures(|failures| failures.record_success(&peer_config.npub, now_ms()));
 
         Ok(
             EstablishedTraversal::new(session_id, peer_config.npub, remote_addr, base_socket)
@@ -1313,6 +1320,8 @@ impl NostrRendezvous {
             #[cfg(test)]
             in_flight,
             #[cfg(test)]
+            capacity_sent: Default::default(),
+            #[cfg(test)]
             pool: std::sync::Mutex::new(None),
             #[cfg(test)]
             signal_rx: std::sync::Mutex::new(None),
@@ -1321,10 +1330,15 @@ impl NostrRendezvous {
         }))
     }
 
-    /// Update the cached outbound-admission flag. Called once per Node
-    /// tick with the current value of `Node::outbound_admission_check()`.
-    /// Cheap atomic store; safe to call unconditionally.
-    pub fn set_outbound_admission(&self, allow: bool) {
+    /// Tell the engine whether the node has room for another peer:
+    /// `Node::outbound_admission_check()`, sent when it changes. While it
+    /// is `false` the engine starts no traversal and answers no offer.
+    /// Loose by design: the inbound msg1 gate in `handshake.rs` remains the
+    /// authoritative cap.
+    pub fn set_capacity(&self, allow: bool) {
+        #[cfg(test)]
+        self.capacity_sent
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.traversal.set_outbound_admission(allow);
     }
 
@@ -1341,9 +1355,11 @@ impl NostrRendezvous {
 
     /// Record a NAT-traversal failure for `npub`, returning the
     /// resulting decision (WARN suppression + extended cooldown +
-    /// threshold-crossing flag for the B6 re-fetch).
-    pub fn record_traversal_failure(&self, npub: &str, now_ms: u64) -> NostrFailureDecision {
-        self.traversal.record_traversal_failure(npub, now_ms)
+    /// threshold-crossing flag for the B6 re-fetch) and the Unix time in
+    /// milliseconds it was computed at, from which the caller measures the
+    /// cooldown.
+    pub async fn record_traversal_failure(&self, npub: &str) -> FailureReply {
+        self.traversal.record_traversal_failure(npub)
     }
 
     /// Record a successful traversal — clears the streak/cooldown.
@@ -1357,12 +1373,30 @@ impl NostrRendezvous {
         self.traversal.cooldown_until(npub, now_ms)
     }
 
-    /// Record a fatal protocol mismatch (e.g. `Unknown FMP version` on a
-    /// Nostr-adopted bootstrap transport). Returns `true` if this is a
-    /// fresh observation worth a WARN log; `false` if the peer is already
-    /// inside a comparable mismatch cooldown.
-    pub fn record_protocol_mismatch(&self, npub: &str, now_ms: u64) -> bool {
-        self.traversal.record_protocol_mismatch(npub, now_ms)
+    /// Note that a datagram from the address a traversal adopted for `npub`
+    /// carried an FMP version other than ours, on `transport_id` from
+    /// `remote_addr`. The peer's discovery cooldown is bumped to the long
+    /// protocol-mismatch window, and a fresh observation, one not already
+    /// inside a comparable cooldown, is logged once at warning level, as
+    /// the receive loop logged it.
+    pub fn note_version_mismatch(
+        &self,
+        npub: &str,
+        transport_id: impl std::fmt::Display,
+        remote_addr: impl std::fmt::Display,
+        peer_version: u8,
+        our_version: u8,
+    ) {
+        if self.traversal.record_protocol_mismatch(npub, now_ms()) {
+            super::log::version_mismatch(
+                npub,
+                &transport_id.to_string(),
+                &remote_addr.to_string(),
+                peer_version,
+                our_version,
+                self.traversal.protocol_mismatch_cooldown_secs(),
+            );
+        }
     }
 
     /// Configured protocol-mismatch cooldown in seconds. Exposed so log
@@ -1704,6 +1738,7 @@ impl NostrRendezvous {
             traversal,
             client,
             in_flight,
+            capacity_sent: Default::default(),
             pool: std::sync::Mutex::new(Some(pool)),
             signal_rx: std::sync::Mutex::new(Some(signals)),
             first,
@@ -1719,6 +1754,11 @@ impl NostrRendezvous {
     /// How many relay operations the pump has in flight.
     pub(crate) fn in_flight_for_test(&self) -> usize {
         self.in_flight.load(Ordering::SeqCst)
+    }
+
+    /// How many times the node has sent its capacity.
+    pub(crate) fn capacity_received_for_test(&self) -> usize {
+        self.capacity_sent.load(Ordering::SeqCst)
     }
 
     /// Register `offer` as our in-flight offer to `peer_npub`, sent to `relays`,

@@ -652,6 +652,29 @@ async fn the_tick_sends_the_transports_only_when_they_change() {
     assert_eq!(engine.transports_received_for_test().await, 2);
 }
 
+#[tokio::test]
+async fn the_capacity_is_sent_only_when_it_changes() {
+    let mut node = make_node_with(Config::new());
+    let engine = std::sync::Arc::new(crate::nostr::NostrRendezvous::new_for_test());
+    node.supervisor.nostr_rendezvous.set_engine(engine.clone());
+
+    node.poll_nostr_rendezvous().await;
+    node.poll_nostr_rendezvous().await;
+    assert_eq!(
+        engine.capacity_received_for_test(),
+        1,
+        "the first tick sends the capacity and the next, unchanged, sends nothing"
+    );
+
+    let driver = &mut node.supervisor.nostr_rendezvous;
+    driver.send_capacity(&engine, false);
+    assert_eq!(engine.capacity_received_for_test(), 2, "a change is sent");
+    driver.send_capacity(&engine, false);
+    assert_eq!(engine.capacity_received_for_test(), 2);
+    driver.send_capacity(&engine, true);
+    assert_eq!(engine.capacity_received_for_test(), 3);
+}
+
 /// A running node with one started UDP transport on loopback, for driving
 /// LAN discovery through the real dial path.
 pub(super) async fn lan_node() -> Node {

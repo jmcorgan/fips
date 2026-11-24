@@ -102,6 +102,9 @@ pub struct RendezvousDriver {
     /// The transports last handed to the engine, so the tick sends them
     /// again only when they change.
     sent_transports: Option<Vec<AdvertTransportSnapshot>>,
+    /// The capacity last sent to the engine, so the tick sends it again
+    /// only when it changes.
+    sent_capacity: Option<bool>,
 }
 
 impl RendezvousDriver {
@@ -124,6 +127,7 @@ impl RendezvousDriver {
     /// handed to it.
     pub fn take_engine(&mut self) -> Option<Arc<NostrRendezvous>> {
         self.sent_transports = None;
+        self.sent_capacity = None;
         self.engine.take()
     }
 
@@ -375,6 +379,16 @@ impl RendezvousDriver {
         bootstrap.set_transports(advertised.clone());
         self.sent_transports = Some(advertised);
         Ok(())
+    }
+
+    /// Tell `bootstrap` whether the node has room for another peer, when
+    /// `capacity` differs from what it was last told.
+    pub fn send_capacity(&mut self, bootstrap: &NostrRendezvous, capacity: bool) {
+        if self.sent_capacity == Some(capacity) {
+            return;
+        }
+        bootstrap.set_capacity(capacity);
+        self.sent_capacity = Some(capacity);
     }
 
     /// As [`Self::refresh_overlay_advert`], waiting until the advert has

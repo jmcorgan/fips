@@ -17,8 +17,10 @@ module itself and two kinds of test file beside it.
   pump or the signal task has ended, or once both handles are taken; and a
   test that pins how `cached_endpoints` parses a peer's npub (the
   lower-case npub and the key in hex are found, an upper-case npub is not),
-  unlike the dial path, which takes either case and refuses hex. The inbox
-  relay list's publish tests are the machine's now
+  unlike the dial path, which takes either case and refuses hex; and a test
+  that the failure reply carries the time its decision was computed at,
+  with the cooldown measured from it and held in the status the node
+  reads. The inbox relay list's publish tests are the machine's now
   (`machine/rendezvous/tests/startup.rs`).
 - Child modules of `mod.rs`, which declares each as `mod <name>;`. Each is a
   child of `nostr::tests` and reaches the `pub(super)` items of the files in
@@ -115,7 +117,9 @@ Tests of one file, each named `nostr::<file>::tests::...`:
 - `log.rs`, of `log.rs`: the golden list of the lines the rendezvous machine
   asks the shell to log, and the pump's three notify-loop lines, each with
   the level, text, fields and target it was logged with before the code
-  moved.
+  moved; and the protocol-mismatch warning, which keeps the receive loop's
+  target, text and fields now that the engine's handle logs it, once per
+  cooldown.
 - `pump.rs`, of `pump.rs`: the pump against nostr-sdk's in-process relay. It
   answers a relay that requires NIP-42 through the machine, and the stored
   advert the relay replays to the first subscribe is cached, which needs the

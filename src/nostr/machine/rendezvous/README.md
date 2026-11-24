@@ -40,6 +40,12 @@ FRC-1601's state, stepped by the shell's pump (`src/nostr/pump.rs`).
   The shell keeps the map from each id to its `oneshot`, task or socket.
 - `log.rs`: `Log`, one variant per line the machine asks the shell to log,
   carrying that line's fields. The shell's `log.rs` renders each.
+- `status.rs`: `Status`, what the node reads of rendezvous without waiting:
+  each peer's failure record, by canonical npub, with the cooldown rule the
+  open-discovery sweep checks and the rows `show peers` prints. The shell
+  stores the latest one where the node's synchronous queries read it; for
+  now the traversal half outside the machine stores it after every change
+  to the failure state.
 - `tests/`: the machine's tests.
 
 ## Rules for changing it

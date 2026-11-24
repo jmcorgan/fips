@@ -3082,3 +3082,36 @@ mod seen_session_floor;
 mod signal_bounds;
 mod signal_lag;
 mod unknown_transport;
+
+/// The failure reply carries the Unix time the decision was computed at,
+/// and its cooldown is measured from that time, so the node's reported
+/// cooldown and retry schedule start where the cooldown does.
+#[tokio::test]
+async fn the_failure_reply_carries_the_time_it_was_computed_at() {
+    let config = crate::config::NostrRendezvousConfig {
+        failure_streak_threshold: 1,
+        extended_cooldown_secs: 600,
+        ..Default::default()
+    };
+    let runtime = NostrRendezvous::new_for_test_with_config(config);
+    let peer_npub = crate::Identity::generate().npub();
+    let before = now_ms();
+    let reply = runtime.record_traversal_failure(&peer_npub).await;
+    let after = now_ms();
+    assert!(
+        (before..=after).contains(&reply.at_ms),
+        "the reply's time {} is not when it was computed ({before}..={after})",
+        reply.at_ms
+    );
+    assert_eq!(reply.decision.consecutive_failures, 1);
+    assert_eq!(
+        reply.decision.cooldown_until_ms,
+        Some(reply.at_ms + 600_000),
+        "the cooldown is not measured from the reply's time"
+    );
+    assert_eq!(
+        runtime.cooldown_until(&peer_npub, reply.at_ms),
+        Some(reply.at_ms + 600_000),
+        "the status the node reads does not hold the cooldown"
+    );
+}

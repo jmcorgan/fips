@@ -18,6 +18,7 @@
 
 pub mod io;
 pub mod log;
+pub mod status;
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};

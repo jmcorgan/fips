@@ -27,7 +27,7 @@ use fips_core::utils::hash::{HashMap, KeyedHasher};
 
 /// One peer's failure-tracking state. Keyed by bech32 npub string in the
 /// owning `FailureState` map.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NpubFailureRecord {
     /// Number of consecutive failures since the last success (or fresh
     /// advert that reset the streak).
@@ -231,7 +231,9 @@ impl FailureState {
     }
 
     /// Return cooldown_until_ms if the peer is currently in extended
-    /// cooldown.
+    /// cooldown. The node reads the same rule from the status
+    /// (`rendezvous::status::Status::cooldown_until`).
+    #[cfg(test)]
     pub fn cooldown_until(&self, npub: &str, now_ms: u64) -> Option<u64> {
         let map = &self.inner;
         map.get(npub)

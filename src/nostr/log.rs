@@ -251,6 +251,30 @@ pub(super) fn channel_closed(channel: Feed) {
     );
 }
 
+/// A datagram from the address a traversal adopted for `npub` carried
+/// another FMP version, and the peer's re-traversal is suppressed for
+/// `cooldown_secs`. Logged with the receive loop's target, where the line
+/// was first written.
+pub(super) fn version_mismatch(
+    npub: &str,
+    transport_id: &str,
+    remote_addr: &str,
+    peer_version: u8,
+    our_version: u8,
+    cooldown_secs: u64,
+) {
+    warn!(
+        target: "fips::node::dataplane::rx_loop",
+        peer_npub = %npub,
+        transport_id = %transport_id,
+        remote_addr = %remote_addr,
+        peer_version,
+        our_version,
+        cooldown_secs,
+        "Datagram from the traversed peer's address carried another FMP version; suppressing re-traversal"
+    );
+}
+
 /// Whether the first notification has been logged, shared by the pump and
 /// the signal task, and when the pump started.
 #[derive(Debug)]

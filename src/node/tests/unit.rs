@@ -3358,12 +3358,12 @@ async fn nostr_rendezvous_outbound_admission_atomic_roundtrip() {
         bootstrap.outbound_admission_allowed(),
         "default must allow (start unsaturated)"
     );
-    bootstrap.set_outbound_admission(false);
+    bootstrap.set_capacity(false);
     assert!(
         !bootstrap.outbound_admission_allowed(),
         "after suppression store: traversal initiator/responder must see false"
     );
-    bootstrap.set_outbound_admission(true);
+    bootstrap.set_capacity(true);
     assert!(
         bootstrap.outbound_admission_allowed(),
         "after recovery store: traversal initiator/responder must see true"

@@ -79,6 +79,12 @@ paths only:
   stale-advert refetch (`ResetStreak`);
 - the traversal half keeps its own clone of the relay client and of the
   node's `Arc<NodeSigner>`;
+- the node's traversal calls already have their final shape: the failure
+  record is awaited and answers with the time it used, the cooldown and
+  `show peers` read a `Status` (`machine/rendezvous/status.rs`) stored after
+  every change to the failure state, the protocol-mismatch warning is the
+  handle's (`note_version_mismatch`), and the node sends its capacity only
+  when it changes (`set_capacity`);
 - the traversal STUN exchange (`stun.rs`'s `perform_stun`) is a short
   async driver over the machine's STUN client (`machine/stun/client.rs`)
   for one server, on the traversal socket; the advert's public-address

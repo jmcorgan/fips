@@ -245,7 +245,13 @@ async fn a_cooldown_recorded_under_an_upper_case_npub_holds_for_the_canonical_np
     let runtime = NostrRendezvous::new_for_test();
     let peer_npub = crate::Identity::generate().npub();
     let now = now_ms();
-    runtime.record_protocol_mismatch(&peer_npub.to_ascii_uppercase(), now);
+    runtime.note_version_mismatch(
+        &peer_npub.to_ascii_uppercase(),
+        "udp0",
+        "192.0.2.1:2121",
+        1,
+        0,
+    );
     assert!(
         runtime.cooldown_until(&peer_npub, now + 1).is_some(),
         "a protocol-mismatch cooldown recorded under the upper-case npub does not hold for the \

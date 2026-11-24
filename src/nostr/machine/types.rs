@@ -155,7 +155,7 @@ pub struct PunchPacket {
 }
 
 /// Outcome of `NostrRendezvous::record_traversal_failure`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NostrFailureDecision {
     pub consecutive_failures: u32,
     /// True iff the lifecycle should log at WARN; false → DEBUG (rate-limit).
@@ -166,6 +166,15 @@ pub struct NostrFailureDecision {
     /// True only on the streak-threshold-crossing transition. Lifecycle
     /// should run a one-shot stale-advert re-check (B6) when set.
     pub crossed_threshold: bool,
+}
+
+/// The answer to `NostrRendezvous::record_traversal_failure`: the decision,
+/// and the Unix time in milliseconds it was computed at, from which the
+/// node measures the cooldown it reports and schedules the next retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailureReply {
+    pub decision: NostrFailureDecision,
+    pub at_ms: u64,
 }
 
 /// Snapshot row for `show_peers` rendering of per-npub Nostr-traversal state.

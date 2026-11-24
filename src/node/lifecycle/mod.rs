@@ -1139,12 +1139,14 @@ impl Node {
             return;
         };
 
-        // Refresh the runtime's outbound-admission view once per tick.
-        // The runtime task lives in a separate tokio context with no Node
-        // reference, so we publish current capacity state through a
-        // cheap atomic store. One-tick lag is acceptable: the inbound
-        // msg1 gate in handshake.rs remains the authoritative cap.
-        bootstrap.set_outbound_admission(self.outbound_admission_check());
+        // The engine has no Node reference, so it is told whether the node
+        // has room for another peer, when that changes. One-tick lag is
+        // acceptable: the inbound msg1 gate in handshake.rs remains the
+        // authoritative cap.
+        let capacity = self.outbound_admission_check();
+        self.supervisor
+            .nostr_rendezvous
+            .send_capacity(&bootstrap, capacity);
         self.push_advert_protection();
         let peers = &self.peers;
         self.supervisor
@@ -1275,9 +1277,11 @@ impl Node {
                         continue;
                     }
 
-                    let now_ms = Self::now_ms();
                     let peering_now = Self::peering_now();
-                    let decision = bootstrap.record_traversal_failure(&peer_config.npub, now_ms);
+                    let reply = bootstrap.record_traversal_failure(&peer_config.npub).await;
+                    // The cooldown is measured from the time the decision
+                    // was computed at.
+                    let (decision, now_ms) = (reply.decision, reply.at_ms);
                     if decision.should_warn {
                         warn!(
                             npub = %peer_config.npub,
