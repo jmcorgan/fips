@@ -276,9 +276,9 @@ installation and configuration instructions.
 Cross-compiled with cargo-zigbuild and assembled as a standard `.ipk`
 archive. The build script accepts aarch64, mipsel, mips, arm and
 x86\_64; releases publish aarch64 and x86\_64. The MIPS targets are
-not built: 32-bit MIPS has no 64-bit atomics, which fips and
-`nostr-relay-pool` both use (see the comment in
-`.github/workflows/package-openwrt.yml`).
+not built: 32-bit MIPS has no 64-bit atomics, which `nostr-sdk` 0.45
+uses in four of its files; fips itself uses `portable-atomic` for them
+(see the comment in `.github/workflows/package-openwrt.yml`).
 
 ```sh
 # Build (default: aarch64)
