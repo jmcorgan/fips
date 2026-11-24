@@ -23,31 +23,36 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::advert::{AdvertAdmission, AdvertMachine, PublishPlan};
-use super::failure_state::FailureState;
 use super::handoff::EstablishedTraversal;
+use super::machine::adverts;
+use super::machine::adverts::cache::{AdvertAdmission, Cache};
+use super::machine::adverts::publisher::{PublishPlan, Publisher};
+use super::machine::params::Params;
+use super::machine::traversal::election::{Election, OfferDisposition, SeenDecision};
+use super::machine::traversal::failures::FailureState;
+use super::machine::traversal::gate::SignalGate;
 use super::offer_admission::{AdmissionReject, OfferAdmission};
 use super::signal::{
-    FRESHNESS_SKEW_TOLERANCE_MS, FreshnessOutcome, SignalEnvelope, build_signal_event,
-    create_traversal_answer, create_traversal_offer, estimate_clock_skew, unwrap_signal_event,
-    validate_offer_freshness, validate_traversal_answer_for_offer,
+    FreshnessOutcome, SignalEnvelope, build_signal_event, create_traversal_answer,
+    create_traversal_offer, estimate_clock_skew, unwrap_signal_event, validate_offer_freshness,
+    validate_traversal_answer_for_offer,
 };
-use super::signal_gate::SignalGate;
 use super::signal_route::SignalRouter;
 use super::stun::observe_traversal_addresses;
 use super::traversal::{
-    PunchTargetTally, RefusalWarnGate, bind_traversal, is_doc_ip, is_never_punchable_ip,
-    is_private_ip, nonce, now_ms, planned_remote_endpoints, run_punch_attempt,
+    PunchTargetTally, RefusalWarnGate, bind_traversal, nonce, now_ms, planned_remote_endpoints,
+    run_punch_attempt,
 };
-use super::traversal_machine::{OfferDisposition, SeenDecision, TraversalMachine};
 use super::types::{
-    ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, BootstrapError, BootstrapEvent,
-    CachedOverlayAdvert, NostrFailureDecision, NostrPeerFailureView, NostrRefetchOutcome,
-    OverlayAdvert, OverlayEndpointAdvert, PROTOCOL_VERSION, PunchHint, SIGNAL_KIND,
-    TraversalAnswer, TraversalOffer,
+    ADVERT_IDENTIFIER, ADVERT_KIND, BootstrapError, BootstrapEvent, CachedOverlayAdvert,
+    NostrFailureDecision, NostrPeerFailureView, NostrRefetchOutcome, OverlayAdvert,
+    OverlayEndpointAdvert, PROTOCOL_VERSION, PunchHint, SIGNAL_KIND, TraversalAnswer,
+    TraversalOffer,
 };
 use crate::PeerIdentity;
 use crate::config::{NostrRendezvousConfig, PeerConfig};
+use crate::time::{HostClock, HostInstant};
+use fips_core::time::Clock;
 
 const ADVERT_CACHE_STALE_GRACE_MULTIPLIER: u64 = 2;
 
@@ -118,18 +123,21 @@ fn clamp_own_advert(advert: &mut OverlayAdvert) {
     }
 }
 
-/// The advert machine for `config`: entries kept to a grace-extended max
-/// age, the configured cache cap, and one republish interval of lapse grace
-/// after an entry's horizon, so an honest author that misses one republish
-/// keeps its slot during a flood.
-pub(super) fn advert_machine(npub: String, config: &NostrRendezvousConfig) -> AdvertMachine {
-    AdvertMachine::new(
+/// The advert cache for `params`: the configured cache cap, and one
+/// republish interval of lapse grace after an entry's horizon, so an honest
+/// author that misses one republish keeps its slot during a flood.
+pub(super) fn advert_cache(npub: String, params: &Params) -> Cache<HostInstant> {
+    Cache::new(
         npub,
-        config.advertise,
-        config.advert_ttl_secs * 1000 * ADVERT_CACHE_STALE_GRACE_MULTIPLIER,
-        config.advert_cache_max_entries,
+        params.advert_cache_max_entries,
+        fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
     )
-    .with_lapse_grace(config.advert_refresh_secs.saturating_mul(1000))
+    .with_lapse_grace(params.advert_refresh_secs.saturating_mul(1000))
+}
+
+/// The grace-extended max age of a cached advert, in ms.
+fn advert_max_age_ms(config: &NostrRendezvousConfig) -> u64 {
+    config.advert_ttl_secs * 1000 * ADVERT_CACHE_STALE_GRACE_MULTIPLIER
 }
 
 /// The key `npub` names, and its canonical npub: the text the advert cache,
@@ -330,53 +338,6 @@ fn endpoint_summary(endpoints: &[OverlayEndpointAdvert]) -> String {
         .join(",")
 }
 
-/// Addresses an advert must not name as a directly dialable endpoint: the
-/// never-punchable ranges plus the private and documentation ones, which are
-/// useless to a peer that found the advert on a relay.
-pub(super) fn is_unroutable_direct_advert_ip(ip: std::net::IpAddr) -> bool {
-    is_never_punchable_ip(ip) || is_private_ip(ip) || is_doc_ip(ip)
-}
-
-pub(super) fn endpoint_advert_is_publicly_usable(endpoint: &OverlayEndpointAdvert) -> bool {
-    let addr = endpoint.addr.trim();
-    if addr.is_empty() {
-        return false;
-    }
-
-    if endpoint.transport == super::types::OverlayTransportKind::Udp
-        && addr.eq_ignore_ascii_case("nat")
-    {
-        return true;
-    }
-    if addr.eq_ignore_ascii_case("nat") {
-        return false;
-    }
-
-    match endpoint.transport {
-        super::types::OverlayTransportKind::Udp | super::types::OverlayTransportKind::Tcp => {
-            let Ok(socket_addr) = addr.parse::<SocketAddr>() else {
-                let Some((host, port)) = addr.rsplit_once(':') else {
-                    return false;
-                };
-                let host = host.trim().trim_start_matches('[').trim_end_matches(']');
-                if host.is_empty() || port.trim().parse::<u16>().ok().is_none_or(|p| p == 0) {
-                    return false;
-                }
-                if host.eq_ignore_ascii_case("localhost") {
-                    return false;
-                }
-                return host
-                    .parse::<std::net::IpAddr>()
-                    .ok()
-                    .is_none_or(|ip| !is_unroutable_direct_advert_ip(ip));
-            };
-            socket_addr.port() != 0 && !is_unroutable_direct_advert_ip(socket_addr.ip())
-        }
-        super::types::OverlayTransportKind::Tor => true,
-        super::types::OverlayTransportKind::Unknown => false,
-    }
-}
-
 /// Cached STUN-derived public address for an advert-eligible UDP transport
 /// bound to a wildcard. Lives on `NostrRendezvous` so the freshness window
 /// survives advert refresh cycles.
@@ -409,8 +370,11 @@ pub struct NostrRendezvous {
     pubkey: PublicKey,
     npub: String,
     config: NostrRendezvousConfig,
-    advert: AdvertMachine,
-    traversal: TraversalMachine,
+    /// The peer advert cache.
+    adverts: std::sync::Mutex<Cache<HostInstant>>,
+    /// The local advert and the decision to publish it.
+    publisher: std::sync::Mutex<Publisher>,
+    traversal: std::sync::Mutex<Election>,
     pending_answers: Mutex<HashMap<String, oneshot::Sender<SignalEnvelope<TraversalAnswer>>>>,
     /// Our outbound offer per peer npub while we wait for its answer, kept so
     /// a dual-init election that suppresses the peer's offer can re-send ours.
@@ -432,9 +396,9 @@ pub struct NostrRendezvous {
     #[cfg(test)]
     signal_rx: std::sync::Mutex<Option<broadcast::Receiver<RelayPoolNotification>>>,
     admission: OfferAdmission,
-    signal_gate: SignalGate,
+    signal_gate: std::sync::Mutex<SignalGate<HostInstant>>,
     /// Limits the suspicious-offer warning to one a minute.
-    refusal_warn: std::sync::Mutex<RefusalWarnGate>,
+    refusal_warn: std::sync::Mutex<RefusalWarnGate<HostInstant>>,
     /// Inbound traversal signals shed before decryption, since process start.
     shed_signals: AtomicU64,
     event_tx: mpsc::UnboundedSender<BootstrapEvent>,
@@ -445,7 +409,7 @@ pub struct NostrRendezvous {
     publish_notify: Notify,
     notify_task: Mutex<Option<JoinHandle<()>>>,
     advertise_task: Mutex<Option<JoinHandle<()>>>,
-    failure_state: FailureState,
+    failure_state: std::sync::Mutex<FailureState>,
     /// STUN-derived public address per advert-eligible UDP transport
     /// (keyed by `TransportId.as_u32()`). Populated on demand by
     /// `learn_public_udp_addr()` and refreshed by TTL.
@@ -550,17 +514,21 @@ impl NostrRendezvous {
             config.max_concurrent_offers_per_npub,
         );
 
+        let params = Params::from(&config);
         let failure_state = FailureState::new(
-            config.failure_streak_threshold,
-            config.extended_cooldown_secs,
-            config.warn_log_interval_secs,
-            config.failure_state_max_entries,
+            params.failure_streak_threshold,
+            params.extended_cooldown_secs,
+            params.warn_log_interval_secs,
+            params.failure_state_max_entries,
+            fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
         );
 
-        let advert = advert_machine(npub.clone(), &config);
-        let traversal = TraversalMachine::new(
-            config.replay_window_secs * 1000,
-            config.seen_sessions_max_entries,
+        let adverts = advert_cache(npub.clone(), &params);
+        let publisher = Publisher::new(params.advertise);
+        let traversal = Election::new(
+            params.replay_window_secs * 1000,
+            params.seen_sessions_max_entries,
+            fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
         );
         let runtime = Arc::new(Self {
             client,
@@ -568,8 +536,9 @@ impl NostrRendezvous {
             pubkey,
             npub,
             config,
-            advert,
-            traversal,
+            adverts: std::sync::Mutex::new(adverts),
+            publisher: std::sync::Mutex::new(publisher),
+            traversal: std::sync::Mutex::new(traversal),
             pending_answers: Mutex::new(HashMap::new()),
             inflight_offers: Mutex::new(HashMap::new()),
             #[cfg(test)]
@@ -581,7 +550,7 @@ impl NostrRendezvous {
             #[cfg(test)]
             signal_rx: std::sync::Mutex::new(None),
             admission,
-            signal_gate: SignalGate::new(Instant::now()),
+            signal_gate: std::sync::Mutex::new(SignalGate::new(HostClock.now())),
             refusal_warn: std::sync::Mutex::new(RefusalWarnGate::default()),
             shed_signals: AtomicU64::new(0),
             event_tx,
@@ -592,7 +561,7 @@ impl NostrRendezvous {
             publish_notify: Notify::new(),
             notify_task: Mutex::new(None),
             advertise_task: Mutex::new(None),
-            failure_state,
+            failure_state: std::sync::Mutex::new(failure_state),
             public_udp_addr_cache: RwLock::new(HashMap::new()),
             outbound_admission: AtomicBool::new(true),
         });
@@ -637,7 +606,7 @@ impl NostrRendezvous {
         // spellings and the offer names the recipient as it names itself; the
         // failure event hands back the configuration as it was given.
         let peer_npub = canonical_npub(&peer_config.npub);
-        if !self.traversal.begin_initiator(&peer_npub) {
+        if !self.election().begin_initiator(&peer_npub) {
             return;
         }
         let target = PeerConfig {
@@ -655,8 +624,41 @@ impl NostrRendezvous {
                 },
             };
             let _ = runtime.event_tx.send(event);
-            runtime.traversal.end_initiator(&peer_npub);
+            runtime.election().end_initiator(&peer_npub);
         });
+    }
+
+    /// The peer advert cache, under its lock.
+    fn cache(&self) -> std::sync::MutexGuard<'_, Cache<HostInstant>> {
+        self.adverts
+            .lock()
+            .expect("advert-machine cache mutex poisoned")
+    }
+
+    /// The local advert and its publishing decision, under their lock.
+    fn publisher(&self) -> std::sync::MutexGuard<'_, Publisher> {
+        self.publisher
+            .lock()
+            .expect("advert-machine local-advert mutex poisoned")
+    }
+
+    /// The initiator election and the seen-sessions cache, under their lock.
+    fn election(&self) -> std::sync::MutexGuard<'_, Election> {
+        self.traversal
+            .lock()
+            .expect("traversal-machine mutex poisoned")
+    }
+
+    /// The pre-decrypt signal allowance, under its lock.
+    fn gate(&self) -> std::sync::MutexGuard<'_, SignalGate<HostInstant>> {
+        self.signal_gate.lock().expect("signal-gate mutex poisoned")
+    }
+
+    /// The per-peer failure state, under its lock.
+    fn failures(&self) -> std::sync::MutexGuard<'_, FailureState> {
+        self.failure_state
+            .lock()
+            .expect("failure-state mutex poisoned")
     }
 
     /// Record a NAT-traversal failure for `npub`, returning the
@@ -664,7 +666,7 @@ impl NostrRendezvous {
     /// threshold-crossing flag for the B6 re-fetch).
     pub fn record_traversal_failure(&self, npub: &str, now_ms: u64) -> NostrFailureDecision {
         let d = self
-            .failure_state
+            .failures()
             .record_failure(&canonical_npub(npub), now_ms);
         NostrFailureDecision {
             consecutive_failures: d.consecutive_failures,
@@ -676,14 +678,14 @@ impl NostrRendezvous {
 
     /// Record a successful traversal — clears the streak/cooldown.
     pub fn record_traversal_success(&self, npub: &str, now_ms: u64) {
-        self.failure_state
+        self.failures()
             .record_success(&canonical_npub(npub), now_ms);
     }
 
     /// Cooldown wall-clock ms if the peer is currently suppressed,
     /// else None. Used by the open-discovery sweep to skip enqueue.
     pub fn cooldown_until(&self, npub: &str, now_ms: u64) -> Option<u64> {
-        self.failure_state
+        self.failures()
             .cooldown_until(&canonical_npub(npub), now_ms)
     }
 
@@ -701,7 +703,7 @@ impl NostrRendezvous {
             .config
             .protocol_mismatch_cooldown_secs
             .saturating_mul(1000);
-        self.failure_state
+        self.failures()
             .record_protocol_mismatch(&canonical_npub(npub), now_ms, cooldown_ms)
     }
 
@@ -713,7 +715,7 @@ impl NostrRendezvous {
 
     /// Snapshot of per-npub failure state for `show_peers` rendering.
     pub fn failure_state_snapshot(&self) -> Vec<NostrPeerFailureView> {
-        self.failure_state
+        self.failures()
             .snapshot()
             .into_iter()
             .map(|(npub, rec)| NostrPeerFailureView {
@@ -842,7 +844,7 @@ impl NostrRendezvous {
         if self.config.advert_relays.is_empty() {
             return NostrRefetchOutcome::Skipped;
         }
-        let cached_created_at = self.advert.cached_created_at(peer_npub);
+        let cached_created_at = self.cache().cached_created_at(peer_npub);
 
         let events = match self
             .client
@@ -867,11 +869,12 @@ impl NostrRendezvous {
                 return NostrRefetchOutcome::Skipped;
             }
             // Absent on relays. Evict any stale cache entry.
-            self.advert.remove(peer_npub);
-            self.failure_state.reset_streak_after_refresh(peer_npub);
+            self.cache().remove(peer_npub);
+            self.failures().reset_streak_after_refresh(peer_npub);
             return NostrRefetchOutcome::Evicted;
         };
-        let relay_created_at = Self::effective_created_at_secs(ev.created_at.as_secs(), now_ms());
+        let relay_created_at =
+            adverts::effective_created_at_secs(ev.created_at.as_secs(), now_ms());
 
         match cached_created_at {
             Some(cached) if relay_created_at <= cached => NostrRefetchOutcome::SameAdvert,
@@ -888,9 +891,8 @@ impl NostrRendezvous {
                     created_at: relay_created_at,
                     valid_until_ms,
                 };
-                if let AdvertAdmission::Refused { first_at_bound } =
-                    self.advert.insert_fetched(peer_npub, updated, now_ms())
-                {
+                let admission = self.cache().insert_fetched(peer_npub, updated, now_ms());
+                if let AdvertAdmission::Refused { first_at_bound } = admission {
                     // The cache does not hold this advert, so the streak is
                     // not reset on the strength of it.
                     self.log_advert_cache_full(first_at_bound);
@@ -901,7 +903,7 @@ impl NostrRendezvous {
                     );
                     return NostrRefetchOutcome::Skipped;
                 }
-                self.failure_state.reset_streak_after_refresh(peer_npub);
+                self.failures().reset_streak_after_refresh(peer_npub);
                 NostrRefetchOutcome::Refreshed
             }
         }
@@ -920,7 +922,8 @@ impl NostrRendezvous {
         self: &Arc<Self>,
         advert: Option<OverlayAdvert>,
     ) -> Result<(), BootstrapError> {
-        if self.advert.set_local_advert(advert) {
+        let changed = self.publisher().set_local_advert(advert);
+        if changed {
             self.request_publish_advert();
         }
         Ok(())
@@ -941,7 +944,7 @@ impl NostrRendezvous {
     /// on a relay.
     pub fn cached_endpoints(&self, peer_npub: &str) -> Option<Vec<OverlayEndpointAdvert>> {
         let canonical = PublicKey::parse(peer_npub).ok()?.to_bech32().ok()?;
-        self.advert
+        self.cache()
             .cached_advert(&canonical, now_ms())
             .map(|advert| advert.endpoints)
     }
@@ -949,7 +952,7 @@ impl NostrRendezvous {
     /// Replace the set of authors whose cached adverts survive a full cache:
     /// the configured peers and the authors with an established link.
     pub fn set_advert_protection(&self, npubs: HashSet<String>) {
-        self.advert.set_protected(npubs);
+        self.cache().set_protected(npubs);
     }
 
     /// The cached adverts the open-discovery sweep should consider: the
@@ -961,8 +964,10 @@ impl NostrRendezvous {
         skip: &HashSet<String>,
     ) -> Vec<(String, Vec<OverlayEndpointAdvert>, u64)> {
         self.prune_advert_cache();
-        self.advert
-            .open_discovery_candidates(max, now_ms(), skip, &mut rand::rng())
+        self.cache()
+            .open_discovery_candidates::<crate::identity::OsEntropy>(max, now_ms(), |npub| {
+                skip.contains(npub)
+            })
     }
 
     /// Expire cached adverts, trim the cache to its cap, and release the
@@ -970,7 +975,8 @@ impl NostrRendezvous {
     /// enough. Called once per node tick.
     pub fn maintain_advert_cache(&self) {
         self.prune_advert_cache();
-        if let Some(refused) = self.advert.bound_tick(Instant::now()) {
+        let released = self.cache().bound_tick(HostClock.now());
+        if let Some(refused) = released {
             info!(refused, "advert cache below cap again");
         }
     }
@@ -1069,14 +1075,16 @@ impl NostrRendezvous {
             // win every replacement comparison in
             // `observe_advert` and buy a proportionally distant
             // validity horizon.
-            let created_at = Self::effective_created_at_secs(event.created_at.as_secs(), now_ms());
-            match self.advert.observe_advert(
+            let created_at =
+                adverts::effective_created_at_secs(event.created_at.as_secs(), now_ms());
+            let admission = self.cache().observe_advert(
                 &author_npub,
                 advert,
                 created_at,
                 valid_until_ms,
                 now_ms(),
-            ) {
+            );
+            match admission {
                 AdvertAdmission::Admitted | AdvertAdmission::Updated
                     if author_npub != self.npub =>
                 {
@@ -1119,7 +1127,8 @@ impl NostrRendezvous {
             // reserve, it does not shed.
             Err(_) => true,
         };
-        if let Err(shed) = self.signal_gate.admit(awaiting_answers, Instant::now()) {
+        let admitted = self.gate().admit(awaiting_answers, HostClock.now());
+        if let Err(shed) = admitted {
             let total = self.shed_signals.fetch_add(1, Ordering::Relaxed) + 1;
             // Debug, not warn, per event: the party that trips this
             // is by definition sending faster than the node wants,
@@ -1391,7 +1400,8 @@ impl NostrRendezvous {
     }
 
     async fn publish_advert(&self) -> Result<(), BootstrapError> {
-        let advert = match self.advert.plan_publish()? {
+        let plan = self.publisher().plan_publish()?;
+        let advert = match plan {
             PublishPlan::Nothing => return Ok(()),
             PublishPlan::Publish(advert) => advert,
         };
@@ -1552,7 +1562,7 @@ impl NostrRendezvous {
         if let Some(observed_skew_ms) =
             estimate_clock_skew(&offer, &answer.payload, answer_received_at)
         {
-            self.failure_state.note_observed_skew(
+            self.failures().note_observed_skew(
                 &peer_config.npub,
                 observed_skew_ms,
                 answer_received_at,
@@ -1626,8 +1636,7 @@ impl NostrRendezvous {
             "traversal: initiator punch succeeded"
         );
 
-        self.failure_state
-            .record_success(&peer_config.npub, now_ms());
+        self.failures().record_success(&peer_config.npub, now_ms());
 
         Ok(
             EstablishedTraversal::new(session_id, peer_config.npub, remote_addr, base_socket)
@@ -1750,11 +1759,14 @@ impl NostrRendezvous {
             PeerIdentity::from_npub(&sender_npub),
         ) {
             (Ok(ours), Ok(theirs)) => {
-                match self.traversal.classify_incoming_offer(
+                // Bound before the match: the Suppress arm awaits, and the
+                // election's lock must not be held across it.
+                let disposition = self.election().classify_incoming_offer(
                     &sender_npub,
                     ours.node_addr(),
                     theirs.node_addr(),
-                ) {
+                );
+                match disposition {
                     OfferDisposition::Suppress => {
                         debug!(
                             peer = %peer_short,
@@ -1777,10 +1789,10 @@ impl NostrRendezvous {
             }
         }
 
-        match self
-            .traversal
-            .note_session_seen(&offer.session_id, now_ms())
-        {
+        let seen = self
+            .election()
+            .note_session_seen(&offer.session_id, now_ms());
+        match seen {
             SeenDecision::Replay => {
                 return Err(BootstrapError::Replay(offer.session_id.clone()));
             }
@@ -1913,7 +1925,8 @@ impl NostrRendezvous {
         let canonical = target_pubkey.to_bech32().expect("infallible");
         let peer_npub = canonical.as_str();
         self.prune_advert_cache();
-        if let Some(advert) = self.advert.cached_advert(peer_npub, now_ms()) {
+        let cached = self.cache().cached_advert(peer_npub, now_ms());
+        if let Some(advert) = cached {
             debug!(
                 peer = %short_npub(peer_npub),
                 source = "cache",
@@ -1948,7 +1961,8 @@ impl NostrRendezvous {
             if author_npub != peer_npub {
                 continue;
             }
-            let created_at = Self::effective_created_at_secs(event.created_at.as_secs(), now_ms());
+            let created_at =
+                adverts::effective_created_at_secs(event.created_at.as_secs(), now_ms());
             let replace = best
                 .as_ref()
                 .map(|current| created_at >= current.created_at)
@@ -1970,10 +1984,10 @@ impl NostrRendezvous {
             endpoints = %endpoint_summary(&cached.advert.endpoints),
             "advert: resolved"
         );
-        if let AdvertAdmission::Refused { first_at_bound } =
-            self.advert
-                .insert_fetched(peer_npub, cached.clone(), now_ms())
-        {
+        let admission = self
+            .cache()
+            .insert_fetched(peer_npub, cached.clone(), now_ms());
+        if let AdvertAdmission::Refused { first_at_bound } = admission {
             self.log_advert_cache_full(first_at_bound);
             debug!(
                 peer = %short_npub(peer_npub),
@@ -2082,59 +2096,10 @@ impl NostrRendezvous {
     }
 
     pub(super) fn validate_overlay_advert(
-        mut advert: OverlayAdvert,
+        advert: OverlayAdvert,
     ) -> Result<OverlayAdvert, BootstrapError> {
-        if advert.identifier != ADVERT_IDENTIFIER {
-            return Err(BootstrapError::InvalidAdvert(format!(
-                "unsupported identifier '{}'",
-                advert.identifier
-            )));
-        }
-        if advert.version != ADVERT_VERSION {
-            return Err(BootstrapError::InvalidAdvert(format!(
-                "unsupported version '{}'",
-                advert.version
-            )));
-        }
-        if advert.endpoints.is_empty() {
-            return Err(BootstrapError::InvalidAdvert(
-                "missing required endpoints".to_string(),
-            ));
-        }
         check_advert_lists(&advert)?;
-        advert.endpoints.retain(endpoint_advert_is_publicly_usable);
-        if advert.endpoints.is_empty() {
-            return Err(BootstrapError::InvalidAdvert(
-                "missing publicly routable endpoints".to_string(),
-            ));
-        }
-
-        let has_nat = advert.has_udp_nat_endpoint();
-        if has_nat {
-            if advert
-                .signal_relays
-                .as_ref()
-                .is_none_or(|relays| relays.is_empty())
-            {
-                return Err(BootstrapError::InvalidAdvert(
-                    "udp:nat endpoint requires signalRelays".to_string(),
-                ));
-            }
-            if advert
-                .stun_servers
-                .as_ref()
-                .is_none_or(|servers| servers.is_empty())
-            {
-                return Err(BootstrapError::InvalidAdvert(
-                    "udp:nat endpoint requires stunServers".to_string(),
-                ));
-            }
-        } else {
-            advert.signal_relays = None;
-            advert.stun_servers = None;
-        }
-
-        Ok(advert)
+        adverts::validate_overlay_advert(advert).map_err(Into::into)
     }
 
     /// Log one planning call's refused punch candidates, giving at most one
@@ -2144,12 +2109,12 @@ impl NostrRendezvous {
             .refusal_warn
             .lock()
             .expect("refusal-warn mutex poisoned")
-            .decide(tally, Instant::now());
+            .decide(tally, HostClock.now());
         log_refusals(tally, peer, session, warn);
     }
 
     fn prune_advert_cache(&self) {
-        let report = self.advert.prune(now_ms());
+        let report = self.cache().prune(now_ms());
         if report.evicted > 0 {
             debug!(
                 evicted = report.evicted,
@@ -2161,7 +2126,7 @@ impl NostrRendezvous {
     }
 
     fn event_valid_until_ms(&self, event: &Event) -> Option<u64> {
-        self.advert.event_valid_until_ms(event, now_ms())
+        Self::compute_advert_valid_until_ms(event, advert_max_age_ms(&self.config), now_ms())
     }
 
     /// Newest event in `events` that was actually signed by `author`.
@@ -2182,24 +2147,6 @@ impl NostrRendezvous {
             .max_by_key(|event| event.created_at.as_secs())
     }
 
-    /// A peer's advert `created_at`, in seconds, clamped so it can never read
-    /// more than `FRESHNESS_SKEW_TOLERANCE_MS` ahead of `now_ms`.
-    ///
-    /// An unbounded future `created_at` buys a cache entry two things it
-    /// should not have: a proportionally distant validity horizon, and an
-    /// unbeatable position in every replacement comparison, so a later genuine
-    /// advert can never displace it. Clamping rather than rejecting is
-    /// deliberate: a node whose own clock runs slow reads every peer's honest
-    /// advert as future-dated, and rejecting would take out Nostr-mediated
-    /// dialing for every peer at once with nothing but a cache miss to show
-    /// for it. Raising the tolerance widens the window in which a future-dated
-    /// advert outranks an honest one; lowering it makes an ordinary clock
-    /// difference look hostile.
-    pub(super) fn effective_created_at_secs(created_at_secs: u64, now_ms: u64) -> u64 {
-        let ceiling_secs = now_ms.saturating_add(FRESHNESS_SKEW_TOLERANCE_MS) / 1000;
-        created_at_secs.min(ceiling_secs)
-    }
-
     pub(super) fn compute_advert_valid_until_ms(
         event: &Event,
         advert_max_age_ms: u64,
@@ -2208,23 +2155,12 @@ impl NostrRendezvous {
         if event.is_expired() {
             return None;
         }
-
-        let created_ms = Self::effective_created_at_secs(event.created_at.as_secs(), now_ms)
-            .saturating_mul(1000);
-        let created_window_until = created_ms.saturating_add(advert_max_age_ms);
-        if created_window_until <= now_ms {
-            return None;
-        }
-
-        let expires_ms = event
-            .tags
-            .expiration()
-            .map(|timestamp| timestamp.as_secs().saturating_mul(1000));
-        let valid_until_ms = expires_ms
-            .map(|expires| expires.min(created_window_until))
-            .unwrap_or(created_window_until);
-
-        (valid_until_ms > now_ms).then_some(valid_until_ms)
+        adverts::advert_valid_until_ms(
+            event.created_at.as_secs(),
+            event.tags.expiration().map(|timestamp| timestamp.as_secs()),
+            advert_max_age_ms,
+            now_ms,
+        )
     }
 
     async fn send_signal<T: Serialize>(
@@ -2425,16 +2361,20 @@ impl NostrRendezvous {
             config.max_concurrent_offers_per_npub,
         );
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let params = Params::from(&config);
         let failure_state = FailureState::new(
-            config.failure_streak_threshold,
-            config.extended_cooldown_secs,
-            config.warn_log_interval_secs,
-            config.failure_state_max_entries,
+            params.failure_streak_threshold,
+            params.extended_cooldown_secs,
+            params.warn_log_interval_secs,
+            params.failure_state_max_entries,
+            fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
         );
-        let advert = advert_machine(npub.clone(), &config);
-        let traversal = TraversalMachine::new(
-            config.replay_window_secs * 1000,
-            config.seen_sessions_max_entries,
+        let adverts = advert_cache(npub.clone(), &params);
+        let publisher = Publisher::new(params.advertise);
+        let traversal = Election::new(
+            params.replay_window_secs * 1000,
+            params.seen_sessions_max_entries,
+            fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
         );
         Self {
             client,
@@ -2442,8 +2382,9 @@ impl NostrRendezvous {
             pubkey,
             npub,
             config,
-            advert,
-            traversal,
+            adverts: std::sync::Mutex::new(adverts),
+            publisher: std::sync::Mutex::new(publisher),
+            traversal: std::sync::Mutex::new(traversal),
             pending_answers: Mutex::new(HashMap::new()),
             inflight_offers: Mutex::new(HashMap::new()),
             sent_signals: std::sync::Mutex::new(Vec::new()),
@@ -2451,7 +2392,7 @@ impl NostrRendezvous {
             policy,
             signal_rx: std::sync::Mutex::new(Some(signals)),
             admission,
-            signal_gate: SignalGate::new(Instant::now()),
+            signal_gate: std::sync::Mutex::new(SignalGate::new(HostClock.now())),
             refusal_warn: std::sync::Mutex::new(RefusalWarnGate::default()),
             shed_signals: AtomicU64::new(0),
             event_tx,
@@ -2462,7 +2403,7 @@ impl NostrRendezvous {
             publish_notify: Notify::new(),
             notify_task: Mutex::new(None),
             advertise_task: Mutex::new(None),
-            failure_state,
+            failure_state: std::sync::Mutex::new(failure_state),
             public_udp_addr_cache: RwLock::new(HashMap::new()),
             outbound_admission: AtomicBool::new(true),
         }
@@ -2477,7 +2418,7 @@ impl NostrRendezvous {
         receiver: PublicKey,
         relays: Vec<String>,
     ) {
-        self.traversal.begin_initiator(peer_npub);
+        self.election().begin_initiator(peer_npub);
         self.inflight_offers.lock().await.insert(
             peer_npub.to_string(),
             InflightOffer {
@@ -2601,7 +2542,8 @@ impl NostrRendezvous {
     /// The advert event `publish_advert` would send now, or `None` when there
     /// is nothing to publish.
     pub(crate) fn signed_advert_for_test(&self) -> Result<Option<Event>, BootstrapError> {
-        match self.advert.plan_publish()? {
+        let plan = self.publisher().plan_publish()?;
+        match plan {
             PublishPlan::Publish(advert) => Ok(Some(self.sign_advert(advert)?.1)),
             PublishPlan::Nothing => Ok(None),
         }
@@ -2646,7 +2588,7 @@ impl NostrRendezvous {
             author_npub: author_npub.clone(),
             advert: OverlayAdvert {
                 identifier: ADVERT_IDENTIFIER.to_string(),
-                version: ADVERT_VERSION,
+                version: super::types::ADVERT_VERSION,
                 endpoints: vec![endpoint],
                 signal_relays: None,
                 stun_servers: None,
@@ -2671,18 +2613,18 @@ impl NostrRendezvous {
     /// Insert a cached advert directly into the in-memory cache. Used by
     /// unit tests to set up consumer-side state without needing live relays.
     pub(crate) async fn insert_advert_for_test(&self, npub: String, advert: CachedOverlayAdvert) {
-        let _ = self.advert.insert_fetched(&npub, advert, now_ms());
+        let _ = self.cache().insert_fetched(&npub, advert, now_ms());
     }
 
     /// The authors the advert cache currently protects.
     pub(crate) fn advert_protection_for_test(&self) -> HashSet<String> {
-        self.advert.protected()
+        self.cache().protected().iter().cloned().collect()
     }
 
     /// The cached `created_at` for `npub`, or `None` when nothing is cached.
     /// Lets a unit test observe whether a refetch evicted an entry.
     pub(crate) async fn cached_created_at_for_test(&self, npub: &str) -> Option<u64> {
-        self.advert.cached_created_at(npub)
+        self.cache().cached_created_at(npub)
     }
 
     /// Queue a bootstrap event directly for lifecycle tests without live relays
@@ -2699,8 +2641,9 @@ impl NostrRendezvous {
 
     /// Whether an outbound initiator is registered under `npub` as written.
     pub(crate) fn initiator_active_for_test(&self, npub: &str) -> bool {
-        if self.traversal.begin_initiator(npub) {
-            self.traversal.end_initiator(npub);
+        let mut election = self.election();
+        if election.begin_initiator(npub) {
+            election.end_initiator(npub);
             false
         } else {
             true

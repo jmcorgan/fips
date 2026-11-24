@@ -1,0 +1,5 @@
+# if_addrs.
+expect exit 1
+expect mod.rs:1: if_addrs path
+=== mod.rs
+fn i() { let _ = if_addrs::get_if_addrs(); }

@@ -430,6 +430,8 @@ STEPS = {
         "Check every source comment resolves in-repo": "comment-refs",
         "Check every ignored test against its inventory": "ignored-tests",
         "Check no non-test code uses std 64-bit atomics": "portable-atomics",
+        "Check the Nostr machine guard against its fixtures": "nostr-machine",
+        "Check the Nostr machine names nothing outside its fence": "nostr-machine",
         "Check no bind-mount source comes from a bare mktemp": "mount-tmpdir",
         "Check every CI container, network and volume carries the run label": "ci-labels",
         "Check the OpenWrt package's shell scripts with shellcheck": "shellcheck",
@@ -567,6 +569,10 @@ CMDS = {
         ["testing/check-ignored-tests.py"],
     ("ci-parity", "Check no non-test code uses std 64-bit atomics"):
         ["testing/check-portable-atomics.py"],
+    ("ci-parity", "Check the Nostr machine guard against its fixtures"):
+        ["testing/nostr-machine/test.sh"],
+    ("ci-parity", "Check the Nostr machine names nothing outside its fence"):
+        ["testing/check-nostr-machine.py"],
     ("ci-parity", "Check no bind-mount source comes from a bare mktemp"):
         ["testing/check-mount-tmpdir.py"],
     ("ci-parity", "Check every CI container, network and volume carries the run label"):

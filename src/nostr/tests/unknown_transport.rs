@@ -1,7 +1,8 @@
 //! Tests that an overlay advert naming an endpoint of a transport kind this
 //! node does not know is not rejected whole: the receiver drops that endpoint
-//! and uses the rest (`OverlayTransportKind::Unknown` in `types.rs`, filtered
-//! by `NostrRendezvous::validate_overlay_advert` in `runtime.rs`). The JSON is
+//! and uses the rest (`OverlayTransportKind::Unknown` in `machine/types.rs`,
+//! filtered by `validate_overlay_advert` in `machine/adverts/mod.rs` through
+//! `NostrRendezvous::validate_overlay_advert` in `runtime.rs`). The JSON is
 //! read the way the advert parser in `runtime.rs` reads an event's content.
 
 use super::super::runtime::NostrRendezvous;

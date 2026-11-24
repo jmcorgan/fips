@@ -1,0 +1,5 @@
+# The back-import shape: the shell reached by super from mod.rs.
+expect exit 1
+expect mod.rs:1: super chain of 1 at depth 0
+=== mod.rs
+use super::runtime::NostrRendezvous;

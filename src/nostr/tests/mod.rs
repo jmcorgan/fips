@@ -5,9 +5,18 @@ use std::time::Duration;
 
 use nostr::prelude::{EventBuilder, Kind, RelayUrl, Tag, Timestamp};
 
+use super::machine::adverts::is_unroutable_direct_advert_ip;
+use super::machine::error::Error as MachineError;
+use super::machine::params::Params;
+use super::machine::punch::parse_punch_packet;
+use super::machine::punch::plan::{
+    PunchStrategy, is_doc_ip, is_never_punchable_ip, is_private_ip, plan_punch_targets,
+};
+use super::machine::tests::TestInstant;
+use super::machine::traversal::election::suppress_responder_for_own_initiator;
 use super::runtime::{
-    INBOX_LOOKBACK, NostrRendezvous, adversarial_offer_reject, inbox_relays,
-    is_unroutable_direct_advert_ip, short_id, signal_relays,
+    INBOX_LOOKBACK, NostrRendezvous, adversarial_offer_reject, inbox_relays, short_id,
+    signal_relays,
 };
 use super::signal::{
     FreshnessOutcome, build_signal_event, create_traversal_answer, create_traversal_offer,
@@ -18,11 +27,9 @@ use super::stun::{parse_stun_binding_success, parse_stun_url};
 #[cfg(target_os = "linux")]
 use super::traversal::run_punch_attempt;
 use super::traversal::{
-    PunchStrategy, RefusalWarnGate, SourceRank, build_punch_packet, is_doc_ip,
-    is_never_punchable_ip, is_private_ip, now_ms, parse_punch_packet, plan_punch_targets,
-    planned_remote_endpoints, rank_punch_source, session_hash,
+    RefusalWarnGate, SourceRank, build_punch_packet, now_ms, planned_remote_endpoints,
+    rank_punch_source, session_hash,
 };
-use super::traversal_machine::suppress_responder_for_own_initiator;
 use super::types::BootstrapError;
 use super::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, OverlayAdvert, OverlayEndpointAdvert,
@@ -479,7 +486,7 @@ fn an_answer_whose_in_reply_to_is_the_offer_event_id_rather_than_its_nonce_is_re
         "npub1server",
         "npub1client",
     ) {
-        Err(BootstrapError::Protocol(reason)) => assert_eq!(reason, "session-mismatch"),
+        Err(MachineError::Protocol(reason)) => assert_eq!(reason, "session-mismatch"),
         other => panic!("expected a session-mismatch refusal, got {other:?}"),
     }
 }
@@ -1010,10 +1017,10 @@ fn a_suspicious_offer_that_logs_nothing_does_not_use_up_the_next_ones_warning() 
     assert!(loud.suspicious());
 
     let mut gate = RefusalWarnGate::default();
-    let t = std::time::Instant::now();
+    let t = TestInstant(0);
     assert_eq!(gate.decide(&quiet, t), None);
     assert_eq!(
-        gate.decide(&loud, t + std::time::Duration::from_millis(1)),
+        gate.decide(&loud, TestInstant(1)),
         Some(0),
         "the warning went to an offer that logged nothing"
     );
@@ -2617,12 +2624,11 @@ async fn answering_a_peers_offer_does_not_resend_ours() {
 // --- advert cache: an entry past its horizon keeps its slot for a grace ---
 
 mod advert_lapse {
-    use std::collections::HashSet;
+    use fips_core::utils::hash::KeyedHasher;
 
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
-
-    use super::super::advert::{AdvertAdmission, AdvertMachine};
+    use super::super::machine::adverts::cache::{AdvertAdmission, Cache};
+    use super::super::machine::params::Params;
+    use super::super::machine::tests::{SeededEntropy, TestInstant, ZeroEntropy};
     use super::{ADVERT_IDENTIFIER, ADVERT_VERSION, OverlayAdvert, OverlayEndpointAdvert};
     use super::{OverlayTransportKind, nostr_config_with_refresh};
 
@@ -2647,13 +2653,17 @@ mod advert_lapse {
 
     /// A cache of `cap` entries with one republish interval of grace, as the
     /// runtime builds it.
-    fn cache(cap: usize) -> AdvertMachine {
-        AdvertMachine::new("npub1self".to_string(), true, 2 * HORIZON, cap)
-            .with_lapse_grace(REFRESH)
+    fn cache(cap: usize) -> Cache<TestInstant> {
+        Cache::new(
+            "npub1self".to_string(),
+            cap,
+            KeyedHasher::new::<ZeroEntropy>(),
+        )
+        .with_lapse_grace(REFRESH)
     }
 
     fn offer(
-        m: &AdvertMachine,
+        m: &mut Cache<TestInstant>,
         npub: &str,
         created_at: u64,
         valid_until_ms: u64,
@@ -2664,16 +2674,16 @@ mod advert_lapse {
 
     /// A cache held full by a flood, with the honest author admitted first.
     /// Flood adverts omit the expiration tag, so they carry twice the horizon.
-    fn flooded(cap: usize) -> AdvertMachine {
-        let m = cache(cap);
+    fn flooded(cap: usize) -> Cache<TestInstant> {
+        let mut m = cache(cap);
         assert_eq!(
-            offer(&m, "npub1honest", 1, T0 + HORIZON, T0),
+            offer(&mut m, "npub1honest", 1, T0 + HORIZON, T0),
             AdvertAdmission::Admitted
         );
         for i in 1..cap {
             let key = format!("npub1flood{i}");
             assert_eq!(
-                offer(&m, &key, 1, T0 + 2 * HORIZON, T0),
+                offer(&mut m, &key, 1, T0 + 2 * HORIZON, T0),
                 AdvertAdmission::Admitted
             );
         }
@@ -2685,15 +2695,15 @@ mod advert_lapse {
     /// its slot back rather than be refused as a newcomer's.
     #[test]
     fn an_honest_author_that_misses_one_republish_during_a_flood_keeps_its_slot() {
-        let m = flooded(4);
+        let mut m = flooded(4);
         let lapsed = T0 + HORIZON + 1;
         let _ = m.prune(lapsed);
-        let late = offer(&m, "npub1flood-late", 1, lapsed + 2 * HORIZON, lapsed);
+        let late = offer(&mut m, "npub1flood-late", 1, lapsed + 2 * HORIZON, lapsed);
 
         let republished = T0 + HORIZON + REFRESH / 2;
         let _ = m.prune(republished);
         assert_eq!(
-            offer(&m, "npub1honest", 2, republished + HORIZON, republished),
+            offer(&mut m, "npub1honest", 2, republished + HORIZON, republished),
             AdvertAdmission::Updated,
             "the honest author's next advert takes its slot back"
         );
@@ -2709,16 +2719,22 @@ mod advert_lapse {
     /// rather than the returning author.
     #[test]
     fn a_returning_author_keeps_its_admission_order() {
-        let m = flooded(4);
+        let mut m = flooded(4);
         let republished = T0 + HORIZON + 1;
         let _ = m.prune(republished);
         assert_eq!(
-            offer(&m, "npub1honest", 2, republished + HORIZON, republished),
+            offer(&mut m, "npub1honest", 2, republished + HORIZON, republished),
             AdvertAdmission::Updated
         );
-        m.set_protected(["npub1configured".to_string()].into_iter().collect());
+        m.set_protected(["npub1configured".to_string()]);
         assert_eq!(
-            offer(&m, "npub1configured", 1, republished + HORIZON, republished),
+            offer(
+                &mut m,
+                "npub1configured",
+                1,
+                republished + HORIZON,
+                republished
+            ),
             AdvertAdmission::Admitted
         );
         assert!(m.cached_created_at("npub1honest").is_some());
@@ -2732,14 +2748,14 @@ mod advert_lapse {
     /// dial path's cache lookup nor open discovery sees it.
     #[test]
     fn a_lapsed_advert_is_served_to_neither_the_dial_path_nor_open_discovery() {
-        let m = flooded(4);
+        let mut m = flooded(4);
         let lapsed = T0 + HORIZON + 1;
         let _ = m.prune(lapsed);
 
         assert!(m.cached_created_at("npub1honest").is_some(), "slot kept");
         assert!(m.cached_advert("npub1honest", lapsed).is_none());
-        let window =
-            m.open_discovery_candidates(64, lapsed, &HashSet::new(), &mut StdRng::seed_from_u64(3));
+        SeededEntropy::seed(3);
+        let window = m.open_discovery_candidates::<SeededEntropy>(64, lapsed, |_| false);
         assert!(
             window.iter().all(|(npub, _, _)| npub != "npub1honest"),
             "a lapsed entry was offered to open discovery"
@@ -2747,9 +2763,9 @@ mod advert_lapse {
         assert_eq!(window.len(), 3, "the live entries are still offered");
 
         // A protected author's lapsed entry is not served either.
-        m.set_protected(["npub1honest".to_string()].into_iter().collect());
-        let window =
-            m.open_discovery_candidates(64, lapsed, &HashSet::new(), &mut StdRng::seed_from_u64(3));
+        m.set_protected(["npub1honest".to_string()]);
+        SeededEntropy::seed(3);
+        let window = m.open_discovery_candidates::<SeededEntropy>(64, lapsed, |_| false);
         assert!(window.iter().all(|(npub, _, _)| npub != "npub1honest"));
     }
 
@@ -2757,7 +2773,7 @@ mod advert_lapse {
     /// did before, and a newcomer is admitted.
     #[test]
     fn a_lapsed_slot_frees_once_one_republish_interval_has_passed() {
-        let m = flooded(4);
+        let mut m = flooded(4);
         let still_lapsed = T0 + HORIZON + REFRESH - 1;
         let report = m.prune(still_lapsed);
         assert_eq!(report.expired, 0);
@@ -2768,7 +2784,7 @@ mod advert_lapse {
         assert_eq!(report.expired, 1);
         assert!(m.cached_created_at("npub1honest").is_none());
         assert_eq!(
-            offer(&m, "npub1newcomer", 1, gone + HORIZON, gone),
+            offer(&mut m, "npub1newcomer", 1, gone + HORIZON, gone),
             AdvertAdmission::Admitted
         );
     }
@@ -2777,12 +2793,12 @@ mod advert_lapse {
     /// is admitted as before, taking the newest unprotected entry's slot.
     #[test]
     fn a_protected_author_still_makes_room_while_an_entry_is_lapsed() {
-        let m = flooded(4);
+        let mut m = flooded(4);
         let lapsed = T0 + HORIZON + 1;
         let _ = m.prune(lapsed);
-        m.set_protected(["npub1configured".to_string()].into_iter().collect());
+        m.set_protected(["npub1configured".to_string()]);
         assert_eq!(
-            offer(&m, "npub1configured", 1, lapsed + HORIZON, lapsed),
+            offer(&mut m, "npub1configured", 1, lapsed + HORIZON, lapsed),
             AdvertAdmission::Admitted
         );
         assert!(m.cached_created_at("npub1configured").is_some());
@@ -2797,9 +2813,9 @@ mod advert_lapse {
     /// from this node's own `advert_refresh_secs`.
     #[test]
     fn the_runtime_takes_the_grace_from_the_advert_refresh_interval() {
-        let m = super::super::runtime::advert_machine(
+        let m = super::super::runtime::advert_cache(
             "npub1self".to_string(),
-            &nostr_config_with_refresh(1_200),
+            &Params::from(&nostr_config_with_refresh(1_200)),
         );
         assert_eq!(m.lapse_grace_ms(), 1_200_000);
     }
@@ -2955,6 +2971,41 @@ fn an_event_of_another_kind_is_not_read_as_an_inbox_relay_list() {
         .sign_with_keys(&nostr::Keys::generate())
         .unwrap();
     assert!(inbox_relays(&event).is_empty());
+}
+
+/// Each machine setting is copied from its own configuration key: every key
+/// gets a distinct value, so two fields swapped in the conversion cannot both
+/// read right.
+#[test]
+fn the_machine_params_copy_each_value_from_its_own_config_key() {
+    let config = crate::config::NostrRendezvousConfig {
+        failure_streak_threshold: 7,
+        extended_cooldown_secs: 11,
+        warn_log_interval_secs: 13,
+        failure_state_max_entries: 17,
+        replay_window_secs: 19,
+        seen_sessions_max_entries: 23,
+        advertise: false,
+        advert_cache_max_entries: 29,
+        advert_refresh_secs: 31,
+        ..Default::default()
+    };
+    let params = Params::from(&config);
+    assert_eq!(params.failure_streak_threshold, 7);
+    assert_eq!(params.extended_cooldown_secs, 11);
+    assert_eq!(params.warn_log_interval_secs, 13);
+    assert_eq!(params.failure_state_max_entries, 17);
+    assert_eq!(params.replay_window_secs, 19);
+    assert_eq!(params.seen_sessions_max_entries, 23);
+    assert!(!params.advertise);
+    assert_eq!(params.advert_cache_max_entries, 29);
+    assert_eq!(params.advert_refresh_secs, 31);
+    // The flag's other value too, so a conversion that ignores it fails.
+    let config = crate::config::NostrRendezvousConfig {
+        advertise: true,
+        ..config
+    };
+    assert!(Params::from(&config).advertise);
 }
 
 mod clock_skew;

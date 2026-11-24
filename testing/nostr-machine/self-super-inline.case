@@ -1,0 +1,5 @@
+# self::super:: written inline.
+expect exit 1
+expect mod.rs:1: super chain of 1 at depth 0
+=== mod.rs
+fn f(_r: self::super::runtime::NostrRendezvous) {}

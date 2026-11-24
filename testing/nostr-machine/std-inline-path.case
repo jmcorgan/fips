@@ -1,0 +1,5 @@
+# A std path written inline, not imported.
+expect exit 1
+expect extra.rs:1: std path
+=== extra.rs
+fn h() { let _m = std::collections::HashMap::<u8, u8>::new(); }

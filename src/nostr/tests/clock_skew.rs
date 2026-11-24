@@ -1,6 +1,7 @@
-//! Tests that the clock-skew estimate (`estimate_clock_skew` in `signal.rs`)
-//! never overflows on the two timestamps a responder supplies in its answer,
-//! and yields no estimate rather than a wrong one or a panic.
+//! Tests that the clock-skew estimate (`estimate_clock_skew` in
+//! `machine/signal.rs`) never overflows on the two timestamps a responder
+//! supplies in its answer, and yields no estimate rather than a wrong one or
+//! a panic.
 
 use super::super::signal::{create_traversal_answer, create_traversal_offer, estimate_clock_skew};
 use super::super::types::{TraversalAnswer, TraversalOffer};

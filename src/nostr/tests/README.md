@@ -18,9 +18,10 @@ module itself and two kinds of test file beside it.
 Child modules of `mod.rs`:
 
 - `clock_skew.rs`: the clock-skew estimate (`estimate_clock_skew` in
-  `signal.rs`) yields no estimate, rather than a panic or a wrapped figure,
-  when the responder's timestamps are outside the `i64` range or overflow
-  the offset arithmetic, and still estimates an ordinary round trip.
+  `machine/signal.rs`) yields no estimate, rather than a panic or a wrapped
+  figure, when the responder's timestamps are outside the `i64` range or
+  overflow the offset arithmetic, and still estimates an ordinary round
+  trip.
 - `fixtures.rs`: the nostr 0.44 events recorded in `src/nostr/fixtures/v044/`
   open and parse with today's code (each wrap with its recipient's key, the
   advert through `parse_overlay_advert_event`, the inbox list through
@@ -48,18 +49,19 @@ Child modules of `mod.rs`:
   that a port-unreachable does not fail a receive on the traversal socket
   at all.
 - `seen_session_cap.rs`: the seen-sessions memory
-  (`TraversalMachine::note_session_seen` in `traversal_machine.rs`) never
+  (`Election::note_session_seen` in `machine/traversal/election.rs`) never
   forgets a session id whose offer can still be fresh. A full memory refuses
   a new session instead, and the incoming-offer handler in `runtime.rs`
   reports that as `seen-sessions-full`; a captured offer is still refused as
   a replay after the memory fills; a full memory takes new sessions again
   once its entries expire; and the default size holds every session id the
-  signal gate (`signal_gate.rs`) admits in one replay window, derived from
-  the gate's rate and burst constants.
+  signal gate (`machine/traversal/gate.rs`) admits in one replay window,
+  derived from the gate's rate and burst constants.
 - `seen_session_floor.rs`: a responder at the defaults remembers a recorded
   session id for as long as its offer can still be fresh, through as many
-  other offers as the signal gate (`signal_gate.rs`) admits meanwhile. The
-  test derives that fill from the gate's rate and burst constants.
+  other offers as the signal gate (`machine/traversal/gate.rs`) admits
+  meanwhile. The test derives that fill from the gate's rate and burst
+  constants.
 - `signal_bounds.rs`: a peer's traversal offer or overlay advert carrying
   an oversized string or list is refused before anything from it is kept.
   The incoming-offer handler in `runtime.rs` refuses an offer whose session
@@ -80,36 +82,21 @@ Child modules of `mod.rs`:
   admission policy and the notify loop in `runtime.rs`.
 - `unknown_transport.rs`: an overlay advert with an endpoint of a transport
   kind this node does not know keeps its known endpoints
-  (`OverlayTransportKind::Unknown` in `types.rs`, dropped by
-  `validate_overlay_advert` in `runtime.rs`); one whose only endpoint is of
-  an unknown kind is still refused; and an unknown endpoint cannot be
-  serialized, so it is never published.
+  (`OverlayTransportKind::Unknown` in `machine/types.rs`, dropped by
+  `validate_overlay_advert` in `machine/adverts/mod.rs`); one whose only
+  endpoint is of an unknown kind is still refused; and an unknown endpoint
+  cannot be serialized, so it is never published.
 
 Tests of one file, each named `nostr::<file>::tests::...`:
 
-- `advert.rs`, of `advert.rs`: `AdvertMachine`'s advert cache (admission,
-  replacement, pruning, the size cap and the protection of configured and
-  linked authors against a flood of new keys, the open-discovery candidates
-  and the cache-full warning) and its publish planning.
-- `failure_state.rs`, of `failure_state.rs`: the per-npub traversal failure
-  streaks, the warning window, cooldowns, protocol-mismatch cooldowns,
-  observed skew and the size cap.
 - `offer_admission.rs`, of `offer_admission.rs`: the per-npub allowance of
   concurrent inbound offers, and that idle senders are reclaimed.
-- `signal_gate.rs`, of `signal_gate.rs`: the inbound signal rate limit, its
-  refill, and the reserve kept for answers to this node's own traversals.
 - `signal_route.rs`, of `signal_route.rs`: the admission policy takes a
   traversal signal off the pool's channel and queues it on its own, once
   however many relays deliver it, and leaves every other event to the pool.
-- `stun.rs`, of `stun.rs`: the binding-success parser refuses truncated,
-  malformed and mismatched replies and skips unknown attributes; the
-  local-candidate filter keeps RFC 1918 and ULA addresses only;
-  `perform_stun` believes a reply only from the server it asked; an
-  observation survives one lost binding request, because the request is
-  retransmitted within the deadline; and only local candidates and server
-  addresses of the socket's address family are used (`offerable`,
-  `pick_family`).
-- `traversal.rs`, of `traversal.rs`: punch packet classification by session
-  hash, and the once-a-minute warning for a stranger's refused offers.
-- `traversal_machine.rs`, of `traversal_machine.rs`: initiator election,
-  outbound initiator dedup, and the replay cache's expiry and cap.
+- `stun.rs`, of `stun.rs`: a STUN exchange over a loopback socket believes
+  a binding success only from the server it asked, and accepts the server's
+  own answer; an observation survives one lost binding request, because the
+  request is retransmitted within the deadline; and only local candidates
+  and server addresses of the socket's address family are used
+  (`offerable`, `pick_family`).

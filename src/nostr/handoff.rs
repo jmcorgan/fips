@@ -10,29 +10,7 @@ use crate::config::UdpConfig;
 use crate::{NodeAddr, TransportId};
 use std::net::{SocketAddr, UdpSocket};
 
-/// Punch-probe magic ("NPTC", network byte order). First byte `0x4E`
-/// collides with FMP's prefix-version high-nibble check, so the UDP
-/// transport silently filters packets carrying this magic to keep
-/// post-adoption handshake logs clean. Defined in the nostr rendezvous
-/// home so the UDP filter and the nostr submodule's punch sender share
-/// the same constant.
-pub const PUNCH_MAGIC: u32 = 0x4E505443;
-
-/// Punch-probe-ack magic ("NPTA", network byte order). Same filter as
-/// [`PUNCH_MAGIC`].
-pub const PUNCH_ACK_MAGIC: u32 = 0x4E505441;
-
-/// Returns `true` if the first four bytes of `data` match a punch-probe or
-/// punch-ack magic. Used by the UDP transport's receive loop to silently
-/// drop stray probes that arrive on an adopted socket after the remote
-/// peer's punch attempt has already timed out.
-pub fn is_punch_packet(data: &[u8]) -> bool {
-    if data.len() < 4 {
-        return false;
-    }
-    let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-    magic == PUNCH_MAGIC || magic == PUNCH_ACK_MAGIC
-}
+pub use super::machine::punch::is_punch_packet;
 
 /// The classifier the Nostr rendezvous registers with every UDP transport
 /// instance: a punch packet is discarded before FMP sees it, anything else

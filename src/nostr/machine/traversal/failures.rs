@@ -20,13 +20,15 @@
 //! Also stores last-observed clock skew (from B5a) so operators can
 //! surface it via `fipsctl show peers` (B3).
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use fips_core::utils::hash::{HashMap, KeyedHasher};
 
 /// One peer's failure-tracking state. Keyed by bech32 npub string in the
 /// owning `FailureState` map.
 #[derive(Debug, Clone)]
-pub(super) struct NpubFailureRecord {
+pub struct NpubFailureRecord {
     /// Number of consecutive failures since the last success (or fresh
     /// advert that reset the streak).
     pub consecutive_failures: u32,
@@ -67,7 +69,7 @@ impl NpubFailureRecord {
 
 /// What the lifecycle layer should do based on the recorded failure.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct FailureDecision {
+pub struct FailureDecision {
     /// Updated streak count (post-increment).
     pub consecutive_failures: u32,
     /// True iff lifecycle should log at WARN; false → log at DEBUG.
@@ -80,8 +82,8 @@ pub(super) struct FailureDecision {
     pub crossed_threshold: bool,
 }
 
-pub(super) struct FailureState {
-    inner: Mutex<HashMap<String, NpubFailureRecord>>,
+pub struct FailureState {
+    inner: HashMap<String, NpubFailureRecord>,
     threshold: u32,
     extended_cooldown_ms: u64,
     warn_log_interval_ms: u64,
@@ -89,14 +91,15 @@ pub(super) struct FailureState {
 }
 
 impl FailureState {
-    pub(super) fn new(
+    pub fn new(
         threshold: u32,
         extended_cooldown_secs: u64,
         warn_log_interval_secs: u64,
         max_entries: usize,
+        hasher: KeyedHasher,
     ) -> Self {
         Self {
-            inner: Mutex::new(HashMap::new()),
+            inner: HashMap::with_hasher(hasher),
             threshold,
             extended_cooldown_ms: extended_cooldown_secs.saturating_mul(1000),
             warn_log_interval_ms: warn_log_interval_secs.saturating_mul(1000),
@@ -106,8 +109,8 @@ impl FailureState {
 
     /// Record a traversal failure against `npub`. Returns the resulting
     /// FailureDecision for the lifecycle layer to act on.
-    pub(super) fn record_failure(&self, npub: &str, now_ms: u64) -> FailureDecision {
-        let mut map = self.inner.lock().expect("failure-state mutex poisoned");
+    pub fn record_failure(&mut self, npub: &str, now_ms: u64) -> FailureDecision {
+        let map = &mut self.inner;
         let entry = map
             .entry(npub.to_string())
             .or_insert_with(|| NpubFailureRecord::new(now_ms));
@@ -139,7 +142,7 @@ impl FailureState {
         };
 
         if map.len() > self.max_entries {
-            evict_oldest(&mut map, self.max_entries);
+            evict_oldest(map, self.max_entries);
         }
 
         decision
@@ -148,8 +151,8 @@ impl FailureState {
     /// Record a successful traversal — clears the streak and cooldown.
     /// Last-observed skew is retained until next eviction since it's
     /// useful to display in `show_peers` even for healthy peers.
-    pub(super) fn record_success(&self, npub: &str, now_ms: u64) {
-        let mut map = self.inner.lock().expect("failure-state mutex poisoned");
+    pub fn record_success(&mut self, npub: &str, now_ms: u64) {
+        let map = &mut self.inner;
         if let Some(entry) = map.get_mut(npub) {
             entry.consecutive_failures = 0;
             entry.cooldown_until_ms = None;
@@ -162,21 +165,21 @@ impl FailureState {
     /// Record an observed clock-skew estimate from a successful answer
     /// receipt (B5a). Creates an entry if needed so we can surface the
     /// skew via `show_peers` even when the peer is healthy.
-    pub(super) fn note_observed_skew(&self, npub: &str, skew_ms: i64, now_ms: u64) {
-        let mut map = self.inner.lock().expect("failure-state mutex poisoned");
+    pub fn note_observed_skew(&mut self, npub: &str, skew_ms: i64, now_ms: u64) {
+        let map = &mut self.inner;
         let entry = map
             .entry(npub.to_string())
             .or_insert_with(|| NpubFailureRecord::new(now_ms));
         entry.last_observed_skew_ms = Some(skew_ms);
 
         if map.len() > self.max_entries {
-            evict_oldest(&mut map, self.max_entries);
+            evict_oldest(map, self.max_entries);
         }
     }
 
     /// Reset streak/cooldown after a successful B6 advert refresh.
-    pub(super) fn reset_streak_after_refresh(&self, npub: &str) {
-        let mut map = self.inner.lock().expect("failure-state mutex poisoned");
+    pub fn reset_streak_after_refresh(&mut self, npub: &str) {
+        let map = &mut self.inner;
         if let Some(entry) = map.get_mut(npub) {
             entry.consecutive_failures = 0;
             entry.cooldown_until_ms = None;
@@ -199,13 +202,8 @@ impl FailureState {
     /// because the peer cannot accept our handshake until one side
     /// upgrades. The cooldown is much longer than the transient-failure
     /// `extended_cooldown_ms` because the mismatch is structural.
-    pub(super) fn record_protocol_mismatch(
-        &self,
-        npub: &str,
-        now_ms: u64,
-        cooldown_ms: u64,
-    ) -> bool {
-        let mut map = self.inner.lock().expect("failure-state mutex poisoned");
+    pub fn record_protocol_mismatch(&mut self, npub: &str, now_ms: u64, cooldown_ms: u64) -> bool {
+        let map = &mut self.inner;
         let entry = map
             .entry(npub.to_string())
             .or_insert_with(|| NpubFailureRecord::new(now_ms));
@@ -226,7 +224,7 @@ impl FailureState {
         entry.mismatch_until_ms = Some(cooldown_until);
 
         if map.len() > self.max_entries {
-            evict_oldest(&mut map, self.max_entries);
+            evict_oldest(map, self.max_entries);
         }
 
         true
@@ -234,16 +232,16 @@ impl FailureState {
 
     /// Return cooldown_until_ms if the peer is currently in extended
     /// cooldown.
-    pub(super) fn cooldown_until(&self, npub: &str, now_ms: u64) -> Option<u64> {
-        let map = self.inner.lock().expect("failure-state mutex poisoned");
+    pub fn cooldown_until(&self, npub: &str, now_ms: u64) -> Option<u64> {
+        let map = &self.inner;
         map.get(npub)
             .and_then(|e| e.cooldown_until_ms)
             .filter(|&t| t > now_ms)
     }
 
     /// Snapshot for `show_peers` rendering (B3).
-    pub(super) fn snapshot(&self) -> Vec<(String, NpubFailureRecord)> {
-        let map = self.inner.lock().expect("failure-state mutex poisoned");
+    pub fn snapshot(&self) -> Vec<(String, NpubFailureRecord)> {
+        let map = &self.inner;
         map.iter()
             .map(|(npub, rec)| (npub.clone(), rec.clone()))
             .collect()
@@ -266,5 +264,5 @@ fn evict_oldest(map: &mut HashMap<String, NpubFailureRecord>, target: usize) {
 }
 
 #[cfg(test)]
-#[path = "tests/failure_state.rs"]
+#[path = "tests/failures.rs"]
 mod tests;

@@ -1,0 +1,5 @@
+# Code pulled in by include! written as a core path.
+expect exit 1
+expect extra.rs:1: include!
+=== extra.rs
+core::include!("../runtime.rs");

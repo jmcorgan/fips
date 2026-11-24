@@ -1,0 +1,5 @@
+# A std-only prelude macro.
+expect exit 1
+expect mod.rs:1: thread_local!
+=== mod.rs
+thread_local! { static X: u8 = 0; }

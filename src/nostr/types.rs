@@ -1,15 +1,10 @@
+//! Shell-side Nostr rendezvous types: the error and the events the node
+//! receives. The wire and payload types are the machine's, re-exported here.
+
 use super::handoff::EstablishedTraversal;
 use crate::config::PeerConfig;
-use serde::{Deserialize, Serialize};
 
-pub const ADVERT_KIND: u16 = 37195;
-pub const ADVERT_IDENTIFIER: &str = "fips-overlay-v1";
-pub const ADVERT_VERSION: u32 = 1;
-pub const SIGNAL_KIND: u16 = 21059;
-// Defined in the nostr `handoff` submodule; re-exported here so the
-// existing punch sender / receiver imports remain unchanged.
-pub use super::handoff::{PUNCH_ACK_MAGIC, PUNCH_MAGIC};
-pub const PROTOCOL_VERSION: &str = "1";
+pub use super::machine::types::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
@@ -56,172 +51,33 @@ pub enum BootstrapEvent {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TraversalAddress {
-    pub protocol: String,
-    pub ip: String,
-    pub port: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PunchHint {
-    #[serde(rename = "startAtMs")]
-    pub start_at_ms: u64,
-    #[serde(rename = "intervalMs")]
-    pub interval_ms: u64,
-    #[serde(rename = "durationMs")]
-    pub duration_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OverlayTransportKind {
-    Udp,
-    Tcp,
-    Tor,
-    /// A transport kind this node does not know, read from another node's
-    /// advert. Such an endpoint is dropped and the rest of the advert used.
-    /// It cannot be serialized, so it can never be published.
-    #[serde(other, skip_serializing)]
-    Unknown,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OverlayEndpointAdvert {
-    pub transport: OverlayTransportKind,
-    pub addr: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OverlayAdvert {
-    pub identifier: String,
-    pub version: u32,
-    pub endpoints: Vec<OverlayEndpointAdvert>,
-    #[serde(rename = "signalRelays", skip_serializing_if = "Option::is_none")]
-    pub signal_relays: Option<Vec<String>>,
-    #[serde(rename = "stunServers", skip_serializing_if = "Option::is_none")]
-    pub stun_servers: Option<Vec<String>>,
-}
-
-impl OverlayAdvert {
-    pub fn has_udp_nat_endpoint(&self) -> bool {
-        self.endpoints.iter().any(|endpoint| {
-            endpoint.transport == OverlayTransportKind::Udp
-                && endpoint.addr.eq_ignore_ascii_case("nat")
-        })
+impl From<super::machine::error::Error> for BootstrapError {
+    /// The same variant with the same text, so every caller and every log
+    /// line sees what it saw before the code that failed moved.
+    fn from(e: super::machine::error::Error) -> Self {
+        use super::machine::error::Error;
+        match e {
+            Error::Protocol(reason) => BootstrapError::Protocol(reason),
+            Error::Stun(reason) => BootstrapError::Stun(reason),
+            Error::InvalidAdvert(reason) => BootstrapError::InvalidAdvert(reason),
+        }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CachedOverlayAdvert {
-    pub author_npub: String,
-    pub advert: OverlayAdvert,
-    pub created_at: u64,
-    pub valid_until_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TraversalOffer {
-    #[serde(rename = "type")]
-    pub message_type: String,
-    #[serde(rename = "sessionId")]
-    pub session_id: String,
-    #[serde(rename = "issuedAt")]
-    pub issued_at: u64,
-    #[serde(rename = "expiresAt")]
-    pub expires_at: u64,
-    pub nonce: String,
-    #[serde(rename = "senderNpub")]
-    pub sender_npub: String,
-    #[serde(rename = "recipientNpub")]
-    pub recipient_npub: String,
-    #[serde(rename = "reflexiveAddress")]
-    pub reflexive_address: Option<TraversalAddress>,
-    #[serde(rename = "localAddresses")]
-    pub local_addresses: Vec<TraversalAddress>,
-    #[serde(rename = "stunServer")]
-    pub stun_server: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TraversalAnswer {
-    #[serde(rename = "type")]
-    pub message_type: String,
-    #[serde(rename = "sessionId")]
-    pub session_id: String,
-    #[serde(rename = "issuedAt")]
-    pub issued_at: u64,
-    #[serde(rename = "expiresAt")]
-    pub expires_at: u64,
-    pub nonce: String,
-    #[serde(rename = "senderNpub")]
-    pub sender_npub: String,
-    #[serde(rename = "recipientNpub")]
-    pub recipient_npub: String,
-    #[serde(rename = "inReplyTo")]
-    pub in_reply_to: String,
-    pub accepted: bool,
-    #[serde(rename = "reflexiveAddress")]
-    pub reflexive_address: Option<TraversalAddress>,
-    #[serde(rename = "localAddresses")]
-    pub local_addresses: Vec<TraversalAddress>,
-    #[serde(rename = "stunServer")]
-    pub stun_server: Option<String>,
-    pub punch: Option<PunchHint>,
-    pub reason: Option<String>,
-    /// Responder's local wall-clock (Unix ms) at the moment it received the
-    /// offer. Optional / non-breaking: the initiator uses this to derive an
-    /// NTP-style clock-skew estimate against the offer's `issued_at`. Older
-    /// responders that don't fill this in still produce valid answers.
-    #[serde(
-        rename = "offerReceivedAt",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub offer_received_at: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PunchPacketKind {
-    Probe,
-    Ack,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PunchPacket {
-    pub kind: PunchPacketKind,
-    pub sequence: u32,
-    pub session_hash: [u8; 16],
-}
-
-/// Outcome of `NostrRendezvous::record_traversal_failure`.
-#[derive(Debug, Clone, Copy)]
-pub struct NostrFailureDecision {
-    pub consecutive_failures: u32,
-    /// True iff the lifecycle should log at WARN; false → DEBUG (rate-limit).
-    pub should_warn: bool,
-    /// Wall-clock ms before which retries should not fire, if cooldown
-    /// is in effect.
-    pub cooldown_until_ms: Option<u64>,
-    /// True only on the streak-threshold-crossing transition. Lifecycle
-    /// should run a one-shot stale-advert re-check (B6) when set.
-    pub crossed_threshold: bool,
-}
-
-/// Snapshot row for `show_peers` rendering of per-npub Nostr-traversal state.
-#[derive(Debug, Clone)]
-pub struct NostrPeerFailureView {
-    pub npub: String,
-    pub consecutive_failures: u32,
-    pub cooldown_until_ms: Option<u64>,
-    pub last_observed_skew_ms: Option<i64>,
-}
-
-/// Outcome of `NostrRendezvous::refetch_advert_for_stale_check` (B6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NostrRefetchOutcome {
-    Evicted,
-    Refreshed,
-    SameAdvert,
-    Skipped,
+impl From<&crate::config::NostrRendezvousConfig> for super::machine::params::Params {
+    /// The values the machine reads, each copied from its own configuration
+    /// key.
+    fn from(c: &crate::config::NostrRendezvousConfig) -> Self {
+        Self {
+            failure_streak_threshold: c.failure_streak_threshold,
+            extended_cooldown_secs: c.extended_cooldown_secs,
+            warn_log_interval_secs: c.warn_log_interval_secs,
+            failure_state_max_entries: c.failure_state_max_entries,
+            replay_window_secs: c.replay_window_secs,
+            seen_sessions_max_entries: c.seen_sessions_max_entries,
+            advertise: c.advertise,
+            advert_cache_max_entries: c.advert_cache_max_entries,
+            advert_refresh_secs: c.advert_refresh_secs,
+        }
+    }
 }

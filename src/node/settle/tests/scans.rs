@@ -1222,7 +1222,7 @@ const INPUTS: &[(&str, &str, bool, &str)] = &[
          below the link layer",
     ),
     (
-        "nostr/traversal_machine.rs",
+        "nostr/machine/traversal/election.rs",
         "suppress_responder_for_own_initiator",
         false,
         "NAT traversal's choice of one traversal session of two, before any \

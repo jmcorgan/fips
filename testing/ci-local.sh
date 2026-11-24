@@ -592,6 +592,7 @@ GUARDS=(
     "run_comment_refs comment-refs"
     "run_ignored_tests ignored-tests"
     "run_portable_atomics portable-atomics"
+    "run_nostr_machine nostr-machine"
     "run_mount_tmpdir mount-tmpdir"
     "run_ci_labels ci-labels"
     "run_shellcheck shellcheck"
@@ -3285,6 +3286,23 @@ run_portable_atomics() {
     info "[portable-atomics] Checking that no non-test code uses std 64-bit atomics"
     python3 "$SCRIPT_DIR/check-portable-atomics.py" || rc=$?
     record "portable-atomics" "$rc"
+}
+
+# The Nostr machine (src/nostr/machine/) names no std, tokio, tracing or
+# nostr_sdk path and nothing in the root crate outside itself. Nothing builds it without
+# std, so this text check is what holds that fence. Its fixtures run first, so
+# a check that stopped seeing a banned path fails here rather than passing the
+# tree. Static, about a second, and needs nothing built. Mirrored in ci.yml's
+# ci-parity job by hand.
+run_nostr_machine() {
+    local rc=0
+    info "[nostr-machine] Checking that the Nostr machine stays inside its fence"
+    bash "$SCRIPT_DIR/nostr-machine/test.sh" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        python3 "$SCRIPT_DIR/check-nostr-machine.py" || rc=$?
+    fi
+    record "nostr-machine" "$rc"
+    return 0
 }
 
 # No bare mktemp result may become a docker bind-mount source. Under a private

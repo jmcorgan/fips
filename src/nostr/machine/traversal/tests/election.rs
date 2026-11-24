@@ -1,4 +1,5 @@
 use super::*;
+use crate::nostr::machine::tests::ZeroEntropy;
 
 fn node_addr(first_byte: u8) -> NodeAddr {
     let mut bytes = [0u8; 16];
@@ -6,8 +7,8 @@ fn node_addr(first_byte: u8) -> NodeAddr {
     NodeAddr::from_bytes(bytes)
 }
 
-fn machine() -> TraversalMachine {
-    TraversalMachine::new(1_000_000, 3)
+fn machine() -> Election {
+    Election::new(1_000_000, 3, KeyedHasher::new::<ZeroEntropy>())
 }
 
 // --- election ordering (classify_incoming_offer) -------------------
@@ -19,7 +20,7 @@ fn election_vectors() {
     let peer = "npub1peer";
 
     // V1: co-active initiator, our addr smaller -> Suppress.
-    let m = machine();
+    let mut m = machine();
     assert!(m.begin_initiator(peer));
     assert_eq!(
         m.classify_incoming_offer(peer, &smaller, &larger),
@@ -27,7 +28,7 @@ fn election_vectors() {
     );
 
     // V2: co-active initiator, our addr larger -> Proceed.
-    let m = machine();
+    let mut m = machine();
     assert!(m.begin_initiator(peer));
     assert_eq!(
         m.classify_incoming_offer(peer, &larger, &smaller),
@@ -43,7 +44,7 @@ fn election_vectors() {
     );
 
     // V4: co-active initiator, equal addresses -> Proceed (self/loopback).
-    let m = machine();
+    let mut m = machine();
     assert!(m.begin_initiator(peer));
     assert_eq!(
         m.classify_incoming_offer(peer, &smaller, &smaller),
@@ -58,7 +59,7 @@ fn election_vectors() {
     );
 
     // V6: begin then end then classify -> Proceed (initiator finished).
-    let m = machine();
+    let mut m = machine();
     assert!(m.begin_initiator(peer));
     m.end_initiator(peer);
     assert_eq!(
@@ -71,7 +72,7 @@ fn election_vectors() {
 
 #[test]
 fn initiator_dedup() {
-    let m = machine();
+    let mut m = machine();
     assert!(m.begin_initiator("npub1p"), "first is a fresh initiator");
     assert!(
         !m.begin_initiator("npub1p"),
@@ -89,7 +90,7 @@ fn initiator_dedup() {
 #[test]
 fn replay_first_then_repeat() {
     // First id Fresh; same id within window Replay.
-    let m = machine();
+    let mut m = machine();
     assert_eq!(m.note_session_seen("s1", 1000), SeenDecision::Fresh);
     assert_eq!(m.note_session_seen("s1", 1500), SeenDecision::Replay);
 }
@@ -97,7 +98,7 @@ fn replay_first_then_repeat() {
 #[test]
 fn replay_prunes_expired() {
     // An entry past its expiry is pruned, so re-seeing it is Fresh.
-    let m = machine(); // replay_window_ms = 1_000_000
+    let mut m = machine(); // replay_window_ms = 1_000_000
     assert_eq!(m.note_session_seen("s1", 1000), SeenDecision::Fresh);
     // now well past s1's expiry (1000 + 1_000_000): s1 pruned by retain,
     // so s1 is Fresh again rather than Replay.
@@ -107,7 +108,7 @@ fn replay_prunes_expired() {
 #[test]
 fn replay_cap_refuses_a_new_session_while_full_of_live_entries() {
     // A full cache refuses a new id rather than forgetting a live one.
-    let m = machine(); // cap = 3, window huge so nothing expires here
+    let mut m = machine(); // cap = 3, window huge so nothing expires here
     assert_eq!(m.note_session_seen("s1", 1), SeenDecision::Fresh);
     assert_eq!(m.note_session_seen("s2", 2), SeenDecision::Fresh);
     assert_eq!(m.note_session_seen("s3", 3), SeenDecision::Fresh);

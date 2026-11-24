@@ -1,0 +1,5 @@
+# The shell, by crate path.
+expect exit 1
+expect mod.rs:1: crate path outside the module
+=== mod.rs
+use crate::nostr::runtime::NostrRendezvous;

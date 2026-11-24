@@ -1,0 +1,5 @@
+# A use item the parser cannot read is flagged, not passed.
+expect exit 1
+expect mod.rs:1: use tree not understood
+=== mod.rs
+use core::{fmt;

@@ -1,0 +1,6 @@
+# std aliased at the import, then used through the alias.
+expect exit 1
+expect extra.rs:1: std at the root of a use tree
+=== extra.rs
+use std as s;
+fn n() -> s::time::Instant { s::time::Instant::now() }

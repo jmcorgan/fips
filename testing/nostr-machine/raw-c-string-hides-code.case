@@ -1,0 +1,5 @@
+# A raw C string with an inner quote must not open a string that hides the code after it.
+expect exit 1
+expect extra.rs:1: std at the root of a use tree
+=== extra.rs
+const C: &core::ffi::CStr = cr#"a"b"#; use std::time::Instant;

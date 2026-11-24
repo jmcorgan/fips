@@ -1,15 +1,15 @@
 //! Synchronous decision core for the Nostr NAT-traversal control state.
 //!
-//! `TraversalMachine` owns the engine-scoped, cross-session state that
+//! `Election` owns the engine-scoped, cross-session state that
 //! previously lived directly on `NostrRendezvous` — the set of in-flight
 //! outbound initiators, and the replay/seen-sessions cache — and hosts the
 //! *decisions* over that state: initiator dedup, the dual-`auto_connect`
 //! responder election, and replay rejection.
 //!
-//! Following the sans-IO shape used by `advert` / `failure_state`, every
-//! method here is synchronous, performs no network I/O and no `.await`,
-//! holds its state behind `std::sync::Mutex`, and takes the current time as
-//! an explicit `now_ms: u64` input rather than reading a clock. The async
+//! Like the rest of the machine, every method here is synchronous, performs
+//! no I/O and no `.await`, and takes the current time as an explicit
+//! `now_ms: u64` input rather than reading a clock. It holds no lock: the
+//! runtime keeps the `Election` behind one `std::sync::Mutex`. The async
 //! driver on `NostrRendezvous` reads the clock at the call site, derives the
 //! `NodeAddr`s from npubs, and performs the actual socket/STUN/relay I/O.
 //!
@@ -17,10 +17,11 @@
 //! `pending_answers` oneshot routing and the `offer_slots` semaphore
 //! admission are not modeled here, and neither is the punch send-cadence.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use alloc::collections::BTreeSet;
+use alloc::string::{String, ToString};
 
-use crate::NodeAddr;
+use fips_core::identity::NodeAddr;
+use fips_core::utils::hash::{HashMap, KeyedHasher};
 
 /// Decide whether an incoming-offer responder session should be suppressed
 /// in favour of our own already-running outbound initiator session.
@@ -49,7 +50,7 @@ use crate::NodeAddr;
 /// is preserved. The `our_addr == peer_addr` case (self / loopback) and any
 /// caller that cannot derive a peer `NodeAddr` likewise fall through to "do not
 /// suppress".
-pub(super) fn suppress_responder_for_own_initiator(
+pub fn suppress_responder_for_own_initiator(
     our_addr: &NodeAddr,
     peer_addr: &NodeAddr,
     have_active_initiator: bool,
@@ -58,9 +59,9 @@ pub(super) fn suppress_responder_for_own_initiator(
 }
 
 /// Result of the dual-init responder election. Returned by
-/// [`TraversalMachine::classify_incoming_offer`].
+/// [`Election::classify_incoming_offer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum OfferDisposition {
+pub enum OfferDisposition {
     /// Answer this offer normally.
     Proceed,
     /// Decline this responder session; our own outbound initiator wins.
@@ -68,9 +69,9 @@ pub(super) enum OfferDisposition {
 }
 
 /// Result of the replay / seen-sessions check. Returned by
-/// [`TraversalMachine::note_session_seen`].
+/// [`Election::note_session_seen`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SeenDecision {
+pub enum SeenDecision {
     /// First time we've seen this session id within the replay window; it is
     /// now recorded.
     Fresh,
@@ -83,24 +84,30 @@ pub(super) enum SeenDecision {
     Full,
 }
 
-pub(super) struct TraversalMachine {
+/// The initiator set and the seen-sessions cache, and the decisions over
+/// them.
+pub struct Election {
     /// Replay window length in ms (`replay_window_secs * 1000`).
     replay_window_ms: u64,
     /// Size cap for the seen-sessions cache.
     seen_max_entries: usize,
     /// npubs of peers we currently have an in-flight outbound initiator for.
-    active_initiators: Mutex<HashSet<String>>,
-    /// Replay cache: session id -> expiry (ms).
-    seen_sessions: Mutex<HashMap<String, u64>>,
+    /// Only ever tested for membership.
+    active_initiators: BTreeSet<String>,
+    /// Replay cache: session id -> expiry (ms). Keyed by an id the peer
+    /// chooses, so the map's hasher is keyed from the host's entropy.
+    seen_sessions: HashMap<String, u64>,
 }
 
-impl TraversalMachine {
-    pub(super) fn new(replay_window_ms: u64, seen_max_entries: usize) -> Self {
+impl Election {
+    /// An election with no initiators and no seen sessions, its seen-sessions
+    /// map keyed with `hasher`.
+    pub fn new(replay_window_ms: u64, seen_max_entries: usize, hasher: KeyedHasher) -> Self {
         Self {
             replay_window_ms,
             seen_max_entries,
-            active_initiators: Mutex::new(HashSet::new()),
-            seen_sessions: Mutex::new(HashMap::new()),
+            active_initiators: BTreeSet::new(),
+            seen_sessions: HashMap::with_hasher(hasher),
         }
     }
 
@@ -109,13 +116,13 @@ impl TraversalMachine {
     /// Register an in-flight outbound initiator for `npub`. Returns `false`
     /// when one is already active (dedup — the driver should not start a
     /// second).
-    pub(super) fn begin_initiator(&self, npub: &str) -> bool {
-        self.lock_initiators().insert(npub.to_string())
+    pub fn begin_initiator(&mut self, npub: &str) -> bool {
+        self.active_initiators.insert(npub.to_string())
     }
 
     /// Clear the in-flight initiator for `npub` on task completion.
-    pub(super) fn end_initiator(&self, npub: &str) {
-        self.lock_initiators().remove(npub);
+    pub fn end_initiator(&mut self, npub: &str) {
+        self.active_initiators.remove(npub);
     }
 
     // --- responder dual-init election ----------------------------------
@@ -124,14 +131,14 @@ impl TraversalMachine {
     /// or suppressed in favour of our own outbound initiator. The driver
     /// derives both `NodeAddr`s (keeping today's derivation-failure "answer
     /// anyway" fallthrough) and passes them in; the machine reads its own
-    /// active-initiator membership under its lock.
-    pub(super) fn classify_incoming_offer(
+    /// active-initiator membership.
+    pub fn classify_incoming_offer(
         &self,
         sender_npub: &str,
         our_addr: &NodeAddr,
         peer_addr: &NodeAddr,
     ) -> OfferDisposition {
-        let have_active = self.lock_initiators().contains(sender_npub);
+        let have_active = self.active_initiators.contains(sender_npub);
         if suppress_responder_for_own_initiator(our_addr, peer_addr, have_active) {
             OfferDisposition::Suppress
         } else {
@@ -148,9 +155,9 @@ impl TraversalMachine {
     /// window, [`SeenDecision::Full`] when the cache holds `seen_max_entries`
     /// live ids (the new id is not recorded), and [`SeenDecision::Fresh`]
     /// otherwise. A live id is never removed to make room.
-    pub(super) fn note_session_seen(&self, session_id: &str, now_ms: u64) -> SeenDecision {
+    pub fn note_session_seen(&mut self, session_id: &str, now_ms: u64) -> SeenDecision {
         let expiry = now_ms + self.replay_window_ms;
-        let mut seen = self.lock_seen();
+        let seen = &mut self.seen_sessions;
         seen.retain(|_, expires_at| *expires_at > now_ms);
         if seen.contains_key(session_id) {
             return SeenDecision::Replay;
@@ -161,22 +168,8 @@ impl TraversalMachine {
         seen.insert(session_id.to_string(), expiry);
         SeenDecision::Fresh
     }
-
-    // --- lock helpers ---------------------------------------------------
-
-    fn lock_initiators(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
-        self.active_initiators
-            .lock()
-            .expect("traversal-machine active-initiators mutex poisoned")
-    }
-
-    fn lock_seen(&self) -> std::sync::MutexGuard<'_, HashMap<String, u64>> {
-        self.seen_sessions
-            .lock()
-            .expect("traversal-machine seen-sessions mutex poisoned")
-    }
 }
 
 #[cfg(test)]
-#[path = "tests/traversal_machine.rs"]
+#[path = "tests/election.rs"]
 mod tests;
