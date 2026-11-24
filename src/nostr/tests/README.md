@@ -26,18 +26,18 @@ Child modules of `mod.rs`:
   open and parse with today's code (each wrap with its recipient's key, the
   advert through `parse_overlay_advert_event`, the inbox list through
   `inbox_relays`), and today's event builders, run again at the capture
-  time, still emit what they hold. It also holds the ignored generator that
-  writes those files.
+  time, still emit what they hold.
 - `inbox_read.rs`: golden tables for two readings of what a peer sends,
   each row pinned to what nostr 0.44 reads from that shape. The relays a
   kind 10050 inbox relay list names (`inbox_relays` in `runtime.rs`), over
   32 tag shapes one at a time and all together, so duplicates collapse; that
   an advert is read by its first `protocol` tag; and the validity
   `compute_advert_valid_until_ms` gives an advert over 18 `expiration` tag
-  shapes.
-- `notify_channels.rs`: the notify loop in `runtime.rs` logs a lag on
-  either of its two channels and reads on, and ends only when a channel
-  closes.
+  shapes, where four rows follow nostr 0.45's reading, which the relay
+  client applies before the shell sees the event.
+- `notify_channels.rs`: the notify loop in `runtime.rs` logs a lag on the
+  signals' channel and reads on, and ends when that channel closes or the
+  relay client's notification stream ends.
 - `npub_spelling.rs`: a peer named by its npub in any letter case is
   handled by its key. `request_connect` addresses the offer to the canonical
   npub and registers the initiator under it, so an upper-case configured
@@ -84,7 +84,7 @@ Child modules of `mod.rs`:
   configuration with 33 entries in each list is cut to the first 32, in
   order, and accepted by a peer.
 - `signal_lag.rs`: a traversal answer delivered ahead of a flood of
-  advertisements twice the relay pool's notification channel size still
+  advertisements twice the relay client's notification channel size still
   reaches the traversal waiting for it, through the relay client's
   admission policy and the notify loop in `runtime.rs`.
 - `unknown_transport.rs`: an overlay advert with an endpoint of a transport
@@ -98,6 +98,14 @@ Tests of one file, each named `nostr::<file>::tests::...`:
 
 - `offer_admission.rs`, of `offer_admission.rs`: the per-npub allowance of
   concurrent inbound offers, and that idle senders are reclaimed.
+- `relay.rs`, of `relay.rs`: the adapter against nostr-sdk's in-process
+  relay. A round trip through a plain relay (a subscription delivers a
+  peer's advert on the stream, a fetch by author finds it, a send naming a
+  relay outside the pool is refused whole); a traversal signal goes to the
+  router's channel, opens to its sender and never reaches the stream; the
+  adapter answers a relay that requires NIP-42 authentication, which refuses
+  a client with no authenticator as `auth-required`; and a stream taken
+  before a subscribe receives the relay's stored replay.
 - `signal_route.rs`, of `signal_route.rs`: the admission policy takes a
   traversal signal off the pool's channel and queues it on its own, once
   however many relays deliver it, and leaves every other event to the pool.

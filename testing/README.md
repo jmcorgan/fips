@@ -303,7 +303,10 @@ job on GitHub). One of them,
 [check-nostr-machine.py](check-nostr-machine.py), holds the Nostr machine
 (`src/nostr/machine/`) to its fence: no `std`, `tokio`, `tracing` or
 `nostr_sdk` path and nothing in the root crate outside the module. Its
-fixtures are in [nostr-machine/](nostr-machine/).
+fixtures are in [nostr-machine/](nostr-machine/). The root `clippy.toml` bans
+the `nostr` items that read the clock or the OS random source, and
+[nostr-ban/](nostr-ban/) checks, after the clippy stages of both runners,
+that every entry of that ban still draws an error.
 
 ### Tiers (`--tier`, `--plan`)
 

@@ -278,6 +278,13 @@ jobs:
       # step to its counterpart.
       - name: Clippy (default features)
         run: cargo clippy --all-targets -- -D warnings
+      # The ban in clippy.toml on the nostr items that read the clock or the
+      # OS random source, checked against a fixture that uses each of them:
+      # an entry clippy cannot resolve draws only a warning, so the ban could
+      # break with clippy still green. Mirrored in testing/ci-local.sh;
+      # check-ci-parity.sh holds each such step to its counterpart.
+      - name: Check the nostr clock and randomness ban against its fixture
+        run: bash testing/nostr-ban/test.sh
       # The no_std core fence. A workspace build unifies dependency features
       # across members, so a feature the root crate enables can hide one the
       # core needs and does not ask for. Linting the core alone resolves only

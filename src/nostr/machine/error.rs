@@ -13,6 +13,11 @@ pub enum Error {
     Stun(String),
     /// An overlay advert broke the content rules; the text says which.
     InvalidAdvert(String),
+    /// A `nostr` primitive refused: a signature that does not verify, a
+    /// payload that does not decrypt, a key that is not valid.
+    Nostr(String),
+    /// An event inside a traversal signal was not valid JSON for its type.
+    EventParse(String),
 }
 
 impl core::fmt::Display for Error {
@@ -22,6 +27,8 @@ impl core::fmt::Display for Error {
             Error::Protocol(reason) => write!(f, "protocol error: {reason}"),
             Error::Stun(reason) => write!(f, "stun failed: {reason}"),
             Error::InvalidAdvert(reason) => write!(f, "invalid overlay advert: {reason}"),
+            Error::Nostr(reason) => write!(f, "nostr error: {reason}"),
+            Error::EventParse(reason) => write!(f, "event parse error: {reason}"),
         }
     }
 }

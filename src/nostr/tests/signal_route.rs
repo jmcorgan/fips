@@ -1,6 +1,11 @@
 //! Tests of the admission policy that takes traversal signals off the relay
 //! pool's notification channel.
 
+// These tests build events with nostr's own keys, clock and signing helpers.
+// The ban in the root clippy.toml is on non-test code using them.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
+use nostr::event::FinalizeEvent;
 use nostr::prelude::{EventBuilder, Keys};
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -10,7 +15,7 @@ use super::*;
 /// An event of `kind`, signed by a stranger.
 fn event_of(kind: u16) -> Event {
     EventBuilder::new(Kind::Custom(kind), "x")
-        .sign_with_keys(&Keys::generate())
+        .finalize(&Keys::generate())
         .expect("sign event")
 }
 
@@ -34,7 +39,7 @@ async fn a_traversal_signal_is_taken_off_the_pool_channel_and_queued_on_its_own(
         "a signal was admitted to the pool channel: {status:?}"
     );
     match signals.try_recv() {
-        Ok(RelayPoolNotification::Event {
+        Ok(ClientNotification::Event {
             relay_url, event, ..
         }) => {
             assert_eq!(event.id, signal.id);

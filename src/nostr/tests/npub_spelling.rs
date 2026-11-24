@@ -4,7 +4,7 @@
 //! whatever spelling the configuration holds. A spelling that is not a
 //! NIP-19 npub (a bech32m checksum, non-zero padding bits) is refused.
 
-use nostr::ToBech32;
+use nostr::nips::nip19::ToBech32;
 
 use super::{
     NostrRendezvous, OverlayEndpointAdvert, OverlayTransportKind, UNCONNECTED_RELAY, now_ms,
@@ -68,7 +68,7 @@ fn udp_endpoint(addr: &str) -> OverlayEndpointAdvert {
 /// a NAT endpoint and that relay for signalling.
 async fn initiator_with_cached_nat_peer(
     mut runtime: NostrRendezvous,
-    peer: &nostr::Keys,
+    peer: &nostr::key::Keys,
 ) -> (std::sync::Arc<NostrRendezvous>, String) {
     runtime.set_stun_servers_for_test(Vec::new());
     runtime
@@ -114,7 +114,7 @@ fn blackhole_relay() -> String {
 
 #[tokio::test]
 async fn a_peer_configured_in_any_case_is_sent_an_offer_addressed_to_its_canonical_npub() {
-    let peer = nostr::Keys::generate();
+    let peer = nostr::key::Keys::generate();
     let canonical = peer.public_key().to_bech32().unwrap();
     for spelling in spellings(&canonical) {
         let (runtime, peer_npub) =

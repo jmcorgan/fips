@@ -60,6 +60,8 @@ impl From<super::machine::error::Error> for BootstrapError {
             Error::Protocol(reason) => BootstrapError::Protocol(reason),
             Error::Stun(reason) => BootstrapError::Stun(reason),
             Error::InvalidAdvert(reason) => BootstrapError::InvalidAdvert(reason),
+            Error::Nostr(reason) => BootstrapError::Nostr(reason),
+            Error::EventParse(reason) => BootstrapError::EventParse(reason),
         }
     }
 }

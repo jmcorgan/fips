@@ -6,34 +6,36 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
+use nostr::event::{Event, Kind};
+use nostr::filter::Filter;
+use nostr::key::{PublicKey, SecretKey};
 use nostr::nips::nip19::ToBech32;
-use nostr::prelude::{
-    Alphabet, Event, EventBuilder, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, Tag,
-    TagKind, TagStandard, Timestamp,
-};
+use nostr::types::{RelayUrl, Timestamp};
+use nostr_sdk::client::ClientNotification;
 #[cfg(test)]
-use nostr_sdk::prelude::AdmitStatus;
-use nostr_sdk::prelude::RelayPoolNotification;
+use nostr_sdk::policy::AdmitStatus;
 use serde::Serialize;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
-use zeroize::{Zeroize, Zeroizing};
 
 use super::handoff::EstablishedTraversal;
+use super::machine::NodeSigner;
 use super::machine::adverts;
 use super::machine::adverts::cache::{AdvertAdmission, Cache};
 use super::machine::adverts::publisher::{PublishPlan, Publisher};
+use super::machine::event::{advert as advert_codec, inbox as inbox_codec};
 use super::machine::params::Params;
 use super::machine::traversal::election::{Election, OfferDisposition, SeenDecision};
 use super::machine::traversal::failures::FailureState;
 use super::machine::traversal::gate::SignalGate;
 use super::offer_admission::{AdmissionReject, OfferAdmission};
-use super::relay::RelayClient;
+use super::relay::{Notifications, RelayClient, aux};
 use super::signal::{
     FreshnessOutcome, SignalEnvelope, build_signal_event, create_traversal_answer,
-    create_traversal_offer, estimate_clock_skew, unwrap_signal_event, validate_offer_freshness,
-    validate_traversal_answer_for_offer,
+    create_traversal_offer, estimate_clock_skew, rumor, unwrap_signal_event,
+    validate_offer_freshness, validate_traversal_answer_for_offer,
 };
 use super::signal_route::SignalRouter;
 use super::stun::observe_traversal_addresses;
@@ -44,8 +46,7 @@ use super::traversal::{
 use super::types::{
     ADVERT_IDENTIFIER, ADVERT_KIND, BootstrapError, BootstrapEvent, CachedOverlayAdvert,
     NostrFailureDecision, NostrPeerFailureView, NostrRefetchOutcome, OverlayAdvert,
-    OverlayEndpointAdvert, PROTOCOL_VERSION, PunchHint, SIGNAL_KIND, TraversalAnswer,
-    TraversalOffer,
+    OverlayEndpointAdvert, PunchHint, SIGNAL_KIND, TraversalAnswer, TraversalOffer,
 };
 use crate::PeerIdentity;
 use crate::config::{NostrRendezvousConfig, PeerConfig};
@@ -166,42 +167,38 @@ fn short_npub(npub: &str) -> String {
         .unwrap_or_else(|| npub.to_string())
 }
 
-/// Which of its two channels the notify loop read from.
+/// Which of its two feeds the notify loop was reading when it ended, as the
+/// line it logs then names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Feed {
-    /// The relay pool's notification channel: adverts, and every other event
+    /// The relay client's notification stream: adverts, and every other event
     /// but a traversal signal.
     Pool,
     /// The channel only traversal signals are put on.
     Signals,
 }
 
-/// What the notify loop does with one read of `feed`: `Continue(Some(_))`
-/// hands the notification on, `Continue(None)` reads on past a lag it has
-/// logged, and `Break(())` ends the loop because the channel has closed. A
-/// lag does not end the loop, which would lose every later advert and signal
-/// along with those already overwritten.
+/// What the notify loop does with one read of the signals' channel:
+/// `Continue(Some(_))` hands the notification on, `Continue(None)` reads on
+/// past a lag it has logged, and `Break(())` ends the loop because the
+/// channel has closed. A lag does not end the loop, which would lose every
+/// later signal along with those already overwritten. The relay client's own
+/// stream skips past a lag of its own without a word, so only this channel's
+/// lag is logged.
 pub(super) fn received(
-    result: Result<RelayPoolNotification, broadcast::error::RecvError>,
-    feed: Feed,
-) -> ControlFlow<(), Option<RelayPoolNotification>> {
+    result: Result<ClientNotification, broadcast::error::RecvError>,
+) -> ControlFlow<(), Option<ClientNotification>> {
     match result {
         Ok(notification) => ControlFlow::Continue(Some(notification)),
         Err(broadcast::error::RecvError::Lagged(skipped)) => {
-            match feed {
-                Feed::Pool => warn!(
-                    skipped,
-                    "nostr notification channel lagged; advert events dropped"
-                ),
-                Feed::Signals => warn!(
-                    skipped,
-                    "nostr signal channel lagged; traversal signals dropped"
-                ),
-            }
+            warn!(
+                skipped,
+                "nostr signal channel lagged; traversal signals dropped"
+            );
             ControlFlow::Continue(None)
         }
         Err(broadcast::error::RecvError::Closed) => {
-            warn!(channel = ?feed, "nostr notification channel closed; notify loop exiting");
+            warn!(channel = ?Feed::Signals, "nostr notification channel closed; notify loop exiting");
             ControlFlow::Break(())
         }
     }
@@ -343,7 +340,8 @@ const INBOX_REPUBLISH: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub struct NostrRendezvous {
     client: RelayClient,
-    keys: nostr::Keys,
+    /// The node key, shared with the relay client's authenticator.
+    signer: Arc<NodeSigner>,
     pubkey: PublicKey,
     npub: String,
     config: NostrRendezvousConfig,
@@ -367,7 +365,7 @@ pub struct NostrRendezvous {
     /// The signal channel's receiver until a unit test starts the notify loop
     /// on it; `None` from `start`, which hands it to the loop.
     #[cfg(test)]
-    signal_rx: std::sync::Mutex<Option<broadcast::Receiver<RelayPoolNotification>>>,
+    signal_rx: std::sync::Mutex<Option<broadcast::Receiver<ClientNotification>>>,
     admission: OfferAdmission,
     signal_gate: std::sync::Mutex<SignalGate<HostInstant>>,
     /// Limits the suspicious-offer warning to one a minute.
@@ -410,8 +408,9 @@ impl NostrRendezvous {
     /// - `advertise_task` — the refresh ticker that drives the publisher.
     ///
     /// Each of these is an unconditional `loop` (the notify loop's only `break`
-    /// is either of its two channels closing, i.e. the client is gone), so a
-    /// finished handle means the task panicked or was aborted:
+    /// is the client's notification stream ending or the signals' channel
+    /// closing, i.e. the client is gone), so a finished handle means the task
+    /// panicked or was aborted:
     /// unrecoverable, which matches the one-way `ChildExited` → `Degraded`
     /// latch in the supervisor FSM.
     ///
@@ -455,18 +454,16 @@ impl NostrRendezvous {
             return Err(BootstrapError::Disabled);
         }
 
-        // Three copies of the private key are made to reach `Keys::parse`:
-        // the keypair, its raw bytes, and the hex string. Each is bound and
-        // cleared here; `nostr::Keys` clears its own on drop.
+        // Two copies of the private key are made to reach the signer: the
+        // keypair and its secret key. Each is bound and cleared here; nostr's
+        // `SecretKey`, which the signer holds, clears its own on drop.
         let mut our_keypair = identity.keypair();
-        let mut secret_bytes = our_keypair.secret_bytes();
-        let secret_hex = Zeroizing::new(hex::encode(secret_bytes));
-        secret_bytes.zeroize();
+        let mut secret = our_keypair.secret_key();
+        let signer = Arc::new(NodeSigner::new(SecretKey::from(secret)));
+        secret.non_secure_erase();
         our_keypair.non_secure_erase();
-        let keys = nostr::Keys::parse(secret_hex.as_str())
-            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
         let (router, signals) = SignalRouter::new();
-        let client = RelayClient::build(&keys, router);
+        let client = RelayClient::build(Arc::clone(&signer), router);
 
         let mut relay_union = HashSet::new();
         relay_union.extend(config.advert_relays.iter().cloned());
@@ -475,7 +472,7 @@ impl NostrRendezvous {
             .add_relays(&relay_union)
             .await
             .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
-        let pubkey = keys.public_key();
+        let pubkey = signer.public_key();
         let npub = crate::encode_npub(&identity.pubkey());
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let admission = OfferAdmission::new(
@@ -501,7 +498,7 @@ impl NostrRendezvous {
         );
         let runtime = Arc::new(Self {
             client,
-            keys,
+            signer,
             pubkey,
             npub,
             config,
@@ -533,12 +530,12 @@ impl NostrRendezvous {
             outbound_admission: AtomicBool::new(true),
         });
 
-        // Subscribe to the relay-pool broadcast channel BEFORE issuing the
-        // Nostr REQs. tokio's broadcast channel only delivers messages sent
-        // after the receiver is created — historical events that arrive in
-        // response to subscribe() (REQ replays) would otherwise be dropped
-        // by the pool's `external_notification_sender.send(...)` returning
-        // `Err(SendError)` when no subscriber exists yet. Without this,
+        // Take the relay client's notification stream BEFORE issuing the
+        // Nostr REQs. The stream reads a broadcast channel that only delivers
+        // messages sent after it subscribes, which it does when it is taken —
+        // historical events that arrive in response to subscribe() (REQ
+        // replays) would otherwise be sent while no subscriber exists yet,
+        // and dropped. Without this,
         // freshly-restarted nodes with `policy: open` waited up to one
         // `advert_refresh_secs` interval (default 30 min) for non-configured
         // peers to re-publish before discovering them. The signals' own
@@ -986,28 +983,37 @@ impl NostrRendezvous {
         Ok(())
     }
 
-    /// Spawn the task that reads the relay pool's notification channel and the
-    /// signals' own channel, and hands each advert and traversal signal on.
+    /// Spawn the task that reads the relay client's notification stream and
+    /// the signals' own channel, and hands each advert and traversal signal
+    /// on.
     fn spawn_notify_loop(
         self: Arc<Self>,
-        mut notifications: broadcast::Receiver<RelayPoolNotification>,
-        mut signals: broadcast::Receiver<RelayPoolNotification>,
+        mut notifications: Notifications,
+        mut signals: broadcast::Receiver<ClientNotification>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let started_at = Instant::now();
             let mut first_event_seen = false;
             info!("nostr notify loop entered");
             loop {
-                // Neither channel is preferred, so a flood on one cannot
-                // starve the other.
-                let (result, feed) = tokio::select! {
-                    result = notifications.recv() => (result, Feed::Pool),
-                    result = signals.recv() => (result, Feed::Signals),
-                };
-                let notification = match received(result, feed) {
-                    ControlFlow::Continue(Some(notification)) => notification,
-                    ControlFlow::Continue(None) => continue,
-                    ControlFlow::Break(()) => break,
+                // Neither feed is preferred, so a flood on one cannot starve
+                // the other.
+                let notification = tokio::select! {
+                    next = notifications.next() => match next {
+                        Some(notification) => notification,
+                        None => {
+                            warn!(
+                                channel = ?Feed::Pool,
+                                "nostr notification channel closed; notify loop exiting"
+                            );
+                            break;
+                        }
+                    },
+                    result = signals.recv() => match received(result) {
+                        ControlFlow::Continue(Some(notification)) => notification,
+                        ControlFlow::Continue(None) => continue,
+                        ControlFlow::Break(()) => break,
+                    },
                 };
                 if !first_event_seen {
                     first_event_seen = true;
@@ -1018,7 +1024,7 @@ impl NostrRendezvous {
                 }
                 // By kind rather than by channel, so a signal that ever reached
                 // the pool's channel would still be opened rather than lost.
-                if let RelayPoolNotification::Event { event, .. } = notification {
+                if let ClientNotification::Event { event, .. } = notification {
                     if event.kind == Kind::Custom(ADVERT_KIND) {
                         self.handle_advert(&event);
                     } else if event.kind == Kind::Custom(SIGNAL_KIND) {
@@ -1115,7 +1121,7 @@ impl NostrRendezvous {
             return;
         }
 
-        let unwrapped = match unwrap_signal_event(&self.keys, &event).await {
+        let unwrapped = match unwrap_signal_event(&self.signer, &event).await {
             Ok(unwrapped) => unwrapped,
             Err(err) => {
                 trace!(error = %err, "failed to unwrap traversal signal");
@@ -1351,7 +1357,7 @@ impl NostrRendezvous {
     }
 
     async fn publish_inbox_relays(&self) -> Result<(), BootstrapError> {
-        let event = inbox_list(&self.keys, &self.config.dm_relays)?;
+        let event = inbox_list(&self.signer, &self.config.dm_relays)?;
         self.client
             .send(&self.config.dm_relays, &event)
             .await
@@ -1401,7 +1407,7 @@ impl NostrRendezvous {
     ) -> Result<(OverlayAdvert, Event), BootstrapError> {
         clamp_own_advert(&mut advert);
         let event = advert_event(
-            &self.keys,
+            &self.signer,
             &advert,
             &self.config.app,
             self.config.advert_ttl_secs,
@@ -2008,9 +2014,7 @@ impl NostrRendezvous {
                     .author(target_pubkey)
                     .kind(Kind::InboxRelays)
                     .since(Timestamp::from(
-                        Timestamp::now()
-                            .as_secs()
-                            .saturating_sub(INBOX_LOOKBACK.as_secs()),
+                        (now_ms() / 1000).saturating_sub(INBOX_LOOKBACK.as_secs()),
                     )),
                 Duration::from_millis(1500),
             )
@@ -2036,13 +2040,9 @@ impl NostrRendezvous {
         event: &Event,
         expected_app: &str,
     ) -> Result<OverlayAdvert, BootstrapError> {
-        let advertised_app = event
-            .tags
-            .find(TagKind::custom("protocol"))
-            .and_then(|tag| tag.content())
-            .ok_or_else(|| {
-                BootstrapError::InvalidAdvert("missing required protocol tag".to_string())
-            })?;
+        let advertised_app = advert_codec::protocol(event).ok_or_else(|| {
+            BootstrapError::InvalidAdvert("missing required protocol tag".to_string())
+        })?;
         if advertised_app != expected_app {
             return Err(BootstrapError::InvalidAdvert(format!(
                 "unsupported protocol '{}'",
@@ -2112,12 +2112,15 @@ impl NostrRendezvous {
             .max_by_key(|event| event.created_at.as_secs())
     }
 
+    /// The time `event`, an advert, stops being valid at `now_ms`, or `None`
+    /// if it already has. Its `expiration` tag is read as the relay client
+    /// reads it, so the client and this agree on whether it has expired.
     pub(super) fn compute_advert_valid_until_ms(
         event: &Event,
         advert_max_age_ms: u64,
         now_ms: u64,
     ) -> Option<u64> {
-        if event.is_expired() {
+        if event.is_expired_at(Timestamp::from(now_ms / 1000)) {
             return None;
         }
         adverts::advert_valid_until_ms(
@@ -2135,13 +2138,12 @@ impl NostrRendezvous {
         payload: &T,
     ) -> Result<Event, BootstrapError> {
         let signal = signal_event(
-            &self.keys,
+            &self.signer,
             receiver,
             payload,
             self.config.signal_ttl_secs,
             now_ms(),
-        )
-        .await?;
+        )?;
         self.client
             .send(relays, &signal)
             .await
@@ -2155,68 +2157,56 @@ impl NostrRendezvous {
     }
 }
 
-/// Build our kind 37195 advert carrying `advert`, signed with `keys`: the
+/// Build our kind 37195 advert carrying `advert`, signed by `signer`: the
 /// identifier, `app` as its protocol, the protocol version, and an
 /// expiration `ttl_secs` after `now_ms`.
 pub(super) fn advert_event(
-    keys: &nostr::Keys,
+    signer: &NodeSigner,
     advert: &OverlayAdvert,
     app: &str,
     ttl_secs: u64,
     now_ms: u64,
 ) -> Result<Event, BootstrapError> {
-    let expires_at = now_ms + ttl_secs * 1000;
-    let tags = vec![
-        Tag::identifier(ADVERT_IDENTIFIER.to_string()),
-        Tag::custom(TagKind::custom("protocol"), [app.to_string()]),
-        Tag::custom(TagKind::custom("version"), [PROTOCOL_VERSION.to_string()]),
-        Tag::expiration(Timestamp::from((expires_at / 1000).max(1))),
-    ];
-
-    EventBuilder::new(Kind::Custom(ADVERT_KIND), serde_json::to_string(advert)?)
-        .tags(tags)
-        .sign_with_keys(keys)
-        .map_err(|e| BootstrapError::Nostr(e.to_string()))
+    let content = serde_json::to_string(advert)?;
+    Ok(advert_codec::advert_event(
+        signer,
+        content,
+        ADVERT_IDENTIFIER,
+        app,
+        ttl_secs,
+        now_ms,
+        aux(),
+    )?)
 }
 
-/// Build a traversal signal carrying `payload` from `keys` to `receiver`: a
-/// private message rumor, sealed and gift-wrapped, expiring `ttl_secs` after
-/// `now_ms`.
-pub(super) async fn signal_event<T: Serialize>(
-    keys: &nostr::Keys,
+/// Build a traversal signal carrying `payload` from `signer` to `receiver`:
+/// a private message rumor written at `now_ms`, sealed and gift-wrapped,
+/// expiring `ttl_secs` after `now_ms`.
+pub(super) fn signal_event<T: Serialize>(
+    signer: &NodeSigner,
     receiver: PublicKey,
     payload: &T,
     ttl_secs: u64,
     now_ms: u64,
 ) -> Result<Event, BootstrapError> {
-    let rumor = EventBuilder::private_msg_rumor(receiver, serde_json::to_string(payload)?)
-        .build(keys.public_key());
+    let rumor = rumor(
+        signer.public_key(),
+        receiver,
+        serde_json::to_string(payload)?,
+        now_ms,
+    );
     build_signal_event(
-        keys,
+        signer,
         receiver,
         rumor,
         Timestamp::from((now_ms + ttl_secs * 1000) / 1000),
     )
-    .await
 }
 
 /// Build our kind 10050 inbox relay list: one `["r", url]` tag per relay that
-/// parses, signed with `keys`.
-pub(super) fn inbox_list(keys: &nostr::Keys, relays: &[String]) -> Result<Event, BootstrapError> {
-    let tags = relays
-        .iter()
-        .filter_map(|relay| RelayUrl::parse(relay).ok())
-        .map(|relay| {
-            Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::R)),
-                [relay.to_string()],
-            )
-        })
-        .collect::<Vec<_>>();
-    EventBuilder::new(Kind::InboxRelays, "")
-        .tags(tags)
-        .sign_with_keys(keys)
-        .map_err(|e| BootstrapError::Nostr(e.to_string()))
+/// parses, signed by `signer`.
+pub(super) fn inbox_list(signer: &NodeSigner, relays: &[String]) -> Result<Event, BootstrapError> {
+    Ok(inbox_codec::inbox_list(signer, relays, now_ms(), aux())?)
 }
 
 /// The relays a kind 10050 inbox relay list names, in order, each once.
@@ -2225,25 +2215,7 @@ pub(super) fn inbox_list(keys: &nostr::Keys, relays: &[String]) -> Result<Event,
 /// read: every deployed FIPS node publishes the `r` form. An `r` tag with a
 /// read or write marker is a NIP-65 entry and has no meaning here.
 pub(super) fn inbox_relays(event: &Event) -> Vec<String> {
-    if event.kind != Kind::InboxRelays {
-        return Vec::new();
-    }
-    let mut seen: HashSet<&RelayUrl> = HashSet::new();
-    let mut relays = Vec::new();
-    for tag in event.tags.iter() {
-        let url = match tag.as_standardized() {
-            Some(TagStandard::Relay(url)) => url,
-            Some(TagStandard::RelayMetadata {
-                relay_url,
-                metadata: None,
-            }) => relay_url,
-            _ => continue,
-        };
-        if seen.insert(url) {
-            relays.push(url.to_string());
-        }
-    }
-    relays
+    inbox_codec::inbox_relays(event)
 }
 
 /// Retain only the candidates the client pool actually holds.
@@ -2308,20 +2280,27 @@ impl NostrRendezvous {
 
     /// As [`Self::new_for_test`], with `config` in place of the default.
     pub(crate) fn new_for_test_with_config(config: NostrRendezvousConfig) -> Self {
-        Self::new_for_test_with_secret_key(config, nostr::SecretKey::generate())
+        let secret = loop {
+            let mut bytes = [0u8; 32];
+            <crate::identity::OsEntropy as fips_core::entropy::EntropySource>::fill(&mut bytes);
+            if let Ok(secret) = SecretKey::from_slice(&bytes) {
+                break secret;
+            }
+        };
+        Self::new_for_test_with_secret_key(config, secret)
     }
 
     /// As [`Self::new_for_test_with_config`], signing as `secret_key` rather
     /// than a fresh key, for tests that need fixed keys.
     pub(crate) fn new_for_test_with_secret_key(
         config: NostrRendezvousConfig,
-        secret_key: nostr::SecretKey,
+        secret_key: SecretKey,
     ) -> Self {
-        let keys = nostr::Keys::new(secret_key);
-        let pubkey = keys.public_key();
+        let signer = Arc::new(NodeSigner::new(secret_key));
+        let pubkey = signer.public_key();
         let npub = pubkey.to_bech32().expect("bech32 encode");
         let (router, signals) = SignalRouter::new();
-        let client = RelayClient::build(&keys, router);
+        let client = RelayClient::build(Arc::clone(&signer), router);
         let admission = OfferAdmission::new(
             config.max_concurrent_incoming_offers,
             config.max_concurrent_offers_per_npub,
@@ -2344,7 +2323,7 @@ impl NostrRendezvous {
         );
         Self {
             client,
-            keys,
+            signer,
             pubkey,
             npub,
             config,
@@ -2430,11 +2409,14 @@ impl NostrRendezvous {
     }
 
     /// Spawn the notify loop as `start` does, on `notifications`, the test's
-    /// stand-in for the pool's notification channel, and on the signals' own
-    /// channel, and return its handle.
+    /// stand-in for the relay client's notification channel, and on the
+    /// signals' own channel, and return its handle. The stand-in is read as
+    /// the client's stream reads its channel: a lag is skipped and a closed
+    /// channel ends the stream (nostr-sdk 0.45.6, `src/stream.rs`,
+    /// `NotificationStream`).
     pub(super) fn spawn_notify_loop_for_test(
         self: Arc<Self>,
-        notifications: broadcast::Receiver<RelayPoolNotification>,
+        notifications: broadcast::Receiver<ClientNotification>,
     ) -> JoinHandle<()> {
         let signals = self
             .signal_rx
@@ -2442,23 +2424,32 @@ impl NostrRendezvous {
             .expect("signal_rx lock")
             .take()
             .expect("the signal channel's receiver is taken once");
-        self.spawn_notify_loop(notifications, signals)
+        let stream = futures::stream::unfold(notifications, |mut receiver| async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(notification) => return Some((notification, receiver)),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        });
+        self.spawn_notify_loop(Box::pin(stream), signals)
     }
 
-    /// Deliver `notification` as the relay pool does with an event a relay
+    /// Deliver `notification` as the relay client does with an event a relay
     /// sent: through the admission policy the client was built with, if it
     /// has one, and if admitted onto `pool`, the test's stand-in for the
-    /// pool's notification channel (`nostr-relay-pool` 0.44.3,
-    /// `src/relay/inner.rs`, `handle_event_msg`). Each admitted delivery takes
-    /// one slot of `pool`. The pool's step that records an event as seen is
+    /// client's notification channel (nostr-sdk 0.45.6, `src/relay/inner.rs`
+    /// lines 1265 to 1320, `handle_event_msg`). Each admitted delivery takes
+    /// one slot of `pool`. The client's step that records an event as seen is
     /// not modelled; a repeat delivery costs the real channel a slot all the
     /// same, as a relay message rather than an event.
     pub(super) async fn deliver_for_test(
         &self,
-        pool: &broadcast::Sender<RelayPoolNotification>,
-        notification: RelayPoolNotification,
+        pool: &broadcast::Sender<ClientNotification>,
+        notification: ClientNotification,
     ) {
-        if let RelayPoolNotification::Event {
+        if let ClientNotification::Event {
             relay_url,
             subscription_id,
             event,

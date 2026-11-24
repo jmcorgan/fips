@@ -16,6 +16,13 @@ The directory is being split into a machine and a shell.
   keeps the paths the rest of the crate uses by re-exporting the machine's
   names.
 
+The shell builds every Nostr event it sends through the codecs in
+`machine/event/`, passing in the time and the random bytes, and holds the
+node key only in the `NodeSigner` there. The root `clippy.toml` bans the
+`nostr` items that read the clock or the OS random source in all non-test
+code; the test files that use them (`tests/mod.rs` and its children, and
+`tests/signal_route.rs`) carry a file-level allow.
+
 `relay.rs` is the shell's one view of the Nostr relay client: every call the
 shell makes on the client (adding and connecting relays, the notification
 channel, subscribing, fetching, sending, reading the pool) goes through its

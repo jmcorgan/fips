@@ -130,8 +130,10 @@ socket2 = { version = "0.6.2", features = ["all"] }
 tokio-socks = "0.5"
 portable-atomic = { version = "1", features = ["std"] }
 
-nostr = { version = "0.44", features = ["std", "nip59"] }
-nostr-sdk = "0.44"
+# The minimums are the releases tested: nostr-sdk 0.45 patch releases changed
+# its API (the client builder's fields), and 0.45.0 to 0.45.5 are yanked.
+nostr = { version = "0.45.7", features = ["std", "nip44"] }
+nostr-sdk = "0.45.6"
 arc-swap = "1"
 fips-core = { path = "core", features = ["ring"] }
 
@@ -233,6 +235,10 @@ fips-core = { path = "core", features = ["test-hooks"] }
 tempfile = "3.15"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 tokio = { version = "1", features = ["test-util"] }
+# nostr-sdk's in-process relay, for the relay adapter's tests
+# (src/nostr/tests/relay.rs). A dev-dependency feature, so no package or
+# release build carries it.
+nostr-sdk = { version = "0.45.6", features = ["local-relay"] }
 
 [[bin]]
 name = "fips"

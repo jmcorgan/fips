@@ -5,28 +5,91 @@
 //! this file alone. Each method returns the client's own error; its caller
 //! maps that onto `BootstrapError`, as it did when it called the client
 //! itself.
+//!
+//! The client is nostr-sdk 0.45's. Where that release's default differs from
+//! the 0.44 client FIPS ran before, the setting that keeps the 0.44 value is
+//! made here, with both values beside it.
 
 use std::collections::HashSet;
-#[cfg(test)]
+use std::future::Future;
+use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nostr::prelude::{Event, Filter, Keys, RelayUrl};
+use futures::Stream;
+use nostr::event::Event;
+use nostr::filter::Filter;
+use nostr::types::RelayUrl;
+use nostr_sdk::authenticator::Authenticator;
+use nostr_sdk::client::{Client, ClientBuilder, ClientNotification, ReqTarget};
 #[cfg(test)]
-use nostr_sdk::prelude::AdmitPolicy;
-use nostr_sdk::prelude::RelayPoolNotification;
-use nostr_sdk::{Client, ClientOptions};
-use tokio::sync::broadcast;
+use nostr_sdk::policy::AdmitPolicy;
 
+use super::machine::NodeSigner;
+use super::machine::event::auth::auth_event;
 use super::signal_route::SignalRouter;
+use super::traversal::now_ms;
 
 /// The error every relay-client call returns.
-pub(super) type Error = nostr_sdk::client::Error;
+pub(super) type Error = nostr_sdk::error::Error;
 
-/// The relay client, signing with the node's keys, with inbound traversal
-/// signals taken off its notification channel by a [`SignalRouter`]. One
-/// client serves signals and adverts alike, so the signals' channel adds no
-/// relay connection.
+/// The stream of what the pool's relays deliver.
+pub(super) type Notifications = Pin<Box<dyn Stream<Item = ClientNotification> + Send>>;
+
+/// How many notifications the client's channel holds unread: 4096, the
+/// default of both nostr-sdk 0.44 and 0.45, set here so it cannot move
+/// with a release. A `usize`, for the tests that size a channel by it.
+pub(crate) const POOL_CHANNEL: usize = 4096;
+
+/// [`POOL_CHANNEL`] as the client builder takes it.
+const POOL_CHANNEL_SIZE: NonZeroUsize = NonZeroUsize::new(POOL_CHANNEL).unwrap();
+
+/// How long a relay connection may take to open. nostr-sdk 0.45 defaults to
+/// 15 s (`ClientBuilder::default`, `client/builder.rs`); 0.44 used 60 s
+/// (`relay/constants.rs`), which this keeps.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a send waits for a relay that asked for authentication to accept
+/// it. nostr-sdk 0.45 waits 10 s (`SendEvent::new`,
+/// `client/api/send_event.rs`); 0.44 waited 7 s (`relay/constants.rs`), which
+/// this keeps.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(7);
+
+/// The client's NIP-42 authenticator: it answers a relay's challenge with an
+/// authentication event signed by the node key.
+#[derive(Debug)]
+struct NodeAuthenticator {
+    signer: Arc<NodeSigner>,
+}
+
+impl Authenticator for NodeAuthenticator {
+    /// The node's answer to `relay_url`'s `challenge`, created now, with
+    /// fresh randomness for its signature.
+    fn make_auth_event<'a>(
+        &'a self,
+        relay_url: &'a RelayUrl,
+        challenge: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Event, Error>> + Send + 'a>> {
+        Box::pin(async move {
+            auth_event(&self.signer, relay_url, challenge, now_ms(), aux())
+                .map_err(|e| Error::other(e.to_string()))
+        })
+    }
+}
+
+/// Fresh auxiliary randomness for a signature, from the host's source.
+pub(super) fn aux() -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    <crate::identity::OsEntropy as fips_core::entropy::EntropySource>::fill(&mut bytes);
+    bytes
+}
+
+/// The relay client, with inbound traversal signals taken off its
+/// notification channel by a [`SignalRouter`], and relay authentication
+/// answered with the node key. It holds no signer of its own: the events it
+/// sends are signed before they reach it. One client serves signals and
+/// adverts alike, so the signals' channel adds no relay connection.
 pub(super) struct RelayClient {
     client: Client,
     /// The admission policy the client was built with, as the client holds
@@ -37,13 +100,19 @@ pub(super) struct RelayClient {
 }
 
 impl RelayClient {
-    /// A client signing with `keys` and admitting each delivered event
-    /// through `router`. It connects to nothing until [`Self::connect`].
-    pub(super) fn build(keys: &Keys, router: SignalRouter) -> Self {
-        let builder = Client::builder()
-            .signer(keys.clone())
+    /// A client answering relay authentication with `signer` and admitting
+    /// each delivered event through `router`. It connects to nothing until
+    /// [`Self::connect`].
+    ///
+    /// `verify_subscriptions` and `ban_relay_on_mismatch` stay off, their
+    /// default in both nostr-sdk 0.44 and 0.45: the callers check what a
+    /// relay returns themselves.
+    pub(super) fn build(signer: Arc<NodeSigner>, router: SignalRouter) -> Self {
+        let builder = ClientBuilder::new()
             .admit_policy(router)
-            .opts(ClientOptions::new().autoconnect(false));
+            .authenticator(NodeAuthenticator { signer })
+            .connect_timeout(CONNECT_TIMEOUT)
+            .notification_channel_size(POOL_CHANNEL_SIZE);
         #[cfg(test)]
         let policy = builder.admit_policy.clone();
         Self {
@@ -72,30 +141,48 @@ impl RelayClient {
         self.client.connect().await;
     }
 
-    /// A receiver of every event the pool's relays deliver from now on, but
-    /// a traversal signal, which the router takes. An event delivered before
-    /// this call is not on it.
-    pub(super) fn notifications(&self) -> broadcast::Receiver<RelayPoolNotification> {
+    /// A stream of every event the pool's relays deliver from now on, but a
+    /// traversal signal, which the router takes. An event delivered before
+    /// this call is not on it. It skips past what it missed when it falls
+    /// behind, and ends when the client shuts down.
+    pub(super) fn notifications(&self) -> Notifications {
         self.client.notifications()
     }
 
     /// Open a long-lived subscription to `filter` on `urls`, under an id the
     /// client chooses.
     pub(super) async fn subscribe(&self, urls: Vec<String>, filter: Filter) -> Result<(), Error> {
-        self.client.subscribe_to(urls, filter, None).await?;
+        let targets: Vec<(String, Vec<Filter>)> = urls
+            .into_iter()
+            .map(|url| (url, vec![filter.clone()]))
+            .collect();
+        self.client.subscribe(ReqTarget::manual(targets)).await?;
         Ok(())
     }
 
     /// The events `urls` hold that match `filter`, collected until every
     /// relay has said it has sent them all or `timeout` has passed, newest
     /// first.
+    ///
+    /// nostr-sdk 0.45 refuses a fetch past 10,000 events by default
+    /// (`DEFAULT_FETCH_EVENTS_LIMIT`, `relay/constants.rs`); 0.44 had no such
+    /// limit, which `max_events(usize::MAX)` keeps.
     pub(super) async fn fetch(
         &self,
         urls: Vec<String>,
         filter: Filter,
         timeout: Duration,
     ) -> Result<Vec<Event>, Error> {
-        let events = self.client.fetch_events_from(urls, filter, timeout).await?;
+        let targets: Vec<(String, Vec<Filter>)> = urls
+            .into_iter()
+            .map(|url| (url, vec![filter.clone()]))
+            .collect();
+        let events = self
+            .client
+            .fetch_events(ReqTarget::manual(targets))
+            .timeout(timeout)
+            .max_events(usize::MAX)
+            .await?;
         Ok(events.into_iter().collect())
     }
 
@@ -103,13 +190,17 @@ impl RelayClient {
     /// whole, as when one of `urls` is not in the pool; relays that took the
     /// send and then failed it do not make it an error.
     pub(super) async fn send(&self, urls: &[String], event: &Event) -> Result<(), Error> {
-        self.client.send_event_to(urls.to_vec(), event).await?;
+        self.client
+            .send_event(event)
+            .to(urls)
+            .authentication_timeout(AUTH_TIMEOUT)
+            .await?;
         Ok(())
     }
 
     /// The relays in the client's pool.
     pub(super) async fn pool_urls(&self) -> HashSet<RelayUrl> {
-        self.client.pool().all_relays().await.into_keys().collect()
+        self.client.relays().all().await.into_keys().collect()
     }
 
     /// The admission policy the client was built with.
@@ -118,3 +209,7 @@ impl RelayClient {
         self.policy.as_ref()
     }
 }
+
+#[cfg(test)]
+#[path = "tests/relay.rs"]
+mod tests;

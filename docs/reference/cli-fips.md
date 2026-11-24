@@ -55,10 +55,10 @@ the YAML configuration. See [configuration.md](configuration.md).
 | `XDG_RUNTIME_DIR` | Used to derive the default control-socket path when `/run/fips` does not exist and the daemon is not running as root. See [control-socket.md](control-socket.md). |
 | `FIPS_CONFIG` | (Windows service mode only) Path to the configuration file when the daemon runs under the service control manager. |
 
-The daemon also clamps the `nostr_relay_pool`, `nostr_sdk`, and `nostr`
-log targets to `info` whenever the effective log level is below
-`trace`, so that `RUST_LOG=debug` does not flood the journal with raw
-relay frames. To see those frames, set the level to `trace`.
+The daemon also clamps the `nostr_sdk` and `nostr` log targets to
+`info` whenever the effective log level is below `trace`, so that
+`RUST_LOG=debug` does not flood the journal with raw relay frames. To
+see those frames, set the level to `trace`.
 
 ## Files
 

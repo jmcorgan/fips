@@ -1,10 +1,16 @@
+// These tests build events with nostr's own keys, clock and signing helpers.
+// The ban in the root clippy.toml is on non-test code using them.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
+use nostr::event::FinalizeEvent;
 use nostr::prelude::{EventBuilder, Kind, RelayUrl, Tag, Timestamp};
 
+use super::machine::NodeSigner;
 use super::machine::adverts::is_unroutable_direct_advert_ip;
 use super::machine::error::Error as MachineError;
 use super::machine::params::Params;
@@ -20,7 +26,7 @@ use super::runtime::{
 };
 use super::signal::{
     FreshnessOutcome, build_signal_event, create_traversal_answer, create_traversal_offer,
-    estimate_clock_skew, unwrap_signal_event, validate_offer_freshness,
+    estimate_clock_skew, rumor, unwrap_signal_event, validate_offer_freshness,
     validate_traversal_answer_for_offer,
 };
 use super::stun::{parse_stun_binding_success, parse_stun_url};
@@ -60,29 +66,43 @@ fn can_reach(local_nat: NatType, remote_nat: NatType) -> bool {
     !(local_nat == NatType::PortRestricted && remote_nat == NatType::PortRestricted)
 }
 
-fn signed_overlay_advert_event(created_at_secs: u64, expiration_secs: Option<u64>) -> nostr::Event {
-    signed_overlay_advert_event_from(&nostr::Keys::generate(), created_at_secs, expiration_secs)
+fn signed_overlay_advert_event(
+    created_at_secs: u64,
+    expiration_secs: Option<u64>,
+) -> nostr::event::Event {
+    signed_overlay_advert_event_from(
+        &nostr::key::Keys::generate(),
+        created_at_secs,
+        expiration_secs,
+    )
 }
 
 fn signed_overlay_advert_event_from(
-    keys: &nostr::Keys,
+    keys: &nostr::key::Keys,
     created_at_secs: u64,
     expiration_secs: Option<u64>,
-) -> nostr::Event {
+) -> nostr::event::Event {
     let content = r#"{"identifier":"fips-overlay-v1","version":1,"endpoints":[{"transport":"tcp","addr":"8.8.8.8:443"}]}"#;
     let mut builder = EventBuilder::new(Kind::Custom(ADVERT_KIND), content)
         .custom_created_at(Timestamp::from(created_at_secs));
     if let Some(expiration_secs) = expiration_secs {
         builder = builder.tags([Tag::expiration(Timestamp::from(expiration_secs))]);
     }
-    builder.sign_with_keys(keys).unwrap()
+    builder.finalize(keys).unwrap()
 }
 
-fn signed_inbox_relay_event(keys: &nostr::Keys, created_at_secs: u64, relay: &str) -> nostr::Event {
+fn signed_inbox_relay_event(
+    keys: &nostr::key::Keys,
+    created_at_secs: u64,
+    relay: &str,
+) -> nostr::event::Event {
     EventBuilder::new(Kind::InboxRelays, "")
-        .tags([Tag::relay(RelayUrl::parse(relay).unwrap())])
+        .tags([Tag::custom(
+            "relay",
+            [RelayUrl::parse(relay).unwrap().to_string()],
+        )])
         .custom_created_at(Timestamp::from(created_at_secs))
-        .sign_with_keys(keys)
+        .finalize(keys)
         .unwrap()
 }
 
@@ -232,8 +252,8 @@ fn advert_freshness_rejects_stale_created_at_without_expiration() {
 #[test]
 fn advert_selection_ignores_events_not_signed_by_the_target_peer() {
     let now_secs = Timestamp::now().as_secs();
-    let peer_keys = nostr::Keys::generate();
-    let hostile_keys = nostr::Keys::generate();
+    let peer_keys = nostr::key::Keys::generate();
+    let hostile_keys = nostr::key::Keys::generate();
 
     let hostile = signed_overlay_advert_event_from(&hostile_keys, now_secs + 3_600, None);
     let genuine = signed_overlay_advert_event_from(&peer_keys, now_secs.saturating_sub(10), None);
@@ -249,8 +269,8 @@ fn advert_selection_ignores_events_not_signed_by_the_target_peer() {
 #[test]
 fn advert_selection_returns_nothing_when_every_event_is_foreign() {
     let now_secs = Timestamp::now().as_secs();
-    let peer_keys = nostr::Keys::generate();
-    let hostile_keys = nostr::Keys::generate();
+    let peer_keys = nostr::key::Keys::generate();
+    let hostile_keys = nostr::key::Keys::generate();
 
     let events = [signed_overlay_advert_event_from(
         &hostile_keys,
@@ -268,8 +288,8 @@ fn advert_selection_returns_nothing_when_every_event_is_foreign() {
 #[test]
 fn inbox_relay_selection_ignores_relay_lists_not_signed_by_the_target() {
     let now_secs = Timestamp::now().as_secs();
-    let peer_keys = nostr::Keys::generate();
-    let hostile_keys = nostr::Keys::generate();
+    let peer_keys = nostr::key::Keys::generate();
+    let hostile_keys = nostr::key::Keys::generate();
 
     let events = [
         signed_inbox_relay_event(&hostile_keys, now_secs + 3_600, "wss://hostile.example/"),
@@ -496,10 +516,14 @@ fn an_answer_whose_in_reply_to_is_the_offer_event_id_rather_than_its_nonce_is_re
 /// the receiver recovers on unwrapping.
 #[tokio::test]
 async fn the_signal_wrap_is_signed_by_a_one_time_key_and_the_seal_by_the_identity_key() {
-    let identity = nostr::Keys::generate();
-    let receiver = nostr::Keys::generate();
-    let rumor = EventBuilder::private_msg_rumor(receiver.public_key(), "hello".to_string())
-        .build(identity.public_key());
+    let identity = NodeSigner::new(nostr::key::SecretKey::generate());
+    let receiver = NodeSigner::new(nostr::key::SecretKey::generate());
+    let rumor = rumor(
+        identity.public_key(),
+        receiver.public_key(),
+        "hello".to_string(),
+        now_ms(),
+    );
 
     let event = build_signal_event(
         &identity,
@@ -507,7 +531,6 @@ async fn the_signal_wrap_is_signed_by_a_one_time_key_and_the_seal_by_the_identit
         rumor,
         Timestamp::from(Timestamp::now().as_secs() + 30),
     )
-    .await
     .expect("signal event should build");
 
     assert_ne!(
@@ -1804,10 +1827,14 @@ fn estimate_clock_skew_returns_none_without_responder_timestamp() {
 
 #[tokio::test]
 async fn signal_events_use_current_timestamps() {
-    let sender = nostr::Keys::generate();
-    let receiver = nostr::Keys::generate();
-    let rumor = EventBuilder::private_msg_rumor(receiver.public_key(), "hello".to_string())
-        .build(sender.public_key());
+    let sender = NodeSigner::new(nostr::key::SecretKey::generate());
+    let receiver = NodeSigner::new(nostr::key::SecretKey::generate());
+    let rumor = rumor(
+        sender.public_key(),
+        receiver.public_key(),
+        "hello".to_string(),
+        now_ms(),
+    );
     let before = Timestamp::now().as_secs();
 
     let event = build_signal_event(
@@ -1816,7 +1843,6 @@ async fn signal_events_use_current_timestamps() {
         rumor,
         Timestamp::from(before + 30),
     )
-    .await
     .expect("signal event should build");
 
     let after = Timestamp::now().as_secs();
@@ -2434,13 +2460,13 @@ async fn an_upper_case_configured_npub_resolves_its_cached_advert() {
 }
 
 /// A peer key whose NodeAddr sorts after (`larger`) or before our own.
-fn peer_keys_ordered(our_npub: &str, larger: bool) -> nostr::Keys {
-    use nostr::ToBech32;
+fn peer_keys_ordered(our_npub: &str, larger: bool) -> nostr::key::Keys {
+    use nostr::nips::nip19::ToBech32;
     let ours = *crate::PeerIdentity::from_npub(our_npub)
         .unwrap()
         .node_addr();
     loop {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::key::Keys::generate();
         let npub = keys.public_key().to_bech32().unwrap();
         let theirs = *crate::PeerIdentity::from_npub(&npub).unwrap().node_addr();
         if (theirs > ours) == larger {
@@ -2472,7 +2498,7 @@ const UNCONNECTED_RELAY: &str = "ws://127.0.0.1:1";
 /// `signal_ttl_secs` runs out, so the suppression re-sends ours, once.
 #[tokio::test]
 async fn suppressing_a_peers_offer_resends_ours_once() {
-    use nostr::ToBech32;
+    use nostr::nips::nip19::ToBech32;
     let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test());
     runtime
         .add_unconnected_relay_for_test(UNCONNECTED_RELAY)
@@ -2515,7 +2541,7 @@ async fn suppressing_a_peers_offer_resends_ours_once() {
 /// tries again; once one publish succeeds, no further re-send follows.
 #[tokio::test]
 async fn a_failed_resend_is_tried_again_on_the_next_suppression() {
-    use nostr::ToBech32;
+    use nostr::nips::nip19::ToBech32;
     let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test());
     let our_npub = runtime.npub_for_test().to_string();
     let peer = peer_keys_ordered(&our_npub, true);
@@ -2577,7 +2603,7 @@ async fn a_failed_resend_is_tried_again_on_the_next_suppression() {
 /// leave ours alone.
 #[tokio::test]
 async fn answering_a_peers_offer_does_not_resend_ours() {
-    use nostr::ToBech32;
+    use nostr::nips::nip19::ToBech32;
     let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test());
     // Our offer's relay is in the pool, so a wrongful re-send would publish and
     // be seen below.
@@ -2830,10 +2856,10 @@ fn nostr_config_with_refresh(secs: u64) -> crate::config::NostrRendezvousConfig 
 }
 
 /// A kind 10050 inbox relay list carrying `tags`, signed by a fresh key.
-fn inbox_list_with_tags(tags: Vec<Tag>) -> nostr::Event {
+fn inbox_list_with_tags(tags: Vec<Tag>) -> nostr::event::Event {
     EventBuilder::new(Kind::InboxRelays, "")
         .tags(tags)
-        .sign_with_keys(&nostr::Keys::generate())
+        .finalize(&nostr::key::Keys::generate())
         .unwrap()
 }
 
@@ -2930,7 +2956,7 @@ async fn the_inbox_relay_list_is_republished_before_it_ages_out_of_the_lookup_wi
 #[test]
 fn an_inbox_relay_list_in_the_nip17_relay_form_is_still_read() {
     let event = signed_inbox_relay_event(
-        &nostr::Keys::generate(),
+        &nostr::key::Keys::generate(),
         Timestamp::now().as_secs(),
         "wss://relay.example",
     );
@@ -2945,7 +2971,7 @@ fn an_inbox_relay_list_in_the_nip17_relay_form_is_still_read() {
 fn an_inbox_relay_list_naming_one_relay_in_both_tag_forms_lists_it_once() {
     let url = "wss://relay.example";
     let event = inbox_list_with_tags(vec![
-        Tag::relay(RelayUrl::parse(url).unwrap()),
+        Tag::custom("relay", [RelayUrl::parse(url).unwrap().to_string()]),
         Tag::parse(["r", url]).unwrap(),
     ]);
     assert_eq!(inbox_relays(&event), vec![normalized(url)]);
@@ -2968,7 +2994,7 @@ fn an_r_tag_carrying_a_marker_is_not_read_as_an_inbox_relay() {
 fn an_event_of_another_kind_is_not_read_as_an_inbox_relay_list() {
     let event = EventBuilder::new(Kind::RelayList, "")
         .tags(vec![Tag::parse(["r", "wss://relay.example"]).unwrap()])
-        .sign_with_keys(&nostr::Keys::generate())
+        .finalize(&nostr::key::Keys::generate())
         .unwrap();
     assert!(inbox_relays(&event).is_empty());
 }

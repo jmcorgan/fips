@@ -1,0 +1,37 @@
+# The nostr items that read the clock or the OS random source. FIPS's Nostr
+# events take their time and their random bytes from the caller (the codecs in
+# src/nostr/machine/event/), so non-test code may call none of these.
+#
+# How the list was drawn up: every public nostr item that calls the OS random
+# source (`SysRng`) or the clock (`SystemTime::now`, `Timestamp::now`) under
+# the nostr features the root package enables (`std`, `nip44`, `rand`,
+# `os-rng`, read with `cargo tree -e features -i nostr`), traced from each
+# call site in the nostr source to the public items that reach it. Trait
+# methods are listed by trait, so every implementation of them is covered.
+# Redo the list whenever a nostr feature or the nostr version changes:
+# testing/nostr-ban/ catches an entry that no longer resolves, but not an item
+# that is new.
+#
+# Entries are spelled by module path, since nostr 0.45 has no root
+# re-exports; an entry that does not resolve only draws a warning that
+# `-D warnings` does not turn into an error, which testing/nostr-ban/test.sh
+# checks for. fips-core does not depend on nostr, so these name nothing there.
+disallowed-types = ["nostr::event::EventBuilder"]
+disallowed-methods = [
+  "nostr::types::Timestamp::now",
+  "nostr::key::Keys::generate",
+  "nostr::key::Keys::parse",
+  "nostr::key::Keys::sign_schnorr",
+  "nostr::nips::nip44::encrypt",
+  "nostr::event::Event::verify",
+  "nostr::event::Event::is_expired",
+  "nostr::key::SecretKey::generate",
+  "nostr::message::SubscriptionId::generate",
+  "nostr::event::SignEvent::sign_event",
+  "nostr::event::AsyncSignEvent::sign_event_async",
+  "nostr::event::FinalizeEvent::finalize",
+  "nostr::event::FinalizeEventAsync::finalize_async",
+  "nostr::event::FinalizeUnsignedEvent::finalize_unsigned",
+  "nostr::nips::nip44::Nip44::nip44_encrypt",
+  "nostr::nips::nip44::AsyncNip44::nip44_encrypt_async",
+]

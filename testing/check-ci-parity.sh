@@ -455,6 +455,7 @@ STEPS = {
     "clippy": {
         "cargo clippy --all-targets --all-features -- -D warnings": "clippy",
         "Clippy (default features)": "clippy-default-features",
+        "Check the nostr clock and randomness ban against its fixture": "nostr-ban",
         "Clippy the no_std core library on its own": "core-fence-lib",
         "Clippy the no_std core and its tests on their own": "core-fence",
         "Clippy the no_std core's slow test suites": "core-fence-slow",
@@ -609,6 +610,8 @@ CMDS = {
     ("clippy", "cargo clippy --all-targets --all-features -- -D warnings"):
         ["cargo clippy --all-targets --all-features -- -D warnings"],
     ("clippy", "Clippy (default features)"): ["cargo clippy --all-targets -- -D warnings"],
+    ("clippy", "Check the nostr clock and randomness ban against its fixture"):
+        ["testing/nostr-ban/test.sh"],
     ("clippy", "Clippy the no_std core library on its own"):
         ["cargo clippy -p fips-core --lib -- -D warnings"],
     ("clippy", "Clippy the no_std core and its tests on their own"):

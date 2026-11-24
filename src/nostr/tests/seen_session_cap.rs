@@ -114,7 +114,7 @@ fn the_default_cap_holds_every_session_the_signal_gate_admits_in_one_replay_wind
 /// the memory is full of live entries.
 #[tokio::test]
 async fn a_new_offer_is_refused_as_seen_sessions_full_by_the_handler_when_the_memory_is_full() {
-    use nostr::ToBech32;
+    use nostr::nips::nip19::ToBech32;
     let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test_with_config(
         NostrRendezvousConfig {
             seen_sessions_max_entries: 2,
@@ -122,7 +122,7 @@ async fn a_new_offer_is_refused_as_seen_sessions_full_by_the_handler_when_the_me
         },
     ));
     let our_npub = runtime.npub_for_test().to_string();
-    let peer = nostr::Keys::generate();
+    let peer = nostr::key::Keys::generate();
     let peer_npub = peer.public_key().to_bech32().unwrap();
     for i in 0..2 {
         let r = runtime
@@ -162,7 +162,7 @@ const HANDLER_CAP: usize = 64;
 /// the captured offer, still fresh, must still be refused as a replay.
 #[tokio::test]
 async fn a_captured_offer_is_still_refused_as_a_replay_after_the_seen_session_cap_fills() {
-    use nostr::ToBech32;
+    use nostr::nips::nip19::ToBech32;
     let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test_with_config(
         NostrRendezvousConfig {
             seen_sessions_max_entries: HANDLER_CAP,
@@ -170,7 +170,7 @@ async fn a_captured_offer_is_still_refused_as_a_replay_after_the_seen_session_ca
         },
     ));
     let our_npub = runtime.npub_for_test().to_string();
-    let peer = nostr::Keys::generate();
+    let peer = nostr::key::Keys::generate();
     let peer_npub = peer.public_key().to_bech32().unwrap();
     let handle = |offer: super::super::TraversalOffer| {
         let runtime = runtime.clone();

@@ -9,8 +9,9 @@
 
 use std::sync::Arc;
 
-use nostr::ToBech32;
-use nostr::prelude::{EventBuilder, Kind, Tag, TagKind};
+use nostr::event::FinalizeEvent;
+use nostr::nips::nip19::ToBech32;
+use nostr::prelude::{EventBuilder, Kind, Tag};
 
 use super::super::runtime::{NostrRendezvous, adversarial_offer_reject};
 use super::super::traversal::nonce;
@@ -48,7 +49,7 @@ fn is_oversized(r: &Result<(), BootstrapError>) -> bool {
 /// Deliver `offer` from `peer` to `runtime`'s incoming-offer handler.
 async fn deliver(
     runtime: &Arc<NostrRendezvous>,
-    peer: &nostr::Keys,
+    peer: &nostr::key::Keys,
     offer: super::super::TraversalOffer,
 ) -> Result<(), BootstrapError> {
     let peer_npub = peer.public_key().to_bech32().unwrap();
@@ -61,7 +62,7 @@ async fn deliver(
 /// An offer from `peer` to `runtime` with the given session id and nonce.
 fn offer_with(
     runtime: &NostrRendezvous,
-    peer: &nostr::Keys,
+    peer: &nostr::key::Keys,
     session_id: String,
     nonce: String,
 ) -> super::super::TraversalOffer {
@@ -78,7 +79,7 @@ fn offer_with(
 #[tokio::test]
 async fn an_offer_with_an_oversized_session_id_is_refused_before_it_is_remembered() {
     let runtime = Arc::new(NostrRendezvous::new_for_test());
-    let peer = nostr::Keys::generate();
+    let peer = nostr::key::Keys::generate();
     let huge = "s".repeat(HUGE);
 
     let first = deliver(
@@ -115,7 +116,7 @@ async fn an_offer_with_an_oversized_session_id_is_refused_before_it_is_remembere
 #[tokio::test]
 async fn an_offer_with_an_oversized_nonce_is_refused_on_its_first_delivery() {
     let runtime = Arc::new(NostrRendezvous::new_for_test());
-    let peer = nostr::Keys::generate();
+    let peer = nostr::key::Keys::generate();
     let r = deliver(
         &runtime,
         &peer,
@@ -145,7 +146,7 @@ fn an_oversized_offer_refusal_is_logged_at_the_default_level() {
 #[tokio::test]
 async fn offer_fields_are_accepted_up_to_the_bound_and_refused_one_byte_past_it() {
     let runtime = Arc::new(NostrRendezvous::new_for_test());
-    let peer = nostr::Keys::generate();
+    let peer = nostr::key::Keys::generate();
     // The test runtime shares no signal relay with the peer, so an offer that
     // passes every check before the relay step fails there with
     // MissingRelays.
@@ -216,10 +217,10 @@ async fn offer_fields_are_accepted_up_to_the_bound_and_refused_one_byte_past_it(
 }
 
 /// A signed advert event carrying `content` and the default protocol tag.
-fn advert_event(content: &str) -> nostr::Event {
+fn advert_event(content: &str) -> nostr::event::Event {
     EventBuilder::new(Kind::Custom(ADVERT_KIND), content)
-        .tags([Tag::custom(TagKind::custom("protocol"), [app()])])
-        .sign_with_keys(&nostr::Keys::generate())
+        .tags([Tag::custom("protocol", [app()])])
+        .finalize(&nostr::key::Keys::generate())
         .unwrap()
 }
 
@@ -418,7 +419,7 @@ fn an_advert_of_one_character_relays_under_the_byte_bound_is_refused() {
 async fn published(
     config: NostrRendezvousConfig,
     snapshot: Vec<AdvertTransportSnapshot>,
-) -> (nostr::Event, OverlayAdvert) {
+) -> (nostr::event::Event, OverlayAdvert) {
     let config = NostrRendezvousConfig {
         enabled: true,
         ..config

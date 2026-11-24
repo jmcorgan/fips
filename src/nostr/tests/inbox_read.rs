@@ -2,8 +2,12 @@
 //! relays a kind 10050 inbox relay list names, and the `expiration` tag of an
 //! overlay advert. Each row's expected value is what nostr 0.44, the version
 //! deployed nodes run, reads from that shape, so a change in how a later
-//! nostr version reads a tag shows here as a changed row.
+//! nostr version reads a tag shows here as a changed row. The four
+//! expiration rows marked below are the exception: there the relay client
+//! itself reads the tag as nostr 0.45 does, before the shell sees the event,
+//! and the shell reads it the same way.
 
+use nostr::event::FinalizeEvent;
 use nostr::prelude::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
 use super::super::ADVERT_KIND;
@@ -85,11 +89,16 @@ fn tag(shape: &[&str]) -> Tag {
 
 /// An event of `kind` carrying `tags`, created at `created_at_secs`, signed
 /// by a fresh key.
-fn event_with(kind: Kind, content: &str, created_at_secs: u64, tags: Vec<Tag>) -> nostr::Event {
+fn event_with(
+    kind: Kind,
+    content: &str,
+    created_at_secs: u64,
+    tags: Vec<Tag>,
+) -> nostr::event::Event {
     EventBuilder::new(kind, content)
         .tags(tags)
         .custom_created_at(Timestamp::from(created_at_secs))
-        .sign_with_keys(&Keys::generate())
+        .finalize(&Keys::generate())
         .expect("sign event")
 }
 
@@ -156,10 +165,14 @@ enum Validity {
 /// How long after its `created_at` an advert stays valid in the tests below.
 const MAX_AGE_MS: u64 = 3_600_000;
 
-/// Each `expiration` tag shape is read as nostr 0.44 reads it: the first
-/// `expiration` tag, of exactly two elements, whose value parses as an
-/// unsigned integer. The expiration times are in the future and inside the
-/// `created_at` window, so a reading shows in the result.
+/// Each `expiration` tag shape is read as the relay client reads it: the
+/// first `expiration` tag, whose second element parses as an unsigned
+/// integer. nostr 0.44 also required the tag to have exactly two elements;
+/// nostr 0.45 reads one with elements after the time too, and drops such an
+/// event inside the relay client once that time has passed, so the four rows
+/// marked are pinned to the time where 0.44 gave the window. The expiration
+/// times are in the future and inside the `created_at` window, so a reading
+/// shows in the result.
 #[test]
 fn each_advert_expiration_tag_shape_gives_its_pinned_validity() {
     let now = Timestamp::now().as_secs();
@@ -175,9 +188,12 @@ fn each_advert_expiration_tag_shape_gives_its_pinned_validity() {
     let at_t2 = Validity::Expiration(now + 200);
     let shapes: [(Vec<Vec<&str>>, Validity); 18] = [
         (vec![vec!["expiration", &t]], at_t),
-        (vec![vec!["expiration", &t, "x"]], Validity::Window),
-        (vec![vec!["expiration", &t, ""]], Validity::Window),
-        (vec![vec!["expiration", &t, "x", "y"]], Validity::Window),
+        // Read by nostr 0.45, not by 0.44, which gave the window.
+        (vec![vec!["expiration", &t, "x"]], at_t),
+        // Read by nostr 0.45, not by 0.44, which gave the window.
+        (vec![vec!["expiration", &t, ""]], at_t),
+        // Read by nostr 0.45, not by 0.44, which gave the window.
+        (vec![vec!["expiration", &t, "x", "y"]], at_t),
         (vec![vec!["expiration", &space_t]], Validity::Window),
         (vec![vec!["expiration", &t_space]], Validity::Window),
         (vec![vec!["expiration", "abc"]], Validity::Window),
@@ -192,9 +208,10 @@ fn each_advert_expiration_tag_shape_gives_its_pinned_validity() {
             vec![vec!["expiration", "abc"], vec!["expiration", &t2]],
             Validity::Window,
         ),
+        // Read by nostr 0.45, not by 0.44, which gave the window.
         (
             vec![vec!["expiration", &t, "x"], vec!["expiration", &t2]],
-            Validity::Window,
+            at_t,
         ),
         (vec![vec!["expiration", &t2], vec!["expiration", &t]], at_t2),
         (vec![vec!["EXPIRATION", &t]], Validity::Window),

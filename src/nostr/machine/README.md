@@ -8,10 +8,13 @@ arguments.
 
 ## The fence
 
-Code here is written against `core`, `alloc`, `fips_core`, `serde` and
-`sha2`. The guard does not hold that list: it holds a list of what may not
-appear, so a crate on neither list (`ring`, `secp256k1`) passes it and is kept
-out in review. What it flags:
+Code here is written against `core`, `alloc`, `fips_core`, `serde`, `sha2`
+and `nostr`'s primitives (events, tags, keys, NIP-44), which `event/` uses to
+build and open the events a node signs. The `nostr` items that read the clock
+or the OS random source are banned crate-wide by the root `clippy.toml`, whose
+break test is `testing/nostr-ban/`. The guard does not hold that list:
+it holds a list of what may not appear, so a crate on neither list (`ring`,
+`secp256k1`) passes it and is kept out in review. What it flags:
 
 - a `std`, `tokio`, `tracing`, `nostr_sdk`, `rand`, `libc`, `if_addrs`,
   `socket2` or `arc_swap` path, and `println!`, `dbg!`, `thread_local!` or the
@@ -48,6 +51,11 @@ host, under the `#[cfg(test)]` the guard requires, and may use `std`.
 - `mod.rs`: the module and its fence.
 - `error.rs`: the machine's `Error`. The shell's `types.rs` maps each variant
   onto the `BootstrapError` variant of the same name with the same text.
+- `event/`: the node's signer, `NodeSigner` (re-exported here), the only
+  holder of the node key in FIPS's Nostr code, and the codecs of the events
+  a node signs or opens: the advert, the inbox relay list, the NIP-42
+  authentication, and the traversal signal's rumor, seal and wrap. Each takes
+  the time and the random bytes it needs from its caller.
 - `params.rs`: `Params`, the configuration values the machine's pieces read.
   The machine cannot name the node's configuration, so the shell's `types.rs`
   converts `NostrRendezvousConfig` into it, one field per key.
@@ -55,8 +63,7 @@ host, under the `#[cfg(test)]` the guard requires, and may use `std`.
   freshness against the caller's wall-clock reading, with
   `FRESHNESS_SKEW_TOLERANCE_MS` of grace (configuration validation reads the
   same constant), the answer's match to our offer, and the clock-skew
-  estimate. Sealing and unsealing the Nostr event stay in the shell's
-  `signal.rs`.
+  estimate. Sealing and opening the Nostr event are `event/signal.rs`'s.
 - `types.rs`: the wire and payload types (the event kinds and identifiers, the
   advert, offer, answer and punch packet bodies, and the failure-state views
   the node reads). Their serde attributes are the wire format; the shell's

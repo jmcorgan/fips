@@ -665,7 +665,7 @@ print_plan() {
     for g in "${GUARDS[@]}"; do echo "${g#* }"; done
     echo nft-syntax
     deb_early && echo deb-build
-    printf '%s\n' fmt clippy clippy-default-features \
+    printf '%s\n' fmt clippy clippy-default-features nostr-ban \
         core-fence-lib core-fence core-fence-slow core-doc
     [[ "$BAREMETAL" == true ]] && echo core-baremetal
     if [[ "$CROSS_CHECK" == true ]]; then
@@ -1240,6 +1240,19 @@ run_build() {
         record "clippy-default-features" 0
     else
         record "clippy-default-features" 1
+        return 1
+    fi
+
+    # The ban in clippy.toml on the nostr items that read the clock or the OS
+    # random source, against a fixture that uses each of them: an entry clippy
+    # cannot resolve draws only a warning, so the ban could break with clippy
+    # still green. Mirrored in .github/workflows/ci.yml; check-ci-parity.sh
+    # holds each such step to its counterpart.
+    info "testing/nostr-ban/test.sh (the nostr ban in clippy.toml against its fixture)"
+    if bash "$SCRIPT_DIR/nostr-ban/test.sh" 2>&1; then
+        record "nostr-ban" 0
+    else
+        record "nostr-ban" 1
         return 1
     fi
 

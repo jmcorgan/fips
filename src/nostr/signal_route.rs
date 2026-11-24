@@ -19,11 +19,15 @@
 //! a signal.
 
 use std::collections::{HashSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
 
-use nostr::prelude::{Event, EventId, Kind, RelayUrl, SubscriptionId};
-use nostr::util::BoxedFuture;
-use nostr_sdk::prelude::{AdmitPolicy, AdmitStatus, PolicyError, RelayPoolNotification};
+use nostr::event::{Event, EventId, Kind};
+use nostr::message::SubscriptionId;
+use nostr::types::RelayUrl;
+use nostr_sdk::client::ClientNotification;
+use nostr_sdk::policy::{AdmitPolicy, AdmitStatus};
 use tokio::sync::broadcast;
 
 use super::types::SIGNAL_KIND;
@@ -82,7 +86,7 @@ impl SeenSignals {
 /// notification channel and queues each one, once, on a channel of its own.
 #[derive(Debug)]
 pub(super) struct SignalRouter {
-    signals: broadcast::Sender<RelayPoolNotification>,
+    signals: broadcast::Sender<ClientNotification>,
     /// The signals already queued, so a copy of one that a second relay
     /// delivers is not queued again, as the pool does not notify an event
     /// twice. Its own record rather than the pool's: the pool's is shared
@@ -94,7 +98,7 @@ impl SignalRouter {
     /// A router and the receiver of its channel. The receiver exists from
     /// the start, so a signal delivered before the notify loop first reads it
     /// is held rather than dropped.
-    pub(super) fn new() -> (Self, broadcast::Receiver<RelayPoolNotification>) {
+    pub(super) fn new() -> (Self, broadcast::Receiver<ClientNotification>) {
         let (signals, receiver) = broadcast::channel(SIGNAL_BACKLOG);
         let router = Self {
             signals,
@@ -113,7 +117,8 @@ impl AdmitPolicy for SignalRouter {
         relay_url: &'a RelayUrl,
         subscription_id: &'a SubscriptionId,
         event: &'a Event,
-    ) -> BoxedFuture<'a, Result<AdmitStatus, PolicyError>> {
+    ) -> Pin<Box<dyn Future<Output = Result<AdmitStatus, nostr_sdk::error::Error>> + Send + 'a>>
+    {
         Box::pin(async move {
             if event.kind != Kind::Custom(SIGNAL_KIND) {
                 return Ok(AdmitStatus::Success);
@@ -121,7 +126,7 @@ impl AdmitPolicy for SignalRouter {
             if self.seen.insert(event.id) {
                 // A send fails only when no receiver is left, which means the
                 // runtime is shutting down and nothing would read the signal.
-                let _ = self.signals.send(RelayPoolNotification::Event {
+                let _ = self.signals.send(ClientNotification::Event {
                     relay_url: relay_url.clone(),
                     subscription_id: subscription_id.clone(),
                     event: Box::new(event.clone()),
