@@ -18,12 +18,12 @@
 //! can overrun it, and nothing that reads the pool, such as a fetch, ever sees
 //! a signal.
 
-use nostr::prelude::{Event, Kind, RelayUrl, SubscriptionId};
+use std::collections::{HashSet, VecDeque};
+use std::sync::Mutex;
+
+use nostr::prelude::{Event, EventId, Kind, RelayUrl, SubscriptionId};
 use nostr::util::BoxedFuture;
-use nostr_sdk::prelude::{
-    AdmitPolicy, AdmitStatus, DatabaseEventStatus, MemoryDatabase, NostrDatabase, PolicyError,
-    RelayPoolNotification,
-};
+use nostr_sdk::prelude::{AdmitPolicy, AdmitStatus, PolicyError, RelayPoolNotification};
 use tokio::sync::broadcast;
 
 use super::types::SIGNAL_KIND;
@@ -34,6 +34,50 @@ use super::types::SIGNAL_KIND;
 /// gate already sheds such a flood before opening it.
 pub(super) const SIGNAL_BACKLOG: usize = 4096;
 
+/// How many signal ids [`SeenSignals`] holds: the size of the record it
+/// replaced, `nostr-database` 0.44's `MemoryDatabase`, whose default event-id
+/// tracker held 35,000 (`MAX_EVENTS`, `src/memory.rs`).
+pub(super) const SEEN_SIGNALS: usize = 35_000;
+
+/// The ids of the signals the router has queued: the last [`SEEN_SIGNALS`],
+/// forgetting the oldest first.
+///
+/// This is the record `nostr-database` 0.44's `MemoryDatabase` kept for the
+/// router: an LRU tracker that the router asked whether an id was present and
+/// then told to record it if not. Asking does not promote an id in that
+/// tracker, and an id already present is never recorded again, so it forgets
+/// ids in the order they were first recorded. A set and a queue under one lock
+/// keep that order; the lock is never held across an await.
+#[derive(Debug, Default)]
+pub(super) struct SeenSignals {
+    inner: Mutex<SeenInner>,
+}
+
+/// The set of ids [`SeenSignals`] holds, and the order they arrived in.
+#[derive(Debug, Default)]
+struct SeenInner {
+    ids: HashSet<EventId>,
+    order: VecDeque<EventId>,
+}
+
+impl SeenSignals {
+    /// Record `id`, returning whether it was new. Recording a new id when
+    /// [`SEEN_SIGNALS`] are held forgets the oldest.
+    pub(super) fn insert(&self, id: EventId) -> bool {
+        let mut inner = self.inner.lock().expect("seen-signals mutex poisoned");
+        if !inner.ids.insert(id) {
+            return false;
+        }
+        inner.order.push_back(id);
+        if inner.order.len() > SEEN_SIGNALS
+            && let Some(oldest) = inner.order.pop_front()
+        {
+            inner.ids.remove(&oldest);
+        }
+        true
+    }
+}
+
 /// The admission policy that takes traversal signals off the relay pool's
 /// notification channel and queues each one, once, on a channel of its own.
 #[derive(Debug)]
@@ -43,7 +87,7 @@ pub(super) struct SignalRouter {
     /// delivers is not queued again, as the pool does not notify an event
     /// twice. Its own record rather than the pool's: the pool's is shared
     /// with every advert, and a flood of those would evict signal ids from it.
-    seen: MemoryDatabase,
+    seen: SeenSignals,
 }
 
 impl SignalRouter {
@@ -54,7 +98,7 @@ impl SignalRouter {
         let (signals, receiver) = broadcast::channel(SIGNAL_BACKLOG);
         let router = Self {
             signals,
-            seen: MemoryDatabase::default(),
+            seen: SeenSignals::default(),
         };
         (router, receiver)
     }
@@ -74,16 +118,7 @@ impl AdmitPolicy for SignalRouter {
             if event.kind != Kind::Custom(SIGNAL_KIND) {
                 return Ok(AdmitStatus::Success);
             }
-            let status = self
-                .seen
-                .check_id(&event.id)
-                .await
-                .map_err(PolicyError::backend)?;
-            if status == DatabaseEventStatus::NotExistent {
-                self.seen
-                    .save_event(event)
-                    .await
-                    .map_err(PolicyError::backend)?;
+            if self.seen.insert(event.id) {
                 // A send fails only when no receiver is left, which means the
                 // runtime is shutting down and nothing would read the signal.
                 let _ = self.signals.send(RelayPoolNotification::Event {

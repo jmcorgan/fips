@@ -3010,6 +3010,7 @@ fn the_machine_params_copy_each_value_from_its_own_config_key() {
 
 mod clock_skew;
 mod fixtures;
+mod inbox_read;
 mod notify_channels;
 mod npub_spelling;
 mod punch_recv_error;

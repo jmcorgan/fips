@@ -16,6 +16,12 @@ The directory is being split into a machine and a shell.
   keeps the paths the rest of the crate uses by re-exporting the machine's
   names.
 
+`relay.rs` is the shell's one view of the Nostr relay client: every call the
+shell makes on the client (adding and connecting relays, the notification
+channel, subscribing, fetching, sending, reading the pool) goes through its
+`RelayClient`, one method per call, and each caller maps the client's error
+onto `BootstrapError`.
+
 Pieces move from the shell into `machine/` one at a time, so which shell file
 holds what changes as they do; `mod.rs` lists the shell files and its `pub use`
 block is the module's surface to the rest of the crate.

@@ -13,10 +13,7 @@ use nostr::prelude::{
 };
 #[cfg(test)]
 use nostr_sdk::prelude::AdmitStatus;
-use nostr_sdk::{
-    Client, ClientOptions,
-    prelude::{AdmitPolicy, RelayPoolNotification},
-};
+use nostr_sdk::prelude::RelayPoolNotification;
 use serde::Serialize;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -32,6 +29,7 @@ use super::machine::traversal::election::{Election, OfferDisposition, SeenDecisi
 use super::machine::traversal::failures::FailureState;
 use super::machine::traversal::gate::SignalGate;
 use super::offer_admission::{AdmissionReject, OfferAdmission};
+use super::relay::RelayClient;
 use super::signal::{
     FreshnessOutcome, SignalEnvelope, build_signal_event, create_traversal_answer,
     create_traversal_offer, estimate_clock_skew, unwrap_signal_event, validate_offer_freshness,
@@ -166,27 +164,6 @@ fn short_npub(npub: &str) -> String {
         .filter(|s| s.len() >= 8)
         .map(|s| format!("npub1{}..{}", &s[..4], &s[s.len() - 4..]))
         .unwrap_or_else(|| npub.to_string())
-}
-
-/// The relay client signing with `keys`, with inbound traversal signals taken
-/// off the relay pool's notification channel onto their own; the admission
-/// policy that does so, as the client holds it; and the receiver of the
-/// signals' channel. One client serves signals and adverts alike, so the
-/// signals' channel adds no relay connection.
-fn relay_client(
-    keys: &nostr::Keys,
-) -> (
-    Client,
-    Option<Arc<dyn AdmitPolicy>>,
-    broadcast::Receiver<RelayPoolNotification>,
-) {
-    let (router, signals) = SignalRouter::new();
-    let builder = Client::builder()
-        .signer(keys.clone())
-        .admit_policy(router)
-        .opts(ClientOptions::new().autoconnect(false));
-    let policy = builder.admit_policy.clone();
-    (builder.build(), policy, signals)
 }
 
 /// Which of its two channels the notify loop read from.
@@ -365,7 +342,7 @@ pub(super) const INBOX_LOOKBACK: Duration = Duration::from_secs(30 * 24 * 60 * 6
 const INBOX_REPUBLISH: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub struct NostrRendezvous {
-    client: Client,
+    client: RelayClient,
     keys: nostr::Keys,
     pubkey: PublicKey,
     npub: String,
@@ -387,10 +364,6 @@ pub struct NostrRendezvous {
     /// it was sent, so unit tests can observe when it is published.
     #[cfg(test)]
     inbox_sent: std::sync::Mutex<Vec<(tokio::time::Instant, Event)>>,
-    /// The admission policy the relay client was built with, so unit tests
-    /// can deliver events through it as a relay connection does.
-    #[cfg(test)]
-    policy: Option<Arc<dyn AdmitPolicy>>,
     /// The signal channel's receiver until a unit test starts the notify loop
     /// on it; `None` from `start`, which hands it to the loop.
     #[cfg(test)]
@@ -492,20 +465,16 @@ impl NostrRendezvous {
         our_keypair.non_secure_erase();
         let keys = nostr::Keys::parse(secret_hex.as_str())
             .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
-        let (client, policy, signals) = relay_client(&keys);
-        // Only the test hooks read the policy; the client keeps its own copy.
-        #[cfg(not(test))]
-        drop(policy);
+        let (router, signals) = SignalRouter::new();
+        let client = RelayClient::build(&keys, router);
 
         let mut relay_union = HashSet::new();
         relay_union.extend(config.advert_relays.iter().cloned());
         relay_union.extend(config.dm_relays.iter().cloned());
-        for relay in relay_union {
-            client
-                .add_relay(&relay)
-                .await
-                .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
-        }
+        client
+            .add_relays(&relay_union)
+            .await
+            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
         let pubkey = keys.public_key();
         let npub = crate::encode_npub(&identity.pubkey());
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -545,8 +514,6 @@ impl NostrRendezvous {
             sent_signals: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             inbox_sent: std::sync::Mutex::new(Vec::new()),
-            #[cfg(test)]
-            policy,
             #[cfg(test)]
             signal_rx: std::sync::Mutex::new(None),
             admission,
@@ -848,7 +815,7 @@ impl NostrRendezvous {
 
         let events = match self
             .client
-            .fetch_events_from(
+            .fetch(
                 self.config.advert_relays.clone(),
                 Filter::new()
                     .author(target_pubkey)
@@ -1360,24 +1327,22 @@ impl NostrRendezvous {
 
     async fn subscribe(&self) -> Result<(), BootstrapError> {
         self.client
-            .subscribe_to(
+            .subscribe(
                 self.config.dm_relays.clone(),
                 Filter::new()
                     .kind(Kind::Custom(SIGNAL_KIND))
                     .pubkey(self.pubkey)
                     .limit(0),
-                None,
             )
             .await
             .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
 
         self.client
-            .subscribe_to(
+            .subscribe(
                 self.config.advert_relays.clone(),
                 Filter::new()
                     .kind(Kind::Custom(ADVERT_KIND))
                     .identifier(ADVERT_IDENTIFIER),
-                None,
             )
             .await
             .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
@@ -1388,7 +1353,7 @@ impl NostrRendezvous {
     async fn publish_inbox_relays(&self) -> Result<(), BootstrapError> {
         let event = inbox_list(&self.keys, &self.config.dm_relays)?;
         self.client
-            .send_event_to(self.config.dm_relays.clone(), &event)
+            .send(&self.config.dm_relays, &event)
             .await
             .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
         #[cfg(test)]
@@ -1408,7 +1373,7 @@ impl NostrRendezvous {
 
         let (advert, event) = self.sign_advert(advert)?;
         self.client
-            .send_event_to(self.config.advert_relays.clone(), &event)
+            .send(&self.config.advert_relays, &event)
             .await
             .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
         debug!(
@@ -1938,7 +1903,7 @@ impl NostrRendezvous {
 
         let events = self
             .client
-            .fetch_events_from(
+            .fetch(
                 self.config.advert_relays.clone(),
                 Filter::new()
                     .author(target_pubkey)
@@ -2005,7 +1970,7 @@ impl NostrRendezvous {
         advert: Option<&OverlayAdvert>,
     ) -> Result<Vec<String>, BootstrapError> {
         let inbox = self.find_recipient_inbox_relays(target_pubkey).await?;
-        let pool: HashSet<RelayUrl> = self.client.pool().all_relays().await.into_keys().collect();
+        let pool: HashSet<RelayUrl> = self.client.pool_urls().await;
         let usable = signal_relays(
             &inbox,
             advert.and_then(|advert| advert.signal_relays.as_deref()),
@@ -2037,7 +2002,7 @@ impl NostrRendezvous {
         }
         let events = self
             .client
-            .fetch_events_from(
+            .fetch(
                 lookup_relays,
                 Filter::new()
                     .author(target_pubkey)
@@ -2178,7 +2143,7 @@ impl NostrRendezvous {
         )
         .await?;
         self.client
-            .send_event_to(relays.to_vec(), &signal)
+            .send(relays, &signal)
             .await
             .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
         #[cfg(test)]
@@ -2283,8 +2248,8 @@ pub(super) fn inbox_relays(event: &Event) -> Vec<String> {
 
 /// Retain only the candidates the client pool actually holds.
 ///
-/// `send_event_to` rejects the whole send with `RelayNotFound` if any single URL
-/// is outside the pool, so a signal addressed to a peer's advertised relays fails
+/// The relay client refuses the whole send if any single URL is outside the
+/// pool, so a signal addressed to a peer's advertised relays fails
 /// entirely on one relay we are not configured with. Filtering first turns that
 /// into a send to the relays we share.
 ///
@@ -2355,7 +2320,8 @@ impl NostrRendezvous {
         let keys = nostr::Keys::new(secret_key);
         let pubkey = keys.public_key();
         let npub = pubkey.to_bech32().expect("bech32 encode");
-        let (client, policy, signals) = relay_client(&keys);
+        let (router, signals) = SignalRouter::new();
+        let client = RelayClient::build(&keys, router);
         let admission = OfferAdmission::new(
             config.max_concurrent_incoming_offers,
             config.max_concurrent_offers_per_npub,
@@ -2389,7 +2355,6 @@ impl NostrRendezvous {
             inflight_offers: Mutex::new(HashMap::new()),
             sent_signals: std::sync::Mutex::new(Vec::new()),
             inbox_sent: std::sync::Mutex::new(Vec::new()),
-            policy,
             signal_rx: std::sync::Mutex::new(Some(signals)),
             admission,
             signal_gate: std::sync::Mutex::new(SignalGate::new(HostClock.now())),
@@ -2456,7 +2421,7 @@ impl NostrRendezvous {
     /// as failed, and touches no network; a send naming a relay outside the
     /// pool fails.
     pub(crate) async fn add_unconnected_relay_for_test(&self, url: &str) {
-        self.client.add_relay(url).await.expect("add relay");
+        self.client.add_relays([url]).await.expect("add relay");
     }
 
     /// Spawn the relay-startup task as `start` does, and return its handle.
@@ -2498,7 +2463,7 @@ impl NostrRendezvous {
             subscription_id,
             event,
         } = &notification
-            && let Some(policy) = &self.policy
+            && let Some(policy) = self.client.policy()
             && let AdmitStatus::Rejected { .. } = policy
                 .admit_event(relay_url, subscription_id, event)
                 .await
@@ -2604,7 +2569,7 @@ impl NostrRendezvous {
     /// its full 2s timeout without touching the network.
     pub(crate) async fn set_advert_relays_for_test(&mut self, relays: Vec<String>) {
         for url in &relays {
-            let _ = self.client.add_relay(url.as_str()).await;
+            let _ = self.client.add_relays([url]).await;
         }
         self.client.connect().await;
         self.config.advert_relays = relays;

@@ -28,6 +28,13 @@ Child modules of `mod.rs`:
   `inbox_relays`), and today's event builders, run again at the capture
   time, still emit what they hold. It also holds the ignored generator that
   writes those files.
+- `inbox_read.rs`: golden tables for two readings of what a peer sends,
+  each row pinned to what nostr 0.44 reads from that shape. The relays a
+  kind 10050 inbox relay list names (`inbox_relays` in `runtime.rs`), over
+  32 tag shapes one at a time and all together, so duplicates collapse; that
+  an advert is read by its first `protocol` tag; and the validity
+  `compute_advert_valid_until_ms` gives an advert over 18 `expiration` tag
+  shapes.
 - `notify_channels.rs`: the notify loop in `runtime.rs` logs a lag on
   either of its two channels and reads on, and ends only when a channel
   closes.
@@ -94,6 +101,8 @@ Tests of one file, each named `nostr::<file>::tests::...`:
 - `signal_route.rs`, of `signal_route.rs`: the admission policy takes a
   traversal signal off the pool's channel and queues it on its own, once
   however many relays deliver it, and leaves every other event to the pool.
+  The router remembers the last 35,000 signals it queued and forgets the
+  oldest first.
 - `stun.rs`, of `stun.rs`: a STUN exchange over a loopback socket believes
   a binding success only from the server it asked, and accepts the server's
   own answer; an observation survives one lost binding request, because the

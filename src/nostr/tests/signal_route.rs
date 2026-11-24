@@ -83,3 +83,35 @@ async fn a_second_copy_of_a_signal_from_another_relay_is_not_queued_again() {
         "the second copy of the signal was queued again"
     );
 }
+
+/// A distinct event id for each `n`.
+fn id(n: u32) -> EventId {
+    let mut bytes = [0u8; 32];
+    bytes[..4].copy_from_slice(&n.to_be_bytes());
+    EventId::from_byte_array(bytes)
+}
+
+/// The record keeps the last 35,000 signals queued, so a copy arriving from
+/// a slow relay soon after is not queued twice, and forgets the oldest first,
+/// as the tracker it replaced did: asking whether an id is held never makes
+/// it newer.
+#[test]
+fn the_router_forgets_the_oldest_signal_once_it_holds_35000_ids() {
+    let seen = SeenSignals::default();
+    for n in 0..35_000 {
+        assert!(seen.insert(id(n)), "id {n} was new but was not recorded");
+    }
+    assert!(
+        !seen.insert(id(0)),
+        "the oldest of 35,000 ids was forgotten before the record was over its size"
+    );
+    assert!(seen.insert(id(35_000)), "a new id was not recorded");
+    assert!(
+        seen.insert(id(0)),
+        "the 35,001st id did not make the record forget the oldest"
+    );
+    assert!(
+        !seen.insert(id(2)),
+        "an id other than the oldest was forgotten"
+    );
+}

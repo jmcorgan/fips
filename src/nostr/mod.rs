@@ -2,6 +2,7 @@ mod driver;
 mod handoff;
 pub(crate) mod machine;
 mod offer_admission;
+mod relay;
 mod runtime;
 mod signal;
 mod signal_route;
