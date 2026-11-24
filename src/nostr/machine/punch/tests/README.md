@@ -13,7 +13,17 @@ Unit tests of `src/nostr/machine/punch/`.
   rest of the minute, and admits the next one a minute later with the count
   it suppressed.
 
+- `attempt.rs`, of `attempt.rs`: the attempt on a test instant. An
+  unplanned source is refused before it is acked; a planned target's probe
+  is acked and adopted; an exact target is adopted at once, over a held
+  remapped one; a remapped port is adopted when the settle passes, and a
+  later one supersedes it without moving the settle; an attempt with nothing
+  to adopt times out once and counts its receive errors; the rounds go to
+  every target from the hinted start until the duration ends, at no less
+  than 20 ms apart; and FRC-1601 Appendix C.7's packets.
+
 The round trip of `build_punch_packet` and `parse_punch_packet`, punch
-planning and vetting (`plan.rs`), and the punch loop that uses them are
-tested in `src/nostr/tests/mod.rs` with the rest of the traversal, through
-the shell's paths.
+planning and vetting (`plan.rs`), and the shell's driver of the attempt on
+a loopback socket are tested in `src/nostr/tests/mod.rs` and
+`src/nostr/tests/punch_recv_error.rs` with the rest of the traversal,
+through the shell's paths.

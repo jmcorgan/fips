@@ -70,7 +70,8 @@ fn an_idle_sender_is_reclaimed_so_the_map_cannot_grow_without_bound() {
         );
     }
 
-    // Three still-held entries, plus the last transient sender, which was
-    // inserted after the prune that would have removed it.
-    assert_eq!(admission.tracked_senders(), 4);
+    // The three still-held entries. Each transient sender is forgotten
+    // when its permit drops, since there is no longer a prune at the next
+    // admission that would leave the last one behind.
+    assert_eq!(admission.tracked_senders(), 3);
 }

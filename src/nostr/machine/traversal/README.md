@@ -2,13 +2,20 @@
 
 What the node remembers about traversal attempts, its own and its peers', and
 what it decides from that memory, including how many inbound signals it lets
-through to decryption. No locks, clocks or logging: the shell's `runtime.rs`
-holds each piece behind one `std::sync::Mutex`, passes in the clock reading
-it took, and logs from the decision it gets back.
+through to decryption, and the pure rules a traversal follows. No locks,
+clocks or logging: the shell's `runtime.rs` holds each piece behind one
+`std::sync::Mutex`, passes in the clock reading it took, and logs from the
+decision it gets back.
 
 ## Files
 
 - `mod.rs`: the module.
+- `admission.rs`: `Admission`, the per-npub admission of inbound offers
+  as counts. An offer takes a slot of its sender's allowance and one of the
+  global bound, as a `SlotId`, and `release` gives both back; a sender is
+  forgotten when its count reaches zero, so the table holds at most the
+  global bound of senders. The per-sender check runs first, so a sender
+  over its allowance never touches the global bound.
 - `election.rs`: `Election`, the set of peers this node has an outbound
   traversal running to and the seen-sessions cache. It refuses a second
   outbound traversal to a peer that already has one; when both peers start
@@ -33,6 +40,16 @@ it took, and logs from the decision it gets back.
   `fips_core::time::Instant` type; the shell passes its host clock's. Its
   rate and burst constants are `pub(crate)` so the seen-sessions tests can
   derive from them how many offers the gate admits in a replay window.
+- `rules.rs`: the traversal's pure rules. The bound on an inbound offer's
+  session id and nonce, and `RejectReason`, why an offer is refused, whose
+  text is `BootstrapError`'s and which says whether the refusal is one relay
+  lag cannot explain (logged at warning level). `peer_key` and
+  `canonical_npub`, the one spelling of a peer's npub that state is keyed
+  by; `short_npub` and `short_id` for log fields. `signal_relays`, which
+  relays a signal goes to, kept to those the relay pool holds. Where a
+  peer's inbox relay list is looked up and the fallback to our DM relays.
+  The punch hint a node sends, and the skew from which an observed clock
+  offset is noted at debug.
 - `tests/`: this directory's unit tests.
 
 ## Rules for changing it

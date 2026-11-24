@@ -20,6 +20,10 @@ pub enum Error {
     EventParse(String),
     /// The relays hold no current advert by this peer; the text is its npub.
     MissingAdvert(String),
+    /// A peer was named by text that is not a NIP-19 npub.
+    InvalidPeerNpub { npub: String, reason: String },
+    /// An offer's session id was seen inside the replay window.
+    Replay(String),
 }
 
 impl core::fmt::Display for Error {
@@ -32,6 +36,8 @@ impl core::fmt::Display for Error {
             Error::Nostr(reason) => write!(f, "nostr error: {reason}"),
             Error::EventParse(reason) => write!(f, "event parse error: {reason}"),
             Error::MissingAdvert(npub) => write!(f, "peer {npub} has no overlay advert"),
+            Error::InvalidPeerNpub { npub, reason } => write!(f, "invalid npub '{npub}': {reason}"),
+            Error::Replay(session) => write!(f, "replayed or duplicate session id: {session}"),
         }
     }
 }

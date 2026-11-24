@@ -134,7 +134,7 @@ fn a_failed_subscribe_is_retried_after_two_seconds_doubling_to_sixty() {
 #[test]
 fn the_inbox_relay_list_is_republished_before_it_ages_out_of_the_lookup_window() {
     const DAY_MS: u64 = 24 * 60 * 60 * 1000;
-    let lookback_ms = crate::nostr::runtime::INBOX_LOOKBACK.as_millis() as u64;
+    let lookback_ms = super::super::super::traversal::rules::INBOX_LOOKBACK.as_millis() as u64;
     let mut h = Harness::new(params(10));
     let inbox = publishes(&started(&mut h, Outcome::Ok { reached: 1 }));
     let mut sent = vec![h.ms];

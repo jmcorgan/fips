@@ -8,6 +8,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use super::error::Error;
+use super::traversal::rules::RejectReason;
 use super::types::{PunchHint, TraversalAddress, TraversalAnswer, TraversalOffer};
 
 /// Wall-clock skew tolerance applied to offer/answer freshness checks, in
@@ -52,20 +53,28 @@ pub fn validate_offer_freshness(
     actual_sender_npub: &str,
     local_npub: &str,
 ) -> Result<FreshnessOutcome, Error> {
+    check_offer(offer, now, signal_ttl_ms, actual_sender_npub, local_npub).map_err(Error::from)
+}
+
+/// An inbound offer's type, freshness at `now` and identities, in that
+/// order, or why it is refused.
+pub fn check_offer(
+    offer: &TraversalOffer,
+    now: u64,
+    signal_ttl_ms: u64,
+    actual_sender_npub: &str,
+    local_npub: &str,
+) -> Result<FreshnessOutcome, RejectReason> {
     if offer.message_type != "offer" {
-        return Err(Error::Protocol("invalid-offer".to_string()));
+        return Err(RejectReason::Invalid);
     }
     let outcome = match check_freshness(offer.issued_at, offer.expires_at, now, signal_ttl_ms) {
         Ok(o) => o,
-        Err(FreshnessReject::Stale) => {
-            return Err(Error::Protocol("expired-offer".to_string()));
-        }
-        Err(FreshnessReject::FutureDated) => {
-            return Err(Error::Protocol("future-dated-offer".to_string()));
-        }
+        Err(FreshnessReject::Stale) => return Err(RejectReason::Expired),
+        Err(FreshnessReject::FutureDated) => return Err(RejectReason::FutureDated),
     };
     if offer.sender_npub != actual_sender_npub || offer.recipient_npub != local_npub {
-        return Err(Error::Protocol("identity-mismatch".to_string()));
+        return Err(RejectReason::IdentityMismatch);
     }
     Ok(outcome)
 }

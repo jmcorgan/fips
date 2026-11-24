@@ -129,7 +129,8 @@ Tests of one file, each named `nostr::<file>::tests::...`:
   reuses the first attempt's ids, so the client holds one subscription, not
   two; and shutdown closes the relay connections.
 - `offer_admission.rs`, of `offer_admission.rs`: the per-npub allowance of
-  concurrent inbound offers, and that idle senders are reclaimed.
+  concurrent inbound offers, and that a sender is forgotten when its last
+  permit drops.
 - `sockets.rs`, of `sockets.rs`: a bound socket's datagrams reach the pump's
   channel and its sends go out, on loopback; a send that fails (to the
   broadcast address, without `SO_BROADCAST`) is reported with its error.

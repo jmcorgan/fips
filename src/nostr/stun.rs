@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
@@ -5,10 +6,15 @@ use tokio::net::{UdpSocket, lookup_host};
 use tracing::debug;
 
 use super::machine::stun::candidates::{self, InterfaceAddr};
+#[cfg(test)]
 use super::machine::stun::client::pick_family;
-use super::machine::stun::create_stun_binding_request;
-pub(super) use super::machine::stun::{parse_stun_binding_success, parse_stun_url};
+use super::machine::stun::client::{Observation, Out};
+#[cfg(test)]
+pub(super) use super::machine::stun::parse_stun_binding_success;
+pub(super) use super::machine::stun::parse_stun_url;
 use super::types::{BootstrapError, TraversalAddress};
+use crate::identity::OsEntropy;
+use crate::time::HostInstant;
 
 // Current STUN parsing is intentionally minimal and only supports
 // MAPPED-ADDRESS / XOR-MAPPED-ADDRESS for IPv4 and IPv6.
@@ -19,12 +25,6 @@ use super::types::{BootstrapError, TraversalAddress};
 /// Latency-sensitive: keep tight so a misbehaving STUN server doesn't
 /// stretch every traversal attempt.
 pub(super) const TRAVERSAL_STUN_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// First retransmission interval for a binding request, doubled after each
-/// retransmission (RFC 8489 Section 6.2.1). Within the 2 s traversal
-/// deadline the request goes out at 0, 0.5 and 1.5 s; within the 5 s advert
-/// deadline also at 3.5 s.
-const STUN_INITIAL_RTO: Duration = Duration::from_millis(500);
 
 pub(super) async fn observe_traversal_addresses(
     socket: &std::net::UdpSocket,
@@ -87,18 +87,21 @@ pub(super) async fn observe_traversal_addresses(
 /// Send a STUN binding request on `socket` and return the reflexive address
 /// the server reports.
 ///
-/// Only a datagram whose source is exactly the resolved server address is
-/// parsed; anything else is consumed and discarded, so an on-path attacker
-/// who has seen the transaction id cannot substitute a mapped address by
-/// injecting a reply. The comparison is exact because every socket handed to
-/// this function is bound to the IPv4 wildcard, so a source can never arrive
-/// in v4-mapped IPv6 form. A dual-stack bind would require normalising both
-/// sides with `IpAddr::to_canonical()` before comparing.
+/// The exchange is the machine's STUN client (`machine/stun/client.rs`) for
+/// this one server; this drives it on `socket` and the host's clocks. Only a
+/// datagram whose source is exactly the resolved server address is parsed;
+/// anything else is consumed and discarded, so an on-path attacker who has
+/// seen the transaction id cannot substitute a mapped address by injecting a
+/// reply. The comparison is exact because every socket handed to this
+/// function is bound to the IPv4 wildcard, so a source can never arrive in
+/// v4-mapped IPv6 form.
 ///
 /// The request is retransmitted, with the same transaction id, from 500 ms
 /// and doubling until the deadline, so one lost datagram does not lose the
 /// server (RFC 8489 Section 6.2.1). It goes to the first resolved address of
-/// the socket's family; a server with none is skipped.
+/// the socket's family; a server with none is skipped. A first send that
+/// fails fails the server at once; a failed retransmission leaves the
+/// earlier sends in flight.
 ///
 /// Caller requirement: this drains and discards every datagram arriving on
 /// `socket` until the deadline, so it must not be entered on a socket that
@@ -108,78 +111,78 @@ async fn perform_stun(
     stun_server: &str,
     response_timeout: Duration,
 ) -> Result<Option<SocketAddr>, BootstrapError> {
-    let endpoint = parse_stun_url(stun_server)?;
-    let txn_id = random_txn_id();
-    let request = create_stun_binding_request(txn_id);
+    // The URL's own error, as the client would give it for this server.
+    parse_stun_url(stun_server)?;
     let want_v4 = socket.local_addr()?.is_ipv4();
-    let addr = resolve_udp_target(&endpoint.host, endpoint.port, want_v4)
-        .await?
-        .ok_or_else(|| BootstrapError::Stun(format!("no address for {}", stun_server)))?;
     let udp = UdpSocket::from_std(socket.try_clone()?)?;
-    udp.send_to(&request, addr).await?;
+    let mut client: Observation<HostInstant, OsEntropy> =
+        Observation::new(vec![stun_server.to_string()], response_timeout, want_v4);
+    // What a failure the client reports means: before the request is out,
+    // no address of the socket's family; after, no answer in time.
+    let mut sent = false;
+    let failure = |sent: bool| {
+        BootstrapError::Stun(if sent {
+            format!("timed out waiting for {stun_server}")
+        } else {
+            format!("no address for {stun_server}")
+        })
+    };
+    let mut pending: VecDeque<Out> = client.begin(mono()).into();
     let mut buf = [0u8; 2048];
-    let deadline = tokio::time::Instant::now() + response_timeout;
-    let mut rto = STUN_INITIAL_RTO;
-    let mut resend_at = tokio::time::Instant::now() + rto;
-    let mut rejected = 0u64;
-    let mut last_unexpected = None;
     loop {
-        let wake = resend_at.min(deadline);
-        let (len, remote) = match tokio::time::timeout_at(wake, udp.recv_from(&mut buf)).await {
-            Ok(Ok(received)) => received,
-            Ok(Err(_)) => break,
-            Err(_) if wake < deadline => {
-                // A failed retransmission leaves the earlier sends in flight.
-                let _ = udp.send_to(&request, addr).await;
-                rto *= 2;
-                resend_at = tokio::time::Instant::now() + rto;
-                continue;
+        while let Some(out) = pending.pop_front() {
+            match out {
+                Out::Resolve { host, port } => {
+                    let addrs: Vec<SocketAddr> =
+                        lookup_host((host.as_str(), port)).await?.collect();
+                    pending.extend(client.resolved(addrs, mono()));
+                }
+                Out::Send { dst, bytes } => {
+                    sent = true;
+                    if let Err(e) = udp.send_to(&bytes, dst).await {
+                        let out = client.send_failed(dst, e.to_string(), mono());
+                        if out.iter().any(|o| matches!(o, Out::Failed { .. })) {
+                            return Err(e.into());
+                        }
+                        pending.extend(out);
+                    }
+                }
+                Out::Succeeded { mapped, .. } => return Ok(Some(mapped)),
+                Out::Discarded {
+                    server,
+                    expected,
+                    rejected,
+                    last_unexpected,
+                } => {
+                    // One line per call rather than per datagram: a flooder
+                    // controls the rate.
+                    debug!(
+                        stun_server = %server,
+                        expected = %expected,
+                        rejected,
+                        last_unexpected = ?last_unexpected,
+                        "discarded STUN datagrams from unexpected sources"
+                    );
+                }
+                Out::Failed { .. } => return Err(failure(sent)),
             }
-            Err(_) => break,
+        }
+        let Some(wake) = client.deadline() else {
+            return Err(failure(sent));
         };
-        if remote != addr {
-            rejected += 1;
-            last_unexpected = Some(remote);
-            continue;
-        }
-        if let Some(mapped) = parse_stun_binding_success(&buf[..len], &txn_id) {
-            return Ok(Some(mapped));
+        let wake = tokio::time::Instant::from_std(wake.into());
+        match tokio::time::timeout_at(wake, udp.recv_from(&mut buf)).await {
+            Ok(Ok((len, src))) => pending.extend(client.datagram(src, &buf[..len], mono())),
+            Ok(Err(_)) => pending.extend(client.recv_error(mono())),
+            Err(_) => pending.extend(client.timeout(mono())),
         }
     }
-    // One line per call rather than per datagram: a flooder controls the rate.
-    if rejected > 0 {
-        debug!(
-            stun_server = %stun_server,
-            expected = %addr,
-            rejected,
-            last_unexpected = ?last_unexpected,
-            "discarded STUN datagrams from unexpected sources"
-        );
-    }
-    Err(BootstrapError::Stun(format!(
-        "timed out waiting for {}",
-        stun_server
-    )))
 }
 
-async fn resolve_udp_target(
-    host: &str,
-    port: u16,
-    want_v4: bool,
-) -> Result<Option<SocketAddr>, BootstrapError> {
-    let normalized_host = host
-        .strip_prefix('[')
-        .and_then(|trimmed| trimmed.strip_suffix(']'))
-        .unwrap_or(host);
-
-    if let Ok(ip) = normalized_host.parse::<IpAddr>() {
-        return Ok(pick_family(
-            std::iter::once(SocketAddr::new(ip, port)),
-            want_v4,
-        ));
-    }
-    let results = lookup_host((normalized_host, port)).await?;
-    Ok(pick_family(results, want_v4))
+/// The monotonic reading the STUN client's deadlines are on: tokio's clock,
+/// as the pump reads it.
+fn mono() -> HostInstant {
+    HostInstant::from(tokio::time::Instant::now().into_std())
 }
 
 /// The local candidate addresses to offer for a socket: those of its family.
@@ -284,14 +287,6 @@ fn bound_addr<A: std::net::ToSocketAddrs>(bind_addr: A) -> Option<IpAddr> {
         .and_then(|socket| socket.local_addr())
         .ok()
         .map(|local_addr| local_addr.ip())
-}
-
-fn random_txn_id() -> [u8; 12] {
-    let mut txn_id = [0u8; 12];
-    for byte in &mut txn_id {
-        *byte = rand::random::<u8>();
-    }
-    txn_id
 }
 
 #[cfg(test)]

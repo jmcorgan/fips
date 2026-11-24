@@ -63,6 +63,10 @@ impl From<super::machine::error::Error> for BootstrapError {
             Error::Nostr(reason) => BootstrapError::Nostr(reason),
             Error::EventParse(reason) => BootstrapError::EventParse(reason),
             Error::MissingAdvert(npub) => BootstrapError::MissingAdvert(npub),
+            Error::InvalidPeerNpub { npub, reason } => {
+                BootstrapError::InvalidPeerNpub { npub, reason }
+            }
+            Error::Replay(session) => BootstrapError::Replay(session),
         }
     }
 }

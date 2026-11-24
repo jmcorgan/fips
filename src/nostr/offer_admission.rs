@@ -1,64 +1,39 @@
-//! Per-npub admission control for inbound traversal offers.
+//! Per-npub admission control for inbound traversal offers, shared by the
+//! signal task and the offers it spawns.
 //!
-//! The intake path used to hold a single global semaphore sized by
-//! `max_concurrent_incoming_offers`, acquired before any identity check, so
-//! one sender could hold every slot and deny traversal onboarding to every
-//! other peer. This type takes a per-npub permit and a global permit
-//! together, so a single npub can occupy at most its own allowance.
-//!
-//! **What this does not fix.** The global pool stays exhaustible. Nostr
-//! identities are free to generate and the signal subscription carries no
-//! author restriction, so an attacker willing to run
-//! `ceil(global_limit / per_sender_limit)` throwaway npubs still saturates
-//! the pool at an unchanged total offer rate, and an honest peer still gets
-//! the same drop. What the per-npub allowance buys is that one identity can
-//! no longer do it alone, and that the refusal a spamming sender receives is
-//! distinguishable in the log from genuine saturation. A defence that raises
-//! the attacker's cost in more than keypairs would have to price the offer
-//! itself, which is a larger change than this one.
-//!
-//! **Lock discipline, which the correctness of the map bound rests on.**
-//! `try_admit` does the prune, the map lookup and both permit acquisitions
-//! under one `std::sync::Mutex` and never awaits inside it. The prune uses
-//! `Arc::strong_count` as an exact idle test: an `OwnedSemaphorePermit` owns
-//! an `Arc<Semaphore>`, so a count of 1 means the map holds the only
-//! reference and no permit for that npub is outstanding. Moving
-//! `try_acquire_owned` outside the lock breaks this — a concurrent prune
-//! could evict an entry whose permit was still live, and the next offer from
-//! that npub would build a fresh semaphore and over-admit. No test in this
-//! module catches that rearrangement, so it has to be preserved by reading.
+//! The counts and the decisions are the machine's
+//! (`machine::traversal::admission`); this wraps them in one
+//! `std::sync::Mutex`, held for one call and never across an `.await`, and
+//! hands out an [`OfferPermit`] that gives its slot back when it is dropped,
+//! so the spawned handling of an offer releases its slot however it ends.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+pub(super) use super::machine::traversal::admission::AdmissionReject;
+use super::machine::traversal::admission::{Admission, SlotId};
 
-/// Why an inbound offer was refused a slot.
-///
-/// The two classes stay apart because they are different operator stories:
-/// one says the node is saturated, the other says a single sender is over its
-/// allowance and everyone else is unaffected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum AdmissionReject {
-    /// The sender already holds its whole per-npub allowance.
-    SenderFull,
-    /// The node is at `max_concurrent_incoming_offers` across all senders.
-    GlobalFull,
+/// A granted admission. Its slot is given back on drop, so the caller only
+/// has to keep this alive for as long as the offer is being processed.
+pub(super) struct OfferPermit {
+    admission: Arc<Mutex<Admission>>,
+    slot: SlotId,
 }
 
-/// A granted admission. Both permits release on drop, so the caller only has
-/// to keep this alive for as long as the offer is being processed.
-pub(super) struct OfferPermit {
-    _sender: OwnedSemaphorePermit,
-    _global: OwnedSemaphorePermit,
+impl Drop for OfferPermit {
+    fn drop(&mut self) {
+        lock(&self.admission).release(self.slot);
+    }
+}
+
+/// The admission, under its lock.
+fn lock(admission: &Mutex<Admission>) -> std::sync::MutexGuard<'_, Admission> {
+    admission.lock().expect("offer-admission mutex poisoned")
 }
 
 /// Admits inbound offers against a per-sender allowance nested inside a
 /// global bound.
 pub(super) struct OfferAdmission {
-    global: Arc<Semaphore>,
-    per_sender: Mutex<HashMap<String, Arc<Semaphore>>>,
-    per_sender_limit: usize,
+    admission: Arc<Mutex<Admission>>,
 }
 
 impl OfferAdmission {
@@ -66,58 +41,27 @@ impl OfferAdmission {
     /// sender npub by `per_sender_limit`.
     pub(super) fn new(global_limit: usize, per_sender_limit: usize) -> Self {
         Self {
-            global: Arc::new(Semaphore::new(global_limit)),
-            per_sender: Mutex::new(HashMap::new()),
-            per_sender_limit,
+            admission: Arc::new(Mutex::new(Admission::new(
+                global_limit,
+                per_sender_limit,
+                fips_core::utils::hash::KeyedHasher::new::<crate::identity::OsEntropy>(),
+            ))),
         }
     }
 
     /// Try to take one slot for `npub`, or say which bound refused it.
-    ///
-    /// The per-sender check runs first so a spamming sender is turned away
-    /// without ever touching the global pool, and therefore causes no churn
-    /// there.
     pub(super) fn try_admit(&self, npub: &str) -> Result<OfferPermit, AdmissionReject> {
-        let mut map = self
-            .per_sender
-            .lock()
-            .expect("offer-admission mutex poisoned");
-
-        // Drop entries with no outstanding permit. Every live per-sender
-        // permit implies a live global permit, so at most `global_limit`
-        // senders survive a prune and the map is bounded by
-        // `global_limit + 1` after the insert below. A benign race with a
-        // permit dropping concurrently can only retain an idle entry for one
-        // more round, or drop an entry all of whose permits are already free;
-        // neither over-admits.
-        map.retain(|_, sem| Arc::strong_count(sem) > 1);
-
-        let sem = map
-            .entry(npub.to_string())
-            .or_insert_with(|| Arc::new(Semaphore::new(self.per_sender_limit)))
-            .clone();
-        let sender = sem
-            .try_acquire_owned()
-            .map_err(|_| AdmissionReject::SenderFull)?;
-        let global = self
-            .global
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| AdmissionReject::GlobalFull)?;
-
+        let slot = lock(&self.admission).try_admit(npub)?;
         Ok(OfferPermit {
-            _sender: sender,
-            _global: global,
+            admission: Arc::clone(&self.admission),
+            slot,
         })
     }
 
     /// How many sender npubs the map currently holds.
     #[cfg(test)]
     pub(super) fn tracked_senders(&self) -> usize {
-        self.per_sender
-            .lock()
-            .expect("offer-admission mutex poisoned")
-            .len()
+        lock(&self.admission).tracked_senders()
     }
 }
 

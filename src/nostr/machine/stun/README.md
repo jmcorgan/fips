@@ -4,10 +4,11 @@ The STUN pieces that read no socket: the codec, the binding exchange as a
 machine, and the choice of which of this host's own addresses a traversal
 offers as same-LAN candidates. The rendezvous machine runs the advert's
 public-address observation through `client.rs`, and the shell's sockets
-carry its datagrams. The traversal flows' exchange is still the shell's
-`stun.rs`, which sends the binding request, waits for the answer, resolves
-the server, draws the transaction id, and reads the host's interfaces and
-probe sockets, calling in here for the rest.
+carry its datagrams. The traversal flows still run their exchange from the
+shell's `stun.rs`, whose `perform_stun` drives the same client for one
+server on the traversal socket (the lookup, the sends and the receives
+against the client's deadlines), and which reads the host's interfaces and
+probe sockets, calling in here for the selection.
 
 ## Files
 
@@ -19,7 +20,7 @@ probe sockets, calling in here for the rest.
 - `client.rs`: `Observation`, one STUN observation over a list of servers,
   as a machine. Per server it parses the URL, resolves the host (an IP
   literal needs no lookup) and picks the first address of the socket's
-  family (`pick_family`, which the shell's `stun.rs` also uses), then sends
+  family (`pick_family`, which the shell's `stun.rs` tests also use), then sends
   a binding request with a fresh transaction id from the caller's entropy,
   retransmitting from 500 ms, doubling, until the server's deadline. It
   believes a binding success only from the exact address it asked, counts

@@ -6,6 +6,7 @@ use alloc::string::ToString;
 use super::error::Error;
 use super::types::{PunchPacket, PunchPacketKind};
 
+pub mod attempt;
 pub mod plan;
 pub mod refusal;
 

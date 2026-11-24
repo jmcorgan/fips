@@ -79,9 +79,10 @@ paths only:
   stale-advert refetch (`ResetStreak`);
 - the traversal half keeps its own clone of the relay client and of the
   node's `Arc<NodeSigner>`;
-- the traversal STUN exchange (`stun.rs`) is the async one it always was;
-  the advert's public-address observation is the machine's, through the
-  STUN client in `machine/stun/client.rs`.
+- the traversal STUN exchange (`stun.rs`'s `perform_stun`) is a short
+  async driver over the machine's STUN client (`machine/stun/client.rs`)
+  for one server, on the traversal socket; the advert's public-address
+  observation is the machine's, through the same client.
 
 ## Sockets
 

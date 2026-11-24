@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use nostr::event::{Event, Kind};
-use nostr::filter::Filter;
 use nostr::key::{PublicKey, SecretKey};
 use nostr::nips::nip19::ToBech32;
 use nostr::types::{RelayUrl, Timestamp};
@@ -23,14 +22,18 @@ use super::handoff::EstablishedTraversal;
 use super::log::FirstEvent;
 use super::machine::NodeSigner;
 use super::machine::adverts::assemble::AdvertTransportSnapshot;
+use super::machine::error::Error as MachineError;
 #[cfg(test)]
 use super::machine::event::advert as advert_codec;
+#[cfg(test)]
 use super::machine::event::inbox as inbox_codec;
 use super::machine::params::Params;
 use super::machine::rendezvous::{Input, PeerKey, Rendezvous};
 use super::machine::traversal::election::{Election, OfferDisposition, SeenDecision};
 use super::machine::traversal::failures::FailureState;
 use super::machine::traversal::gate::SignalGate;
+use super::machine::traversal::rules::{self, RejectReason};
+pub(super) use super::machine::traversal::rules::{canonical_npub, short_id, short_npub};
 use super::offer_admission::{AdmissionReject, OfferAdmission};
 use super::pump::{self, Inbox, Msg, Pump, ask};
 #[cfg(test)]
@@ -59,46 +62,15 @@ use crate::config::{NostrRendezvousConfig, PeerConfig};
 use crate::time::{HostClock, HostInstant};
 use fips_core::time::Clock;
 
-/// The longest `sessionId` or `nonce`, in bytes, an inbound traversal offer
-/// may carry. The seen-sessions memory keys on the session id, and the nonce
-/// is copied into the answer. Ours are about 30 bytes (`traversal::nonce`).
-const MAX_OFFER_FIELD_BYTES: usize = 128;
-
-/// Refuse an inbound offer whose session id or nonce is longer than
-/// `MAX_OFFER_FIELD_BYTES`. An honest peer never sends one.
+/// Refuse an inbound offer whose session id or nonce is longer than the
+/// machine's bound (`rules::check_offer_bounds`).
 fn check_offer_bounds(offer: &TraversalOffer) -> Result<(), BootstrapError> {
-    if offer.session_id.len() > MAX_OFFER_FIELD_BYTES || offer.nonce.len() > MAX_OFFER_FIELD_BYTES {
-        return Err(BootstrapError::Protocol("oversized-offer".to_string()));
-    }
-    Ok(())
+    Ok(rules::check_offer_bounds(offer).map_err(MachineError::from)?)
 }
 
-/// The key `npub` names, and its canonical npub: the text the advert cache,
-/// the failure state, the active-initiator set and traversal signals use for
-/// that key. `npub` may be in any letter case; text that is not a NIP-19 npub
-/// is refused, as `crate::decode_npub` refuses it.
+/// The key `npub` names, and its canonical npub (`rules::peer_key`).
 fn peer_key(npub: &str) -> Result<(PublicKey, String), BootstrapError> {
-    let invalid = |reason: String| BootstrapError::InvalidPeerNpub {
-        npub: npub.to_string(),
-        reason,
-    };
-    let key = crate::decode_npub(npub).map_err(|e| invalid(e.to_string()))?;
-    let pubkey = PublicKey::from_slice(&key.serialize()).map_err(|e| invalid(e.to_string()))?;
-    Ok((pubkey, crate::encode_npub(&key)))
-}
-
-/// The canonical npub for `npub`, or `npub` as written when it names no key.
-/// State keyed by npub is keyed by this, so every spelling of one key shares
-/// one entry.
-fn canonical_npub(npub: &str) -> String {
-    peer_key(npub).map_or_else(|_| npub.to_string(), |(_, canonical)| canonical)
-}
-
-pub(super) fn short_npub(npub: &str) -> String {
-    npub.strip_prefix("npub1")
-        .filter(|s| s.len() >= 8)
-        .map(|s| format!("npub1{}..{}", &s[..4], &s[s.len() - 4..]))
-        .unwrap_or_else(|| npub.to_string())
+    Ok(rules::peer_key(npub)?)
 }
 
 /// Which of its two feeds the notify loop was reading when it ended, as the
@@ -159,28 +131,13 @@ enum Resend {
 }
 
 /// Whether an inbound-offer rejection belongs to a class that cannot be
-/// explained by ordinary relay delivery lag, and therefore warrants a warning
-/// on a node running at the default log level. A stale offer is benign and is
-/// deliberately excluded.
+/// explained by ordinary relay delivery lag (`RejectReason::adversarial`).
 pub(super) fn adversarial_offer_reject(err: &BootstrapError) -> bool {
     matches!(
         err,
         BootstrapError::Protocol(reason)
-            if reason == "future-dated-offer"
-                || reason == "identity-mismatch"
-                || reason == "invalid-offer"
-                || reason == "oversized-offer"
+            if RejectReason::from_code(reason).is_some_and(|r| r.adversarial())
     )
-}
-
-/// Shorten a peer-supplied identifier for logging.
-///
-/// Truncates on a character boundary rather than a byte index. The input is a
-/// session id taken straight from a remote party's JSON with no charset
-/// validation, and slicing by byte offset panics when the boundary falls
-/// inside a multi-byte character.
-pub(super) fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
 }
 
 /// Record, once per planning call, the punch candidates a peer named that we
@@ -246,9 +203,6 @@ pub(super) fn endpoint_summary(endpoints: &[OverlayEndpointAdvert]) -> String {
         .collect::<Vec<_>>()
         .join(",")
 }
-
-/// How far back a peer's kind 10050 inbox relay list is looked up.
-pub(super) const INBOX_LOOKBACK: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// The node's handle on Nostr rendezvous.
 ///
@@ -681,11 +635,12 @@ impl TraversalShared {
     }
 
     fn punch_hint(&self) -> PunchHint {
-        PunchHint {
-            start_at_ms: now_ms() + self.config.punch_start_delay_ms,
-            interval_ms: self.config.punch_interval_ms,
-            duration_ms: self.config.punch_duration_ms,
-        }
+        rules::punch_hint(
+            now_ms(),
+            self.config.punch_start_delay_ms,
+            self.config.punch_interval_ms,
+            self.config.punch_duration_ms,
+        )
     }
 
     async fn connect_peer(
@@ -808,10 +763,7 @@ impl TraversalShared {
                 observed_skew_ms,
                 answer_received_at,
             );
-            let abs_skew = observed_skew_ms.unsigned_abs();
-            // 30s threshold: well below the 60s SKEW_TOLERANCE wall but loud
-            // enough to surface a real clock problem on either side.
-            if abs_skew >= 30_000 {
+            if rules::skew_is_significant(observed_skew_ms) {
                 debug!(
                     peer = %peer_short,
                     session = %short_id(&offer.session_id),
@@ -1176,48 +1128,31 @@ impl TraversalShared {
     }
 
     /// The relays `target_pubkey`'s newest kind 10050 inbox relay list names,
-    /// looked up on our own DM and advert relays among lists no older than
-    /// `INBOX_LOOKBACK`. Falls back to our `dm_relays` when the fetch fails or
-    /// no non-empty list is found.
+    /// looked up on our own DM and advert relays (`rules::inbox_lookup`).
+    /// Falls back to our `dm_relays` when the fetch fails or no non-empty
+    /// list is found (`rules::inbox_or_fallback`).
     async fn find_recipient_inbox_relays(
         &self,
         target_pubkey: PublicKey,
     ) -> Result<Vec<String>, BootstrapError> {
-        let mut lookup_relays = self.config.dm_relays.clone();
-        for relay in &self.config.advert_relays {
-            if !lookup_relays.contains(relay) {
-                lookup_relays.push(relay.clone());
-            }
-        }
+        let (lookup_relays, filter) = rules::inbox_lookup(
+            target_pubkey,
+            &self.config.dm_relays,
+            &self.config.advert_relays,
+            now_ms(),
+        );
         let events = self
             .client
-            .fetch(
-                lookup_relays,
-                Filter::new()
-                    .author(target_pubkey)
-                    .kind(Kind::InboxRelays)
-                    .since(Timestamp::from(
-                        (now_ms() / 1000).saturating_sub(INBOX_LOOKBACK.as_secs()),
-                    )),
-                Duration::from_millis(1500),
-            )
+            .fetch(lookup_relays, filter, rules::INBOX_FETCH_TIMEOUT)
             .await;
-        let events = match events {
-            Ok(events) => events,
-            Err(err) => {
-                debug!(error = %err, "failed to fetch inbox relays, falling back to configured DM relays");
-                return Ok(self.config.dm_relays.clone());
-            }
-        };
-        let newest =
-            super::machine::adverts::ingest::newest_by_author(events.iter(), target_pubkey);
-        if let Some(event) = newest {
-            let relays = inbox_relays(event);
-            if !relays.is_empty() {
-                return Ok(relays);
-            }
+        if let Err(err) = &events {
+            debug!(error = %err, "failed to fetch inbox relays, falling back to configured DM relays");
         }
-        Ok(self.config.dm_relays.clone())
+        Ok(rules::inbox_or_fallback(
+            events.as_deref(),
+            target_pubkey,
+            &self.config.dm_relays,
+        ))
     }
 
     /// Log one planning call's refused punch candidates, giving at most one
@@ -1610,58 +1545,21 @@ pub(super) fn inbox_list(signer: &NodeSigner, relays: &[String]) -> Result<Event
 /// Both the NIP-17 `["relay", url]` form and the bare `["r", url]` form are
 /// read: every deployed FIPS node publishes the `r` form. An `r` tag with a
 /// read or write marker is a NIP-65 entry and has no meaning here.
+#[cfg(test)]
 pub(super) fn inbox_relays(event: &Event) -> Vec<String> {
     inbox_codec::inbox_relays(event)
 }
 
-/// Retain only the candidates the client pool actually holds.
-///
-/// The relay client refuses the whole send if any single URL is outside the
-/// pool, so a signal addressed to a peer's advertised relays fails
-/// entirely on one relay we are not configured with. Filtering first turns that
-/// into a send to the relays we share.
-///
-/// Comparison is on the normalized `RelayUrl` rather than the raw string, because
-/// the pool is keyed that way: a candidate spelled `wss://relay.example/` matches
-/// a configured `wss://relay.example`. Order is preserved, candidates that fail
-/// to parse are dropped, and duplicates that normalize alike are collapsed.
-fn retain_pooled_relays(candidates: &[String], pool: &HashSet<RelayUrl>) -> Vec<String> {
-    let mut seen: HashSet<RelayUrl> = HashSet::new();
-    let mut usable = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let Ok(url) = RelayUrl::parse(candidate) else {
-            continue;
-        };
-        if pool.contains(&url) && seen.insert(url.clone()) {
-            usable.push(url.to_string());
-        }
-    }
-    usable
-}
-
-/// Choose the relays a traversal signal for one peer should be sent to.
-///
-/// The candidates are the peer's NIP-17 inbox relays, then the relays its advert
-/// nominates for signaling, then our own DM relays — remote-supplied first, ours
-/// last, so a peer's preference is honored where we can act on it. The result is
-/// whatever survives [`retain_pooled_relays`].
-///
-/// This is the whole decision, kept synchronous so it can be exercised without a
-/// relay client: the caller's only job is to supply the fetched inbox list and
-/// the pool.
+/// Choose the relays a traversal signal for one peer should be sent to, from
+/// those the client pool holds (`rules::signal_relays`).
 pub(super) fn signal_relays(
     inbox: &[String],
     advert_signal: Option<&[String]>,
     dm_relays: &[String],
     pool: &HashSet<RelayUrl>,
 ) -> Vec<String> {
-    let mut merged: Vec<String> = inbox.to_vec();
-    for relay in advert_signal.unwrap_or_default().iter().chain(dm_relays) {
-        if !merged.contains(relay) {
-            merged.push(relay.clone());
-        }
-    }
-    retain_pooled_relays(&merged, pool)
+    let pool: BTreeSet<RelayUrl> = pool.iter().cloned().collect();
+    rules::signal_relays(inbox, advert_signal, dm_relays, &pool)
 }
 
 #[cfg(test)]

@@ -1,10 +1,9 @@
 # src/nostr/machine/punch
 
 The punch packet and the decisions around a punch attempt. No sockets and no
-timers: the shell's `traversal.rs` plans the attempt through `plan.rs`, sends
-and receives the datagrams, and calls in here to build and read them. The
-attempt's own timing (the probe rounds and the settle window for a remapped
-source) stays in the shell with the socket loop.
+clocks: the shell's `traversal.rs` plans the attempt through `plan.rs` and
+drives the attempt machine in `attempt.rs` on the traversal socket, sending
+what it asks and handing it what arrives with the host's monotonic clock.
 
 ## Files
 
@@ -15,6 +14,17 @@ source) stays in the shell with the socket loop.
   `build_punch_packet`, `parse_punch_packet` and `classify_punch_packet`,
   which tells the punch loop whether a datagram is to be ignored, acked or
   taken as the peer's answer.
+- `attempt.rs`: `Attempt`, one punch attempt as a machine (FRC-1601
+  Section 6.3). It converts the punch hint's start, in Unix time, once to a
+  monotonic deadline, then probes every planned target once a round, every
+  `max(interval, 20 ms)`, until the start plus `max(duration, 1 ms)`. It
+  reads a datagram in the FRC's order: a source that is no planned target's
+  address is refused and counted before anything else, a probe is acked, an
+  exact target is adopted at once, and a target's address on another port
+  is held for the 250 ms settle (`PUNCH_SETTLE`), a later one replacing it.
+  It ends with `Adopt` or, at its timeout, `TimedOut`, and keeps a `Tally` of
+  the refused sources, superseded holds and receive errors for the one line
+  the shell logs at the end.
 - `plan.rs`: punch planning. It vets each peer-supplied candidate once
   (unparsable text, port 0, never-routable ranges, private addresses off our
   interface prefixes), bounds the candidate list and the target list, pairs
