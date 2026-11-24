@@ -1,15 +1,17 @@
 //! The unit tests of `../parity.rs` and its trace, `../parity.txt`, attached
 //! from that file with `#[path]`: the trace reads back as written, every script names only what it holds,
 //! scripts and blocks match one to one, and a `core` line names a listed
-//! cause. Each test plants its own bad input and shows it is found.
+//! cause. Each of those plants its own bad input and shows it is found. And
+//! `NAMED_STARTS` is the numbers of the starts the settlement tests define,
+//! a list whose break is a scratch edit (characterisation, `faults.rs`).
 
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use super::{
-    Cause, Mark, SCRIPTS, Script, Setting, Step, TRACE, Transport, differs, expected, line, read,
-    strays, unmatched,
+    Cause, Mark, NAMED_STARTS, SCRIPTS, Script, Setting, Step, TRACE, Transport, differs, expected,
+    line, read, strays, unmatched,
 };
 
 /// The committed trace's lines that are not comments or blank, as written.
@@ -287,4 +289,22 @@ fn a_core_line_names_a_listed_cause() {
             "nor does the trace it is planted in: {planted:?}"
         );
     }
+}
+
+/// `NAMED_STARTS` is the numbers of the named starts the settlement tests
+/// define, each once and in order, so the root crate's map of the starts it
+/// runs reads the list the core has.
+#[test]
+fn the_named_start_numbers_are_the_settlement_tests_starts() {
+    let mut defined: Vec<u8> = crate::proto::settle::tests::starts::starts()
+        .iter()
+        .map(|s| s.number)
+        .collect();
+    defined.sort_unstable();
+    defined.dedup();
+    assert_eq!(
+        NAMED_STARTS,
+        defined.as_slice(),
+        "defect: the named start numbers differ from the starts the settlement tests define"
+    );
 }

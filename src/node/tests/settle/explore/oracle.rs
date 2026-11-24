@@ -135,6 +135,16 @@ fn every_named_start_keeps_its_properties_on_a_real_pair_on_tcp_with_multipath_o
     properties(Medium::Tcp, true);
 }
 
+#[test]
+fn every_named_start_keeps_its_properties_on_a_real_pair_on_mixed_transports() {
+    properties(Medium::Mixed, false);
+}
+
+#[test]
+fn every_named_start_keeps_its_properties_on_a_real_pair_on_mixed_transports_with_multipath_on() {
+    properties(Medium::Mixed, true);
+}
+
 #[cfg(ble_available)]
 #[test]
 fn every_named_start_keeps_its_properties_on_a_real_pair_on_ble() {

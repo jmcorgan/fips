@@ -782,6 +782,11 @@ pub const SCRIPTS: &[Script] = &[
     },
 ];
 
+/// The numbers of the settlement tests' named starts, each once, in order.
+/// The root crate's real-node explorer runs each or says why not; a test
+/// here holds the list to the starts the settlement tests define.
+pub const NAMED_STARTS: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 26];
+
 /// The named starts of the settlement tests that no script runs, each with
 /// why: what it needs that no step names, or that no mark shows.
 pub const UNSHARED: &[(&str, &str)] = &[

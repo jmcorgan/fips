@@ -239,7 +239,10 @@ release build, nor the root crate's `test-hooks` build.
   line may name (`Cause`); the reader of `parity.txt` and its checks; and
   the link rekey and path settings a node derives at the default
   configuration at each multipath setting (`rekey`, `path`), which a root
-  test (`src/node/settle/tests/defaults.rs`) ties to the node's own.
+  test (`src/node/settle/tests/defaults.rs`) ties to the node's own; and
+  the named starts' numbers (`NAMED_STARTS`), which a test here holds to
+  the starts `tests/starts.rs` defines and the root crate's real-node
+  explorer maps one by one.
   Declared under `#[cfg(any(test, feature = "test-hooks"))]`, so the root
   crate's tests read it and no normal or release build holds it.
 - `parity.txt`: the trace both sides compare with, `include_str!`d by

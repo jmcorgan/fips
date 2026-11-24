@@ -2049,6 +2049,10 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
         "the_aged_move_candidate_explored_shows_exactly_the_breaches_recorded_for_it",
         "the record of a candidate rule's explored outcome, every breach and convergence in candidates.txt, which reds at any change to it either way; no switch is a defect of the candidate, and a row would rerun some minutes of exploration per child, so the breaks a row would name are run by hand and logged with the commit",
     ),
+    (
+        "the_named_start_numbers_are_the_settlement_tests_starts",
+        "a list held equal to the starts the settlement tests define, which no switch of the node or the core changes; its break, a number added to the list, is a scratch edit run by hand and logged with the commit",
+    ),
 ];
 
 /// The switches in `all` that no row of `rows` names.

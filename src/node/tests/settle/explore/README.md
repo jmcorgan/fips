@@ -27,11 +27,15 @@ helper that seeds a handshake machine by hand.
   - `Medium`: the transport every node of a world runs: the in-process
     loopback, TCP on 127.0.0.1, or the BLE transport over the mock radio
     (`#[cfg(ble_available)]`, since only those builds have the BLE
-    transport).
+    transport); or `Mixed`, two transports per node, the loopback as
+    transport 0, standing in for UDP, and TCP on 127.0.0.1 as transport 1,
+    whose packets are forwarded into the loopback's receive channel, so the
+    node has one channel as the daemon does.
   - `World::new(medium, count, on)`: `count` nodes with multipath set as
     `on`, sorted so node 0 has the smallest node address. A loopback world
     can take more transports per node (`add_transport`), each an address of
-    its own delivering to the node's one receive channel.
+    its own delivering to the node's one receive channel; `transports` and
+    `ends` give each node's transports, ids and own addresses.
   - The steps: `dial` (`initiate_connection`), `connected` (the node polls
     its pending connects until none is left), `deliver`, `lose`,
     `duplicate` and `swap` (one held msg1 or msg2, named by its node, class
@@ -59,8 +63,12 @@ helper that seeds a handshake machine by hand.
     restart and a redial each do what their step says; a dial on a second
     loopback transport runs on it; a pair on a frozen clock holds one
     session while time passes a second at a time past the 30 s link-dead
-    timeout, a heal after each second. Each runs with multipath off and, as
-    its `_with_multipath_on` sibling, on.
+    timeout, a heal after each second; a dial on a mixed world's TCP
+    transport runs on it, each handshake packet handed over only at its
+    step; and in a mixed world a held TCP msg1 holds back only frames from
+    its own source, so the loopback's heartbeats keep the pair on its
+    session past link-dead. Each runs with multipath off and, as its
+    `_with_multipath_on` sibling, on.
   - For the shared schedules: `packets` gives what a node holds of one
     class, so a step can name a packet by what it carries; `clear` loses
     everything in flight; `hold` keeps established frames held too, until
@@ -102,20 +110,24 @@ helper that seeds a handshake machine by hand.
   that test, while a panic on the walk's thread is not taken for the test
   thread's own by `testing/lib/test-verdict.sh` (`parity.rs` names its
   threads the same way); `parallel` runs a job per start and order that way
-  and gathers what they found. Its tests: a walk's thread is named for its
-  test; the map covers every pinned defect and every core start number;
+  and gathers what they found. `WALKED` lists the media the explorer walks:
+  the loopback, TCP, the mixed world and, where it builds, BLE. Its tests:
+  a walk's thread is named for its test; the map covers every pinned defect
+  and every core start number (`fips-core`'s
+  `proto::settle::parity::NAMED_STARTS`, which a core test holds to the
+  core's starts), a start counting as run only on a medium in `WALKED`;
   every start reaches its target: its scripted path runs to its end on its
-  transport, and the explorer walks the number of paths the start states,
-  in both orders and at both settings; and no more than `WALKS_AT_ONCE`
-  walks run at once.
+  medium, and the explorer walks the number of paths the start states, in
+  both orders and at both settings, on every medium in `WALKED`; and no
+  more than `WALKS_AT_ONCE` walks run at once.
 - `oracle.rs`: what is checked at each leaf (`judge`), and the explorer's
-  tests over the starts: every path of every start keeps its properties, per
-  transport and setting; each pinned defect the map gives a start is found
-  there (start 9's three). And the crossing with a
-  decrypt-worker pool (`pooled`): every path heals to one session per pair
-  with every node's current session held by its workers, the session a
-  crossing moves its peer onto among them; and the same on each path of the
-  crossing whose workers lag (`lagging`) that drops a msg1.
+  tests over the starts: every path of every start keeps its properties,
+  per medium (loopback, TCP, mixed, BLE) and setting; each pinned defect
+  the map gives a start is found there (start 9's three). And the crossing
+  with a decrypt-worker pool (`pooled`): every path heals to one session
+  per pair with every node's current session held by its workers, the
+  session a crossing moves its peer onto among them; and the same on each
+  path of the crossing whose workers lag (`lagging`) that drops a msg1.
 - `parity.rs`: the schedules `fips-core` shares with its settlement world
   (`proto::settle::parity`) run on a real pair, each end's mark after each
   step compared with the node's lines of the committed trace, at each
@@ -175,14 +187,24 @@ has one scripted path and up to `3n` varied ones; a swap is not a path where
 no second packet of its class is held.
 
 Every start runs in both address orders and at both settings. The starts
-that run are 1 to 6, 8, 9 and 11, each on the transport the core's start
+that run are 1 to 6, 8, 9, 11 and 26, each on the transport the core's start
 names (UDP's is the loopback's; start 2's second transport and start 9's
 second addresses are a second loopback transport; start 4 only where the BLE
-transport builds). Starts 5 and 6 dial twice before either msg1 is read, the
+transport builds; start 26, which dials on UDP and then TCP, on the mixed
+world). Starts 5 and 6 dial twice before either msg1 is read, the
 shape of `settle::crossing`'s late second dial: the core's start 5 dials the
 second time after the first completes, and on a real pair the dialer's
 frames would then reach the responder before the second msg1, which the
 start is not about. `NOT_RUN` gives the reason for each other start.
+
+Start 26 dials on the loopback, lets the pair settle and 2 s pass, then
+dials the peer's TCP address; its script opens that connection and hands
+over the msg1 and the answer. Between two nodes of this tree the responder
+answers the second dial as a redial and the dialer moves onto its second
+dial at the msg2, so the redial is promoted at the dialer's first frame
+over TCP. A deployed release's dialer, which keeps its first address and
+never moves at the msg2, is not reached here: `../legacy_dialer.rs` makes
+a node send as one.
 
 ## The explorer's reach
 
@@ -199,12 +221,23 @@ node began answering a fresh msg1 from a held, heard peer off its link as a
 redial (2026-11-18): node 1 answers node 0's dial on the second transport
 with a msg2 from a pending redial leg, where it had refused that msg1, so at
 step 3 node 0 holds two msg2s, its rekey's answer and the redial's, and a
-swap applies there as well as at step 0. That makes 168 paths per setting
-with the BLE transport and 150 without. Every start and order runs on a thread of
-its own, each with its own runtime, and so its own test clock: a loopback
-start takes 3 to 11 s, a TCP or BLE crossing 23 s, and the whole module 23 s
-of wall time, inside the default lane's 120 s, in nextest's `node-synthetic`
-group with the rest of `settle`. Nothing here is `long-running`.
+swap applies there as well as at step 0.
+
+Start 26, added 2026-11-24 on the mixed world, walks 5 paths in either
+order and at either setting (two handshake steps, no swap applies). With
+start 9's and start 26's paths, that makes 178 paths per setting with the
+BLE transport and 160 without.
+
+Every start and order runs on a thread of its own, each with its own
+runtime, and so its own test clock. Measured 2026-11-09: a loopback start
+took 3 to 11 s, a TCP or BLE crossing 23 s, and the whole module 23 s of
+wall time. Measured 2026-11-24, with the reference-model test retired,
+start 9's defects pinned and the mixed world walked, at a one-minute load of
+11 to 16 on 12 cores: the whole module, 47 tests, took 47 to 49 s of wall
+time in three runs under `cargo test`, where it took 39 s before start 26
+and the mixed world. It runs inside the default lane's 120 s, in
+nextest's `node-synthetic` group with the rest of `settle`. Nothing here is
+`long-running`.
 
 ## How many walks run at once
 
@@ -314,17 +347,18 @@ the index it echoes, each handshake numbered in its dialer's life in the
 order its msg1 was first seen in flight. On BLE a connection opening opens
 both ends' dials, which share the pair's one connection.
 
-Run, on a build with the BLE transport: 18 scripts at multipath off and 20
-at on, the crossings of starts 1, 3 and 4 (UDP, TCP, BLE), start 5's and
+Run, on a build with the BLE transport: all 22 scripts at multipath off and
+24 at on, the crossings of starts 1, 3 and 4 (UDP, TCP, BLE), start 5's and
 start 6's late second dials, start 8's restart, start 18's BLE dials lost
 to the first dial's deadline (on only), an own rekey, the peer's rekey and a
-rekey after a TCP crossing, each in both address orders. Not run:
-`crossing-mixed`, start 2's crossing over UDP and TCP (and start 15's,
-the same schedule), and `redial-transport`, a second dial over TCP to a
-pair settled over UDP and answered as a redial, since a world's nodes
-share one medium (real nodes hold the redial in `roam_redial.rs`,
-`second_path_msg1.rs` and `crossed_dial.rs`, as `UNRUN`'s reason names);
-and every BLE script on a build without the BLE transport.
+rekey after a TCP crossing, and on the mixed world (`Medium::Mixed`, the
+loopback for UDP beside TCP) `crossing-mixed`, start 2's crossing over UDP
+and TCP (start 15's is the same schedule), and `redial-transport`, a second
+dial over TCP to a pair settled over UDP and answered as a redial; each in
+both address orders. A script's transport names the world's transport of
+the same index: in the mixed world, UDP is transport 0 and TCP is
+transport 1. Not run (`UNRUN` is empty): every BLE script on a build
+without the BLE transport, which leaves 20 at each setting.
 
 What the trace cannot show: a mark says whose dial an end's session came
 from, own or the peer's, not which of its own dials. So a dialer left on
@@ -375,6 +409,8 @@ the property tests', on start 1 with no pool.
   `advance`.
 - A node's receive loop, its periodic announces and its path tick between
   steps do not run. The world drives the node; it does not start it.
+- A mixed world's clock runs with real time, as a TCP world's does, and no
+  step restarts one of its nodes: no start that runs on it restarts.
 - A restart over TCP or BLE closes the old run's connections and waits until
   no other node holds one at the restarted node's address. A connection the
   other node accepted from the old run is keyed by the old run's port and is

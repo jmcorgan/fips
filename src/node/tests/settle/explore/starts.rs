@@ -291,6 +291,23 @@ const REKEYING: &[Step] = &[
 /// its dial's, node 0 reads node 1's dial and then the first answer.
 const CROSSING_REKEY: &[Step] = &[msg1(1, 0), msg1(1, 0), msg1(0, 0), msg2(0, 0)];
 
+/// Start 26: node 0 dials node 1 on transport 0 and the pair settles; 2 s
+/// later node 0 dials node 1's address on transport 1, as a deployed
+/// release dials a peer on each of its transports and the second dial
+/// trails the first. Run on a mixed world, where transport 0 stands in for
+/// UDP and transport 1 is TCP.
+const LATE_OTHER: &[Step] = &[
+    dial(0, 1, 0),
+    Step::Heal,
+    Step::Advance(2_000),
+    Step::Heal,
+    dial(0, 1, 1),
+];
+
+/// Start 26's script, the core's: the second dial's connection opens, node
+/// 1 reads its msg1 and node 0 the answer.
+const LATE_OTHER_SCRIPT: &[Step] = &[Step::Connected { node: 0 }, msg1(1, 0), msg2(0, 0)];
+
 /// Start 11: nodes 0 and 1 cross, and node 2 dials node 0.
 const THREE: &[Step] = &[dial(0, 1, 0), dial(1, 0, 0), dial(2, 0, 0)];
 
@@ -414,6 +431,17 @@ pub(super) fn starts() -> Vec<Start> {
             nodes: 3,
             ..s(11, "three nodes", Medium::Loopback, THREE, THREE_SCRIPT, 10)
         },
+        Start {
+            transports: 2,
+            ..s(
+                26,
+                "late second dial on another transport, heard",
+                Medium::Mixed,
+                LATE_OTHER,
+                LATE_OTHER_SCRIPT,
+                5,
+            )
+        },
     ];
     #[cfg(ble_available)]
     v.push(s(
@@ -465,7 +493,8 @@ pub(super) fn lagging() -> Start {
 }
 
 /// The core's named starts no real pair runs here, by number, each with its
-/// reason. With [`starts`] they cover every number from 1 to 14.
+/// reason. With [`starts`] they cover every number of the core's
+/// (`proto::settle::parity::NAMED_STARTS`).
 pub(super) const NOT_RUN: &[(u8, &str)] = &[
     (
         7,

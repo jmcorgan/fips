@@ -2,7 +2,8 @@
 //! of a schedule does to them.
 //!
 //! The nodes are real `Node`s on a real transport: the in-process loopback,
-//! TCP on 127.0.0.1, or the BLE transport over the mock radio. Each node's
+//! TCP on 127.0.0.1, or the BLE transport over the mock radio; or, in a
+//! mixed world, on two, the loopback and TCP side by side. Each node's
 //! receive channel is the test's, so nothing a node is sent reaches it until
 //! the world hands it over. Every dial goes through `initiate_connection`,
 //! the path a configured peer takes; time moves by `crate::time::advance`.
@@ -43,6 +44,10 @@ pub(super) enum Medium {
     /// handshake.
     #[cfg(ble_available)]
     Ble,
+    /// Two transports per node, both delivering into the node's one
+    /// receive channel: the loopback as transport 0, standing in for UDP,
+    /// and TCP on 127.0.0.1 as transport 1. Its rounds wait as TCP's do.
+    Mixed,
 }
 
 impl Medium {
@@ -111,12 +116,13 @@ pub(super) struct World {
 }
 
 impl World {
-    /// `count` nodes on `medium`, each with one transport, with multipath
-    /// set as `on`. On the loopback the thread's monotonic clock is frozen
-    /// first, so from here on only `advance` moves it: real time, a wait for
-    /// a decrypt worker or a stalled host among it, does not reach the
-    /// nodes' timers. A TCP or BLE world's clock is left running: the TCP
-    /// crossing with multipath on does not heal on a frozen clock.
+    /// `count` nodes on `medium`, each with one transport, or two in a
+    /// mixed world, with multipath set as `on`. On the loopback the
+    /// thread's monotonic clock is frozen first, so from here on only
+    /// `advance` moves it: real time, a wait for a decrypt worker or a
+    /// stalled host among it, does not reach the nodes' timers. A TCP, BLE
+    /// or mixed world's clock is left running: the TCP crossing with
+    /// multipath on does not heal on a frozen clock.
     pub(super) async fn new(medium: Medium, count: usize, on: bool) -> World {
         if medium == Medium::Loopback {
             crate::time::freeze();
@@ -125,6 +131,7 @@ impl World {
         #[cfg(ble_available)]
         let radio = ble::Radio::default();
         let mut nodes = Vec::with_capacity(count);
+        let mut tcp = Vec::new();
         for _ in 0..count {
             nodes.push(match medium {
                 Medium::Loopback => loopback_node(on).await,
@@ -134,12 +141,25 @@ impl World {
                     let at = ble::addr(nodes.len());
                     ble::end(make_node_with(config.clone()), at, &radio).await
                 }
+                Medium::Mixed => {
+                    let (tn, end) = mixed_end(on).await;
+                    tcp.push((*tn.node.node_addr(), end));
+                    tn
+                }
             });
         }
         nodes.sort_by_key(|tn| *tn.node.node_addr());
         let ends = nodes
             .iter()
-            .map(|tn| vec![(tn.transport_id, tn.addr.clone())])
+            .map(|tn| {
+                let mut ends = vec![(tn.transport_id, tn.addr.clone())];
+                ends.extend(
+                    tcp.iter()
+                        .filter(|(at, _)| at == tn.node.node_addr())
+                        .map(|(_, end)| end.clone()),
+                );
+                ends
+            })
             .collect();
         World {
             nodes,
@@ -151,6 +171,17 @@ impl World {
             #[cfg(ble_available)]
             radio,
         }
+    }
+
+    /// How many transports each node has.
+    pub(super) fn transports(&self) -> usize {
+        self.ends[0].len()
+    }
+
+    /// Node `at`'s transports, by index: each one's id and the node's own
+    /// address on it.
+    pub(super) fn ends(&self, at: usize) -> &[(TransportId, TransportAddr)] {
+        &self.ends[at]
     }
 
     /// Give every node one more loopback transport, at an address of its
@@ -452,6 +483,7 @@ impl World {
                 stop(&mut self.nodes[at]).await;
                 ble::end(rerun(&self.nodes[at], config), addr, &self.radio).await
             }
+            Medium::Mixed => panic!("precondition: no step restarts a node of a mixed world"),
         };
         for (tid, addr) in self.ends[at].iter().skip(1) {
             rebind(&mut fresh, *tid, addr);
@@ -609,6 +641,50 @@ async fn tcp_end(mut node: Node, bind: &str) -> TestNode {
         packet_rx: bridge_to_unbounded(packet_rx),
         addr,
     }
+}
+
+/// A loopback node, transport id 1, with multipath set as `on`, given a
+/// second transport: TCP, id 2, listening on an ephemeral port of
+/// 127.0.0.1, whose packets are forwarded into the loopback's receive
+/// channel, so the node has one channel as the daemon does. Returns the
+/// node and its TCP transport's id and address.
+async fn mixed_end(on: bool) -> (TestNode, (TransportId, TransportAddr)) {
+    let mut tn = loopback_node(on).await;
+    let (_, into) = LOOPBACK_REGISTRY
+        .lock()
+        .unwrap()
+        .get(&tn.addr)
+        .expect("precondition: the loopback node's address is registered")
+        .clone();
+    let (packet_tx, mut packet_rx) = packet_channel(256);
+    tokio::spawn(async move {
+        while let Some(packet) = packet_rx.recv().await {
+            if into.send(packet).is_err() {
+                break;
+            }
+        }
+    });
+    let tid = TransportId::new(2);
+    let config = TcpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        mtu: Some(1400),
+        ..Default::default()
+    };
+    let mut transport = TcpTransport::new(tid, None, config, packet_tx);
+    transport
+        .start_async()
+        .await
+        .expect("precondition: the TCP transport starts");
+    let addr = TransportAddr::from_string(
+        &transport
+            .local_addr()
+            .expect("precondition: the TCP transport is bound")
+            .to_string(),
+    );
+    tn.node
+        .transports
+        .insert(tid, TransportHandle::Tcp(transport));
+    (tn, (tid, addr))
 }
 
 /// BLE nodes over the mock radio.
@@ -1145,4 +1221,129 @@ async fn a_held_packet_can_be_dropped_duplicated_and_swapped() {
 #[tokio::test]
 async fn a_held_packet_can_be_dropped_duplicated_and_swapped_with_multipath_on() {
     varied(true).await;
+}
+
+/// The transport each of `world`'s nodes 0 and 1 holds the other on: the
+/// transport of the held peer's link record.
+fn held_on(world: &World) -> Vec<Option<TransportId>> {
+    [(0, 1), (1, 0)]
+        .iter()
+        .map(|&(at, peer)| {
+            let node = &world.nodes[at].node;
+            let addr = world.nodes[peer].node.node_addr();
+            node.get_peer(addr)
+                .and_then(|p| node.links.get(&p.link_id()))
+                .map(|l| l.transport_id())
+        })
+        .collect()
+}
+
+/// A dial on a mixed world's TCP transport runs on it: the connection
+/// opens at `Connected`, its msg1 and msg2 are handed over only at the steps
+/// that name them, and the pair settles with each end holding its peer on
+/// a link of the TCP transport.
+async fn mixed_tcp_dial(on: bool) {
+    let mut world = World::new(Medium::Mixed, 2, on).await;
+    let tcp = world.ends[0][1].0;
+    let dial = Step::Dial {
+        from: 0,
+        to: 1,
+        transport: 1,
+    };
+    let msg1 = Step::Handshake {
+        to: 1,
+        kind: Kind::Msg1,
+        nth: 0,
+    };
+    let msg2 = Step::Handshake {
+        to: 0,
+        kind: Kind::Msg2,
+        nth: 0,
+    };
+    let stages: [(&[Step], Reached); 3] = [
+        (
+            &[dial, Step::Connected { node: 0 }],
+            (false, false, [0, 0, 1, 0]),
+        ),
+        (&[msg1], (false, true, [0, 1, 0, 0])),
+        (&[msg2], (true, true, [0, 0, 0, 0])),
+    ];
+    let mut bad = Vec::new();
+    for (n, (steps, want)) in stages.iter().enumerate() {
+        run(&mut world, steps).await;
+        let seen = reached(&mut world);
+        if seen != *want {
+            bad.push(format!("after stage {n}: {seen:?}, where {want:?}"));
+        }
+    }
+    let quiet = run(&mut world, &[Step::Heal]).await;
+    let one = settled(&mut world.nodes, 0, 1).await;
+    let on_t = held_on(&world);
+    cleanup_nodes(&mut world.nodes).await;
+    if !quiet {
+        bad.push("the nodes did not go quiet".to_string());
+    }
+    if let Err(e) = one {
+        bad.push(format!("the dial did not settle: {e}"));
+    }
+    if on_t != vec![Some(tcp); 2] {
+        bad.push(format!("the pair is held on {on_t:?}, not on TCP"));
+    }
+    assert!(bad.is_empty(), "defect: on a mixed world: {bad:#?}");
+}
+
+#[tokio::test]
+async fn a_dial_on_a_mixed_worlds_tcp_transport_runs_on_it() {
+    mixed_tcp_dial(false).await;
+}
+
+#[tokio::test]
+async fn a_dial_on_a_mixed_worlds_tcp_transport_runs_on_it_with_multipath_on() {
+    mixed_tcp_dial(true).await;
+}
+
+/// In a mixed world a held packet holds back only the frames of its own
+/// source. A pair settled on the loopback; node 0 dials node 1 on TCP and
+/// the msg1 stays held at node 1; then 35 s pass a second at a time, past
+/// the 30 s link-dead timeout, frames flowing after each. Node 0's frames
+/// on the loopback are handed over behind the held TCP msg1, so the pair
+/// is still on its one session, and what node 1 still holds came over TCP.
+async fn mixed_frames(on: bool) {
+    let mut world = World::new(Medium::Mixed, 2, on).await;
+    let tcp = world.ends[0][1].0;
+    let dial = |transport| Step::Dial {
+        from: 0,
+        to: 1,
+        transport,
+    };
+    run(&mut world, &[dial(0), Step::Heal]).await;
+    assert!(
+        one_session(&world),
+        "precondition: the loopback dial left the pair on one session"
+    );
+    run(&mut world, &[dial(1), Step::Connected { node: 0 }]).await;
+    let msg1s = world.held(1, Kind::Msg1);
+    for _ in 0..35 {
+        run(&mut world, &[Step::Advance(1_000)]).await;
+    }
+    world.collect();
+    let sources: Vec<TransportId> = world.held[1].iter().map(|p| p.transport_id).collect();
+    let one = one_session(&world);
+    cleanup_nodes(&mut world.nodes).await;
+    assert_eq!(msg1s, 1, "precondition: node 1 holds the TCP dial's msg1");
+    assert!(
+        one && !sources.is_empty() && sources.iter().all(|t| *t == tcp),
+        "defect: a held TCP msg1 held back the loopback's frames, or was handed over: one session {one}, node 1 holds packets from {sources:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_mixed_world_holds_back_only_the_frames_behind_a_held_packet_from_their_source() {
+    mixed_frames(false).await;
+}
+
+#[tokio::test]
+async fn a_mixed_world_holds_back_only_the_frames_behind_a_held_packet_from_their_source_with_multipath_on()
+ {
+    mixed_frames(true).await;
 }

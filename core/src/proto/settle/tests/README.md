@@ -298,7 +298,10 @@ can rebuild any state by replaying the path that reached it.
   the scripts and the trace's blocks match one to one, with a line for
   each step and end, a header with the script's settings and no `core`
   line restating the node's value; and every `core` line names a listed
-  cause. Each plants its own bad input.
+  cause. Each plants its own bad input. And `NAMED_STARTS` is the numbers
+  of the starts `starts.rs` defines, each once and in order, the list the
+  root crate's real-node explorer maps; a characterisation test, whose
+  break, a number added, is run by hand.
 - `legacy/`: models of deployed settlement as nodes of the world. See its
   README.
 - `joint/`: the joint world, whose nodes run the core, a real rekey
