@@ -12,8 +12,10 @@
 //! names it or a heal hands it over, as the core's world delivers only
 //! what a step names:
 //!
-//! - a dial is the world's dial of the peer's home on the world's one
-//!   transport, through `initiate_connection`;
+//! - a dial is the world's dial of the peer's home on the script's
+//!   transport, through `initiate_connection`: the world's one transport,
+//!   or in the mixed world, for a script on UDP and TCP, the loopback for
+//!   UDP and TCP for TCP;
 //! - a connection opening is the node's pending connects resolved, and on
 //!   BLE, where the pair shares one connection, the peer's as well;
 //! - a handshake message hands its reader the first packet of that kind
@@ -56,18 +58,10 @@ use fips_core::proto::settle::parity::{
 };
 use std::sync::{Arc, Mutex};
 
-/// The shared scripts no real pair runs here, by name, each with why.
-pub(super) const UNRUN: &[(&str, &str)] = &[
-    ("crossing-mixed-smaller-off", MIXED),
-    ("crossing-mixed-larger-off", MIXED),
-    ("crossing-mixed-smaller-on", MIXED),
-    ("crossing-mixed-larger-on", MIXED),
-];
-
-/// Why the crossing over two transports is not run.
-const MIXED: &str = "its dials go over UDP and TCP between the same two nodes, and a world's \
-                     nodes run one medium: only a loopback world takes a second transport, and \
-                     that one is a loopback one";
+/// The shared scripts no real pair runs here, by name, each with why. Every
+/// script runs on some world here since the mixed world runs those on UDP
+/// and TCP; a script a world cannot run is listed with its reason.
+pub(super) const UNRUN: &[(&str, &str)] = &[];
 
 /// Why `script` is not run here: it is listed in [`UNRUN`], or it runs on
 /// a transport this build does not have.
@@ -81,14 +75,16 @@ fn unrun(script: &Script) -> Option<&'static str> {
     None
 }
 
-/// The medium a world runs `script` on: its one transport's. `None` for a
-/// script on more than one transport.
+/// The medium a world runs `script` on: its one transport's, or the mixed
+/// world's for a script on UDP and TCP, whose transports 0 and 1 are those
+/// two in that order. `None` for any other.
 fn medium(script: &Script) -> Option<Medium> {
     match script.transports {
         [Transport::Udp] => Some(Medium::Loopback),
         [Transport::Tcp] => Some(Medium::Tcp),
         #[cfg(ble_available)]
         [Transport::Ble] => Some(Medium::Ble),
+        [Transport::Udp, Transport::Tcp] => Some(Medium::Mixed),
         _ => None,
     }
 }
@@ -97,8 +93,8 @@ fn medium(script: &Script) -> Option<Medium> {
 struct Walk {
     world: World,
     medium: Medium,
-    /// The script's transport, which every pair of the world is on.
-    transport: Transport,
+    /// The script's transports, by the world's transport index.
+    transports: &'static [Transport],
     /// Which world node each of the script's nodes is.
     order: Order,
     /// Each world node's handshakes, by the sender index its msg1 carries,
@@ -120,7 +116,7 @@ impl Walk {
         Walk {
             world,
             medium,
-            transport: script.transports[0],
+            transports: script.transports,
             order,
             begun: [Vec::new(), Vec::new()],
         }
@@ -250,12 +246,23 @@ impl Walk {
     async fn take(&mut self, step: parity::Step, dials: &[(usize, usize)]) -> Result<(), String> {
         let n = |i| self.order.node(i);
         match step {
-            parity::Step::Dial { from, to, .. } => {
+            parity::Step::Dial {
+                from,
+                to,
+                transport,
+            } => {
                 let (from, to) = (n(from), n(to));
+                let transport = self
+                    .transports
+                    .iter()
+                    .position(|t| *t == transport)
+                    .ok_or_else(|| {
+                        format!("a dial on {transport:?}, which the world does not run")
+                    })?;
                 self.step(Step::Dial {
                     from,
                     to,
-                    transport: 0,
+                    transport,
                 })
                 .await;
             }
@@ -290,16 +297,22 @@ impl Walk {
         Ok(())
     }
 
-    /// The pair `(transport, addr)` names, as a pair of world node `peer`'s.
+    /// The pair `(transport, addr)` names, as a pair of world node `peer`'s:
+    /// the script's transport of that index, at the peer's home on it or
+    /// elsewhere.
     fn place(&self, peer: usize, transport: TransportId, addr: &TransportAddr) -> Place {
-        let home = &self.world.nodes[peer];
-        let at = if transport == home.transport_id && *addr == home.addr {
+        let ends = self.world.ends(peer);
+        let t = ends
+            .iter()
+            .position(|(id, _)| *id == transport)
+            .unwrap_or(0);
+        let at = if ends.get(t).is_some_and(|(_, home)| home == addr) {
             At::Home
         } else {
             At::Accepted
         };
         Place {
-            transport: self.transport,
+            transport: self.transports[t],
             at,
         }
     }

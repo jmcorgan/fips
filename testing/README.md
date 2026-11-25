@@ -281,7 +281,11 @@ behind `:` or `if false`, a pipe with no pipefail, `--no-run`, a
 constant-false `if:` or a `continue-on-error:` fails the check. No step in
 any workflow a push or a pull request starts may run the explorers (the
 core's `slow-explorers` feature, the root crate's `explorers` feature, or
-`FIPS_MUTATION_EXPLORERS`), counting values a matrix supplies. Matching by
+`FIPS_MUTATION_EXPLORERS`), counting values a matrix supplies: the
+real-node walks run at the internal builder's tier 2 only, so on a tree
+that builds them the check lists their two stages, `root-explorers` and
+`mutations-explorers`, as local-only; next builds none, so it lists
+neither. Matching by
 fragment does not parse the shell, so review still has to read a CI change.
 The only exceptions are what one
 runner cannot do, listed by name in the check: the Android, macOS and Windows
@@ -307,53 +311,55 @@ internal builder runs for each kind of commit:
   and no integration suites.
 - **Tier 2, trunk tips and landing candidates:** tier 1, with the `.deb`
   built at the start of the build stage, the core's slow suites, the
-  mutation lane, the musl unit tests and every integration suite but the
+  mutation lane, the musl unit tests, the root crate's real-node walks
+  (`root-explorers`) with the mutation lane's explorer lines
+  (`mutations-explorers`), which next does not build (below), and every
+  integration suite but the
   nightly-only chaos scenarios, with the chaos runner's veth host-command
   test run just before the chaos suites and the RPM network budget test just
-  before rpm-install. This is the set GitHub's `ci.yml` runs too, though it
-  runs those two tests among its guards.
-- **Tier 3, the nightly run of each trunk tip:** tier 2, the explorers (on
-  next the core half alone, and so not the mutation lane's explorer lines;
-  see below), and the nightly extras: a batch of every CI chaos scenario,
-  three runs each, the same batch of the nightly-only chaos scenarios
-  (`dual-udp-flap`, `two-bound-udp-bulk`, `churn-mixed-10` and
-  `congestion-stress`, which no tier 1 or tier 2 run and no GitHub job
-  takes), and the long scenarios no other run takes (`dead-grace-long`,
-  `maelstrom`, `maelstrom-sparse`). `--with-tor` adds the Tor suites. The
-  parity check lists the nightly-only scenarios as an exception, since
-  GitHub CI has no nightly run.
+  before rpm-install. This is the set GitHub's `ci.yml` runs too, but for
+  the walks and their mutation lines, which run on the internal builder only
+  (operator, 2026-11-24), and it runs those two tests among its guards.
+- **Tier 3, the nightly run of each trunk tip:** tier 2, fips-core's half
+  of the explorers (`core-explorers`), and the nightly extras: a
+  batch of every CI chaos scenario, three runs each, the same batch of the
+  nightly-only chaos scenarios (`dual-udp-flap`, `two-bound-udp-bulk`,
+  `churn-mixed-10` and `congestion-stress`, which no tier 1 or tier 2 run
+  and no GitHub job takes), and the long scenarios no other run takes
+  (`dead-grace-long`, `maelstrom`, `maelstrom-sparse`). `--with-tor` adds
+  the Tor suites. The parity check lists the nightly-only scenarios as an
+  exception, since GitHub CI has no nightly run.
 
-No tier a push starts runs the explorers. Under a tier the root tests run in
-a container, the environment switches (`FIPS_CI_BAREMETAL`,
-`FIPS_CI_SLOW_TESTS`, `FIPS_CI_ROOT_TESTS`) are ignored, and an option that
-changes what runs is refused with exit 2; only `-j`, `--plan` and, at tier 3,
-`--with-tor` combine with it.
+Tier 1, which every branch push runs, runs no explorer. Under a tier the
+root tests run in a container, the environment switches
+(`FIPS_CI_BAREMETAL`, `FIPS_CI_SLOW_TESTS`, `FIPS_CI_ROOT_TESTS`) are
+ignored, and an option that changes what runs is refused with exit 2; only
+`-j`, `--plan` and, at tier 3, `--with-tor` combine with it.
 
 Tier 3 is too long for one builder slot, so it also comes in parts, each run
 alone on a fresh checkout by `--tier 3 --part <name>`:
 
 - `testing/ci-local.sh --tier 2`: tier 2, guards and build stage included.
 - `testing/ci-local.sh --tier 3 --part core-explorers`: `core-explorers`.
-- `testing/ci-local.sh --tier 3 --part root-explorers`: `root-explorers` and
-  `mutations-explorers`, on a tree that builds the real-node explorer. Next
-  does not, so there it is refused with exit 2, as `--explorers=root` is.
 - `testing/ci-local.sh --tier 3 --part chaos`: `build-integration`, the
   chaos batch and the long scenarios (with `--with-tor`, the Tor suites).
 
-Together they record exactly what `--tier 3` records (on next, tier 2 and
-the core explorer and chaos parts), and
+Together the three record exactly what `--tier 3` records, and
 [`lib/ci-plan-test.sh`](lib/ci-plan-test.sh) holds them to that: no result of
 tier 3 is missing from every part, no part lists a result tier 3 does not,
 and no two parts share a result but `build-integration`, which the chaos
-part builds for itself. The on-demand explorer job is the explorer parts,
-which on next is the core part alone. A part runs no guards and no build
-stage, since the nightly's tier 2 part runs those on the same tree; a part
-whose plan lists nothing of its own exits 1, and the chaos part fails
-before building when it has no scenario. A single explorer half streams
-its output as it runs. `-j` and `--plan` combine with any part,
-`--with-tor` only with `chaos`. A builder can test a tree for parts with
-`testing/ci-local.sh --tier 3 --part chaos --plan`, which exits 0 on a tree
-that has them and 2 on one that does not.
+part builds for itself. The on-demand explorer job is the core explorer
+part. The `root-explorers` part went when tier 2 took the real-node walks
+(2026-11-24): `--part root-explorers` is now an unknown part and exits 2,
+which the builder's nightly probe of the parts reads as a part this tree
+does not have. A part runs no guards and no build stage, since the
+nightly's tier 2 part runs those on the same tree; a part whose plan lists
+nothing of its own exits 1, and the chaos part fails before building when
+it has no scenario. A single explorer half streams its output as it runs.
+`-j` and `--plan` combine with any part, `--with-tor` only with `chaos`. A
+builder can test a tree for parts with `testing/ci-local.sh --tier 3
+--part chaos --plan`, which exits 0 on a tree that has them and 2 on one
+that does not.
 
 `--tier <n> --plan` prints the results a green run of that tier records, in
 order, and exits without running anything. It reads the same switches and
@@ -460,10 +466,13 @@ or with `--slow-tests` or `FIPS_CI_SLOW_TESTS=1`. Every other platform's test
 run skips them.
 
 The explorers, every test that walks a state space (the core's
-`slow-explorers` feature and the root crate's `explorers`), run in no CI run
-started by a push, on either runner: only the nightly run, `--tier 3`, and a
-run with `--explorers` take them. `--explorers` runs, after the unit tests,
-exactly the tests each feature adds to its crate's library, the two halves
+`slow-explorers` feature and the root crate's `explorers`), run in no
+GitHub workflow and no tier 1 run. The root crate's half, the real-node
+walks, runs at tier 2 with its mutation lines, on the internal builder only
+(operator, 2026-11-24); the core's half runs only in the nightly run,
+`--tier 3`; and a run with `--explorers` takes either or both.
+`--explorers` runs, after the unit tests, exactly the tests each feature
+adds to its crate's library, the two halves
 side by side, recorded as `core-explorers` and `root-explorers`;
 `--explorers=core` or `=root` runs one half. Each half's names come from the
 two builds' own test lists, and an empty difference fails the half rather than
@@ -475,15 +484,23 @@ again in the explorers' build, the one place the rows whose tests are
 explorers run. With the root half, the mutation lane runs again as a stage of
 its own, `mutations-explorers`: built with the root crate's `explorers`
 feature, it runs only its lines whose test is a root explorer
-(`FIPS_MUTATION_EXPLORERS=only`), which the plain lane skips.
+(`FIPS_MUTATION_EXPLORERS=only`), which the plain lane skips. The root half
+is short beside the core's: measured on core-vm on 2026-11-24, at a
+one-minute load of 10 to 16 on 12 cores, the walks' module took 47 to 49 s
+of tests and the explorer mutation lines 282 s, 20 lines over 7 switches,
+each test run healthy and then on its switch. The one incus figure before
+they moved, the nightly part that ran both, was 562 s on 2026-11-17,
+builds included; the tier 2 stage times on incus come from its next full
+run.
 
 Next builds no real-node explorer: its handshake is XX and the explorer is
 written for master's IK, so the module is under `#[cfg(any())]`
 (`src/node/tests/settle/explore/README.md`) and the root crate's `explorers`
 feature adds no test. On next, `--explorers` and tier 3 therefore run the
-core half alone, `--explorers=root` and `--part root-explorers` are refused
-(`ROOT_EXPLORER` in `ci-local.sh`), and neither tier 3 nor any part records
-`root-explorers` or `mutations-explorers`. Next's mutation manifest has no
+core half alone, tier 2 runs no explorer, `--explorers=root` is refused
+(`ROOT_EXPLORER` in `ci-local.sh`), and no tier and no part records
+`root-explorers` or `mutations-explorers`, so the parity check lists
+neither as local-only. Next's mutation manifest has no
 line whose test is a root explorer, so the plain lane skips nothing.
 
 The Linux and musl legs also create an address-less dummy interface

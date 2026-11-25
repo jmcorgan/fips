@@ -721,9 +721,11 @@ jobs:
       # run on every push (among them the guard-switch meta-tests); the other
       # platforms' jobs skip them. Mirrored in testing/ci-local.sh, where they
       # run with --slow-tests. The explorers (the core's `slow-explorers`
-      # feature and the root crate's `explorers`) run in no job here: no CI
-      # run started by a push runs them, and testing/ci-local.sh runs them
-      # only with --explorers and in the nightly run, --tier 3. The
+      # feature and the root crate's `explorers`) run in no job here:
+      # testing/ci-local.sh runs the root crate's real-node walks at the
+      # internal builder's tier 2 only (--tier 2, which GitHub mirrors in all
+      # else) on a tree that builds them, which next does not, the core's
+      # half only in its nightly run (--tier 3), and both with --explorers. The
       # --all-features clippy step lints them.
       - name: Run the no_std core's tests on their own, with its slow suites
         run: |

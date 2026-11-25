@@ -15,16 +15,14 @@
 
 // Without the `explorers` feature only the world's own tests, the map of
 // pinned defects and the test of a walk thread's name compile, and most of
-// the explorer's machinery (the walk, the reference model, the worker
-// pools) has no caller. It is kept compiled so those tests and the walks
-// share one copy; the --all-features clippy pass still finds code nothing
-// at all uses.
+// the explorer's machinery (the walk, the worker pools) has no caller. It
+// is kept compiled so those tests and the walks share one copy; the
+// --all-features clippy pass still finds code nothing at all uses.
 #![cfg_attr(not(feature = "explorers"), allow(dead_code))]
 
 // The explorer's file is named for what the directory is for.
 #[allow(clippy::module_inception)]
 mod explore;
-mod model;
 // The walks run only with the `explorers` feature (see the crate's
 // Cargo.toml and this directory's README); the world's own tests and the
 // map of pinned defects run in every build.

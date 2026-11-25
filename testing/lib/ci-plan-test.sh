@@ -8,12 +8,13 @@
 # missing. The same holds for each part of tier 3 (--part). The parts, with
 # tier 2, must list exactly what tier 3 lists, each part only results tier 3
 # lists, no two of them the same result but the integration build, and the
-# explorer parts exactly what tier 3 adds to tier 2 besides the chaos part;
-# each failure names the result at fault. The parts are ci-local.sh's own
-# (tier3_parts): on next, which builds no real-node explorer, there is no
-# root-explorers part, and tier 3 lists no mutations-explorers. A part whose
-# plan has nothing of its own is refused, and the chaos part with no
-# scenario fails before it builds anything.
+# core explorer part exactly what tier 3 adds to tier 2 besides the chaos
+# part; each failure names the result at fault. Tier 2 runs the root
+# crate's explorer half and its mutation lines on a tree that builds the
+# real-node explorer (ROOT_EXPLORER), so a run of it that records either one
+# short fails; on next, which builds none, tier 2 and tier 3 list neither. A
+# part whose plan has nothing of its own is refused, and the chaos part with
+# no scenario fails before it builds anything.
 #
 # Nothing is built or started: the functions are read out of ci-local.sh and
 # run in this shell, and record() is a stand-in that only stores the result.
@@ -48,7 +49,7 @@ check() {
 defs="$(sed -n '/^# ── Configuration/,/^# ── Parse arguments/p' "$CI_LOCAL")
 $(awk '/^(check_plan|skip_stage|run_part)\(\) \{/,/^}/' "$CI_LOCAL")"
 for fn in print_plan apply_tier nightly_chaos print_part_plan apply_part part_has_work \
-        tier3_parts check_plan skip_stage run_part; do
+        check_plan skip_stage run_part; do
     if ! grep -q "^$fn() {" <<<"$defs"; then
         echo "ci-plan-test: $fn() not found in $CI_LOCAL; nothing was tested" >&2
         exit 2
@@ -123,16 +124,31 @@ run_check
 check "tier 2: an unrecorded stage that was not skipped fails" \
     "$(grep -qx 'plan-match=1' <<<"$OUT" && echo 0 || echo 1)"
 
+# The root explorer half and the mutation lane's explorer lines go together,
+# from tier 2 on, where the tree builds the real-node explorer
+# (ROOT_EXPLORER); where it does not, as on next, no tier lists either.
+load 2
+if [[ "$ROOT_EXPLORER" == true ]]; then
+    record_plan root-explorers
+    run_check
+    check "tier 2: a missing root explorer half fails" \
+        "$(grep -qF 'planned, not recorded: root-explorers' <<<"$OUT" && echo 0 || echo 1)"
+    load 2
+    record_plan mutations-explorers
+    run_check
+    check "tier 2: a missing mutations-explorers fails" \
+        "$(grep -qF 'planned, not recorded: mutations-explorers' <<<"$OUT" && echo 0 || echo 1)"
+else
+    check "tier 2 with no real-node explorer lists neither root-explorers nor mutations-explorers" \
+        "$(print_plan | grep -qxE 'root-explorers|mutations-explorers' && echo 1 || echo 0)"
+fi
+
 load 3
 record_plan core-explorers
 run_check
 check "tier 3: a missing explorer half fails" \
     "$(grep -qF 'planned, not recorded: core-explorers' <<<"$OUT" && echo 0 || echo 1)"
 
-# The root explorer half and the mutation lane's explorer lines go together:
-# where the tree builds the real-node explorer (ROOT_EXPLORER), tier 3 must
-# record mutations-explorers; where it does not, as on next, tier 3 lists
-# neither result.
 load 3
 if [[ "$ROOT_EXPLORER" == true ]]; then
     record_plan mutations-explorers
@@ -144,13 +160,7 @@ else
         "$(print_plan | grep -qxE 'root-explorers|mutations-explorers' && echo 1 || echo 0)"
 fi
 
-# The parts are read from ci-local.sh, so a tree with no root half is held to
-# its own set: tier 2, core-explorers and chaos.
-load 3
-mapfile -t PARTS < <(tier3_parts)
-check "tier 3 splits into a core explorer part and a chaos part" \
-    "$(printf '%s\n' "${PARTS[@]}" | grep -qx core-explorers && printf '%s\n' "${PARTS[@]}" | grep -qx chaos && echo 0 || echo 1)" \
-    "parts: ${PARTS[*]}"
+PARTS=(core-explorers chaos)
 for part in "${PARTS[@]}"; do
     load 3 "$part"
     record_plan
@@ -215,12 +225,10 @@ for tor in false true; do
             done < <(comm -12 <(echo "${PLANS[${names[$i]}]}") <(echo "${PLANS[${names[$j]}]}"))
         done
     done
-    explorer_job=$(for part in "${PARTS[@]}"; do
-            [[ "$part" == *-explorers ]] && echo "${PLANS[$part]}"
-        done | grep -v '^$' | sort -u)
+    explorer_job=$(printf '%s\n' "${PLANS[core-explorers]}" | sort -u)
     rest=$(comm -23 <(comm -23 <(echo "$t3") <(echo "$t2")) <(echo "${PLANS[chaos]}"))
     [[ "$explorer_job" == "$rest" ]] \
-        || problems+=("the explorer parts list $(echo "$explorer_job" | tr '\n' ' ')but tier 3 adds $(echo "$rest" | tr '\n' ' ')besides tier 2 and chaos")
+        || problems+=("the explorer part lists $(echo "$explorer_job" | tr '\n' ' ')but tier 3 adds $(echo "$rest" | tr '\n' ' ')besides tier 2 and chaos")
     for p in "${problems[@]}"; do echo "  $p"; done
     check "tier 3 with WITH_TOR=$tor: the parts and tier 2 list exactly tier 3, each only its own" \
         "${#problems[@]}" "${problems[*]:0:3}"

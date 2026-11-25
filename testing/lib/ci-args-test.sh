@@ -8,11 +8,13 @@
 # no real-node explorer, refuses root, and its ROOT_EXPLORER must agree with
 # how the source declares that explorer. --tier takes 1, 2 or 3 and
 # refuses every option that changes what runs; --plan needs a tier and prints
-# that tier's stages, and no tier a push starts (1 or 2) lists an explorer.
-# --part takes one of the parts of tier 3 and needs that tier, and each
-# part's plan lists exactly its own results; on next root-explorers is
-# refused, as --explorers=root is, and tier 3 lists neither root-explorers nor
-# mutations-explorers.
+# that tier's stages: tier 1, which every branch push runs, lists no
+# explorer, tier 2 lists the root crate's walks and their mutation lines on a
+# tree that builds them (on next neither) and not the core's explorers, and
+# tier 3 lists the core's explorers besides. --part takes one of the two
+# parts of tier 3 and needs that tier, and each part's plan lists exactly its
+# own results; the root-explorers part, retired when tier 2 took the walks,
+# is refused with exit 2, which the builder's nightly probe of it reads.
 #
 # Every case invokes ci-local.sh with arguments that end during parsing, before
 # the load sampler, traps, containers or any build, so the suite is hermetic and
@@ -220,7 +222,8 @@ expect_plan "--tier 1 --plan" \
     "ci-parity core-baremetal cross-check-x86_64-apple-darwin unit-tests core-fence-tests known-defect release-test-compile root-tests" \
     "mutations musl-tests build-integration chaos-tcp-mesh agreement-break core-explorers root-explorers mutations-explorers build deb-build" \
     --tier 1 --plan
-# On next the break lane is off, so no tier's plan lists it.
+# On next the break lane is off, so no tier's plan lists it, and with no
+# real-node explorer tier 2 lists neither the walks nor their mutation lines.
 expect_plan "--tier 2 --plan" \
     "root-tests mutations musl-tests build-integration chaos-tcp-mesh rpm-install deb-build" \
     "core-explorers root-explorers mutations-explorers chaos-batch1-tcp-mesh chaos-maelstrom tor-socks5 build agreement-break" \
@@ -247,21 +250,15 @@ check "--tier 1 under FIPS_CI_SLOW_TESTS=1: says the switches are ignored" \
 expect_usage_error "--part without a value" "--part needs a value" --tier 3 --part
 expect_usage_error "--part with an unknown name" \
     "--part takes core-explorers or chaos, not: bogus" --tier 3 --part bogus
+expect_usage_error "--part root-explorers, retired into tier 2" \
+    "--part takes core-explorers or chaos, not: root-explorers" --tier 3 --part root-explorers
+expect_usage_error "--part root-explorers --plan, the builder's nightly probe" \
+    "--part takes core-explorers or chaos, not: root-explorers" --tier 3 --part root-explorers --plan
 expect_usage_error "--part without a tier" "--part needs --tier 3" --part chaos
 expect_usage_error "--part with --tier 2" "--part needs --tier 3" --tier 2 --part chaos
 expect_usage_error "--part --plan without a tier" "--part needs --tier 3" --part chaos --plan
 expect_usage_error "--part core-explorers with --with-tor" \
     "--with-tor combines only with --part chaos" --tier 3 --part core-explorers --with-tor
-# Next has no root half, so the root explorer part is refused like
-# --explorers=root, in any option order and before --plan prints anything.
-expect_usage_error "--part root-explorers on a tree with no real-node explorer" \
-    "--part root-explorers: this tree builds no real-node explorer" \
-    --tier 3 --part root-explorers --plan
-expect_usage_error "--part root-explorers with --with-tor" \
-    "--part root-explorers: this tree builds no real-node explorer" \
-    --with-tor --part root-explorers --tier 3
-FIPS_CI_TIER=3 expect_usage_error "FIPS_CI_TIER=3 --part root-explorers --plan" \
-    "--part root-explorers: this tree builds no real-node explorer" --part root-explorers --plan
 expect_usage_error "--part with --slow-tests" \
     "--tier 3 cannot be combined with --slow-tests" --tier 3 --part chaos --slow-tests
 

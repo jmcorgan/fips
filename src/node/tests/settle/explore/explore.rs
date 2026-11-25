@@ -15,6 +15,7 @@ use super::super::super::*;
 use super::script::{Kind, Step, run};
 use super::starts::{Clause, NOT_RUN, Order, PINS, Reach, Start, starts};
 use super::world::{Medium, World};
+use fips_core::proto::settle::parity::NAMED_STARTS;
 use std::future::Future;
 #[cfg(feature = "explorers")]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -93,7 +94,7 @@ pub(super) async fn built(start: &Start, order: Order, on: bool) -> World {
 
 /// `world`, new, built to `start`'s state in `order`.
 pub(super) async fn build(mut world: World, start: &Start, order: Order) -> World {
-    for _ in 1..start.transports {
+    for _ in world.transports()..start.transports {
         world.add_transport();
     }
     #[cfg(unix)]
@@ -246,6 +247,18 @@ pub(super) async fn heal(world: &mut World, start: &Start, order: Order) -> bool
     }
     false
 }
+
+/// The media the explorer walks, each in both orders and at both settings.
+/// A start on a medium not listed here is walked by nothing, and the map
+/// counts it as not run.
+#[cfg(ble_available)]
+pub(super) const WALKED: &[Medium] = &[Medium::Loopback, Medium::Tcp, Medium::Mixed, Medium::Ble];
+
+/// The media the explorer walks, each in both orders and at both settings.
+/// A start on a medium not listed here is walked by nothing, and the map
+/// counts it as not run.
+#[cfg(not(ble_available))]
+pub(super) const WALKED: &[Medium] = &[Medium::Loopback, Medium::Tcp, Medium::Mixed];
 
 /// The starts that run on `medium`.
 pub(super) fn carried(medium: Medium) -> Vec<Start> {
@@ -422,8 +435,11 @@ fn each_walk_runs_on_a_thread_named_for_the_test_that_started_it() {
 /// Every `fips-mesh` known-defect line of the inventory is in the map once,
 /// at its setting, and the map holds no other; each start it names runs on
 /// this build or is the BLE start of a build with no BLE transport, and
-/// names a node its world holds; every named start number of the core's,
-/// 1 to 14, is run here or listed as not run, with a reason.
+/// names a node its world holds and a path the start has; every path a
+/// start pins a clause on is one of its paths; every named start number of
+/// the core's (`NAMED_STARTS`) is run here, by a start on a medium the
+/// explorer walks, or listed as not run, with a reason, and no other number
+/// is listed.
 #[test]
 fn every_pinned_defect_of_the_node_is_mapped_to_a_start_or_to_none() {
     let inventory = include_str!("../../../../../testing/ignored-tests.txt");
@@ -452,9 +468,13 @@ fn every_pinned_defect_of_the_node_is_mapped_to_a_start_or_to_none() {
             Reach::Start {
                 name: start,
                 order,
+                path,
                 clause,
                 node,
             } => match all.iter().find(|s| s.name == *start) {
+                Some(s) if path.is_some() && !paths(s).contains(path) => {
+                    bad.push(format!("{name}: {start} has no path {path:?}"));
+                }
                 Some(s) if node.is_none_or(|n| n < s.nodes) => {
                     let bare = name.trim_end_matches("_with_multipath_on");
                     let larger = bare.ends_with("larger_first") || bare.ends_with("larger_dialer");
@@ -473,15 +493,34 @@ fn every_pinned_defect_of_the_node_is_mapped_to_a_start_or_to_none() {
             Reach::None(_) => {}
         }
     }
-    for number in 1..=14u8 {
-        let run =
-            all.iter().any(|s| s.number == number) || (number == 4 && cfg!(not(ble_available)));
+    for s in &all {
+        for (order, path, clause) in s.pinned {
+            if path.is_some() && !paths(s).contains(path) {
+                bad.push(format!(
+                    "start {} pins {clause:?} ({order:?}) on a path it does not have: {path:?}",
+                    s.number
+                ));
+            }
+        }
+    }
+    for &number in NAMED_STARTS {
+        let run = all
+            .iter()
+            .any(|s| s.number == number && WALKED.contains(&s.medium))
+            || (number == 4 && cfg!(not(ble_available)));
         let listed = NOT_RUN
             .iter()
             .any(|(n, why)| *n == number && !why.is_empty());
         if run == listed {
             bad.push(format!(
                 "start {number}: run {run}, listed as not run {listed}"
+            ));
+        }
+    }
+    for (number, _) in NOT_RUN {
+        if !NAMED_STARTS.contains(number) {
+            bad.push(format!(
+                "start {number}: listed as not run, and no core start"
             ));
         }
     }
@@ -511,17 +550,17 @@ async fn reached((start, order, on): Job, at: Arc<Mutex<String>>) -> Vec<String>
     }
 }
 
-/// Every start reaches its target: on every transport, in both orders and
+/// Every start reaches its target: on every medium walked, in both orders and
 /// at both settings, its scripted path runs every step to the end of its
 /// script, and the explorer walks the number of paths the start states, its
 /// scripted path and each variation that applies.
 #[cfg(feature = "explorers")]
 #[test]
 fn the_explorer_reaches_each_starts_target() {
-    let mut all = jobs(Medium::Loopback, &[false, true]);
-    all.extend(jobs(Medium::Tcp, &[false, true]));
-    #[cfg(ble_available)]
-    all.extend(jobs(Medium::Ble, &[false, true]));
+    let mut all = Vec::new();
+    for &medium in WALKED {
+        all.extend(jobs(medium, &[false, true]));
+    }
     let bad = parallel(all, reached);
     assert!(bad.is_empty(), "defect: {bad:#?}");
 }

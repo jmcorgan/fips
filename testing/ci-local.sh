@@ -18,19 +18,23 @@
 #                          2  trunk tips and landing candidates: tier 1, the
 #                             .deb built at the start of the build stage
 #                             (deb-build, to deploy/), the core's slow
-#                             suites, the mutation lane, the musl unit tests
-#                             and every integration suite, with the self-tests
-#                             of the chaos runner's veth setup (veth-host)
-#                             and of the RPM suite's network budget
-#                             (rpm-budget) run beside the suites they serve.
-#                          3  the nightly run of each trunk tip: tier 2, the
-#                             explorers (on next the core half alone, so not
-#                             the mutation lane's explorer lines either; see
-#                             --explorers), a chaos batch of each
-#                             CI scenario and of the nightly-only ones
-#                             (NIGHTLY_CHAOS), and the long scenarios no
-#                             other run takes. --with-tor adds the Tor
-#                             suites.
+#                             suites, the mutation lane, the musl unit tests,
+#                             the root crate's explorer half, the real-node
+#                             walks (root-explorers), with the mutation
+#                             lane's explorer lines (mutations-explorers),
+#                             on a tree that builds them, which next does
+#                             not (see --explorers), and every integration
+#                             suite, with the
+#                             self-tests of the chaos runner's veth setup
+#                             (veth-host) and of the RPM suite's network
+#                             budget (rpm-budget) run beside the suites they
+#                             serve.
+#                          3  the nightly run of each trunk tip: tier 2,
+#                             fips-core's explorer half (core-explorers), a
+#                             chaos batch of each CI scenario and of the
+#                             nightly-only ones (NIGHTLY_CHAOS), and the long
+#                             scenarios no other run takes. --with-tor adds
+#                             the Tor suites.
 #                        Under a tier the root tests run in a container
 #                        (run_root_tests), never under sudo, and the
 #                        environment switches below (FIPS_CI_BAREMETAL,
@@ -38,8 +42,9 @@
 #                        It cannot be combined with an option that changes
 #                        what runs: only -j and --plan, and --with-tor at tier
 #                        3. FIPS_CI_TIER=<n> in the environment does the same.
-#                        No tier runs the explorers from a push: tier 3 is
-#                        the nightly run.
+#                        Tier 1, which every branch push runs, runs no
+#                        explorer: the real-node walks run from tier 2 and
+#                        the core's half only in tier 3, the nightly run.
 #   --part <name>        With --tier 3, run one part of the nightly run, so a
 #                        builder can spread it over more than one slot. The
 #                        parts, with --tier 2, record together exactly what
@@ -47,10 +52,6 @@
 #                        them to that), and each runs alone on a fresh
 #                        checkout:
 #                          core-explorers  fips-core's explorer half
-#                          root-explorers  the root crate's explorer half and
-#                                          the mutation lane's explorer lines;
-#                                          refused on next, which has no
-#                                          root half (see --explorers)
 #                          chaos           the integration build, the chaos
 #                                          batch and the long scenarios; with
 #                                          --with-tor, the Tor suites too
@@ -92,12 +93,13 @@
 #                        runs one half. With the root half the mutation lane's
 #                        lines whose test is a root explorer walk run too, as
 #                        a stage of their own (mutations-explorers). Off by
-#                        default, and no CI run started by a push turns it on:
-#                        they take hours. Cannot be combined with
-#                        --build-only, which skips the unit-test stage. Next
-#                        builds no real-node explorer, so here --explorers
-#                        runs the core half alone, and =root and --part
-#                        root-explorers are refused (ROOT_EXPLORER below).
+#                        default; tier 2 runs the root half and tier 3 both,
+#                        and tier 1 neither: the core half takes hours.
+#                        Cannot be combined with --build-only, which skips
+#                        the unit-test stage. Next builds no real-node
+#                        explorer, so here --explorers and tier 3 run the
+#                        core half alone, tier 2 none, and =root is refused
+#                        (ROOT_EXPLORER below).
 #   --cross-check        Also compile the macOS, Windows and FreeBSD targets in
 #                        the build stage (testing/cross-check/check.sh). Off
 #                        by default: it needs zig. When asked for, a missing
@@ -268,9 +270,8 @@
 #         --root-tests or --explorers, a tier other than 1, 2 or 3, an
 #         option --tier cannot be combined with, --plan without --tier, an
 #         unknown --part, --part without --tier 3, --with-tor with a part
-#         other than chaos, or the root explorer half, --explorers=root or
-#         --part root-explorers, on a tree with no real-node explorer);
-#         nothing ran
+#         other than chaos, or the root explorer half, --explorers=root, on
+#         a tree with no real-node explorer); nothing ran
 #   130 — interrupted by SIGINT  (128 + 2;  run was cancelled, not a failure)
 #   143 — terminated by SIGTERM  (128 + 15; run was cancelled, not a failure)
 #
@@ -356,7 +357,7 @@ EXPLORERS=""
 # its handshake is XX and the explorer is written for master's IK, so the
 # module is under #[cfg(any())] (src/node/tests/settle/mod.rs) and the
 # explorers feature adds no test. Here --explorers and tier 3 run the core
-# half alone, and --explorers=root is refused.
+# half alone, tier 2 runs no explorer, and --explorers=root is refused.
 ROOT_EXPLORER=false
 CROSS_CHECK=false
 ROOT_TESTS=false
@@ -677,24 +678,12 @@ print_part_plan() {
     case "$PART" in
         core-explorers)
             echo core-explorers ;;
-        root-explorers)
-            printf '%s\n' root-explorers mutations-explorers ;;
         chaos)
             echo build-integration
             while read -r entry; do echo "chaos-${entry%% *}"; done < <(nightly_chaos)
             [[ "$WITH_TOR" == true ]] && printf '%s\n' "${TOR_SUITES[@]}"
             ;;
     esac
-    return 0
-}
-
-# The parts this tree's tier 3 splits into, one per line. root-explorers is
-# one only where the tree builds the real-node explorer (ROOT_EXPLORER); on
-# next it is refused, and tier 3 lists neither of its results.
-tier3_parts() {
-    echo core-explorers
-    [[ "$ROOT_EXPLORER" == true ]] && echo root-explorers
-    echo chaos
     return 0
 }
 
@@ -788,6 +777,7 @@ apply_tier() {
         MUTATIONS=true
         MUSL=true
         SKIP_INTEGRATION=false
+        if [[ "$ROOT_EXPLORER" == true ]]; then EXPLORERS=root; fi
     fi
     if [[ "$TIER" -eq 3 ]]; then
         EXPLORERS=$(all_explorers)
@@ -825,7 +815,6 @@ apply_part() {
     NIGHTLY=false
     case "$PART" in
         core-explorers) EXPLORERS=core ;;
-        root-explorers) EXPLORERS=root ;;
         chaos)          NIGHTLY=true ;;
     esac
     return 0
@@ -879,17 +868,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 # A part is one share of tier 3, so it needs that tier, and the Tor suites
-# belong to the chaos part alone. The root explorer part is refused where the
-# tree has no root half, before --plan could print a part tier 3 never runs.
+# belong to the chaos part alone.
 if [[ -n "$PART" ]]; then
-    if [[ "$PART" == root-explorers && "$ROOT_EXPLORER" != true ]]; then
-        usage_error "--part root-explorers: this tree builds no real-node explorer (src/node/tests/settle/mod.rs), so there is no root half"
-    fi
-    if ! tier3_parts | grep -qxF -- "$PART"; then
-        _parts="core-explorers or chaos"
-        [[ "$ROOT_EXPLORER" == true ]] && _parts="core-explorers, root-explorers or chaos"
-        usage_error "--part takes $_parts, not: $PART"
-    fi
+    case "$PART" in
+        core-explorers|chaos) ;;
+        *) usage_error "--part takes core-explorers or chaos, not: $PART" ;;
+    esac
     [[ "$TIER" == 3 ]] || usage_error "--part needs --tier 3"
     if [[ "$WITH_TOR" == true && "$PART" != chaos ]]; then
         usage_error "--with-tor combines only with --part chaos"
@@ -1488,7 +1472,8 @@ run_tests() {
     # at least once without it. Mirrored in .github/workflows/ci.yml, which
     # always runs the slow suites here; locally they need --slow-tests (or
     # FIPS_CI_SLOW_TESTS=1, which the internal builder sets). The explorers
-    # are not among them: they run in run_explorers, only with --explorers.
+    # are not among them: they run in run_explorers, with --explorers or a
+    # tier that runs them.
     local core_test=(cargo test -p fips-core)
     if [[ "$SLOW_TESTS" == true ]]; then
         core_test+=(--features slow-tests)
@@ -1520,8 +1505,7 @@ run_tests() {
     # gaps, never a product defect, and tier 2 runs it before a trunk moves.
     # Its lines whose test only the root crate's explorers feature compiles
     # are skipped here, and run in a stage of their own with the root
-    # explorers (run_lane_explorers), so the nightly can run them apart from
-    # tier 2.
+    # explorers (run_lane_explorers), in a build with that feature.
     #
     # Its normal-build fence reads the fips from the .deb the build stage
     # made (deb-build), which is what users install, instead of building a
@@ -1750,16 +1734,18 @@ GUARD_META=(
     proto::rekey::tests::faults::every_guard_switch_turns_each_test_it_names_red_and_each_passes_with_none
 )
 
-# With --explorers, the explorers' two halves: fips-core's slow-explorers
+# With --explorers (and at tier 2, the root half; at tier 3, both), the
+# explorers' two halves: fips-core's slow-explorers
 # tests, and its guard-switch meta-tests (GUARD_META), against its
 # slow-tests build, and the root crate's explorers walks against its default
 # build. Next has only the core half (ROOT_EXPLORER), so EXPLORERS is never
 # root or all here. Where both run, they run side by side, each in a
 # subshell with its output held until it ends, so the two do not interleave;
 # the parent records each half's status, since a subshell's record() dies
-# with it. One half alone (=core, =root, or a part) runs in the foreground
-# with its output streamed, so a builder's log does not sit silent for the
-# hours the core half takes. Off by default, and then nothing is recorded.
+# with it. One half alone (=core, =root, tier 2 or a part) runs in the
+# foreground with its output streamed, so a builder's log does not sit
+# silent for the hours the core half takes. Off by default, and then
+# nothing is recorded.
 # One explorer half by name, core or root, in a subshell; its status.
 explorer_half() {
     if [[ "$1" == core ]]; then
@@ -1801,8 +1787,8 @@ run_explorers() {
     return 0
 }
 
-# With the root explorers (--explorers, --explorers=root, tier 3 or the
-# root-explorers part), the mutation lane's lines whose test only the root
+# With the root explorers (--explorers, --explorers=root, tier 2 or tier
+# 3), the mutation lane's lines whose test only the root
 # crate's explorers feature compiles, built with that feature, recorded as
 # mutations-explorers. The plain lane (mutations) skips those lines and keeps
 # the normal-build fence, so the two stages together run every manifest line
@@ -3164,9 +3150,6 @@ run_part() {
     case "$PART" in
         core-explorers)
             run_explorers ;;
-        root-explorers)
-            run_explorers
-            run_lane_explorers ;;
         chaos)
             mapfile -t entries < <(nightly_chaos)
             if [[ ${#entries[@]} -eq 0 ]]; then

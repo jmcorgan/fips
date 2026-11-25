@@ -121,8 +121,8 @@ expect_red "a mapped step renamed in ci.yml" \
     "test-mutations: mapped step 'Run the mutation lane' is no longer in ci.yml"
 
 fresh && plant testing/check-ci-parity.sh \
-    'LOCAL_ONLY = {"cross-check-*": "zig compiles of targets GitHub builds natively"}' \
-    'LOCAL_ONLY = {}'
+    '    "cross-check-*": "zig compiles of targets GitHub builds natively",' \
+    ''
 expect_red "the cross-check exception removed" \
     "tier 2 stage cross-check-x86_64-apple-darwin has no GitHub step mapped to it"
 

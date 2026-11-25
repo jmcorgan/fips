@@ -76,16 +76,18 @@ profiling = []
 # warning.
 test-overrides = []
 # The real-node settlement explorer's walks
-# (`src/node/tests/settle/explore/`: the property, peer-change and
+# (`src/node/tests/settle/explore/`: the property and
 # decrypt-worker tests in `oracle.rs`, the reach and walk-bound tests in
 # `explore.rs`, and the shared schedules in `parity.rs`). Off by default, so
-# no CI run started by a push executes them; `testing/ci-local.sh
-# --explorers` and the nightly run, `--tier 3`, turn it on, as does any
-# `cargo test --features explorers`.
+# no GitHub workflow and no tier 1 run executes them; `testing/ci-local.sh`
+# turns it on at tiers 2 and 3, the internal builder's trunk-tip, landing
+# and nightly runs, and with `--explorers`, as does any `cargo test
+# --features explorers`.
 # The --all-features clippy pass lints the code it gates. fips-core's
 # explorers are behind its own `slow-explorers` feature. Next builds no
 # real-node explorer (the module is under `#[cfg(any())]` in
-# `src/node/tests/settle/mod.rs`), so on next this feature compiles no test.
+# `src/node/tests/settle/mod.rs`), so on next this feature compiles no test
+# and no tier of `testing/ci-local.sh` turns it on.
 explorers = []
 # The mutation lane's node switches (`fips_core::faults`, read from
 # `FIPS_NODE_FAULTS`) in a binary, for a chaos image that puts back a break so

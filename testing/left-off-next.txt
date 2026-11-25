@@ -39,8 +39,8 @@
 
 # The real-node explorer, its world, oracle and parity runs. next builds none of it:
 # `mod explore;` in src/node/tests/settle/mod.rs sits under `#[cfg(any())]`, because the
-# explorer's schedules, traces and model are written for master's two-message link and next's
-# is Noise XX. The files are kept so later merges take master's edits to them.
+# explorer's schedules and traces are written for master's two-message link and next's is
+# Noise XX. The files are kept so later merges take master's edits to them.
 switch        no-site    WorldSkipsWorkerWait  core/src/faults.rs
 test          no-site    every_pinned_defect_of_the_node_is_mapped_to_a_start_or_to_none  src/node/tests/settle/explore/explore.rs
 test          no-site    the_explorer_reaches_each_starts_target  src/node/tests/settle/explore/explore.rs
@@ -48,12 +48,12 @@ test          no-site    a_crossing_whose_decrypt_workers_lag_heals_to_one_sessi
 test          no-site    a_crossing_whose_decrypt_workers_lag_heals_to_one_session_on_each_dropped_msg1_path_with_multipath_on  src/node/tests/settle/explore/oracle.rs
 test          no-site    a_crossing_with_the_worker_pool_started_offers_the_moved_session  src/node/tests/settle/explore/oracle.rs
 test          no-site    a_crossing_with_the_worker_pool_started_offers_the_moved_session_with_multipath_on  src/node/tests/settle/explore/oracle.rs
-test          no-site    each_peer_change_of_a_named_start_does_what_the_models_transition_says  src/node/tests/settle/explore/oracle.rs
-test          no-site    each_peer_change_of_a_named_start_does_what_the_models_transition_says_with_multipath_on  src/node/tests/settle/explore/oracle.rs
 test          no-site    every_named_start_keeps_its_properties_on_a_real_pair_on_ble  src/node/tests/settle/explore/oracle.rs
 test          no-site    every_named_start_keeps_its_properties_on_a_real_pair_on_ble_with_multipath_on  src/node/tests/settle/explore/oracle.rs
 test          no-site    every_named_start_keeps_its_properties_on_a_real_pair_on_loopback  src/node/tests/settle/explore/oracle.rs
 test          no-site    every_named_start_keeps_its_properties_on_a_real_pair_on_loopback_with_multipath_on  src/node/tests/settle/explore/oracle.rs
+test          no-site    every_named_start_keeps_its_properties_on_a_real_pair_on_mixed_transports  src/node/tests/settle/explore/oracle.rs
+test          no-site    every_named_start_keeps_its_properties_on_a_real_pair_on_mixed_transports_with_multipath_on  src/node/tests/settle/explore/oracle.rs
 test          no-site    every_named_start_keeps_its_properties_on_a_real_pair_on_tcp  src/node/tests/settle/explore/oracle.rs
 test          no-site    every_named_start_keeps_its_properties_on_a_real_pair_on_tcp_with_multipath_on  src/node/tests/settle/explore/oracle.rs
 test          no-site    the_explorer_finds_each_pinned_defect_at_its_oracle  src/node/tests/settle/explore/oracle.rs
@@ -67,8 +67,12 @@ test          no-site    a_dial_in_a_world_goes_through_initiate_connection_on_t
 test          no-site    a_dial_in_a_world_goes_through_initiate_connection_on_tcp_with_multipath_on  src/node/tests/settle/explore/world.rs
 test          no-site    a_dial_on_a_worlds_second_transport_runs_on_it  src/node/tests/settle/explore/world.rs
 test          no-site    a_dial_on_a_worlds_second_transport_runs_on_it_with_multipath_on  src/node/tests/settle/explore/world.rs
+test          no-site    a_dial_on_a_mixed_worlds_tcp_transport_runs_on_it  src/node/tests/settle/explore/world.rs
+test          no-site    a_dial_on_a_mixed_worlds_tcp_transport_runs_on_it_with_multipath_on  src/node/tests/settle/explore/world.rs
 test          no-site    a_held_packet_can_be_dropped_duplicated_and_swapped  src/node/tests/settle/explore/world.rs
 test          no-site    a_held_packet_can_be_dropped_duplicated_and_swapped_with_multipath_on  src/node/tests/settle/explore/world.rs
+test          no-site    a_mixed_world_holds_back_only_the_frames_behind_a_held_packet_from_their_source  src/node/tests/settle/explore/world.rs
+test          no-site    a_mixed_world_holds_back_only_the_frames_behind_a_held_packet_from_their_source_with_multipath_on  src/node/tests/settle/explore/world.rs
 test          no-site    a_pair_in_a_world_holds_one_session_through_time_past_the_link_dead_timeout  src/node/tests/settle/explore/world.rs
 test          no-site    a_pair_in_a_world_holds_one_session_through_time_past_the_link_dead_timeout_with_multipath_on  src/node/tests/settle/explore/world.rs
 test          no-site    a_world_delivers_only_what_the_schedule_names_on_ble  src/node/tests/settle/explore/world.rs
@@ -705,6 +709,27 @@ test          no-site    a_redial_of_a_dialer_that_moved_to_its_second_transport
 test          no-site    a_redial_of_a_dialer_that_moved_to_its_second_transport_is_swapped_with_multipath_on  src/node/tests/settle/legacy_dialer.rs
 test          no-site    an_adopted_redials_msg1_sent_again_is_refused_and_opens_no_redial  src/node/tests/settle/legacy_dialer.rs
 test          no-site    a_redial_proven_on_the_held_link_runs_the_moves_effects_that_keep_the_link_in_their_order  src/node/settle/tests/plan.rs
+
+# Master's start 9 scripted by hand on real nodes: a rekey crossed by dials on a second
+# transport, and its three known defects, each of master's pending redial leg (the leg's link
+# taking the held link's index entry, crossed legs each promoted into a split, and a resent dial
+# msg1 answered as a rekey the dialer cannot adopt). The file reads the leg and the redial
+# memory, which next does not have, so src/node/tests/settle/rekey_cross.rs is not on next and
+# its known-defect entries are not in next's testing/ignored-tests.txt. It is removed rather
+# than kept under `#[cfg(any())]` as explore/ is, because check-ignored-tests.py reads every
+# source file whatever its cfg, and its six ignored tests would need entries here.
+test          no-site    a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_with_multipath_on  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
+known-defect  no-site    node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session  src/node/tests/settle/rekey_cross.rs
+known-defect  no-site    node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_with_multipath_on  src/node/tests/settle/rekey_cross.rs
+known-defect  no-site    node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first  src/node/tests/settle/rekey_cross.rs
+known-defect  no-site    node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
+known-defect  no-site    node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first  src/node/tests/settle/rekey_cross.rs
+known-defect  no-site    node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
 
 # The stream reader's handshake sizes. next's reader states its own XX set (an exact msg1,
 # minimum msg2 and msg3) rather than master's two exact IK sizes from the FMP wire module.

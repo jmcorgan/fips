@@ -28,8 +28,9 @@
 #   frame arrives or a move onto the node's own dial, which counts it heard
 #   (FRC-1201 Section 5.5); the `heard` of each line from a move on was read
 #   from a run of real nodes, once the node set it there, and in the
-#   crossings over two transports, which no real pair runs, follows the
-#   same rule.
+#   crossings over two transports, which no real pair ran then, follows
+#   the same rule. Real nodes on the root crate's mixed world (the
+#   loopback beside TCP) have given those lines since 2026-11-24.
 # - Both read line by line against a run of the model of the node and of
 #   joint nodes on these schedules at both settings, which gave these
 #   lines; the joint nodes' `session` there was read from the handshake
