@@ -59,8 +59,10 @@ pub(crate) struct ProbeJob {
     lookup_fanout: Option<usize>,
     lookup_attempts: Option<u8>,
     session_error: Option<String>,
-    /// Set when the drive-time guard refused a teardown the core had already
-    /// decided on, so the report says the session was left in place.
+    /// Set when the driver left in place an entry the core had decided to
+    /// end: because the drive-time guard refused, because the session is
+    /// established and left to the idle timeout, or because the target's
+    /// handshake holds it. The report then says the session was left in place.
     teardown_refused: Option<LeftIntact>,
     reap_at_ms: Option<u64>,
 }
@@ -438,11 +440,28 @@ impl Node {
         }
     }
 
-    /// Remove a probe-created session, or decline and say why.
+    /// End the probe's hold on the session it opened, or decline and say why.
     ///
-    /// The path MTU the session learned for the target goes with it, as at
-    /// every other session close: an entry the session tightened carries no
-    /// deadline, so nothing else would release it.
+    /// An established session is left in place for the idle timeout to close
+    /// on both nodes. No message ends the target's end, so removing ours would
+    /// leave the target holding a session whose every frame, its own probe's
+    /// reports included, this node drops as belonging to an unknown session.
+    ///
+    /// A session whose handshake never completed is removed, unless it holds
+    /// a candidate the target's own setup opened. The target can be
+    /// established while this end is not only by having completed its own
+    /// setup on this node's answer, and removing the entry would drop the
+    /// msg3 that completes it here. The entry is left to its rekey machine,
+    /// as at the handshake timeout: the target's msg3 completes the
+    /// candidate and this node's unanswered attempt gives way to it, and if
+    /// no msg3 comes the machine ends the attempt and the candidate on their
+    /// own deadlines and closes the entry.
+    ///
+    /// The path MTU the session learned for the target goes with the entry,
+    /// as at every other session close: an entry the session tightened
+    /// carries no deadline, so nothing else would release it. A removed
+    /// entry releases it here; an entry left in place releases it when it
+    /// closes.
     ///
     /// `pending_tun_packets` is deliberately untouched: the idle-purge path
     /// removes it because it runs after the idle timeout, but here the map can
@@ -461,6 +480,24 @@ impl Node {
             return;
         }
         let name = self.peer_display_name(&job.target);
+        if self
+            .sessions
+            .get(&job.target)
+            .is_some_and(SessionEntry::is_established)
+        {
+            job.teardown_refused = Some(LeftIntact::IdleTimeout);
+            debug!(probe_id = job.id, dest = %name, "Probe left the session it opened to the idle timeout");
+            return;
+        }
+        if self
+            .sessions
+            .get(&job.target)
+            .is_some_and(|entry| entry.candidate_count() > 0)
+        {
+            job.teardown_refused = Some(LeftIntact::Replaced);
+            debug!(probe_id = job.id, dest = %name, "Probe left the target's handshake to complete the session");
+            return;
+        }
         if let Some(entry) = self.sessions.get(&job.target)
             && let Some(mmp) = entry.mmp()
         {

@@ -43,7 +43,7 @@ that change what you do next:
 | path | `disjoint_trees` | different spanning-tree roots | The two nodes are in separate spanning trees: a partition, unless the session stage succeeds, in which case the trees were reconverging. |
 | path | `no_next_hop` | no next hop toward this target | Local preview only; read the session stage. |
 | session | `handshake_timeout` | gave up waiting for the handshake to complete | Traffic is lost in one direction or both, or the coordinates are cached for an identity the target no longer holds (below). |
-| rtt | `no_report` | no receiver report of any kind within the budget | Loss or congestion on the path. Retry; see [diagnose-mtu-issues.md](diagnose-mtu-issues.md) if bulk traffic also stalls. |
+| rtt | `no_report` | no receiver report of any kind within the budget | Loss or congestion on the path. Retry (a retry within the session idle timeout reuses the session the first probe left, so its session stage reports it preexisting); see [diagnose-mtu-issues.md](diagnose-mtu-issues.md) if bulk traffic also stalls. |
 | rtt | `sub_millisecond` | reports arrived but every sample measured under 1 ms | Not loss: expected on loopback and same-host meshes. |
 | rtt | `no_echo` | reports arrived but none carried a usable timestamp echo | Not loss: the session works, the measurement did not. |
 | rtt | `bad_timestamp_echo` | receiver reports carried timestamp echoes that failed arithmetic validation | An anomaly worth investigating. |

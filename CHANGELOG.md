@@ -1858,6 +1858,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own estimate for the reverse direction, so on an asymmetric path a real
   decrease could wait a full notification interval, and an increase could
   be sent as urgent.
+- The node a `fipsctl probe` reached can still reach this node over the
+  session the probe opened. Before, the probe removed its own end of the
+  session when it finished while the other node kept its end, so
+  everything that node sent on it was dropped here, its pings were lost
+  and its own probes of this node ended `rtt no_report`, until a new
+  session replaced it. A session the probe opened is now left for the
+  session idle timeout to close on both nodes: until then
+  `fipsctl show sessions` lists it, a second probe of the same node finds
+  it already up, and the report's `cleanup.left_intact_reason` is the new
+  value `idle_timeout`, with `cleanup.session_created_and_torn_down`
+  false. A probe whose handshake did not complete still removes its
+  session, unless the other node was opening a session to this node at
+  the same moment; that session is now kept and completes, where before
+  it was dropped here, and the report gives `left_intact_reason`
+  `replaced`.
 - On the pending-session path, a decrypted frame too short for its inner
   header is dropped, as it already was on the main path. Before, it was
   counted in the link statistics and could move the peer's address.
@@ -2162,9 +2177,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full size. A SYN behind an Authentication, Fragment or ESP header is still
   left alone.
 
-- A probe that tears down the session it opened no longer leaves a tighter
-  path MTU learned during the probe clamping the TCP MSS of new connections to
-  that destination.
+- A session a probe opened no longer leaves a tighter path MTU learned
+  during the probe clamping the TCP MSS of new connections to that
+  destination once the session ends.
 
 - Packets sent to a destination while its session is being set up are no
   longer dropped without a word when that session ends. When the session's

@@ -139,7 +139,7 @@
   <rect x="1332" y="296" width="236" height="112" class="outcome"/>
   <text x="1450" y="332" text-anchor="middle" class="stage">verdict</text>
   <text x="1450" y="362" text-anchor="middle" class="detail">ok · partial · failed</text>
-  <text x="1450" y="384" text-anchor="middle" class="detail">our session is torn down</text>
+  <text x="1450" y="384" text-anchor="middle" class="detail">an established session idles out</text>
 
   <!-- ============================================================ -->
   <!-- Legend                                                       -->

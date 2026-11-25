@@ -87,7 +87,7 @@ ResponderCutoverSkipsFilterMark	red	fips-mesh	node::tests::settle::carry::redial
 ResponderCutoverSkipsFilterMark	red	fips-mesh	node::tests::settle::carry::redial_from_the_larger_node_answered_as_a_rekey_resends_the_filter
 ResponderCutoverSkipsFilterMark	red	fips-mesh	node::tests::settle::table::rekey::a_responders_cutover_does_what_its_cells_say
 ResponderCutoverSkipsFilterMark	red	fips-mesh	node::tests::settle::table::rekey::a_responders_cutover_does_what_its_cells_say_with_multipath_on
-ClampEntryKept	red	fips-mesh	node::tests::probe::probe_teardown_releases_the_clamp_entry_the_probes_session_tightened	must not outlive the session
+ClampEntryKept	red	fips-mesh	node::tests::probe::removing_an_unfinished_probe_session_releases_its_clamp_entry
 ClampEntryKept	red	fips-mesh	node::tests::peer_restart::restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions	the clamp entry the ended session tightened goes with it
 ClampEntryKept	red	fips-mesh	node::tests::settle::table::rekey::a_restart_found_at_a_rekey_does_what_its_cells_say
 ClampEntryKept	red	fips-mesh	node::tests::settle::table::rekey::a_restart_found_at_a_rekey_does_what_its_cells_say_with_multipath_on

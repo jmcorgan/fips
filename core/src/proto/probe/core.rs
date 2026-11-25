@@ -103,8 +103,10 @@ pub enum ProbeAction {
     OpenSession,
     /// Send one standalone `CoordsWarmup` on the session.
     SendWarmup,
-    /// Remove the probe-created session, after the identity and adoption
-    /// checks pass.
+    /// End the probe's hold on the session it created, after the identity
+    /// and adoption checks pass. The driver leaves an established one to the
+    /// idle timeout, leaves an unfinished one that holds the target's
+    /// handshake for that handshake to complete, and removes any other.
     TeardownSession,
     /// Mark the job terminal and release its target claim.
     Finish,
