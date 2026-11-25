@@ -4,15 +4,15 @@
 # still exits 0 with the usage on stdout. --rerun <suite> rejects an unknown
 # suite name and the options it cannot be combined with, before any build;
 # --build-only rejects --root-tests and --explorers, whose stages it would
-# skip; and --explorers= takes only core or root. --tier takes 1, 2 or 3 and
-# refuses every option that changes what runs; --plan needs a tier and prints
-# that tier's stages: tier 1, which every branch push runs, lists no
-# explorer, tier 2 lists the root crate's walks and their mutation lines and
-# not the core's explorers, and tier 3 lists both. --part takes one of the
-# two parts of tier 3 and needs that tier, and each part's plan lists
-# exactly its own results; the root-explorers part, retired when tier 2
-# took the walks, is refused with exit 2, which the builder's nightly probe
-# of it reads.
+# skip; and --explorers= takes only root. --tier takes 1, 2 or 3 and refuses
+# every option that changes what runs; --plan needs a tier and prints that
+# tier's stages: tier 1, which every branch push runs, lists no explorer,
+# tier 2 lists the root crate's walks and their mutation lines, and tier 3
+# lists them too and no longer lists fips-core's retired explorers. --part
+# takes chaos, the one part of tier 3, and needs that tier, and the part's
+# plan lists exactly its own results; the retired explorer parts, the root
+# crate's and fips-core's, are refused with exit 2, which the builder's
+# nightly probe of each reads.
 #
 # Every case invokes ci-local.sh with arguments that end during parsing, before
 # the load sampler, traps, containers or any build, so the suite is hermetic and
@@ -152,12 +152,14 @@ expect_usage_error "--build-only with --explorers" \
     "--explorers cannot be combined with --build-only" --build-only --explorers
 expect_usage_error "--explorers=root with --build-only" \
     "--explorers cannot be combined with --build-only" --explorers=root --build-only
-expect_usage_error "--rerun with --explorers=core" \
-    "--rerun cannot be combined with --explorers" --rerun firewall --explorers=core
+expect_usage_error "--rerun with --explorers=root" \
+    "--rerun cannot be combined with --explorers" --rerun firewall --explorers=root
 expect_usage_error "--explorers= with an unknown half" \
-    "--explorers takes core or root, not: both" --explorers=both
+    "--explorers takes only root, not: both" --explorers=both
 expect_usage_error "--explorers= with no half" \
-    "--explorers takes core or root, not: nothing" --explorers=
+    "--explorers takes only root, not: nothing" --explorers=
+expect_usage_error "--explorers=core, the retired core half" \
+    "--explorers takes only root, not: core" --explorers=core
 
 expect_usage_error "--tier without a value" "--tier needs a value" --tier
 expect_usage_error "--tier 4" "--tier takes 1, 2 or 3, not: 4" --tier 4
@@ -166,7 +168,7 @@ expect_usage_error "--tier two" "--tier takes 1, 2 or 3, not: two" --tier two
 FIPS_CI_TIER=9 expect_usage_error "FIPS_CI_TIER=9" "--tier takes 1, 2 or 3, not: 9"
 expect_usage_error "--plan without --tier" "--plan needs --tier" --plan
 for opt in --build-only --test-only --skip-integration --skip-chaos --baremetal \
-        --slow-tests --explorers --explorers=core --cross-check --root-tests \
+        --slow-tests --explorers --explorers=root --cross-check --root-tests \
         --with-tor --only --rerun; do
     args=(--tier 2 "$opt")
     case "$opt" in --only|--rerun) args+=(firewall) ;; esac
@@ -195,11 +197,11 @@ expect_plan() {
 }
 expect_plan "--tier 1 --plan" \
     "ci-parity core-baremetal cross-check-x86_64-apple-darwin unit-tests core-fence-tests known-defect release-test-compile root-tests" \
-    "mutations musl-tests build-integration chaos-tcp-mesh agreement-break core-explorers root-explorers mutations-explorers build deb-build" \
+    "mutations musl-tests build-integration chaos-tcp-mesh agreement-break root-explorers mutations-explorers build deb-build" \
     --tier 1 --plan
 expect_plan "--tier 2 --plan" \
     "root-tests mutations musl-tests root-explorers mutations-explorers build-integration chaos-tcp-mesh agreement-break rpm-install deb-build" \
-    "core-explorers chaos-batch1-tcp-mesh chaos-maelstrom tor-socks5 build" \
+    "chaos-batch1-tcp-mesh chaos-maelstrom tor-socks5 build" \
     --tier 2 --plan
 # The break lane runs after the chaos scenarios, whose run it follows in the
 # integration stage, so it comes after the last of them.
@@ -210,12 +212,12 @@ check "--tier 2 --plan: agreement-break comes after the chaos scenarios" \
 check "--tier 2 --plan: deb-build comes before fmt" \
     "$(invoke --tier 2 --plan; d=$(grep -nx deb-build <<<"$OUT" | cut -d: -f1); f=$(grep -nx fmt <<<"$OUT" | cut -d: -f1); [ -n "$d" ] && [ -n "$f" ] && [ "$d" -lt "$f" ] && echo 0 || echo 1)"
 expect_plan "--tier 3 --plan" \
-    "mutations musl-tests chaos-tcp-mesh core-explorers root-explorers mutations-explorers chaos-batch3-tcp-mesh chaos-maelstrom chaos-maelstrom-sparse chaos-dead-grace-long" \
-    "tor-socks5" \
+    "mutations musl-tests chaos-tcp-mesh root-explorers mutations-explorers chaos-batch3-tcp-mesh chaos-maelstrom chaos-maelstrom-sparse chaos-dead-grace-long" \
+    "tor-socks5 core-explorers" \
     --tier 3 --plan
-expect_plan "--tier 3 --with-tor --plan" "tor-socks5 tor-directory core-explorers" "" \
+expect_plan "--tier 3 --with-tor --plan" "tor-socks5 tor-directory" "" \
     --plan --with-tor --tier 3
-FIPS_CI_TIER=1 expect_plan "FIPS_CI_TIER=1 --plan" "root-tests" "mutations core-explorers" --plan
+FIPS_CI_TIER=1 expect_plan "FIPS_CI_TIER=1 --plan" "root-tests" "mutations" --plan
 # A tier overrides the builder's environment switches rather than refusing
 # them, and says so.
 FIPS_CI_SLOW_TESTS=1 FIPS_CI_ROOT_TESTS=1 expect_plan "--tier 1 under FIPS_CI_SLOW_TESTS=1" \
@@ -226,36 +228,22 @@ check "--tier 1 under FIPS_CI_SLOW_TESTS=1: says the switches are ignored" \
 # suites go with the chaos part alone.
 expect_usage_error "--part without a value" "--part needs a value" --tier 3 --part
 expect_usage_error "--part with an unknown name" \
-    "--part takes core-explorers or chaos, not: bogus" --tier 3 --part bogus
+    "--part takes chaos, not: bogus" --tier 3 --part bogus
 expect_usage_error "--part root-explorers, retired into tier 2" \
-    "--part takes core-explorers or chaos, not: root-explorers" --tier 3 --part root-explorers
+    "--part takes chaos, not: root-explorers" --tier 3 --part root-explorers
 expect_usage_error "--part root-explorers --plan, the builder's nightly probe" \
-    "--part takes core-explorers or chaos, not: root-explorers" --tier 3 --part root-explorers --plan
+    "--part takes chaos, not: root-explorers" --tier 3 --part root-explorers --plan
+expect_usage_error "--part core-explorers --plan, the builder's nightly probe of the retired part" \
+    "--part takes chaos, not: core-explorers" --tier 3 --part core-explorers --plan
 expect_usage_error "--part without a tier" "--part needs --tier 3" --part chaos
 expect_usage_error "--part with --tier 2" "--part needs --tier 3" --tier 2 --part chaos
 expect_usage_error "--part --plan without a tier" "--part needs --tier 3" --part chaos --plan
-expect_usage_error "--part core-explorers with --with-tor" \
-    "--with-tor combines only with --part chaos" --tier 3 --part core-explorers --with-tor
 expect_usage_error "--part with --slow-tests" \
     "--tier 3 cannot be combined with --slow-tests" --tier 3 --part chaos --slow-tests
 
-# Each part's plan is exactly its own results. The chaos part's count comes
+# The part's plan is exactly its own results. The chaos part's count comes
 # from ci-local.sh's own arrays: each CI scenario NIGHTLY_CHAOS_RUNS times,
 # the long scenarios, and the integration build.
-expect_part_plan() {
-    local name="$1" want="$2"
-    shift 2
-    invoke "$@"
-    check "$name: exits 0" "$([ "$RC" -eq 0 ] && echo 0 || echo 1)" "rc=$RC"
-    local got
-    got="$(grep -v '^#' <<<"$OUT" | tr '\n' ' ' | sed 's/ $//')"
-    check "$name: lists exactly $want" "$([ "$got" = "$want" ] && echo 0 || echo 1)" "got: $got"
-    return 0
-}
-expect_part_plan "--part core-explorers --plan" "core-explorers" \
-    --tier 3 --part core-explorers --plan
-FIPS_CI_TIER=3 expect_part_plan "FIPS_CI_TIER=3 --part core-explorers --plan" \
-    "core-explorers" --part core-explorers --plan
 n_chaos=$(invoke --list; grep -c '^    chaos-' <<<"$OUT")
 n_runs=$(sed -n 's/^NIGHTLY_CHAOS_RUNS=\([0-9]*\)$/\1/p' "$CI_LOCAL")
 n_long=$(sed -n '/^NIGHTLY_LONG=(/,/^)/p' "$CI_LOCAL" | grep -c '^    "')
@@ -273,7 +261,7 @@ check "--part chaos --plan: lists the batch and the long scenarios" \
 check "--part chaos --plan: lists no Tor suite" \
     "$(grep -qx tor-socks5 <<<"$plan_lines" && echo 1 || echo 0)"
 expect_plan "--part chaos --with-tor --plan" "tor-socks5 tor-directory chaos-maelstrom build-integration" \
-    "core-explorers unit-tests ci-parity" --tier 3 --part chaos --with-tor --plan
+    "unit-tests ci-parity" --tier 3 --part chaos --with-tor --plan
 
 check "--tier 1 --plan: core-fence-tests without slow-tests" \
     "$(invoke --tier 1 --plan; grep -qF -- "slow-tests feature" <<<"$OUT" && echo 1 || echo 0)"

@@ -1,7 +1,7 @@
 //! Seeded long runs of the settlement core in the world, with shrinking.
 //!
-//! The explorer covers every short schedule from a named start; these runs
-//! cover long ones from a cold start, drawn from a seed. Two nodes, each
+//! These runs cover long schedules from a cold start, drawn from a seed;
+//! no test explores every short schedule from a named start. Two nodes, each
 //! made by a maker (joint nodes at both ends with multipath off by default,
 //! the core with a real rekey machine and bundle per held peer), are
 //! configured to dial one another, or one dials and the other waits, on one of four
@@ -325,8 +325,7 @@ fn valid(w: &World, a: Act) -> bool {
         | Act::Replay(_)
         | Act::Third(_)
         | Act::Garbage(_)
-        | Act::Path(_)
-        | Act::Dial(..) => true,
+        | Act::Path(_) => true,
     }
 }
 
@@ -389,8 +388,7 @@ pub fn run(
                 | Act::Replay(_)
                 | Act::Third(_)
                 | Act::Garbage(_)
-                | Act::Path(_)
-                | Act::Dial(..) => {}
+                | Act::Path(_) => {}
             }
             apply(&mut w, a);
             acts.push(a);

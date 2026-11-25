@@ -1,12 +1,8 @@
-//! The named starts the explorer runs from, each with the scripted
-//! schedule that reaches its target state and the depth it is explored to.
+//! The named starts, each with the scripted schedule that reaches its
+//! target state.
 //!
 //! Every start begins mid-history: a fresh start explored to the depth a
-//! crossing with a restart needs is out of reach. A start's depth is its
-//! script's length plus two events (one fault, one restart or advance).
-//! Its state cap is the number of states that depth was measured to reach
-//! with headroom; one depth more reaches more than three times as many
-//! states, past the cap, so a start that grew is seen.
+//! crossing with a restart needs is out of reach.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -72,19 +68,12 @@ pub struct Start {
     pub maker: Maker,
     /// The scripted schedule from the start to its target state.
     pub script: fn(&mut World) -> Vec<Act>,
-    /// The depth it is explored to.
-    pub depth: usize,
-    /// The most states that depth may reach.
-    pub cap: usize,
     /// The event budgets.
     pub budget: Budget,
     /// Whether the wall clock may step.
     pub wall: bool,
     /// Whether third-party msg1s and forged msg2s are injected.
     pub forged: bool,
-    /// Whether each node may dial another once ([`Act::Dial`]): the cold
-    /// start's, whose world holds nothing to deliver until a node dials.
-    pub cold: bool,
 }
 
 /// Which packet a script step delivers.
@@ -638,143 +627,100 @@ fn late_other_script(w: &mut World) -> Vec<Act> {
 
 /// Every named start.
 pub fn starts() -> Vec<Start> {
-    let s = |number, name, build: Build, script: fn(&mut World) -> Vec<Act>, depth, cap| Start {
+    let s = |number, name, build: Build, script: fn(&mut World) -> Vec<Act>| Start {
         number,
         name,
         build,
         script,
-        depth,
-        cap,
         maker: model,
         budget: SMALL,
         wall: false,
         forged: false,
-        cold: false,
     };
     let mut v = alloc::vec![
-        s(
-            1,
-            "crossing, connectionless",
-            crossing,
-            crossing_script,
-            6,
-            14_600
-        ),
+        s(1, "crossing, connectionless", crossing, crossing_script),
         s(
             2,
             "crossing, two transports",
             crossing_mixed,
-            crossing_mixed_script,
-            7,
-            65_000
+            crossing_mixed_script
         ),
         s(
             3,
             "crossing, connection-oriented",
             crossing_stream,
-            crossing_stream_script,
-            7,
-            111_400
+            crossing_stream_script
         ),
-        s(4, "crossing, BLE", crossing_ble, crossing_script, 6, 27_600),
+        s(4, "crossing, BLE", crossing_ble, crossing_script),
         s(
             5,
             "late second dial in order, larger dialer",
             late_order::<true>,
-            late_order_script,
-            4,
-            1_000
+            late_order_script
         ),
         s(
             5,
             "late second dial in order, smaller dialer",
             late_order::<false>,
-            late_order_script,
-            4,
-            1_000
+            late_order_script
         ),
         s(
             6,
             "late second dial, second msg2 first, larger dialer",
             late_reordered::<true>,
-            late_reordered_script,
-            6,
-            10_100
+            late_reordered_script
         ),
         s(
             6,
             "late second dial, second msg2 first, smaller dialer",
             late_reordered::<false>,
-            late_reordered_script,
-            6,
-            10_100
+            late_reordered_script
         ),
         s(
             7,
             "dial on the peer's aged link, then own rekey",
             aged,
-            aged_script,
-            6,
-            18_100
+            aged_script
         ),
-        s(
-            8,
-            "restart at each point",
-            restart,
-            restart_script,
-            5,
-            1_400
-        ),
+        s(8, "restart at each point", restart, restart_script),
         s(
             9,
             "crossing during a rekey",
             rekeying::<false>,
-            rekeying_script,
-            6,
-            30_400
+            rekeying_script
         ),
         s(
             9,
             "crossing during a rekey's drain",
             rekeying::<true>,
-            drain_script,
-            4,
-            2_400
+            drain_script
         ),
         s(
             10,
             "stored msg2 whose send failed, then a resend",
             stored,
-            stored_script,
-            6,
-            1_400
+            stored_script
         ),
-        s(11, "three nodes", three, three_script, 6, 54_800),
-        s(12, "two paths", paths, paths_script, 6, 96_900),
-        s(13, "replayed msg1", replayed, replayed_script, 4, 1_400),
+        s(11, "three nodes", three, three_script),
+        s(12, "two paths", paths, paths_script),
+        s(13, "replayed msg1", replayed, replayed_script),
         s(
             13,
             "forged msg2 spray against a pending dial",
             sprayed,
-            sprayed_script,
-            6,
-            28_000
+            sprayed_script
         ),
         s(
             14,
             "wall step inside the heard floor",
             walled,
-            walled_script,
-            4,
-            900
+            walled_script
         ),
         s(
             26,
             "late second dial on another transport, heard",
             late_other,
-            late_other_script,
-            5,
-            3_200
+            late_other_script
         ),
     ];
     for st in &mut v {

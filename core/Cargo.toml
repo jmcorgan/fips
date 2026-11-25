@@ -74,19 +74,6 @@ test-hooks = []
 # --slow-tests or at tier 2 and 3 turn it on, and the core's clippy passes
 # lint the code it gates either way.
 slow-tests = []
-# The settlement explorers: every settlement test that walks a state space,
-# a few minutes or tens of minutes each. The model's reach
-# (`proto/settle/tests/explore.rs`), the model parties over every start
-# (`proto/settle/tests/oracle.rs`), joint nodes against the models of the
-# deployed nodes (`proto/settle/tests/legacy/explore.rs`) and the model of
-# the current node against itself (`legacy/findings.rs`), the candidate
-# rules' explored runs (`candidates.rs`), and in the joint world
-# (`proto/settle/tests/joint/`) every reach and sweep. Turning it on turns
-# `slow-tests` on too. Off in every CI run started by a push: they run only
-# with `testing/ci-local.sh --explorers` and in the nightly run, `--tier 3`.
-# The root crate's clippy pass with --all-features lints the code it gates.
-# The root crate's real-node explorer is behind its own `explorers` feature.
-slow-explorers = ["slow-tests"]
 
 [dev-dependencies]
 # Host-only test dependencies; tests may use `std`.

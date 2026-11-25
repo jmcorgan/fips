@@ -1966,7 +1966,9 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
 }
 
 /// The candidate rules, test-only. Each keeps the core's own rules and
-/// changes one decision, so the explorer can compare the two.
+/// changes one decision; the candidates' scripted tests select one, and
+/// comparing it with the core's own rule across the starts is left to a
+/// later decision.
 #[cfg(test)]
 impl<I: Instant, F: Flow<I>> Table<I, F> {
     /// How long a responder keeps a replaced unheard session.

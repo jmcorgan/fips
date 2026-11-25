@@ -19,7 +19,7 @@
 #                             .deb built at the start of the build stage
 #                             (deb-build, to deploy/), the core's slow
 #                             suites, the mutation lane, the musl unit tests,
-#                             the root crate's explorer half, the real-node
+#                             the root crate's explorers, the real-node
 #                             walks (root-explorers), with the mutation
 #                             lane's explorer lines (mutations-explorers),
 #                             and every integration suite, with the
@@ -27,8 +27,7 @@
 #                             (veth-host) and of the RPM suite's network
 #                             budget (rpm-budget) run beside the suites they
 #                             serve.
-#                          3  the nightly run of each trunk tip: tier 2,
-#                             fips-core's explorer half (core-explorers), a
+#                          3  the nightly run of each trunk tip: tier 2, a
 #                             chaos batch of each CI scenario and of the
 #                             nightly-only ones (NIGHTLY_CHAOS), and the long
 #                             scenarios no other run takes. --with-tor adds
@@ -41,23 +40,21 @@
 #                        what runs: only -j and --plan, and --with-tor at tier
 #                        3. FIPS_CI_TIER=<n> in the environment does the same.
 #                        Tier 1, which every branch push runs, runs no
-#                        explorer: the real-node walks run from tier 2 and
-#                        the core's half only in tier 3, the nightly run.
+#                        explorer: the real-node walks run from tier 2.
 #   --part <name>        With --tier 3, run one part of the nightly run, so a
 #                        builder can spread it over more than one slot. The
-#                        parts, with --tier 2, record together exactly what
+#                        part, with --tier 2, records together exactly what
 #                        --tier 3 records (testing/lib/ci-plan-test.sh holds
-#                        them to that), and each runs alone on a fresh
-#                        checkout:
-#                          core-explorers  fips-core's explorer half
+#                        them to that), and runs alone on a fresh checkout.
+#                        There is one part:
 #                          chaos           the integration build, the chaos
 #                                          batch and the long scenarios; with
 #                                          --with-tor, the Tor suites too
 #                        A part runs no guards and no build stage: the
 #                        nightly's tier 2 part runs those on the same tree.
-#                        --plan prints a part's results. -j and --plan
-#                        combine with any part, --with-tor only with chaos.
-#                        A part whose plan lists nothing of its own exits 1.
+#                        --plan prints a part's results. -j, --plan and
+#                        --with-tor combine with it. A part whose plan lists
+#                        nothing of its own exits 1.
 #   --plan               With --tier, print the stages the run would record,
 #                        in order, and exit without running anything. A green
 #                        tier run fails if what it recorded differs from this
@@ -74,28 +71,25 @@
 #                        llvm-ar. When asked for, a missing prerequisite fails
 #                        the run. FIPS_CI_BAREMETAL=1 in the environment turns
 #                        it on too. GitHub CI runs it on every push.
-#   --slow-tests         Also run fips-core's slow test suites (the models of
-#                        the deployed releases and the guard-switch
-#                        meta-test) in the core's own test run. Off by
-#                        default: they take minutes, and GitHub CI's Linux job
-#                        runs them on every push. The explorers are not among
-#                        them (--explorers). FIPS_CI_SLOW_TESTS=1 in the
-#                        environment turns it on too.
-#   --explorers[=core|root]
-#                        Also run the explorers, after the unit tests: the
-#                        tests fips-core compiles only with its slow-explorers
-#                        feature (recorded as core-explorers) and those the
-#                        root crate compiles only with its explorers feature
-#                        (root-explorers). Each half runs exactly the tests
-#                        its feature adds, read from the two builds' test
-#                        lists, and the two run side by side. =core or =root
-#                        runs one half. With the root half the mutation lane's
-#                        lines whose test is a root explorer walk run too, as
-#                        a stage of their own (mutations-explorers). Off by
-#                        default; tier 2 runs the root half and tier 3 both,
-#                        and tier 1 neither: the core half takes hours.
-#                        Cannot be combined with --build-only, which skips
-#                        the unit-test stage.
+#   --slow-tests         Also run fips-core's slow test suites (the rekey
+#                        explorers, the models of the deployed releases and
+#                        the guard-switch meta-tests) in the core's own test
+#                        run. Off by default: they take minutes, and GitHub
+#                        CI's Linux job runs them on every push. The
+#                        real-node walks are not among them (--explorers).
+#                        FIPS_CI_SLOW_TESTS=1 in the environment turns it on
+#                        too.
+#   --explorers[=root]
+#                        Also run the real-node walks, after the unit tests:
+#                        the tests the root crate compiles only with its
+#                        explorers feature (root-explorers), exactly the
+#                        tests the feature adds, read from the two builds'
+#                        test lists. The mutation lane's lines whose test is
+#                        a walk run too, as a stage of their own
+#                        (mutations-explorers). =root is the same; any other
+#                        value is refused. Off by default; tiers 2 and 3 run
+#                        it, and tier 1 does not. Cannot be combined with
+#                        --build-only, which skips the unit-test stage.
 #   --cross-check        Also compile the macOS, Windows and FreeBSD targets in
 #                        the build stage (testing/cross-check/check.sh). Off
 #                        by default: it needs zig. When asked for, a missing
@@ -326,7 +320,7 @@ SKIP_INTEGRATION=false
 SKIP_CHAOS=false
 BAREMETAL=false
 SLOW_TESTS=false
-# Which explorer halves run: empty for none, or core, root or all.
+# Whether the real-node walks run: empty for none, or root.
 EXPLORERS=""
 CROSS_CHECK=false
 ROOT_TESTS=false
@@ -637,8 +631,6 @@ print_part_plan() {
     local entry
     echo "# ci-local.sh --tier 3 --part $PART: the results a green run records, in order"
     case "$PART" in
-        core-explorers)
-            echo core-explorers ;;
         chaos)
             echo build-integration
             while read -r entry; do echo "chaos-${entry%% *}"; done < <(nightly_chaos)
@@ -683,8 +675,7 @@ print_plan() {
         echo addrless-iface-musl
         echo "# musl-tests and addrless-iface-musl are skipped, with the reason, on a host without the $MUSL_TARGET target or musl-gcc"
     fi
-    [[ "$EXPLORERS" == all || "$EXPLORERS" == core ]] && echo core-explorers
-    if [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]]; then
+    if [[ "$EXPLORERS" == root ]]; then
         echo root-explorers
         echo mutations-explorers
     fi
@@ -735,7 +726,6 @@ apply_tier() {
         EXPLORERS=root
     fi
     if [[ "$TIER" -eq 3 ]]; then
-        EXPLORERS=all
         NIGHTLY=true
     fi
     return 0
@@ -769,7 +759,6 @@ apply_part() {
     EXPLORERS=""
     NIGHTLY=false
     case "$PART" in
-        core-explorers) EXPLORERS=core ;;
         chaos)          NIGHTLY=true ;;
     esac
     return 0
@@ -798,12 +787,12 @@ while [[ $# -gt 0 ]]; do
         --skip-chaos)       SKIP_CHAOS=true; GIVEN+=("$1"); shift ;;
         --baremetal)        BAREMETAL=true; GIVEN+=("$1"); shift ;;
         --slow-tests)       SLOW_TESTS=true; GIVEN+=("$1"); shift ;;
-        --explorers)        EXPLORERS=all; GIVEN+=("$1"); shift ;;
+        --explorers)        EXPLORERS=root; GIVEN+=("$1"); shift ;;
         --explorers=*)
             EXPLORERS="${1#*=}"
             GIVEN+=(--explorers)
-            [[ "$EXPLORERS" == core || "$EXPLORERS" == root ]] \
-                || usage_error "--explorers takes core or root, not: ${EXPLORERS:-nothing}"
+            [[ "$EXPLORERS" == root ]] \
+                || usage_error "--explorers takes only root, not: ${EXPLORERS:-nothing}"
             shift ;;
         --cross-check)      CROSS_CHECK=true; GIVEN+=("$1"); shift ;;
         --root-tests)       ROOT_TESTS=true; GIVEN+=("$1"); shift ;;
@@ -822,17 +811,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# A part is one share of tier 3, so it needs that tier, and the Tor suites
-# belong to the chaos part alone.
+# A part is one share of tier 3, so it needs that tier. Chaos is the only
+# part, and the Tor suites are its own.
 if [[ -n "$PART" ]]; then
     case "$PART" in
-        core-explorers|chaos) ;;
-        *) usage_error "--part takes core-explorers or chaos, not: $PART" ;;
+        chaos) ;;
+        *) usage_error "--part takes chaos, not: $PART" ;;
     esac
     [[ "$TIER" == 3 ]] || usage_error "--part needs --tier 3"
-    if [[ "$WITH_TOR" == true && "$PART" != chaos ]]; then
-        usage_error "--with-tor combines only with --part chaos"
-    fi
 fi
 
 # A tier is a fixed set of stages, so an option that changes what runs is
@@ -1436,9 +1422,8 @@ run_tests() {
     # test whose result depends on a feature only the root crate enables runs
     # at least once without it. Mirrored in .github/workflows/ci.yml, which
     # always runs the slow suites here; locally they need --slow-tests (or
-    # FIPS_CI_SLOW_TESTS=1, which the internal builder sets). The explorers
-    # are not among them: they run in run_explorers, with --explorers or a
-    # tier that runs them.
+    # FIPS_CI_SLOW_TESTS=1, which the internal builder sets); with them they
+    # include the rekey explorers.
     local core_test=(cargo test -p fips-core)
     if [[ "$SLOW_TESTS" == true ]]; then
         core_test+=(--features slow-tests)
@@ -1634,19 +1619,18 @@ print(exe)
     return 0
 }
 
-# One half of the explorers: run exactly the tests the package's library
+# A package's explorers: run exactly the tests the package's library
 # compiles only with the feature $4, returning their status; $1 names the
-# half in what it prints, and the caller records it. $2 is the package, $3 its
+# run in what it prints, and the caller records it. $2 is the package, $3 its
 # library target, $4 the feature and $5 the features of the build it is
 # compared with (empty for the default). The names come from the two builds'
 # own --list, so no list here follows the gates. An empty difference fails:
 # it would mean the feature gates nothing, and a run of no tests passes. So
 # does a result line whose passed and ignored counts do not add up to the
-# names asked for. Any further arguments name tests the base build compiles
-# too that run again in the feature's build; each must be in its list.
+# names asked for.
 run_explorer_half() {
     local record_name="$1" pkg="$2" target="$3" feature="$4" base="$5"
-    local again=("${@:6}") t listed
+    local listed
     local base_args=(cargo test -p "$pkg" --lib) exe base_exe names log rc=0
     [[ -n "$base" ]] && base_args+=(--features "$base")
     base_exe=$(lib_test_exe "$target" "${base_args[@]}")
@@ -1663,14 +1647,7 @@ run_explorer_half() {
         fail "[$record_name] the $feature feature adds no test to $pkg, so there is nothing to run"
         return 1
     fi
-    for t in "${again[@]}"; do
-        if ! grep -qxF -- "$t" <<<"$listed"; then
-            fail "[$record_name] $pkg's $feature build has no test $t"
-            return 1
-        fi
-        names+=("$t")
-    done
-    info "[$record_name] cargo test -p $pkg --lib --features $feature -- --exact <the $((${#names[@]} - ${#again[@]})) tests $feature adds, and ${#again[@]} run again>"
+    info "[$record_name] cargo test -p $pkg --lib --features $feature -- --exact <the ${#names[@]} tests $feature adds>"
     log=$(mktemp "/tmp/ci-$record_name.XXXXXX")
     with_fd_limit cargo test -p "$pkg" --lib --features "$feature" -- --exact "${names[@]}" 2>&1 \
         | tee "$log"
@@ -1691,63 +1668,14 @@ PY
     return "$rc"
 }
 
-# The guard-switch meta-tests of fips-core. The slow suites run them without
-# the explorers, which leaves out every row test only the explorers' build
-# compiles; the core half runs them again in that build, so those rows run.
-GUARD_META=(
-    proto::settle::tests::faults::run::every_guard_switch_turns_each_test_it_names_red_and_each_passes_with_none
-    proto::rekey::tests::faults::every_guard_switch_turns_each_test_it_names_red_and_each_passes_with_none
-)
-
-# With --explorers (and at tier 2, the root half; at tier 3, both), the
-# explorers' two halves: fips-core's slow-explorers
-# tests, and its guard-switch meta-tests (GUARD_META), against its
-# slow-tests build, and the root crate's explorers walks against its default
-# build. Both halves run side by side, each in a
-# subshell with its output held until it ends, so the two do not interleave;
-# the parent records each half's status, since a subshell's record() dies
-# with it. One half alone (=core, =root, tier 2 or a part) runs in the
-# foreground with its output streamed, so a builder's log does not sit
-# silent for the hours the core half takes. Off by default, and then
-# nothing is recorded.
-# One explorer half by name, core or root, in a subshell; its status.
-explorer_half() {
-    if [[ "$1" == core ]]; then
-        ( run_explorer_half core-explorers fips-core fips_core slow-explorers slow-tests \
-            "${GUARD_META[@]}" )
-    else
-        ( run_explorer_half root-explorers fips-mesh fips explorers "" )
-    fi
-}
-
+# With --explorers (and at tiers 2 and 3), the real-node walks: the root
+# crate's explorers tests against its default build, run in the foreground
+# with their output streamed. Off by default, and then nothing is recorded.
 run_explorers() {
-    local halves=() h pids=() logs=() i rc
-    case "$EXPLORERS" in
-        "")   return 0 ;;
-        core) halves=(core) ;;
-        root) halves=(root) ;;
-        *)    halves=(core root) ;;
-    esac
-    if [[ ${#halves[@]} -eq 1 ]]; then
-        rc=0
-        explorer_half "${halves[0]}" || rc=$?
-        record "${halves[0]}-explorers" "$rc"
-        return 0
-    fi
-    for h in "${halves[@]}"; do
-        logs+=("$(mktemp "/tmp/ci-explorers-$h.XXXXXX")")
-        explorer_half "$h" >"${logs[-1]}" 2>&1 &
-        pids+=($!)
-    done
-    for i in "${!halves[@]}"; do
-        rc=0
-        wait "${pids[$i]}" || rc=$?
-        echo "--- ${halves[$i]}-explorers output ---"
-        sed 's/.*\r//' "${logs[$i]}"
-        echo "---"
-        rm -f "${logs[$i]}"
-        record "${halves[$i]}-explorers" "$rc"
-    done
+    local rc=0
+    [[ "$EXPLORERS" == root ]] || return 0
+    ( run_explorer_half root-explorers fips-mesh fips explorers "" ) || rc=$?
+    record root-explorers "$rc"
     return 0
 }
 
@@ -1759,7 +1687,7 @@ run_explorers() {
 # once. The lane fails when no line is an explorer walk, so a renamed module
 # cannot turn this stage into a run of nothing.
 run_lane_explorers() {
-    [[ "$EXPLORERS" == all || "$EXPLORERS" == root ]] || return 0
+    [[ "$EXPLORERS" == root ]] || return 0
     info "testing/mutations/run.sh (FIPS_MUTATION_EXPLORERS=only)"
     if FIPS_MUTATION_EXPLORERS=only with_fd_limit bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
         record "mutations-explorers" 0
@@ -3111,8 +3039,6 @@ run_part() {
     local entries=()
     stage "Tier 3, part $PART"
     case "$PART" in
-        core-explorers)
-            run_explorers ;;
         chaos)
             mapfile -t entries < <(nightly_chaos)
             if [[ ${#entries[@]} -eq 0 ]]; then

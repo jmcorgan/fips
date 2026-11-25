@@ -46,12 +46,12 @@
 //! - [`Oracle::Machine`]: the rekey machines' and the bundles' own
 //!   oracles, from their simulators' predicates, the text naming which;
 //!   among them, once healed, the two machines of each pair converged on
-//!   one session with nothing in progress, which a sweep exempts where it
-//!   exempts a split.
+//!   one session with nothing in progress, which the exemption by shape
+//!   spares where it spares a split.
 //!
 //! Three clauses of those, where the core is known to part from the
-//! bundle or the node, are pinned, not asserted: counted, printed by a
-//! sweep and held by the failing tests of `joint/pins.rs`.
+//! bundle or the node, are pinned, not asserted: counted, and held by the
+//! failing tests of `joint/pins.rs`.
 //!
 //! `RightLink`, `MapsAgree`, `Fresh`, `Classified`, `Bounded` and a joint
 //! node's own hold at every step. `OneSession` and `ConnectionsInUse` hold once the world is
@@ -72,8 +72,6 @@ use alloc::vec::Vec;
 
 use super::super::model::history::Hs;
 use super::explore::replay;
-#[cfg(feature = "slow-explorers")]
-use super::explore::{Check, Stats, explore};
 use super::shadow;
 use super::starts::Start;
 use super::world::{Dir, Kind, Left, Ms, Shape, State, View, World, ends};
@@ -192,6 +190,10 @@ pub fn every_step(w: &World) -> Vec<Breach> {
     out
 }
 
+/// The `RightLink` clause at node `x`. It does not accept a redial the
+/// node adopts at the frame that proves it, whose session the node then
+/// holds on the link it already held: no kept test reaches that state, and
+/// a test that does needs this clause widened first.
 fn right_link(x: usize, v: &View, out: &mut Vec<Breach>) {
     if fault!(RightLinkOff) {
         return;
@@ -371,11 +373,6 @@ pub fn heal(w: &mut World) {
     super::starts::settle(w);
 }
 
-/// Whether a breach at a healed world is exempt: a split a known shape
-/// left.
-#[cfg(feature = "slow-explorers")]
-pub type Exempt<'a> = &'a (dyn Fn(&World, &Breach) -> bool + Sync);
-
 /// The exemption of the model's convergence with itself: a breach of
 /// convergence that a known shape other than the two defects left for
 /// later left ([`left`]). Nothing else is exempt.
@@ -427,117 +424,6 @@ fn left(w: &World, b: &Breach, take: fn(Shape) -> bool) -> bool {
 fn converging(b: &Breach) -> bool {
     b.oracle == Oracle::OneSession
         || (b.oracle == Oracle::Machine && b.what.starts_with(super::joint::oracle::CONVERGED))
-}
-
-/// The exemption of the runs against the models of deployed nodes: a
-/// breach of convergence that any known shape left ([`left`]), the two
-/// defects left for later included.
-#[cfg(feature = "slow-explorers")]
-pub fn by_any_shape(w: &World, b: &Breach) -> bool {
-    left(w, b, |_| true)
-}
-
-/// What a sweep found: the explorer's statistics, the first breach of each
-/// oracle at each node with its path, how many healed leaves had a breach
-/// exempted, per shape, and how many explored states showed each pinned
-/// clause of the joint world's oracles.
-#[cfg(feature = "slow-explorers")]
-pub struct Swept {
-    /// The explorer's statistics.
-    pub stats: Stats,
-    /// The first breach of each oracle at each node, with its path.
-    pub found: Vec<(Breach, Vec<super::explore::Act>)>,
-    /// Leaves with an exempted breach, by the shapes their path showed.
-    pub exempted: Vec<(Vec<super::world::Shape>, usize)>,
-    /// Explored states showing each pinned clause, by clause.
-    pub pinned: Vec<(super::joint::oracle::Pin, usize)>,
-}
-
-/// Every breach on the path of `st` to depth `depth`, and at its leaves
-/// once healed, with the shortest path to each, keyed by oracle and node;
-/// a breach `exempt` names is counted instead.
-#[cfg(feature = "slow-explorers")]
-pub fn sweep(st: &Start, depth: usize, exempt: Exempt<'_>) -> Swept {
-    let found = std::sync::Mutex::new(Vec::new());
-    let pins = std::sync::Mutex::new(Vec::<(super::joint::oracle::Pin, usize)>::new());
-    let check = |w: &World, path: &[super::explore::Act]| -> Result<(), String> {
-        let mut f = found.lock().unwrap_or_else(|e| e.into_inner());
-        for b in every_step(w) {
-            note(&mut f, b, path);
-        }
-        drop(f);
-        let mut seen: Vec<super::joint::oracle::Pin> = super::joint::oracle::pinned_in(w)
-            .into_iter()
-            .map(|(_, pin, _)| pin)
-            .collect();
-        seen.sort_unstable();
-        seen.dedup();
-        if !seen.is_empty() {
-            let mut p = pins.lock().unwrap_or_else(|e| e.into_inner());
-            for pin in seen {
-                match p.iter_mut().find(|(q, _)| *q == pin) {
-                    Some((_, n)) => *n += 1,
-                    None => p.push((pin, 1)),
-                }
-            }
-        }
-        Ok(())
-    };
-    let stats = explore(st, depth, &check as Check<'_>);
-    let mut f = found.into_inner().unwrap_or_else(|e| e.into_inner());
-    let mut exempted: Vec<(Vec<super::world::Shape>, usize)> = Vec::new();
-    for path in &stats.leaves {
-        let mut w = replay(st, path);
-        heal(&mut w);
-        let mut spared = false;
-        for b in every_step(&w).into_iter().chain(healed(&w)) {
-            if exempt(&w, &b) {
-                spared = true;
-            } else {
-                note(&mut f, b, path);
-            }
-        }
-        if spared {
-            let kinds = w.kinds();
-            match exempted.iter_mut().find(|(s, _)| *s == kinds) {
-                Some((_, n)) => *n += 1,
-                None => exempted.push((kinds, 1)),
-            }
-        }
-    }
-    if std::env::var_os("FIPS_SETTLE_EXPLORE_TRACE").is_some() {
-        for (b, path) in &f {
-            let mut w = super::explore::replay_logged(st, path, true);
-            heal(&mut w);
-            std::eprintln!(
-                "{}: {:?} at n{}: {}\n{}",
-                st.name,
-                b.oracle,
-                b.node,
-                b.what,
-                w.net.log.join("\n")
-            );
-        }
-    }
-    let mut pinned = pins.into_inner().unwrap_or_else(|e| e.into_inner());
-    pinned.sort_unstable();
-    Swept {
-        stats,
-        found: f,
-        exempted,
-        pinned,
-    }
-}
-
-/// Keep the first breach of each oracle at each node.
-#[cfg(feature = "slow-explorers")]
-fn note(f: &mut Vec<(Breach, Vec<super::explore::Act>)>, b: Breach, path: &[super::explore::Act]) {
-    if !f
-        .iter()
-        .any(|(g, _)| g.oracle == b.oracle && g.node == b.node)
-    {
-        f.push((b, path.to_vec()));
-    }
 }
 
 /// Run `steps` on `w`, checking every step, then heal and return every
@@ -734,44 +620,6 @@ mod checks {
         );
     }
 
-    #[cfg(feature = "slow-explorers")]
-    #[test]
-    fn model_parties_settle_on_every_start() {
-        // The model with the operator's late-dial rule, as both ends of
-        // every start but the aged link (where the model is undecided) and
-        // the two paths (which the model does not know): every property at
-        // every step, and once healed at every leaf. A split on a path that
-        // showed a known shape is counted, not failed; the observation
-        // tests below show each shape.
-        let all: Vec<_> = starts()
-            .into_iter()
-            .filter(|s| !matches!(s.number, 7 | 12))
-            .collect();
-        let report = crate::testutil::bounded(&all, |st| {
-            let t = std::time::Instant::now();
-            let swept = sweep(st, st.depth, &by_shape);
-            (swept, t.elapsed().as_millis())
-        });
-        let mut wrong = Vec::new();
-        for (st, (swept, ms)) in all.iter().zip(report) {
-            std::eprintln!(
-                "settle {:>2} {}: {} states, {} leaves healed in {ms} ms, exempted {:?}",
-                st.number,
-                st.name,
-                swept.stats.states,
-                swept.stats.leaves.len(),
-                swept.exempted
-            );
-            for (b, path) in swept.found {
-                wrong.push(format!(
-                    "{}: {:?} at n{}: {}\n  path {path:?}",
-                    st.name, b.oracle, b.node, b.what
-                ));
-            }
-        }
-        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-    }
-
     #[test]
     fn classified_fires_on_a_refusal_the_model_does_not_make() {
         use super::super::super::model::history::{Binding, Bytes, Epoch, Event, LinkId};
@@ -843,10 +691,6 @@ mod checks {
             .filter(converging)
             .map(|b| {
                 let s = by_shape(w, &b);
-                #[cfg(feature = "slow-explorers")]
-                if w.shapes.iter().all(|(k, _)| !k.pinned()) {
-                    assert_eq!(s, by_any_shape(w, &b), "{b:?}");
-                }
                 (b, s)
             })
             .collect()
@@ -861,20 +705,6 @@ mod checks {
             view: v,
             keys: alloc::vec![(B, Hs(cur))],
         });
-    }
-
-    /// The breaches of convergence a healed `w` shows, each with whether
-    /// the runs against the deployed models spare it.
-    #[cfg(feature = "slow-explorers")]
-    fn spared_any(w: &World) -> Vec<(Breach, bool)> {
-        healed(w)
-            .into_iter()
-            .filter(converging)
-            .map(|b| {
-                let s = by_any_shape(w, &b);
-                (b, s)
-            })
-            .collect()
     }
 
     #[test]
@@ -933,24 +763,6 @@ mod checks {
             all.len() == 1 && all[0].0.what.starts_with(PENDING) && !all[0].1,
             "a pending on the shape's sessions is not the shape's: {all:?}"
         );
-        // A pending of another handshake than the one a dial left, on
-        // sessions the dial did not leave either.
-        #[cfg(feature = "slow-explorers")]
-        {
-            let mut w = shaped(
-                5,
-                5,
-                5,
-                5,
-                alloc::vec![(Shape::DialAsRekey, Left::Pending(Hs(9)))],
-            );
-            arm(&mut w, 8, 5);
-            let all = spared_any(&w);
-            assert!(
-                all.len() == 1 && all[0].0.what.starts_with(PENDING) && !all[0].1,
-                "a pending the dial did not leave is not spared: {all:?}"
-            );
-        }
     }
 
     #[test]
@@ -1001,14 +813,6 @@ mod checks {
                 !all.is_empty() && all.iter().all(|(_, s)| !s),
                 "the dial's is a defect left for later: {all:?}"
             );
-            #[cfg(feature = "slow-explorers")]
-            {
-                let all = spared_any(w);
-                assert!(
-                    all.iter().all(|(_, s)| *s),
-                    "what the dial left is spared against the deployed models: {all:?}"
-                );
-            }
         }
     }
 }

@@ -181,7 +181,7 @@ builds, and changes no line of the core, the machine or the bundle.
   the record) and when its own rekey started. A start's acts
   of a transport losing or regaining carrier and being removed go to
   every held peer's bundle.
-  It names, for the sweeps' exemption, the pairs its bundles hold as
+  It names, for the exemption in `explore.rs`, the pairs its bundles hold as
   acknowledged paths that are not Live (`Party::lapsed`), and for the
   shared schedules whether the core counts a held peer heard
   (`Party::heard`).
@@ -258,9 +258,8 @@ builds, and changes no line of the core, the machine or the bundle.
   setup pair whose path is probing), which the core's rule no longer
   shows. The mirror of the paths is asserted whole, a switched-to path in
   the state its bundle holds it. `pinned_in` lists the pinned clauses,
-  each sweep counts the explored states showing each, and `pins.rs` holds
-  a test of each shape. Its tests show the mirror at a roam and at a
-  second path (`PathsUnmirrored`, `StateIgnored`), delivery of a
+  and `pins.rs` holds a test of each shape. Its tests show the mirror at
+  a roam and at a second path (`PathsUnmirrored`, `StateIgnored`), delivery of a
   replacement request, an orphaned bundle and a restart found at a rekey
   (`ReplaceDropped`, `OrphanKept`, `RestartDropped`), and attribution of
   a msg1 on a roamed one-path link (`AttributeBySetupOnly`).
@@ -277,14 +276,10 @@ builds, and changes no line of the core, the machine or the bundle.
   firing on a planted reading, delivery or output through these
   wrappers.
 - `starts.rs`: the named starts (`../starts.rs`) with joint nodes at both
-  ends, at each of the four pairings of the two settings (a mixed pairing
-  puts node 0 at the first and every other node at the second), each with
-  its state cap measured on the joint world at that pairing (the count
-  its depth reached, times 1.5, rounded up to a hundred). A start keeps
-  its script and depth, but for the start with two paths, which
-  `../starts.rs` writes with no paths, for the model: it is rebuilt on
-  real bundles. Beside them, the starts only joint nodes run, each built
-  mid-history on real bundles and explored to its script plus two:
+  ends, at Off with Off and at On with On. A start keeps its script, but
+  for the start with two paths, which `../starts.rs` writes with no
+  paths, for the model: it is rebuilt on real bundles. Beside them, the
+  starts only joint nodes run, each built mid-history on real bundles:
   rebuilt start 12, node 1's second dial opened before the capability
   exchange, its connection the one its bundle's second path then uses,
   and its resend arriving from a pair node 0's link holds as a Live
@@ -318,66 +313,29 @@ builds, and changes no line of the core, the machine or the bundle.
   (`ReleaseKeepsPair`), and the reaped dial's retire keeping the
   connection the dial still out uses, read at that step
   (`CloseByPeerAddress`).
-  Apart from them, the cold start: two nodes configured with each other
-  on UDP that have dialed, sent and connected nothing, the one start on
-  which the explorer offers a node's dial, once per node, so its depth
-  counts the dials. Its depth is not its script plus two but the depth a
-  cold start is explored to within the reach budget, measured at Off with
-  Off and at On with On, and its cap is the count at that depth, times
-  1.5, at each. None of the four pairings' lists holds it.
-- `explore.rs`: the settlement world's explorer over the joint starts: each
-  start's reach at each of the four pairings, one test per pairing
-  (switch `ReachOneMore`, shown on one start's reach in `runs.rs`), with every line naming its pairing; that two worlds stepped in turn along one path have
-  one digest, so no node's path identifiers move another's (by hand:
-  the streams made one per process); and that a state differing only
-  inside a machine, in a field neither `view` nor `bindings` shows, has
-  its own key and its own successors (`KeyFromView`, `KeyOmitsBundle`).
-  The cold start's reach at Off with Off and at On with On, one test each,
-  to its stated depth and within its cap (`ReachOneMore`, which explores
-  one depth more, past the cap, by hand: with it each test takes minutes,
-  and the switch's row shows the same check on start 14); and the
-  measurement those depths come
-  from, ignored and run by hand: the cold start explored depth after depth
-  until a time limit (`FIPS_SETTLE_COLD_LIMIT`, in seconds, 120 by
-  default), printing each depth's frontier and the time it ended at, and
-  how far into the next depth the limit came.
-  Its sweeps check every start's explored states and healed leaves, every
-  start but the two late-dial cases (start 6's accepted split, which
-  `../regress.rs` tests is ended by the link-dead timer and the redial
-  within a heal, and start 7's aged-link defect, pinned there): at Off
-  with Off, and
-  at On with On every start but the three named starts whose links
-  turn capable there and the two-path starts whose sweeps take minutes
-  (`OutboundGated` for both, shown on one start's sweep in `runs.rs`). A
-  whole reach or sweep at one pairing takes minutes, so the switches' rows
-  name the one-start runs of `runs.rs` and these are characterisation. A
-  capable link's bundles probe every
-  fraction of a second, so each healed leaf of those three steps a
-  minute of probes and each sweep takes tens of minutes; they run one test
-  per start, the two-path starts one test together and the two mixed
-  pairings' sweeps one test each, in the explorers' build only. It
-  exempts a split a known shape left (`oracle::by_shape`), and the breach `pins.rs` holds of a connection-closed
-  pair the node's bundle holds as an acknowledged path that is not Live
-  (`lapsed`). Each sweep's line counts its exempted breaches by cause and
-  the explored states showing each pinned clause of the joint world's
-  oracles, and a test shows the pinned breach exempted by its cause and a
-  settled, capable pair not.
-  The core's own explorer runs here too, in the explorers' build, on
-  joint nodes at Off: every
-  named start but the two late-dial cases, the one with two paths on
-  real bundles, with joint nodes at both ends and with one at either end
-  against the model, under the same exemption and one more, for what the
-  model's missing link-dead timer leaves beside a joint node (`untimed`):
-  the model still holds a joint node whose timer removed it after the
-  link's frames were lost, and refuses every redial (one off the link of
-  a peering it has not heard from, while that link can be reached), so
-  the joint node holds a configured peer it cannot reach and the model
-  keeps the refused redial's connection open. A node runs the timer too;
-  two joint nodes never reach it. The model answers a redial of a peering
-  it has heard from, so no explored path of the named starts reaches it
-  now; the exemption test builds it by hand, the model answering one dial
-  on UDP from a joint node configured with its TCP home, and shows it
-  spares that world's two breaches and nothing else in it.
+- `explore.rs`: the settlement world's explorer on the joint starts,
+  where it serves two checks: that two worlds stepped in turn along one
+  path have one digest, so no node's path identifiers move another's (by
+  hand: the streams made one per process); and that a state differing
+  only inside a machine, in a field neither `view` nor `bindings` shows,
+  has its own key and its own successors (`KeyFromView`,
+  `KeyOmitsBundle`). And the exemption of a healed leaf's breaches: a
+  split a known shape left (`oracle::by_shape`), the breach `pins.rs`
+  holds of a connection-closed pair the node's bundle holds as an
+  acknowledged path that is not Live (`lapsed`), and what the model's
+  missing link-dead timer leaves beside a joint node (`untimed`): the
+  model still holds a joint node whose timer removed it after the link's
+  frames were lost, and refuses every redial (one off the link of a
+  peering it has not heard from, while that link can be reached), so the
+  joint node holds a configured peer it cannot reach and the model keeps
+  the refused redial's connection open. A node runs the timer too; two
+  joint nodes never reach it. A test shows the pinned breach exempted by
+  its cause and a settled, capable pair not, and builds the model's case
+  by hand, the model answering one dial on UDP from a joint node
+  configured with its TCP home, showing the exemption spares that world's
+  two breaches and nothing else in it. The reaches and sweeps of every
+  start at each pairing, and the core's own explorer on joint nodes, were
+  retired.
 - `pins.rs`: pins of what the joint world found. A known-defect pin is
   ignored, listed in `testing/ignored-tests.txt` and run by the
   known-defect lane, which reds when one passes; the fix that turns one
@@ -403,12 +361,12 @@ builds, and changes no line of the core, the machine or the bundle.
   characterisation; a msg1 from the pair a frame
   from another transport came from is off the link to the core (start 2
   at Off), as is one from a pair whose path the bundle still holds
-  probing (start 2 at On with On, found by its sweep), shapes that now
-  need `HeardMovesPeer` and `AttributeByCurrent` both, so they are
-  characterisation too; and a crossing in which the smaller node's own
-  dial is answered over the larger node's dial connection, from the
-  larger node's second address (the named start with two paths as
-  `../starts.rs` writes it, its nodes joint nodes), keeps that connection
+  probing (start 2 at On with On, found by a sweep since retired),
+  shapes that now need `HeardMovesPeer` and `AttributeByCurrent` both,
+  so they are characterisation too; and a crossing in which the smaller
+  node's own dial is answered over the larger node's dial connection,
+  from the larger node's second address (the named start with two paths
+  as `../starts.rs` writes it, its nodes joint nodes), keeps that connection
   open, since the moved-onto link's record takes the pair before the
   inbound link is retired (`MoveClosesNewPair` puts back the close, after
   which both ends lose the link and redial).
@@ -416,17 +374,8 @@ builds, and changes no line of the core, the machine or the bundle.
   cheapest test that shows a guard can fail in a world of joint nodes:
   every start's script with its heal at On with On (its twin at Off with
   Off is `party.rs`'s), which reds fourteen of the core's switches at
-  both settings and `HeardMovesPeer` at On with On alone; the reach of
-  the wall step start alone at each of the four pairings, the cheapest
-  run that shows the reach check can fail
-  (`ReachOneMore`); the sweeps at Off with Off of the wall step start, the
-  drain start and the stored answer's start alone, each the start with
-  the fewest states whose sweep reds a switch the scripts do not
-  (`OutboundGated`, `LeaseKept`, `IntervalTen`; `HeardNeedsFrame`;
-  `StoredByBytes`); the sweep at On with On of rebuilt start 12 alone
-  (`StateIgnored`; the core's switch it was meant for is masked there by
-  the pinned breach of a lapsed path); and two rekey schedules no
-  explored path holds,
+  both settings and `HeardMovesPeer` at On with On alone; and two rekey
+  schedules no named start's path holds,
   written out step by step: simultaneous rekeys whose msg1s both arrive
   before either answer, settling on the smaller node's (the rekey
   machine's switch `LargerKeepsOwn`), and a rekey msg1 refused once from
@@ -507,8 +456,6 @@ builds, and changes no line of the core, the machine or the bundle.
   keyed by the node's digest unless a reason it can never change a
   successor is written beside it: a field the key leaves out merges
   states the explorer must keep apart.
-- A start's cap is re-measured, not raised by hand, when a change moves
-  its state count; the reach test's lines give the counts.
 - What an abstract end sends is stub crypto, a function of world names:
   no decision goes in `names.rs`.
 - A change to the link profile's constants reds
@@ -520,13 +467,10 @@ builds, and changes no line of the core, the machine or the bundle.
   message starts `defect:`, and checks the shape it needs with
   `precondition:` assertions; it lands with its `known-defect` line and
   its characterisation entry, and the fix removes all three.
-- The lanes: every reach and every sweep here, the core's own explorer on
-  joint nodes and the one-start reaches and sweeps of `runs.rs` among
-  them, is gated on `slow-explorers`, which no CI run started by a push
-  turns on; local CI runs them only with `--explorers`. The scripted
-  runs, the feeds and the pins run in every build. The cold start's
-  measurement is ignored and run by hand. A new reach or sweep goes
-  behind `slow-explorers` too.
+- The lanes: the scripted runs, the feeds, the pins and the explorer
+  checks run in every build. The reaches and sweeps that walked the
+  joint starts, and the core's own explorer on joint nodes, were retired;
+  whether one returns is an open decision.
 - Tests here follow the settlement tests' coverage rules
   (`core/src/proto/settle/tests/README.md`): each needs a switch's row, a
   self-checked entry or a characterisation entry in `../faults.rs`, in the

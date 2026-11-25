@@ -28,8 +28,8 @@
 //!   the peer's late crossing dial.
 //! - [`Shape::LaterDialFirst`] and [`Shape::DialAsRekey`]: the late second
 //!   dial answered in the other order and the dial on the peer's aged
-//!   link, the two defects left for later, which only the runs against
-//!   the models of deployed nodes exempt (`legacy/explore.rs`).
+//!   link, the two defects left for later, which no exemption spares
+//!   ([`Shape::pinned`]).
 
 use alloc::string::String;
 use alloc::vec::Vec;

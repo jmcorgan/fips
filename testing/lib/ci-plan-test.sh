@@ -5,13 +5,12 @@
 # configuration, stage lists and plan functions, plants a set of recorded
 # results, and runs check_plan on them: the plan itself passes, a missing or
 # an extra result fails and is named, and a skipped stage is not counted as
-# missing. The same holds for each part of tier 3 (--part). The parts, with
-# tier 2, must list exactly what tier 3 lists, each part only results tier 3
-# lists, no two of them the same result but the integration build, and the
-# core explorer part exactly what tier 3 adds to tier 2 besides the chaos
-# part; each failure names the result at fault. Tier 2 runs the root
-# crate's explorer half and its mutation lines, so a run of it that records
-# either one short fails. A part whose plan has nothing
+# missing. The same holds for the part of tier 3 (--part). The chaos part,
+# with tier 2, must list exactly what tier 3 lists, each only results tier 3
+# lists, and the two no result in common but the integration build; each
+# failure names the result at fault. Tier 2 runs the root crate's explorers
+# and its mutation lines, so a run of it that records either one short
+# fails. A part whose plan has nothing
 # of its own is refused, and the chaos part with no scenario fails before it
 # builds anything.
 #
@@ -126,7 +125,7 @@ check "tier 2: an unrecorded stage that was not skipped fails" \
 load 2
 record_plan root-explorers
 run_check
-check "tier 2: a missing root explorer half fails" \
+check "tier 2: a missing root explorer run fails" \
     "$(grep -qF 'planned, not recorded: root-explorers' <<<"$OUT" && echo 0 || echo 1)"
 
 load 2
@@ -136,18 +135,12 @@ check "tier 2: a missing mutations-explorers fails" \
     "$(grep -qF 'planned, not recorded: mutations-explorers' <<<"$OUT" && echo 0 || echo 1)"
 
 load 3
-record_plan core-explorers
-run_check
-check "tier 3: a missing explorer half fails" \
-    "$(grep -qF 'planned, not recorded: core-explorers' <<<"$OUT" && echo 0 || echo 1)"
-
-load 3
 record_plan mutations-explorers
 run_check
 check "tier 3: a missing mutations-explorers fails" \
     "$(grep -qF 'planned, not recorded: mutations-explorers' <<<"$OUT" && echo 0 || echo 1)"
 
-PARTS=(core-explorers chaos)
+PARTS=(chaos)
 for part in "${PARTS[@]}"; do
     load 3 "$part"
     record_plan
@@ -212,10 +205,6 @@ for tor in false true; do
             done < <(comm -12 <(echo "${PLANS[${names[$i]}]}") <(echo "${PLANS[${names[$j]}]}"))
         done
     done
-    explorer_job=$(printf '%s\n' "${PLANS[core-explorers]}" | sort -u)
-    rest=$(comm -23 <(comm -23 <(echo "$t3") <(echo "$t2")) <(echo "${PLANS[chaos]}"))
-    [[ "$explorer_job" == "$rest" ]] \
-        || problems+=("the explorer part lists $(echo "$explorer_job" | tr '\n' ' ')but tier 3 adds $(echo "$rest" | tr '\n' ' ')besides tier 2 and chaos")
     for p in "${problems[@]}"; do echo "  $p"; done
     check "tier 3 with WITH_TOR=$tor: the parts and tier 2 list exactly tier 3, each only its own" \
         "${#problems[@]}" "${problems[*]:0:3}"
