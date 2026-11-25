@@ -113,7 +113,7 @@ fn resend_bookkeeping() {
     assert!(state.handshake_msg1().is_none());
     assert!(state.handshake_msg2().is_none());
 
-    state.set_handshake_msg1(vec![1, 2, 3], 500);
+    state.set_handshake_msg1(vec![1, 2, 3]);
     assert_eq!(state.handshake_msg1(), Some(&[1u8, 2, 3][..]));
     assert_eq!(state.resend_count(), 0);
 
@@ -124,7 +124,7 @@ fn resend_bookkeeping() {
     assert_eq!(state.resend_count(), 2);
 
     // set_handshake_msg1 resets the resend counter.
-    state.set_handshake_msg1(vec![4, 5], 100);
+    state.set_handshake_msg1(vec![4, 5]);
     assert_eq!(state.handshake_msg1(), Some(&[4u8, 5][..]));
     assert_eq!(state.resend_count(), 0);
 

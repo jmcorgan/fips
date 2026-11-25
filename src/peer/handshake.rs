@@ -502,7 +502,7 @@ impl Handshake {
     /// sent, which its handshake leg held until the msg2 completed it, for
     /// the promotion that follows. The carrier schedules no resend.
     pub(crate) fn set_conn_handshake_msg1(&mut self, msg1: Vec<u8>) {
-        self.conn.set_handshake_msg1(msg1, 0);
+        self.conn.set_handshake_msg1(msg1);
     }
 
     /// Store the wire-format msg2 for duplicate-msg1 resend on the surviving

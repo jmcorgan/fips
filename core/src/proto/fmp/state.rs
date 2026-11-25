@@ -345,7 +345,7 @@ impl ConnectionState {
     /// Store the wire-format msg1 bytes for resend and reset the resend counter.
     /// The first-resend deadline is scheduled by the shell timer driver, not
     /// tracked here.
-    pub fn set_handshake_msg1(&mut self, msg1: Vec<u8>, _first_resend_at_ms: u64) {
+    pub fn set_handshake_msg1(&mut self, msg1: Vec<u8>) {
         self.handshake_msg1 = Some(msg1);
         self.resend_count = 0;
     }
