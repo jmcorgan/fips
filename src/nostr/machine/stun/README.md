@@ -3,12 +3,10 @@
 The STUN pieces that read no socket: the codec, the binding exchange as a
 machine, and the choice of which of this host's own addresses a traversal
 offers as same-LAN candidates. The rendezvous machine runs the advert's
-public-address observation through `client.rs`, and the shell's sockets
-carry its datagrams. The traversal flows still run their exchange from the
-shell's `stun.rs`, whose `perform_stun` drives the same client for one
-server on the traversal socket (the lookup, the sends and the receives
-against the client's deadlines), and which reads the host's interfaces and
-probe sockets, calling in here for the selection.
+public-address observation and each traversal's observation through
+`client.rs`, and the shell's sockets carry their datagrams. The shell's
+`stun.rs` reads the host's interfaces and probe sockets and hands them over
+raw; the selection is `candidates.rs`'s.
 
 ## Files
 

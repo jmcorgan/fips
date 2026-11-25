@@ -1,16 +1,13 @@
-//! A peer named by its npub in any letter case is looked up, signalled and
-//! remembered by its key: the advert cache, the offer's recipient, the
-//! active-initiator set and the failure state all use the canonical npub,
-//! whatever spelling the configuration holds. A spelling that is not a
-//! NIP-19 npub (a bech32m checksum, non-zero padding bits) is refused.
+//! A peer named by its npub in any letter case is looked up and remembered
+//! by its key: the advert cache and the failure state use the canonical
+//! npub, whatever spelling the configuration holds. A spelling that is not a
+//! NIP-19 npub (a bech32m checksum, non-zero padding bits) is refused. A
+//! connect's failure hands back the configuration as the node gave it. The
+//! offer's recipient and the initiator set are the machine's, tested in
+//! `machine/rendezvous/tests/traversal.rs`.
 
-use nostr::nips::nip19::ToBech32;
-
-use super::{
-    NostrRendezvous, OverlayEndpointAdvert, OverlayTransportKind, UNCONNECTED_RELAY, now_ms,
-    offer_between, peer_keys_ordered,
-};
-use crate::nostr::types::BootstrapError;
+use super::{NostrRendezvous, OverlayEndpointAdvert, OverlayTransportKind, now_ms};
+use crate::nostr::types::{BootstrapError, BootstrapEvent};
 
 /// The FRC-1703 Appendix C.1 key's canonical npub.
 const CANONICAL_NPUB: &str = "npub1lycg5qvjtrp3qjf5f7zl382j9x6nrjz9sdhenvyxq8c3808qxmus6gq266";
@@ -47,63 +44,12 @@ fn spellings(npub: &str) -> [String; 3] {
     ]
 }
 
-/// A peer config naming `npub` as written.
-fn peer_config(npub: &str) -> crate::config::PeerConfig {
-    crate::config::PeerConfig {
-        npub: npub.to_string(),
-        ..Default::default()
-    }
-}
-
 /// A UDP endpoint advert at `addr`.
 fn udp_endpoint(addr: &str) -> OverlayEndpointAdvert {
     OverlayEndpointAdvert {
         transport: OverlayTransportKind::Udp,
         addr: addr.to_string(),
     }
-}
-
-/// A runtime configured with no STUN servers, so a traversal runs no STUN
-/// exchange.
-fn runtime_without_stun() -> NostrRendezvous {
-    NostrRendezvous::new_for_test_with_config(crate::config::NostrRendezvousConfig {
-        stun_servers: Vec::new(),
-        ..Default::default()
-    })
-}
-
-/// `runtime`, which runs no STUN exchange, with the unconnected relay in its
-/// pool and, cached under `peer`'s canonical npub, an advert that names a NAT
-/// endpoint and that relay for signalling.
-async fn initiator_with_cached_nat_peer(
-    runtime: NostrRendezvous,
-    peer: &nostr::key::Keys,
-) -> (std::sync::Arc<NostrRendezvous>, String) {
-    runtime
-        .add_unconnected_relay_for_test(UNCONNECTED_RELAY)
-        .await;
-    let peer_npub = peer.public_key().to_bech32().unwrap();
-    let mut advert = NostrRendezvous::cached_advert_for_test(
-        peer_npub.clone(),
-        udp_endpoint("nat"),
-        now_ms() / 1_000,
-    );
-    advert.advert.signal_relays = Some(vec![UNCONNECTED_RELAY.to_string()]);
-    runtime
-        .insert_advert_for_test(peer_npub.clone(), advert)
-        .await;
-    (std::sync::Arc::new(runtime), peer_npub)
-}
-
-/// The first traversal offer `runtime` publishes, waiting up to 10 s for it.
-async fn wait_for_sent_offer(runtime: &NostrRendezvous) -> crate::nostr::TraversalOffer {
-    for _ in 0..200 {
-        if let Some(offer) = runtime.sent_offers_for_test().into_iter().next() {
-            return offer;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("no traversal offer was published within 10 s");
 }
 
 /// A TCP listener that accepts and never speaks: a relay URL pointed at it
@@ -118,52 +64,6 @@ fn blackhole_relay() -> String {
         }
     });
     format!("ws://127.0.0.1:{port}")
-}
-
-#[tokio::test]
-async fn a_peer_configured_in_any_case_is_sent_an_offer_addressed_to_its_canonical_npub() {
-    let peer = nostr::key::Keys::generate();
-    let canonical = peer.public_key().to_bech32().unwrap();
-    for spelling in spellings(&canonical) {
-        let (runtime, peer_npub) =
-            initiator_with_cached_nat_peer(runtime_without_stun(), &peer).await;
-        runtime.request_connect(peer_config(&spelling)).await;
-        let offer = wait_for_sent_offer(&runtime).await;
-        // The responder routes an offer only when its recipient is its own
-        // canonical npub, and refuses any other text as `identity-mismatch`.
-        assert_eq!(
-            offer.recipient_npub, peer_npub,
-            "the offer to a peer configured as {spelling} is addressed to another text"
-        );
-        assert!(
-            runtime.initiator_active_for_test(&peer_npub),
-            "the initiator for a peer configured as {spelling} is not registered under its key"
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_peer_configured_in_upper_case_still_wins_the_dual_init_election() {
-    let base = runtime_without_stun();
-    let our_npub = base.npub_for_test().to_string();
-    // A peer whose NodeAddr sorts after ours: our initiator wins, so its offer
-    // is suppressed while ours is in flight.
-    let peer = peer_keys_ordered(&our_npub, true);
-    let (runtime, peer_npub) = initiator_with_cached_nat_peer(base, &peer).await;
-    runtime
-        .request_connect(peer_config(&peer_npub.to_ascii_uppercase()))
-        .await;
-    let _ = wait_for_sent_offer(&runtime).await;
-
-    let theirs = offer_between("their-session", &peer_npub, &our_npub);
-    let handled = runtime
-        .clone()
-        .handle_incoming_offer_for_test(theirs, peer.public_key(), peer_npub.clone())
-        .await;
-    assert!(
-        handled.is_ok(),
-        "the peer's offer was answered instead of suppressed in favour of ours: {handled:?}"
-    );
 }
 
 #[tokio::test]
@@ -252,9 +152,44 @@ async fn a_cooldown_recorded_under_an_upper_case_npub_holds_for_the_canonical_np
         1,
         0,
     );
+    runtime.settled_for_test().await;
     assert!(
         runtime.cooldown_until(&peer_npub, now + 1).is_some(),
         "a protocol-mismatch cooldown recorded under the upper-case npub does not hold for the \
          canonical npub the discovery sweep checks"
     );
+}
+
+/// A connect refused because the node has no room comes back as a failure
+/// event carrying the peer's configuration as the node gave it, in the
+/// spelling it was configured with, not the canonical npub the traversal
+/// runs under.
+#[tokio::test]
+async fn a_connect_refused_for_capacity_comes_back_failed_with_the_configuration_as_given() {
+    let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test());
+    let spelling = alternating_case(&crate::Identity::generate().npub());
+    let config = crate::config::PeerConfig::new(spelling.clone(), "udp", "203.0.113.7:2121");
+    runtime.set_capacity(false);
+    runtime.request_connect(config).await;
+    runtime.settled_for_test().await;
+    let events = runtime.drain_events().await;
+    assert_eq!(events.len(), 1, "one event for the connect: {events:?}");
+    let BootstrapEvent::Failed {
+        peer_config,
+        reason,
+    } = &events[0]
+    else {
+        panic!("the connect did not fail: {events:?}");
+    };
+    assert_eq!(
+        peer_config.npub, spelling,
+        "the configuration was not handed back as given"
+    );
+    let addresses: Vec<_> = peer_config
+        .addresses
+        .iter()
+        .map(|a| (a.transport.as_str(), a.addr.as_str()))
+        .collect();
+    assert_eq!(addresses, [("udp", "203.0.113.7:2121")]);
+    assert_eq!(reason, "bootstrap disabled");
 }

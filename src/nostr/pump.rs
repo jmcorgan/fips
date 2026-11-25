@@ -1,23 +1,29 @@
 //! The pump: the one task that owns the rendezvous machine.
 //!
-//! It reads three feeds with no preference among them, so a flood on one
+//! It reads its feeds with no preference among them, so a flood on one
 //! cannot starve another: its inbox, where the node's handle, the relay
-//! client's authenticator and the pump's own relay operations post; the
-//! relay client's notification stream; and the machine's next deadline.
-//! Each input is handed to the machine with the step's clock readings, and
-//! every action the machine queues is then carried out.
+//! client's authenticator and the pump's own operations post; the relay
+//! client's notification stream; the signal router's channel, which only
+//! traversal signals are put on; the machine's sockets' datagrams; and the
+//! machine's next deadline. Each input is handed to the machine with the
+//! step's clock readings; the status the node reads is then stored when it
+//! changed, and only after that is every action the machine queued carried
+//! out, so a reply never arrives ahead of the status it describes.
 //!
-//! Carrying out an action never awaits I/O: each relay call and each
-//! public-address observation runs in a task of its own, held in a
-//! `JoinSet` and aborted when the pump ends, that posts its result back to
-//! the inbox. That is what lets a relay's authentication challenge, which
-//! the machine answers, arrive while a relay call is in flight. The
-//! machine's UDP sockets are `sockets.rs`'s, each read by a task of its own
-//! onto a fourth feed, a bounded channel of datagrams.
+//! Carrying out an action never awaits I/O: each relay call, host-name
+//! lookup and read of the host's interfaces runs in a task of its own, held
+//! in a `JoinSet` and aborted when the pump ends, that posts its result
+//! back to the inbox. That is what lets a relay's authentication
+//! challenge, which the machine answers, arrive while a relay call is in
+//! flight. The machine's UDP sockets are `sockets.rs`'s, each read by a
+//! task of its own.
 
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
+use std::ops::ControlFlow;
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use futures::StreamExt;
 use nostr::event::{Event, Kind};
 use nostr::message::SubscriptionId;
@@ -26,21 +32,26 @@ use nostr_sdk::client::ClientNotification;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
 
+use super::handoff::EstablishedTraversal;
 use super::log::{self, FirstEvent};
 use super::machine::adverts::assemble::AdvertTransportSnapshot;
 use super::machine::error::Error as MachineError;
+use super::machine::rendezvous::status::Status;
 use super::machine::rendezvous::{
-    Action, Input, Now, Outcome, PeerKey, Rendezvous, Reply, ReplyId, SubId,
+    Action, ConnectId, Input, Interfaces, Now, Outcome, PeerKey, Read, Rendezvous, Reply, ReplyId,
+    SubId,
 };
 use super::relay::{Notifications, RelayClient};
-use super::runtime::Feed;
+use super::runtime::{Feed, received};
 use super::sockets::{DATAGRAM_BACKLOG, Datagram, Sockets};
 use super::traversal::now_ms;
 #[cfg(test)]
 use super::types::CachedOverlayAdvert;
 use super::types::{
-    ADVERT_KIND, NostrRefetchOutcome, OverlayAdvert, OverlayEndpointAdvert, SIGNAL_KIND,
+    ADVERT_KIND, BootstrapEvent, FailureReply, NostrRefetchOutcome, OverlayEndpointAdvert,
+    SIGNAL_KIND,
 };
+use crate::config::PeerConfig;
 use crate::identity::OsEntropy;
 use crate::time::HostInstant;
 
@@ -62,9 +73,12 @@ pub(super) enum Msg {
         key: PeerKey,
         tx: oneshot::Sender<Result<Vec<OverlayEndpointAdvert>, MachineError>>,
     },
-    ResolveAdvert {
-        key: PeerKey,
-        tx: oneshot::Sender<Result<OverlayAdvert, MachineError>>,
+    Connect {
+        peer_config: PeerConfig,
+    },
+    RecordFailure {
+        npub: String,
+        tx: oneshot::Sender<FailureReply>,
     },
     CachedEndpoints {
         npub: String,
@@ -92,6 +106,11 @@ pub(super) enum Msg {
     InsertAdvert {
         npub: String,
         advert: CachedOverlayAdvert,
+        tx: oneshot::Sender<()>,
+    },
+    #[cfg(test)]
+    AwaitAnswer {
+        nonce: String,
         tx: oneshot::Sender<()>,
     },
 }
@@ -134,9 +153,12 @@ async fn sleep_until(deadline: Option<HostInstant>) {
 /// pump's empty answer.
 type Replier = Box<dyn FnOnce(Reply) + Send>;
 
-/// The machine's view of a failure streak, reset as a refreshed or evicted
-/// advert warrants. The streaks are kept by the traversal flows.
-pub(super) type ResetStreak = Box<dyn Fn(&str) + Send>;
+/// What the pump hands the node: the events it drains, and the status its
+/// synchronous queries read.
+pub(super) struct ToNode {
+    pub(super) events: mpsc::UnboundedSender<BootstrapEvent>,
+    pub(super) status: Arc<ArcSwap<Status>>,
+}
 
 /// The pump's state: the machine, the relay client, the answers owed, and
 /// the operations in flight.
@@ -150,15 +172,16 @@ pub(super) struct Pump {
     /// first opened under, so a retry reuses it.
     subscriptions: HashMap<SubId, SubscriptionId>,
     tasks: JoinSet<()>,
-    reset_streak: ResetStreak,
     /// The machine's UDP sockets.
     sockets: Sockets,
     /// What the sockets read.
     datagrams: mpsc::Receiver<Datagram>,
-    /// The signal router's channel, for a signal that ever reached the
-    /// pool's stream.
-    signals: broadcast::Sender<ClientNotification>,
-    first: std::sync::Arc<FirstEvent>,
+    /// The configuration of each connect the node asked for, for the
+    /// failure event it may end with.
+    connects: HashMap<ConnectId, PeerConfig>,
+    next_connect: u64,
+    to_node: ToNode,
+    first: FirstEvent,
     #[cfg(test)]
     in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -190,9 +213,7 @@ impl Pump {
         machine: Rendezvous<HostInstant, OsEntropy>,
         client: RelayClient,
         inbox: Inbox,
-        reset_streak: ResetStreak,
-        signals: broadcast::Sender<ClientNotification>,
-        first: std::sync::Arc<FirstEvent>,
+        to_node: ToNode,
     ) -> Self {
         let (datagram_tx, datagrams) = mpsc::channel(DATAGRAM_BACKLOG);
         Self {
@@ -205,9 +226,10 @@ impl Pump {
             next_reply: 1,
             subscriptions: HashMap::new(),
             tasks: JoinSet::new(),
-            reset_streak,
-            signals,
-            first,
+            connects: HashMap::new(),
+            next_connect: 1,
+            to_node,
+            first: FirstEvent::new(),
             #[cfg(test)]
             in_flight: Default::default(),
         }
@@ -219,18 +241,18 @@ impl Pump {
         self.in_flight.clone()
     }
 
-    /// Run until the machine is shut down or the relay client's stream
-    /// ends. The operations still in flight are aborted on the way out.
+    /// Run until the machine is shut down, or the relay client's stream or
+    /// the signal router's channel ends. The operations still in flight are
+    /// aborted on the way out.
     pub(super) async fn run(
         mut self,
         mut notifications: Notifications,
+        mut signals: broadcast::Receiver<ClientNotification>,
         mut rx: mpsc::UnboundedReceiver<Msg>,
     ) {
         log::notify_loop_entered();
         loop {
-            while let Some(action) = self.machine.poll_action() {
-                self.execute(action);
-            }
+            self.flush();
             if self.machine.stopped() {
                 break;
             }
@@ -253,6 +275,16 @@ impl Pump {
                         break;
                     }
                 },
+                // A lag is logged and read past; a closed channel ends the
+                // pump, which ends rendezvous as the signal task's end did.
+                signal = signals.recv() => match received(signal) {
+                    ControlFlow::Continue(Some(note)) => {
+                        self.first.note();
+                        self.dispatch(note);
+                    }
+                    ControlFlow::Continue(None) => {}
+                    ControlFlow::Break(()) => break,
+                },
                 Some((socket, src, bytes)) = self.datagrams.recv() => {
                     let input = Input::Datagram { socket, src, bytes };
                     self.machine.handle(input, now());
@@ -265,25 +297,36 @@ impl Pump {
         self.sockets.close_all();
     }
 
-    /// Hand a notification from the relay client's stream to the machine:
-    /// an advert as a relay event. A traversal signal never reaches this
-    /// stream, since the signal router takes each one onto its own channel;
-    /// one that ever did is put on that channel, so it is still opened.
+    /// Store the status the step left, if it changed, then carry out every
+    /// action the step queued. The status goes first because a reply
+    /// completes a `oneshot` another thread can read at once: a caller that
+    /// has awaited one must find the status its reply describes.
+    fn flush(&mut self) {
+        if let Some(status) = self.machine.take_status() {
+            self.to_node.status.store(Arc::new(status));
+        }
+        while let Some(action) = self.machine.poll_action() {
+            self.execute(action);
+        }
+    }
+
+    /// Hand an event a relay delivered to the machine: an advert, or a
+    /// traversal signal. A signal normally arrives on the signal router's
+    /// channel; one that ever reached the client's stream is handed over
+    /// the same way.
     fn dispatch(&mut self, note: ClientNotification) {
         let ClientNotification::Event {
             relay_url, event, ..
-        } = &note
+        } = note
         else {
             return;
         };
-        if event.kind == Kind::Custom(ADVERT_KIND) {
+        if event.kind == Kind::Custom(ADVERT_KIND) || event.kind == Kind::Custom(SIGNAL_KIND) {
             let input = Input::RelayEvent {
-                relay: relay_url.clone(),
-                event: event.clone(),
+                relay: relay_url,
+                event,
             };
             self.machine.handle(input, now());
-        } else if event.kind == Kind::Custom(SIGNAL_KIND) {
-            let _ = self.signals.send(note);
         }
     }
 
@@ -328,11 +371,18 @@ impl Pump {
                     }
                 })),
             },
-            Msg::ResolveAdvert { key, tx } => Input::ResolveAdvert {
-                key,
+            Msg::Connect { peer_config } => {
+                let connect = ConnectId(self.next_connect);
+                self.next_connect += 1;
+                let npub = peer_config.npub.clone();
+                self.connects.insert(connect, peer_config);
+                Input::Connect { npub, connect }
+            }
+            Msg::RecordFailure { npub, tx } => Input::RecordFailure {
+                npub,
                 reply: self.owe(Box::new(move |payload| {
-                    if let Reply::Advert(result) = payload {
-                        let _ = tx.send(result);
+                    if let Reply::Failure(reply) = payload {
+                        let _ = tx.send(reply);
                     }
                 })),
             },
@@ -384,6 +434,15 @@ impl Pump {
                 advert,
                 reply: self.owe(Box::new(move |payload| {
                     if let Reply::Settled = payload {
+                        let _ = tx.send(());
+                    }
+                })),
+            },
+            #[cfg(test)]
+            Msg::AwaitAnswer { nonce, tx } => Input::AwaitAnswer {
+                nonce,
+                reply: self.owe(Box::new(move |payload| {
+                    if let Reply::AnswerRouted = payload {
                         let _ = tx.send(());
                     }
                 })),
@@ -452,12 +511,16 @@ impl Pump {
             } => {
                 let client = self.client.clone();
                 self.spawn(async move {
-                    let outcome =
-                        match tokio::time::timeout(timeout, client.send(&relays, &event)).await {
-                            Ok(Ok(reached)) => Outcome::Ok { reached },
-                            Ok(Err(e)) => Outcome::Err(e.to_string()),
-                            Err(_) => Outcome::TimedOut,
-                        };
+                    let send = client.send(&relays, &event);
+                    let sent = match timeout {
+                        Some(timeout) => tokio::time::timeout(timeout, send).await.ok(),
+                        None => Some(send.await),
+                    };
+                    let outcome = match sent {
+                        Some(Ok(reached)) => Outcome::Ok { reached },
+                        Some(Err(e)) => Outcome::Err(e.to_string()),
+                        None => Outcome::TimedOut,
+                    };
                     Input::PublishDone { req, outcome }
                 });
             }
@@ -498,12 +561,49 @@ impl Pump {
             }
             Action::Send { socket, dst, bytes } => self.sockets.send(socket, dst, bytes),
             Action::Close { socket } => self.sockets.release(socket),
+            Action::ReadInterfaces { req, read } => {
+                let inbox = self.inbox.clone();
+                self.tasks.spawn_blocking(move || {
+                    let read = match read {
+                        Read::Candidates { port } => super::stun::read_candidates(port),
+                        Read::OnLink => Interfaces::OnLink(crate::utils::onlink::read_system()),
+                    };
+                    let _ = inbox.send(Msg::Input(Input::Interfaces { req, read }));
+                });
+            }
+            Action::Adopt {
+                socket,
+                session,
+                peer_npub,
+                remote,
+                connect,
+            } => {
+                if let Some(connect) = connect {
+                    self.connects.remove(&connect);
+                }
+                let events = self.to_node.events.clone();
+                self.sockets.adopt(socket, move |socket| {
+                    let traversal = EstablishedTraversal::new(session, peer_npub, remote, socket)
+                        .with_transport_name("nostr-nat");
+                    let _ = events.send(BootstrapEvent::Established { traversal });
+                });
+            }
+            Action::Failed { connect, reason } => {
+                if let Some(peer_config) = self.connects.remove(&connect) {
+                    let _ = self.to_node.events.send(BootstrapEvent::Failed {
+                        peer_config,
+                        reason,
+                    });
+                }
+            }
+            Action::Release { connect } => {
+                self.connects.remove(&connect);
+            }
             Action::Reply { reply, payload } => {
                 if let Some(replier) = self.replies.remove(&reply) {
                     replier(payload);
                 }
             }
-            Action::ResetStreak { npub } => (self.reset_streak)(&npub),
             Action::Log(line) => log::render(&line),
         }
     }

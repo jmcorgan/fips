@@ -1,13 +1,12 @@
 //! Tests that a peer's Nostr traversal offer or overlay advert carrying an
 //! oversized string or list is refused before anything from it is kept: the
-//! incoming-offer handler in `runtime.rs` refuses an offer whose session id or
-//! nonce is over its byte bound before the seen-sessions memory records it,
-//! and `parse_overlay_advert_event` refuses an advert whose content is over
+//! refusal of an offer whose session id or nonce is over its byte bound is a
+//! warning (the responder's checks are tested in
+//! `machine/rendezvous/tests/traversal.rs`), and
+//! `parse_overlay_advert_event` refuses an advert whose content is over
 //! its byte bound or whose `endpoints`, `signalRelays` or `stunServers` list
 //! is over its entry bound. The advert this node publishes stays inside the
 //! bounds, with an over-long configured list cut to the bound.
-
-use std::sync::Arc;
 
 use nostr::event::FinalizeEvent;
 use nostr::nips::nip19::ToBech32;
@@ -19,18 +18,12 @@ use super::super::machine::NodeSigner;
 use super::super::machine::params::Params;
 use super::super::machine::rendezvous::{Action, Input, Rendezvous};
 use super::super::runtime::{NostrRendezvous, adversarial_offer_reject};
-use super::super::traversal::nonce;
 use super::super::types::BootstrapError;
 use super::super::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, AdvertTransportSnapshot, OverlayAdvert,
     OverlayEndpointAdvert, OverlayTransportKind,
 };
-use super::offer_between;
 use crate::config::NostrRendezvousConfig;
-
-/// The longest session id or nonce, in bytes, an inbound offer may carry.
-/// Our own are about 30 bytes (`traversal::nonce`).
-const OFFER_FIELD_CAP: usize = 128;
 
 /// The largest advert event content, in bytes, that is parsed at all.
 const ADVERT_CONTENT_CAP: usize = 8 * 1024;
@@ -39,101 +32,9 @@ const ADVERT_CONTENT_CAP: usize = 8 * 1024;
 /// list may carry.
 const ADVERT_LIST_CAP: usize = 32;
 
-/// The length of the oversized strings: the size the issue measured.
-const HUGE: usize = 40_000;
-
 /// The protocol tag value the default configuration expects on an advert.
 fn app() -> String {
     NostrRendezvousConfig::default().app
-}
-
-fn is_oversized(r: &Result<(), BootstrapError>) -> bool {
-    matches!(r, Err(BootstrapError::Protocol(reason)) if reason == "oversized-offer")
-}
-
-/// Deliver `offer` from `peer` to `runtime`'s incoming-offer handler.
-async fn deliver(
-    runtime: &Arc<NostrRendezvous>,
-    peer: &nostr::key::Keys,
-    offer: super::super::TraversalOffer,
-) -> Result<(), BootstrapError> {
-    let peer_npub = peer.public_key().to_bech32().unwrap();
-    runtime
-        .clone()
-        .handle_incoming_offer_for_test(offer, peer.public_key(), peer_npub)
-        .await
-}
-
-/// An offer from `peer` to `runtime` with the given session id and nonce.
-fn offer_with(
-    runtime: &NostrRendezvous,
-    peer: &nostr::key::Keys,
-    session_id: String,
-    nonce: String,
-) -> super::super::TraversalOffer {
-    let peer_npub = peer.public_key().to_bech32().unwrap();
-    let mut offer = offer_between("placeholder", &peer_npub, runtime.npub_for_test());
-    offer.session_id = session_id;
-    offer.nonce = nonce;
-    offer
-}
-
-/// A stranger's offer whose session id is 40,000 bytes is refused on its
-/// first delivery, and a second delivery is refused the same way rather than
-/// as a replay, so the id was never remembered.
-#[tokio::test]
-async fn an_offer_with_an_oversized_session_id_is_refused_before_it_is_remembered() {
-    let runtime = Arc::new(NostrRendezvous::new_for_test());
-    let peer = nostr::key::Keys::generate();
-    let huge = "s".repeat(HUGE);
-
-    let first = deliver(
-        &runtime,
-        &peer,
-        offer_with(&runtime, &peer, huge.clone(), nonce()),
-    )
-    .await;
-    let second = deliver(&runtime, &peer, offer_with(&runtime, &peer, huge, nonce())).await;
-    assert!(
-        !matches!(&second, Err(BootstrapError::Replay(id)) if id.len() == HUGE),
-        "defect: the {HUGE}-byte session id was remembered, so its second delivery is a replay"
-    );
-    assert!(
-        is_oversized(&first),
-        "defect: a {HUGE}-byte session id was not refused as oversized-offer: {:?}",
-        first
-            .as_ref()
-            .map_err(|e| e.to_string().chars().take(80).collect::<String>())
-    );
-    assert!(
-        is_oversized(&second),
-        "defect: the second delivery of a {HUGE}-byte session id was not refused as \
-         oversized-offer: {:?}",
-        second
-            .as_ref()
-            .map_err(|e| e.to_string().chars().take(80).collect::<String>())
-    );
-}
-
-/// A stranger's offer whose nonce is 40,000 bytes is refused on its first
-/// delivery. Without the bound it would reach the relay step, where the nonce
-/// is copied into the answer.
-#[tokio::test]
-async fn an_offer_with_an_oversized_nonce_is_refused_on_its_first_delivery() {
-    let runtime = Arc::new(NostrRendezvous::new_for_test());
-    let peer = nostr::key::Keys::generate();
-    let r = deliver(
-        &runtime,
-        &peer,
-        offer_with(&runtime, &peer, nonce(), "n".repeat(HUGE)),
-    )
-    .await;
-    assert!(
-        is_oversized(&r),
-        "defect: a {HUGE}-byte nonce was not refused as oversized-offer: {:?}",
-        r.as_ref()
-            .map_err(|e| e.to_string().chars().take(80).collect::<String>())
-    );
 }
 
 /// The refusal is one of the classes ordinary relay lag cannot explain, so it
@@ -144,81 +45,6 @@ fn an_oversized_offer_refusal_is_logged_at_the_default_level() {
         adversarial_offer_reject(&BootstrapError::Protocol("oversized-offer".to_string())),
         "defect: an oversized-offer refusal is not logged at the default level"
     );
-}
-
-/// The ids and nonces this node makes for its own offers are accepted, and
-/// the bound sits exactly at its value for both fields.
-#[tokio::test]
-async fn offer_fields_are_accepted_up_to_the_bound_and_refused_one_byte_past_it() {
-    let runtime = Arc::new(NostrRendezvous::new_for_test());
-    let peer = nostr::key::Keys::generate();
-    // The test runtime shares no signal relay with the peer, so an offer that
-    // passes every check before the relay step fails there with
-    // MissingRelays.
-    let passes =
-        |r: &Result<(), BootstrapError>| matches!(r, Err(BootstrapError::MissingRelays(_)));
-
-    let ours = nonce();
-    assert!(ours.len() <= OFFER_FIELD_CAP, "precondition: our id fits");
-    let r = deliver(&runtime, &peer, offer_with(&runtime, &peer, ours, nonce())).await;
-    assert!(passes(&r), "defect: an id from nonce() was refused: {r:?}");
-
-    let cases = [
-        (
-            "session id at the bound",
-            "a".repeat(OFFER_FIELD_CAP),
-            nonce(),
-            true,
-        ),
-        (
-            "session id one byte past",
-            "b".repeat(OFFER_FIELD_CAP + 1),
-            nonce(),
-            false,
-        ),
-        (
-            "nonce at the bound",
-            nonce(),
-            "c".repeat(OFFER_FIELD_CAP),
-            true,
-        ),
-        (
-            "nonce one byte past",
-            nonce(),
-            "d".repeat(OFFER_FIELD_CAP + 1),
-            false,
-        ),
-        // The bound counts bytes, not characters: 64 two-byte characters fill
-        // it, and 65 are past it while still far under 128 characters.
-        (
-            "two-byte session id at the bound",
-            "é".repeat(OFFER_FIELD_CAP / 2),
-            nonce(),
-            true,
-        ),
-        (
-            "two-byte session id past",
-            "ê".repeat(OFFER_FIELD_CAP / 2 + 1),
-            nonce(),
-            false,
-        ),
-    ];
-    for (name, session_id, nonce, accepted) in cases {
-        let r = deliver(
-            &runtime,
-            &peer,
-            offer_with(&runtime, &peer, session_id, nonce),
-        )
-        .await;
-        if accepted {
-            assert!(passes(&r), "defect: {name} was refused: {r:?}");
-        } else {
-            assert!(
-                is_oversized(&r),
-                "defect: {name} was not refused as oversized-offer: {r:?}"
-            );
-        }
-    }
 }
 
 /// A signed advert event carrying `content` and the default protocol tag.
@@ -430,7 +256,7 @@ async fn published(
         enabled: true,
         ..config
     };
-    let signer = Arc::new(NodeSigner::new(SecretKey::generate()));
+    let signer = NodeSigner::new(SecretKey::generate());
     let npub = signer.public_key().to_bech32().expect("bech32");
     let now = super::super::pump::now();
     let mut machine = Rendezvous::<crate::time::HostInstant, crate::identity::OsEntropy>::new(

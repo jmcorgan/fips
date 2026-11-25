@@ -4,8 +4,6 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-#[cfg(target_os = "linux")]
-use std::time::Duration;
 
 use nostr::event::FinalizeEvent;
 use nostr::prelude::{EventBuilder, Kind, RelayUrl, Tag, Timestamp};
@@ -29,8 +27,6 @@ use super::signal::{
     validate_traversal_answer_for_offer,
 };
 use super::stun::{parse_stun_binding_success, parse_stun_url};
-#[cfg(target_os = "linux")]
-use super::traversal::run_punch_attempt;
 use super::traversal::{
     RefusalWarnGate, SourceRank, build_punch_packet, now_ms, planned_remote_endpoints,
     rank_punch_source, session_hash,
@@ -1851,64 +1847,6 @@ async fn signal_events_use_current_timestamps() {
     assert!(created_at <= after);
 }
 
-/// These punch tests distinguish a spoofer from a planned target by source
-/// **IP**, so each needs its own loopback address. Only Linux treats the whole
-/// of 127/8 as local; macOS and Windows bind 127.0.0.1 alone unless an alias is
-/// added, so the bind panics there. They are gated to Linux rather than
-/// rewritten onto one address, because collapsing them onto 127.0.0.1 would
-/// make every source rank `RemappedPort` and the tests would stop testing what
-/// they are for.
-///
-/// **Coverage gap**: on macOS and Windows the only end-to-end exercise of
-/// `run_punch_attempt` is the closed-target test in
-/// `tests/punch_recv_error.rs`; the source-ranking paths are covered there
-/// only by the `rank_punch_source_*` unit tests above, which take no sockets.
-/// A loopback socket bound on `host`, non-blocking as both production call
-/// sites leave it, since `run_punch_attempt` hands it straight to
-/// `UdpSocket::from_std`.
-#[cfg(target_os = "linux")]
-fn punch_socket(host: &str) -> std::net::UdpSocket {
-    let socket = std::net::UdpSocket::bind(format!("{host}:0")).expect("bind a loopback socket");
-    socket
-        .set_nonblocking(true)
-        .expect("the punch socket must be non-blocking");
-    socket
-}
-
-/// A hint that starts punching immediately. `start_at_ms` is absolute wall
-/// clock, so anything plausible-looking in the future would sleep out the test.
-#[cfg(target_os = "linux")]
-fn immediate_punch_hint(duration_ms: u64) -> PunchHint {
-    PunchHint {
-        start_at_ms: 0,
-        interval_ms: 20,
-        duration_ms,
-    }
-}
-
-/// Send one well-formed probe carrying `session_id`'s hash from `from` to
-/// `to`, which is what a replay of captured punch bytes looks like.
-#[cfg(target_os = "linux")]
-fn send_probe(from: &std::net::UdpSocket, to: SocketAddr, session_id: &str) {
-    let packet = build_punch_packet(PunchPacketKind::Probe, 1, session_id);
-    from.send_to(&packet, to).expect("probe should send");
-}
-
-/// Whether anything readable on `socket` is a punch ack.
-#[cfg(target_os = "linux")]
-fn received_an_ack(socket: &std::net::UdpSocket) -> bool {
-    let mut buf = [0u8; 2048];
-    while let Ok((len, _)) = socket.recv_from(&mut buf) {
-        if parse_punch_packet(&buf[..len])
-            .map(|packet| packet.kind == PunchPacketKind::Ack)
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    false
-}
-
 #[test]
 fn rank_punch_source_accepts_a_planned_target() {
     let target: SocketAddr = "198.51.100.20:63000".parse().unwrap();
@@ -1932,156 +1870,6 @@ fn rank_punch_source_rejects_an_address_we_never_planned_to_probe() {
     assert_eq!(
         rank_punch_source(stranger, &[target]),
         SourceRank::Unplanned
-    );
-}
-
-/// The regression test for the defect. The punch packet's discriminator is a
-/// digest of a value both peers already know and it travels in the clear in
-/// every probe, so anyone who has seen one can replay it. Acceptance is now
-/// constrained to the targets this node planned; the spoofer is neither
-/// adopted nor acked, and an ack would be a reflection we control.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn a_matching_punch_packet_from_an_unplanned_source_is_neither_adopted_nor_acked() {
-    let victim = punch_socket("127.0.0.3");
-    let peer = punch_socket("127.0.0.1");
-    let spoofer = punch_socket("127.0.0.2");
-    let victim_addr = victim.local_addr().expect("victim address");
-    let targets = vec![peer.local_addr().expect("peer address")];
-
-    send_probe(&spoofer, victim_addr, "session-unplanned");
-    let result = run_punch_attempt(
-        &victim,
-        "session-unplanned",
-        &targets,
-        immediate_punch_hint(400),
-        Duration::from_millis(700),
-    )
-    .await;
-
-    assert!(
-        matches!(result, Err(BootstrapError::PunchTimeout(_))),
-        "a spoofed source must not be adopted, got {result:?}"
-    );
-    assert!(
-        !received_an_ack(&spoofer),
-        "an unplanned source must not be acked"
-    );
-}
-
-/// The spoofer wins the race on arrival order and still loses on address.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn a_planned_source_is_adopted_even_when_a_spoofer_replies_first() {
-    let victim = punch_socket("127.0.0.3");
-    let peer = punch_socket("127.0.0.1");
-    let spoofer = punch_socket("127.0.0.2");
-    let victim_addr = victim.local_addr().expect("victim address");
-    let peer_addr = peer.local_addr().expect("peer address");
-
-    send_probe(&spoofer, victim_addr, "session-race");
-    send_probe(&peer, victim_addr, "session-race");
-    let result = run_punch_attempt(
-        &victim,
-        "session-race",
-        &[peer_addr],
-        immediate_punch_hint(400),
-        Duration::from_millis(700),
-    )
-    .await;
-
-    assert_eq!(
-        result.expect("the planned peer should be adopted"),
-        peer_addr
-    );
-}
-
-/// The healthy path, which is the check that the source constraint does not
-/// red a legitimately clean run: one probe from the single planned target is
-/// adopted immediately and acked.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn the_ordinary_probe_from_a_planned_target_is_still_adopted_and_acked() {
-    let victim = punch_socket("127.0.0.3");
-    let peer = punch_socket("127.0.0.1");
-    let victim_addr = victim.local_addr().expect("victim address");
-    let peer_addr = peer.local_addr().expect("peer address");
-
-    send_probe(&peer, victim_addr, "session-healthy");
-    let result = run_punch_attempt(
-        &victim,
-        "session-healthy",
-        &[peer_addr],
-        immediate_punch_hint(400),
-        Duration::from_millis(700),
-    )
-    .await;
-
-    assert_eq!(
-        result.expect("the planned peer should be adopted"),
-        peer_addr
-    );
-    assert!(received_an_ack(&peer), "a planned probe should be acked");
-}
-
-/// Peer-reflexive discovery: a symmetric NAT allocates a fresh port toward us,
-/// so the peer's probe arrives from an address that is not in the plan but
-/// shares a planned target's IP. Adopting it is the main class of NAT pairing
-/// punching exists to rescue, and this test reds if the rule is ever tightened
-/// to exact matching without that being reopened deliberately.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn a_planned_targets_remapped_port_is_adopted_when_that_is_all_that_arrives() {
-    let victim = punch_socket("127.0.0.3");
-    let peer = punch_socket("127.0.0.1");
-    let victim_addr = victim.local_addr().expect("victim address");
-    let peer_addr = peer.local_addr().expect("peer address");
-    // The address the peer's own STUN observation named, before its NAT
-    // remapped the port: same host, a port nothing is bound to.
-    let stale_target = SocketAddr::new(peer_addr.ip(), peer_addr.port().wrapping_add(1).max(1));
-
-    send_probe(&peer, victim_addr, "session-remapped");
-    let result = run_punch_attempt(
-        &victim,
-        "session-remapped",
-        &[stale_target],
-        immediate_punch_hint(400),
-        Duration::from_millis(2000),
-    )
-    .await;
-
-    assert_eq!(
-        result.expect("a remapped port on a planned target should be adopted"),
-        peer_addr
-    );
-}
-
-/// An exact match inside the settle window supersedes a remapped one that
-/// arrived first, which is what the window is for.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn an_exact_target_supersedes_a_remapped_port_inside_the_settle_window() {
-    let victim = punch_socket("127.0.0.3");
-    let peer = punch_socket("127.0.0.1");
-    let neighbour = punch_socket("127.0.0.1");
-    let victim_addr = victim.local_addr().expect("victim address");
-    let peer_addr = peer.local_addr().expect("peer address");
-
-    send_probe(&neighbour, victim_addr, "session-settle");
-    send_probe(&peer, victim_addr, "session-settle");
-    let result = run_punch_attempt(
-        &victim,
-        "session-settle",
-        &[peer_addr],
-        immediate_punch_hint(400),
-        Duration::from_millis(2000),
-    )
-    .await;
-
-    assert_eq!(
-        result.expect("the exact target should win"),
-        peer_addr,
-        "an exact match must supersede a source that only shares the IP"
     );
 }
 
@@ -2330,39 +2118,22 @@ fn live_handle() -> tokio::task::JoinHandle<()> {
 async fn nostr_liveness_fires_when_the_pump_dies() {
     let runtime = NostrRendezvous::new_for_test();
     runtime
-        .install_task_handles_for_test(finished_handle().await, live_handle())
+        .install_task_handle_for_test(finished_handle().await)
         .await;
     assert!(
         runtime.is_finished(),
-        "a dead pump means no advert is ever received or published again"
+        "a dead pump means no advert or traversal signal is ever handled again"
     );
 }
 
-#[tokio::test]
-async fn nostr_liveness_fires_when_the_signal_task_dies() {
-    let runtime = NostrRendezvous::new_for_test();
-    runtime
-        .install_task_handles_for_test(live_handle(), finished_handle().await)
-        .await;
-    assert!(
-        runtime.is_finished(),
-        "a dead signal task means no traversal signal is ever received again"
-    );
-}
-
-/// `shutdown` takes every handle, leaving `None`. That must read as finished so
+/// `shutdown` takes the handle, leaving `None`. That must read as finished so
 /// the 2s liveness poll monitor terminates instead of spinning after a stop.
 #[tokio::test]
 async fn nostr_liveness_reports_finished_once_the_handles_are_taken() {
     let runtime = NostrRendezvous::new_for_test();
-    runtime
-        .install_task_handles_for_test(live_handle(), live_handle())
-        .await;
-    assert!(
-        !runtime.is_finished(),
-        "control: two live tasks read as live"
-    );
-    runtime.take_task_handles_for_test().await;
+    runtime.install_task_handle_for_test(live_handle()).await;
+    assert!(!runtime.is_finished(), "control: a live pump reads as live");
+    runtime.take_task_handle_for_test().await;
     assert!(
         runtime.is_finished(),
         "no installed handles (post-shutdown) reads as finished"
@@ -2534,22 +2305,6 @@ async fn an_upper_case_configured_npub_resolves_its_cached_advert() {
     assert_eq!(endpoints, vec![endpoint]);
 }
 
-/// A peer key whose NodeAddr sorts after (`larger`) or before our own.
-fn peer_keys_ordered(our_npub: &str, larger: bool) -> nostr::key::Keys {
-    use nostr::nips::nip19::ToBech32;
-    let ours = *crate::PeerIdentity::from_npub(our_npub)
-        .unwrap()
-        .node_addr();
-    loop {
-        let keys = nostr::key::Keys::generate();
-        let npub = keys.public_key().to_bech32().unwrap();
-        let theirs = *crate::PeerIdentity::from_npub(&npub).unwrap().node_addr();
-        if (theirs > ours) == larger {
-            return keys;
-        }
-    }
-}
-
 fn offer_between(session: &str, from: &str, to: &str) -> super::TraversalOffer {
     create_traversal_offer(
         session.to_string(),
@@ -2595,164 +2350,6 @@ impl nostr_sdk::authenticator::Authenticator for SignerAuthenticator {
             .map_err(|e| nostr_sdk::error::Error::other(e.to_string()))
         })
     }
-}
-
-/// A relay URL the test runtime adds to its pool without connecting. A send
-/// naming it succeeds at the pool and reaches no network.
-const UNCONNECTED_RELAY: &str = "ws://127.0.0.1:1";
-
-/// Dual init where our NodeAddr is smaller: the peer's offer is suppressed in
-/// favour of ours. If the peer never received ours, neither side answers until
-/// `signal_ttl_secs` runs out, so the suppression re-sends ours, once.
-#[tokio::test]
-async fn suppressing_a_peers_offer_resends_ours_once() {
-    use nostr::nips::nip19::ToBech32;
-    let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test());
-    runtime
-        .add_unconnected_relay_for_test(UNCONNECTED_RELAY)
-        .await;
-    let our_npub = runtime.npub_for_test().to_string();
-    let peer = peer_keys_ordered(&our_npub, true);
-    let peer_npub = peer.public_key().to_bech32().unwrap();
-
-    let ours = offer_between("our-session", &our_npub, &peer_npub);
-    runtime
-        .insert_inflight_offer_for_test(
-            &peer_npub,
-            ours.clone(),
-            peer.public_key(),
-            vec![UNCONNECTED_RELAY.to_string()],
-        )
-        .await;
-
-    for session in ["their-session-1", "their-session-2"] {
-        let theirs = offer_between(session, &peer_npub, &our_npub);
-        runtime
-            .clone()
-            .handle_incoming_offer_for_test(theirs, peer.public_key(), peer_npub.clone())
-            .await
-            .expect("a suppressed offer is not an error");
-        assert_eq!(
-            runtime.sent_offers_for_test(),
-            vec![ours.clone()],
-            "our offer, with its session id, should be re-sent exactly once ({session})"
-        );
-        assert_eq!(
-            runtime.inflight_offer_resent_for_test(&peer_npub).await,
-            Some(true),
-            "a published re-send should be marked done ({session})"
-        );
-    }
-}
-
-/// A re-send whose publish fails is not marked done, so the next suppression
-/// tries again; once one publish succeeds, no further re-send follows.
-#[tokio::test]
-async fn a_failed_resend_is_tried_again_on_the_next_suppression() {
-    use nostr::nips::nip19::ToBech32;
-    let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test());
-    let our_npub = runtime.npub_for_test().to_string();
-    let peer = peer_keys_ordered(&our_npub, true);
-    let peer_npub = peer.public_key().to_bech32().unwrap();
-
-    // The offer names a relay the pool does not hold yet, so publishing fails.
-    let ours = offer_between("our-session", &our_npub, &peer_npub);
-    runtime
-        .insert_inflight_offer_for_test(
-            &peer_npub,
-            ours.clone(),
-            peer.public_key(),
-            vec![UNCONNECTED_RELAY.to_string()],
-        )
-        .await;
-
-    let suppress = |session: &'static str| {
-        let runtime = runtime.clone();
-        let theirs = offer_between(session, &peer_npub, &our_npub);
-        let (sender, sender_npub) = (peer.public_key(), peer_npub.clone());
-        async move {
-            runtime
-                .handle_incoming_offer_for_test(theirs, sender, sender_npub)
-                .await
-                .expect("a suppressed offer is not an error");
-        }
-    };
-
-    suppress("their-session-1").await;
-    assert!(
-        runtime.sent_offers_for_test().is_empty(),
-        "a failed publish sends nothing"
-    );
-    assert_eq!(
-        runtime.inflight_offer_resent_for_test(&peer_npub).await,
-        Some(false),
-        "a failed publish must leave the re-send available"
-    );
-
-    runtime
-        .add_unconnected_relay_for_test(UNCONNECTED_RELAY)
-        .await;
-    for session in ["their-session-2", "their-session-3"] {
-        suppress(session).await;
-        assert_eq!(
-            runtime.sent_offers_for_test(),
-            vec![ours.clone()],
-            "the retried re-send should publish our offer exactly once ({session})"
-        );
-        assert_eq!(
-            runtime.inflight_offer_resent_for_test(&peer_npub).await,
-            Some(true),
-            "the published re-send should be marked done ({session})"
-        );
-    }
-}
-
-/// Dual init where the peer's NodeAddr is smaller: we answer its offer and
-/// leave ours alone.
-#[tokio::test]
-async fn answering_a_peers_offer_does_not_resend_ours() {
-    use nostr::nips::nip19::ToBech32;
-    let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test());
-    // Our offer's relay is in the pool, so a wrongful re-send would publish and
-    // be seen below.
-    runtime
-        .add_unconnected_relay_for_test(UNCONNECTED_RELAY)
-        .await;
-    let our_npub = runtime.npub_for_test().to_string();
-    let peer = peer_keys_ordered(&our_npub, false);
-    let peer_npub = peer.public_key().to_bech32().unwrap();
-
-    let ours = offer_between("our-session", &our_npub, &peer_npub);
-    runtime
-        .insert_inflight_offer_for_test(
-            &peer_npub,
-            ours,
-            peer.public_key(),
-            vec![UNCONNECTED_RELAY.to_string()],
-        )
-        .await;
-
-    let theirs = offer_between("their-session", &peer_npub, &our_npub);
-    let r = runtime
-        .clone()
-        .handle_incoming_offer_for_test(theirs, peer.public_key(), peer_npub.clone())
-        .await;
-    // The test runtime shares no signal relay with the peer, so answering fails
-    // after the election. That failure shows the offer got past it rather than
-    // being rejected earlier.
-    assert!(
-        matches!(r, Err(BootstrapError::MissingRelays(_))),
-        "expected to reach the answer step, got {r:?}"
-    );
-    assert!(
-        runtime.sent_offers_for_test().is_empty(),
-        "an offer we answer must not trigger a re-send"
-    );
-    assert_eq!(
-        runtime.inflight_offer_resent_for_test(&peer_npub).await,
-        Some(false),
-        "an offer we answer must not trigger a re-send"
-    );
 }
 
 // --- advert cache: an entry past its horizon keeps its slot for a grace ---
@@ -3046,6 +2643,15 @@ fn the_machine_params_copy_each_value_from_its_own_config_key() {
         dm_relays: vec!["wss://dm-43.example".to_string()],
         stun_servers: vec!["stun:stun-47.example:3478".to_string()],
         advert_ttl_secs: 53,
+        signal_ttl_secs: 59,
+        attempt_timeout_secs: 61,
+        punch_start_delay_ms: 67,
+        punch_interval_ms: 71,
+        punch_duration_ms: 73,
+        share_local_candidates: true,
+        protocol_mismatch_cooldown_secs: 79,
+        max_concurrent_incoming_offers: 83,
+        max_concurrent_offers_per_npub: 89,
         ..Default::default()
     };
     let params = Params::from(&config);
@@ -3063,12 +2669,23 @@ fn the_machine_params_copy_each_value_from_its_own_config_key() {
     assert_eq!(params.dm_relays, vec!["wss://dm-43.example"]);
     assert_eq!(params.stun_servers, vec!["stun:stun-47.example:3478"]);
     assert_eq!(params.advert_ttl_secs, 53);
-    // The flag's other value too, so a conversion that ignores it fails.
+    assert_eq!(params.signal_ttl_secs, 59);
+    assert_eq!(params.attempt_timeout_secs, 61);
+    assert_eq!(params.punch_start_delay_ms, 67);
+    assert_eq!(params.punch_interval_ms, 71);
+    assert_eq!(params.punch_duration_ms, 73);
+    assert!(params.share_local_candidates);
+    assert_eq!(params.protocol_mismatch_cooldown_secs, 79);
+    assert_eq!(params.max_concurrent_incoming_offers, 83);
+    assert_eq!(params.max_concurrent_offers_per_npub, 89);
+    // The flags' other values too, so a conversion that ignores one fails.
     let config = crate::config::NostrRendezvousConfig {
         advertise: true,
+        share_local_candidates: false,
         ..config
     };
     assert!(Params::from(&config).advertise);
+    assert!(!Params::from(&config).share_local_candidates);
 }
 
 mod clock_skew;

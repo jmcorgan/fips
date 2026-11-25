@@ -74,7 +74,7 @@ fn start_subscribes_to_signals_and_adverts_then_publishes_the_inbox_list_then_th
     assert_eq!(inbox.len(), 1, "the inbox relay list follows the subscribe");
     assert_eq!(inbox[0].2.kind, Kind::InboxRelays);
     assert_eq!(inbox[0].1, p.dm_relays);
-    assert_eq!(inbox[0].3, Duration::from_secs(5));
+    assert_eq!(inbox[0].3, Some(Duration::from_secs(5)));
 
     let advert = publishes(&h.input(Input::PublishDone {
         req: inbox[0].0,
@@ -83,7 +83,7 @@ fn start_subscribes_to_signals_and_adverts_then_publishes_the_inbox_list_then_th
     assert_eq!(advert.len(), 1, "the advert follows the inbox relay list");
     assert_eq!(advert[0].2.kind, Kind::Custom(ADVERT_KIND));
     assert_eq!(advert[0].1, p.advert_relays);
-    assert_eq!(advert[0].3, Duration::from_secs(10));
+    assert_eq!(advert[0].3, Some(Duration::from_secs(10)));
     assert_eq!(
         h.m.poll_timeout(),
         Some(TestInstant(100_000)),

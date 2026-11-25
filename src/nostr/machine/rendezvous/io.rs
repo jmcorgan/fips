@@ -11,8 +11,10 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::net::SocketAddr;
+use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
+
+use fips_core::utils::onlink::OnLinkPrefixes;
 
 use nostr::event::Event;
 use nostr::filter::Filter;
@@ -21,9 +23,10 @@ use nostr::types::RelayUrl;
 
 use super::super::adverts::assemble::AdvertTransportSnapshot;
 use super::super::error::Error;
+use super::super::stun::candidates::InterfaceAddr;
 #[cfg(test)]
 use super::super::types::CachedOverlayAdvert;
-use super::super::types::{NostrRefetchOutcome, OverlayAdvert, OverlayEndpointAdvert};
+use super::super::types::{FailureReply, NostrRefetchOutcome, OverlayEndpointAdvert};
 use super::log::Log;
 
 /// A relay operation, or a public-address observation, the machine started.
@@ -42,6 +45,35 @@ pub struct SubId(pub u64);
 /// A UDP socket the machine asked the shell to bind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SocketId(pub u64);
+
+/// A connect the node asked for. The shell assigns it and keeps the peer's
+/// configuration under it, for the failure event the connect may end with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConnectId(pub u64);
+
+/// What of the host a traversal reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Read {
+    /// The candidates for this host's own addresses on a socket bound to
+    /// `port`: the interface list, and the local address of each probe and
+    /// of each wildcard bind on `port` (`stun::candidates`).
+    Candidates { port: u16 },
+    /// The on-link prefixes of this host's interfaces.
+    OnLink,
+}
+
+/// What the shell read of the host, raw; the machine selects from it.
+#[derive(Debug, Clone)]
+pub enum Interfaces {
+    /// The interface addresses in listing order, and each probe's and
+    /// wildcard bind's local address, `None` where the read failed.
+    Candidates {
+        entries: Vec<InterfaceAddr>,
+        observed: Vec<Option<IpAddr>>,
+    },
+    /// The on-link prefixes.
+    OnLink(OnLinkPrefixes),
+}
 
 /// Which step of making a socket failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +113,7 @@ pub enum Input {
     Start,
     /// Stop. The machine asks for nothing more.
     Shutdown,
-    /// An advert a relay delivered on the subscription's stream.
+    /// An event a relay delivered: an advert, or a traversal signal.
     RelayEvent { relay: RelayUrl, event: Box<Event> },
     /// The subscribe `req` ended.
     SubscribeDone { req: ReqId, outcome: Outcome },
@@ -117,8 +149,9 @@ pub enum Input {
         src: SocketAddr,
         bytes: Vec<u8>,
     },
-    /// Receiving on `socket` failed.
-    RecvError { socket: SocketId },
+    /// Receiving on `socket` failed; the text is the I/O error's, as its
+    /// `Debug` prints it.
+    RecvError { socket: SocketId, error: String },
     /// A send on `socket` to `dst` failed; the text is the I/O error's.
     SendFailed {
         socket: SocketId,
@@ -145,9 +178,26 @@ pub enum Input {
     },
     /// Check a peer's advert on the relays again.
     Refetch { key: PeerKey, reply: ReplyId },
-    /// A peer's whole advert, from the cache or else the relays, for the
-    /// traversal flows still served outside the machine.
-    ResolveAdvert { key: PeerKey, reply: ReplyId },
+    /// Traverse to the peer the node configured as `npub`, in any spelling.
+    Connect { npub: String, connect: ConnectId },
+    /// Whether the node has room for another peer.
+    Capacity(bool),
+    /// A traversal to `npub` failed; answer with the decision.
+    RecordFailure { npub: String, reply: ReplyId },
+    /// A datagram from the address a traversal adopted for `npub` carried
+    /// FMP version `peer_version`, not ours.
+    VersionMismatch {
+        npub: String,
+        transport_id: String,
+        remote_addr: String,
+        peer_version: u8,
+        our_version: u8,
+    },
+    /// What the read `req` found.
+    Interfaces { req: ReqId, read: Interfaces },
+    /// Answer when an answer whose `inReplyTo` is `nonce` is routed.
+    #[cfg(test)]
+    AwaitAnswer { nonce: String, reply: ReplyId },
     /// Answer once every earlier input has been handled.
     #[cfg(test)]
     Settle { reply: ReplyId },
@@ -176,12 +226,13 @@ pub enum Action {
         subs: Vec<(SubId, Vec<String>, Filter)>,
         timeout: Duration,
     },
-    /// Send `event` to `relays` within `timeout`, and report `PublishDone`.
+    /// Send `event` to `relays`, within `timeout` if there is one, and
+    /// report `PublishDone`.
     Publish {
         req: ReqId,
         relays: Vec<String>,
         event: Event,
-        timeout: Duration,
+        timeout: Option<Duration>,
     },
     /// Fetch what `relays` hold that matches `filter`, waiting at most
     /// `timeout`, and report `FetchDone`.
@@ -204,11 +255,26 @@ pub enum Action {
     },
     /// Stop reading `socket` and drop it.
     Close { socket: SocketId },
+    /// Read what `read` names of the host, off the pump's task, and report
+    /// `Interfaces`.
+    ReadInterfaces { req: ReqId, read: Read },
+    /// Stop reading `socket` and hand it to the node as a punched link to
+    /// `peer_npub` at `remote`, for `session`. A connect's configuration
+    /// is no longer needed.
+    Adopt {
+        socket: SocketId,
+        session: String,
+        peer_npub: String,
+        remote: SocketAddr,
+        connect: Option<ConnectId>,
+    },
+    /// The connect `connect` failed with `reason`; tell the node.
+    Failed { connect: ConnectId, reason: String },
+    /// The connect `connect` ended with nothing to tell the node: a
+    /// traversal to the peer was already running.
+    Release { connect: ConnectId },
     /// Complete a request.
     Reply { reply: ReplyId, payload: Reply },
-    /// Reset `npub`'s failure streak, as a refreshed or evicted advert
-    /// warrants. Run before any reply queued after it.
-    ResetStreak { npub: String },
     /// Log a line.
     Log(Log),
 }
@@ -221,6 +287,8 @@ pub struct Inspection {
     pub protected: BTreeSet<String>,
     /// How many `Transports` inputs the machine has taken.
     pub transports: u64,
+    /// How many `Capacity` inputs the machine has taken.
+    pub capacity: u64,
 }
 
 /// The answer to a request.
@@ -238,8 +306,11 @@ pub enum Reply {
     OpenDiscovery(Vec<(String, Vec<OverlayEndpointAdvert>, u64)>),
     /// The refetch's outcome.
     Refetch(NostrRefetchOutcome),
-    /// A peer's whole advert.
-    Advert(Result<OverlayAdvert, Error>),
+    /// The failure decision.
+    Failure(FailureReply),
+    /// An answer was routed.
+    #[cfg(test)]
+    AnswerRouted,
     /// Every earlier input has been handled.
     #[cfg(test)]
     Settled,

@@ -46,6 +46,7 @@ pub enum FreshnessReject {
     FutureDated,
 }
 
+#[cfg(test)]
 pub fn validate_offer_freshness(
     offer: &TraversalOffer,
     now: u64,

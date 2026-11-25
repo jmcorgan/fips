@@ -22,8 +22,8 @@ Unit tests of `src/nostr/machine/punch/`.
   every target from the hinted start until the duration ends, at no less
   than 20 ms apart; and FRC-1601 Appendix C.7's packets.
 
-The round trip of `build_punch_packet` and `parse_punch_packet`, punch
-planning and vetting (`plan.rs`), and the shell's driver of the attempt on
-a loopback socket are tested in `src/nostr/tests/mod.rs` and
-`src/nostr/tests/punch_recv_error.rs` with the rest of the traversal,
-through the shell's paths.
+The round trip of `build_punch_packet` and `parse_punch_packet` and punch
+planning and vetting (`plan.rs`) are tested in `src/nostr/tests/mod.rs`, the
+attempt on a real loopback socket through receive errors in
+`src/nostr/tests/punch_recv_error.rs`, and whole attempts between two
+machines in `machine/rendezvous/tests/traversal.rs`.

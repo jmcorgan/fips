@@ -403,11 +403,11 @@ fn every_machine_log_event_renders_with_todays_target_level_text_and_fields() {
 async fn the_mismatch_warning_keeps_the_receive_loops_target_text_and_fields() {
     const MESSAGE: &str = "Datagram from the traversed peer's address carried another FMP version; suppressing re-traversal";
     let runtime = super::super::runtime::NostrRendezvous::new_for_test();
-    let ((), capture) = capture_logs(|| {
-        for _ in 0..2 {
-            runtime.note_version_mismatch(PEER, "udp1", "192.0.2.7:2121", 1, 0);
-        }
-    });
+    let (capture, _guard) = crate::testutil::capture_logs_scoped();
+    for _ in 0..2 {
+        runtime.note_version_mismatch(PEER, "udp1", "192.0.2.7:2121", 1, 0);
+    }
+    runtime.settled_for_test().await;
     assert_eq!(
         capture.lines_with(MESSAGE),
         vec![format!(

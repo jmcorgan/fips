@@ -67,6 +67,12 @@ impl From<super::machine::error::Error> for BootstrapError {
                 BootstrapError::InvalidPeerNpub { npub, reason }
             }
             Error::Replay(session) => BootstrapError::Replay(session),
+            Error::Disabled => BootstrapError::Disabled,
+            Error::MissingNatEndpoint(npub) => BootstrapError::MissingNatEndpoint(npub),
+            Error::MissingRelays(npub) => BootstrapError::MissingRelays(npub),
+            Error::SignalTimeout(npub) => BootstrapError::SignalTimeout(npub),
+            Error::PunchTimeout(peer) => BootstrapError::PunchTimeout(peer),
+            Error::Io(error) => BootstrapError::Io(std::io::Error::other(error)),
         }
     }
 }
@@ -90,6 +96,15 @@ impl From<&crate::config::NostrRendezvousConfig> for super::machine::params::Par
             dm_relays: c.dm_relays.clone(),
             stun_servers: c.stun_servers.clone(),
             advert_ttl_secs: c.advert_ttl_secs,
+            signal_ttl_secs: c.signal_ttl_secs,
+            attempt_timeout_secs: c.attempt_timeout_secs,
+            punch_start_delay_ms: c.punch_start_delay_ms,
+            punch_interval_ms: c.punch_interval_ms,
+            punch_duration_ms: c.punch_duration_ms,
+            share_local_candidates: c.share_local_candidates,
+            protocol_mismatch_cooldown_secs: c.protocol_mismatch_cooldown_secs,
+            max_concurrent_incoming_offers: c.max_concurrent_incoming_offers,
+            max_concurrent_offers_per_npub: c.max_concurrent_offers_per_npub,
         }
     }
 }

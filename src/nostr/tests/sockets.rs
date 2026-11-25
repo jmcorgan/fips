@@ -74,3 +74,36 @@ async fn a_send_that_fails_is_reported_with_its_error() {
     }
     sockets.close_all();
 }
+
+/// A punched socket is handed over after every send queued ahead of the
+/// hand-over has gone out: the ack a node sends to the probe it adopts is
+/// what lets the peer adopt in turn.
+#[tokio::test]
+async fn a_send_queued_before_the_hand_over_goes_out_before_the_socket_is_handed_over() {
+    let (datagrams, _received) = mpsc::channel(DATAGRAM_BACKLOG);
+    let (inbox, _rx) = mpsc::unbounded_channel();
+    let mut sockets = Sockets::new(datagrams, inbox);
+    let socket = SocketId(1);
+    let Input::SocketBound { local, .. } = sockets.bind(socket) else {
+        panic!("the socket did not bind");
+    };
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (handed, handed_over) = tokio::sync::oneshot::channel();
+
+    sockets.send(socket, peer.local_addr().unwrap(), b"ack".to_vec());
+    sockets.adopt(socket, move |adopted| {
+        let _ = handed.send(adopted);
+    });
+
+    let mut buf = [0u8; 16];
+    let (len, _) = tokio::time::timeout(SOON, peer.recv_from(&mut buf))
+        .await
+        .expect("the send queued before the hand-over was lost")
+        .unwrap();
+    assert_eq!(&buf[..len], b"ack");
+    let adopted = tokio::time::timeout(SOON, handed_over)
+        .await
+        .expect("the socket was not handed over")
+        .unwrap();
+    assert_eq!(adopted.local_addr().unwrap().port(), local.port());
+}

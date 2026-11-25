@@ -9,6 +9,8 @@ use core::net::SocketAddr;
 
 use nostr::event::EventId;
 
+use super::super::punch::plan::PunchTargetTally;
+use super::super::traversal::gate::SignalShed;
 use super::super::types::OverlayEndpointAdvert;
 
 /// How a peer's advert reached the cache, for the line that says it could
@@ -127,5 +129,178 @@ pub enum Log {
         kind: u16,
         event: EventId,
         relays: usize,
+    },
+
+    // --- traversal: the `peer` and `session` fields are already short ----
+    /// An inbound signal was shed before decryption (debug), and the count
+    /// since start.
+    SignalShed { reason: SignalShed, total: u64 },
+    /// The count of signals shed reached a power of two (warn).
+    SignalsShed { shed: u64 },
+    /// An inbound signal could not be opened (trace).
+    UnwrapFailed { error: String },
+    /// An inbound signal's sender key has no npub (debug).
+    SenderNpubFailed { error: String },
+    /// An offer was dropped at the global offer bound (warn).
+    OfferRateLimited { sender_npub: String, limit: usize },
+    /// An offer was dropped at its sender's allowance (debug).
+    OfferSenderFull { sender_npub: String, limit: usize },
+    /// An offer was refused: at warn when relay lag cannot explain it,
+    /// else at debug.
+    OfferFailed {
+        peer: String,
+        session: String,
+        error: String,
+        adversarial: bool,
+    },
+    /// The node is at capacity, so no initiator starts (debug).
+    InitiatorSuppressed { peer: String },
+    /// An initiator starts (debug).
+    InitiatorStarting { peer: String },
+    /// The initiator's addresses are observed (debug).
+    InitiatorStunObserved {
+        peer: String,
+        reflexive: String,
+        local: usize,
+        stun: String,
+    },
+    /// The offer was published (debug).
+    OfferSent {
+        peer: String,
+        session: String,
+        relays: usize,
+        event: String,
+    },
+    /// The answer arrived (debug).
+    AnswerReceived {
+        peer: String,
+        session: String,
+        accepted: bool,
+        reflexive: String,
+        local: usize,
+    },
+    /// A clock skew of 30 s or more was observed (debug).
+    SkewSignificant {
+        peer: String,
+        session: String,
+        skew_ms: i64,
+    },
+    /// A smaller clock skew was observed (trace).
+    SkewNominal { peer: String, skew_ms: i64 },
+    /// The answer was fresh only within the skew tolerance (debug).
+    AnswerWithinTolerance {
+        peer: String,
+        session: String,
+        answer_issued_at: u64,
+        answer_expires_at: u64,
+    },
+    /// The initiator's punch reached the peer (debug).
+    InitiatorPunchSucceeded {
+        peer: String,
+        session: String,
+        remote: SocketAddr,
+    },
+    /// Our offer was sent again after the peer's was suppressed (debug).
+    OfferResent {
+        peer: String,
+        session: String,
+        event: String,
+    },
+    /// Sending our offer again failed (debug).
+    OfferResendFailed {
+        peer: String,
+        session: String,
+        error: String,
+    },
+    /// The node is at capacity, so an offer is dropped (debug).
+    OfferDroppedAtCapacity { peer: String, session: String },
+    /// An offer arrived (debug).
+    OfferReceived {
+        peer: String,
+        session: String,
+        reflexive: String,
+        local: usize,
+    },
+    /// The offer was fresh only within the skew tolerance (debug).
+    OfferWithinTolerance {
+        peer: String,
+        session: String,
+        offer_issued_at: u64,
+        offer_expires_at: u64,
+        offer_received_at: u64,
+    },
+    /// Our own initiator wins the dual initiation, so the peer's offer is
+    /// not answered (debug).
+    ResponderSuppressed { peer: String, session: String },
+    /// A node address could not be derived, so the offer is answered
+    /// (trace).
+    NoNodeAddr { peer: String },
+    /// The responder's addresses are observed (debug).
+    ResponderStunObserved {
+        peer: String,
+        session: String,
+        accepted: bool,
+        reflexive: String,
+        local: usize,
+    },
+    /// The answer was published (debug).
+    AnswerSent {
+        peer: String,
+        session: String,
+        accepted: bool,
+        relays: usize,
+        event: String,
+    },
+    /// The responder's punch reached the peer (debug).
+    ResponderPunchSucceeded {
+        peer: String,
+        session: String,
+        remote: SocketAddr,
+    },
+    /// The responder's punch adopted nothing (debug).
+    ResponderPunchFailed {
+        peer: String,
+        session: String,
+        error: String,
+    },
+    /// The relays a signal goes to (debug).
+    SignalRelaysResolved {
+        peer: String,
+        inbox: usize,
+        usable: usize,
+    },
+    /// The peer's inbox relay list could not be fetched (debug).
+    InboxFetchFailed { error: String },
+    /// Punch candidates the peer named were refused: at warn with the
+    /// count of warnings held back when `suppressed` is set, else at debug.
+    PunchCandidatesRefused {
+        suppressed: Option<u64>,
+        peer: String,
+        session: String,
+        tally: PunchTargetTally,
+    },
+    /// Punch packets from unplanned sources, and remapped holds a later
+    /// one replaced, in one attempt (debug).
+    PunchSourcesRefused {
+        session: String,
+        unplanned: usize,
+        superseded: usize,
+    },
+    /// Receives that failed on the punch socket in one attempt (debug).
+    PunchRecvErrors {
+        session: String,
+        recv_errors: usize,
+        last_error: Option<String>,
+    },
+    /// A datagram from a traversed peer's address carried another FMP
+    /// version, so the peer is not traversed again for a while (warn, with
+    /// the receive loop's target).
+    VersionMismatch {
+        npub: String,
+        transport_id: String,
+        remote_addr: String,
+        peer_version: u8,
+        our_version: u8,
+        cooldown_secs: u64,
     },
 }

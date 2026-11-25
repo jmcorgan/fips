@@ -2,10 +2,10 @@ mod driver;
 mod handoff;
 mod log;
 pub(crate) mod machine;
-mod offer_admission;
 mod pump;
 mod relay;
 mod runtime;
+#[cfg(test)]
 mod signal;
 mod signal_route;
 mod sockets;
@@ -25,8 +25,8 @@ pub use handoff::{
 pub use runtime::NostrRendezvous;
 pub use types::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, BootstrapError, BootstrapEvent,
-    CachedOverlayAdvert, NostrFailureDecision, NostrPeerFailureView, NostrRefetchOutcome,
-    OverlayAdvert, OverlayEndpointAdvert, OverlayTransportKind, PROTOCOL_VERSION, PUNCH_ACK_MAGIC,
-    PUNCH_MAGIC, PunchHint, PunchPacket, PunchPacketKind, SIGNAL_KIND, TraversalAddress,
-    TraversalAnswer, TraversalOffer,
+    CachedOverlayAdvert, FailureReply, NostrFailureDecision, NostrPeerFailureView,
+    NostrRefetchOutcome, OverlayAdvert, OverlayEndpointAdvert, OverlayTransportKind,
+    PROTOCOL_VERSION, PUNCH_ACK_MAGIC, PUNCH_MAGIC, PunchHint, PunchPacket, PunchPacketKind,
+    SIGNAL_KIND, TraversalAddress, TraversalAnswer, TraversalOffer,
 };

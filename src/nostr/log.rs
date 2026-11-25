@@ -10,7 +10,7 @@
 
 use std::time::Instant;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::machine::rendezvous::log::{IngestPath, Log, Source};
 use super::runtime::{Feed, endpoint_summary, short_id, short_npub};
@@ -224,6 +224,392 @@ pub(super) fn render(line: &Log) {
             error = %error,
             "public-udp-addr: STUN failed"
         ),
+        other => render_traversal(other),
+    }
+}
+
+/// Log a traversal line. Each keeps the target of the file it was first
+/// logged from: the flows' lines `fips::nostr::runtime`, the punch
+/// attempt's `fips::nostr::traversal`, and the version-mismatch warning the
+/// receive loop's. The `peer` and `session` fields arrive shortened.
+fn render_traversal(line: &Log) {
+    match line {
+        Log::SignalShed { reason, total } => debug!(
+            target: "fips::nostr::runtime",
+            reason = ?reason,
+            total = *total,
+            "shed inbound traversal signal before decrypt"
+        ),
+        Log::SignalsShed { shed } => warn!(
+            target: "fips::nostr::runtime",
+            shed = *shed,
+            "inbound traversal signals shed before decrypt"
+        ),
+        Log::UnwrapFailed { error } => trace!(
+            target: "fips::nostr::runtime",
+            error = %error,
+            "failed to unwrap traversal signal"
+        ),
+        Log::SenderNpubFailed { error } => debug!(
+            target: "fips::nostr::runtime",
+            error = %error,
+            "failed to encode traversal sender npub"
+        ),
+        Log::OfferRateLimited { sender_npub, limit } => warn!(
+            target: "fips::nostr::runtime",
+            sender_npub = %sender_npub,
+            limit = *limit,
+            "rate-limited inbound traversal offer (max_concurrent_incoming_offers reached); offer dropped"
+        ),
+        Log::OfferSenderFull { sender_npub, limit } => debug!(
+            target: "fips::nostr::runtime",
+            sender_npub = %sender_npub,
+            limit = *limit,
+            "inbound traversal offer refused: sender is at its per-npub offer allowance"
+        ),
+        // An offer arriving stale is the expected consequence of relay lag
+        // and stays at debug. The other refusals cannot arise from lag, so
+        // they are the operator's only sign a node is fed malformed or
+        // forged signals, and clear the default level.
+        Log::OfferFailed {
+            peer,
+            session,
+            error,
+            adversarial: true,
+        } => warn!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            error = %error,
+            "rejected traversal offer"
+        ),
+        Log::OfferFailed {
+            peer,
+            session,
+            error,
+            adversarial: false,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            error = %error,
+            "failed to handle traversal offer"
+        ),
+        Log::InitiatorSuppressed { peer } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            "traversal: initiator suppressed, Node at capacity"
+        ),
+        Log::InitiatorStarting { peer } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            "traversal: initiator starting"
+        ),
+        Log::InitiatorStunObserved {
+            peer,
+            reflexive,
+            local,
+            stun,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            reflexive = %reflexive,
+            local = *local,
+            stun = %stun,
+            "traversal: initiator STUN observed"
+        ),
+        Log::OfferSent {
+            peer,
+            session,
+            relays,
+            event,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            relays = *relays,
+            event = %event,
+            "traversal: offer sent"
+        ),
+        Log::AnswerReceived {
+            peer,
+            session,
+            accepted,
+            reflexive,
+            local,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            accepted = *accepted,
+            reflexive = %reflexive,
+            local = *local,
+            "traversal: answer received"
+        ),
+        Log::SkewSignificant {
+            peer,
+            session,
+            skew_ms,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            skew_ms = *skew_ms,
+            "traversal: significant peer clock skew observed"
+        ),
+        Log::SkewNominal { peer, skew_ms } => trace!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            skew_ms = *skew_ms,
+            "traversal: peer clock skew within nominal range"
+        ),
+        Log::AnswerWithinTolerance {
+            peer,
+            session,
+            answer_issued_at,
+            answer_expires_at,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            answer_issued_at = *answer_issued_at,
+            answer_expires_at = *answer_expires_at,
+            "traversal: answer accepted within freshness tolerance"
+        ),
+        Log::InitiatorPunchSucceeded {
+            peer,
+            session,
+            remote,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            remote = %remote,
+            "traversal: initiator punch succeeded"
+        ),
+        Log::OfferResent {
+            peer,
+            session,
+            event,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            event = %event,
+            "traversal: offer re-sent after suppressing the peer's"
+        ),
+        Log::OfferResendFailed {
+            peer,
+            session,
+            error,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            error = %error,
+            "traversal: offer re-send failed"
+        ),
+        Log::OfferDroppedAtCapacity { peer, session } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            "traversal: incoming offer dropped, Node at capacity"
+        ),
+        Log::OfferReceived {
+            peer,
+            session,
+            reflexive,
+            local,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            reflexive = %reflexive,
+            local = *local,
+            "traversal: offer received"
+        ),
+        Log::OfferWithinTolerance {
+            peer,
+            session,
+            offer_issued_at,
+            offer_expires_at,
+            offer_received_at,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            offer_issued_at = *offer_issued_at,
+            offer_expires_at = *offer_expires_at,
+            offer_received_at = *offer_received_at,
+            "traversal: offer accepted within freshness tolerance"
+        ),
+        Log::ResponderSuppressed { peer, session } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            "traversal: responder session suppressed, our outbound initiator wins (smaller addr)"
+        ),
+        Log::NoNodeAddr { peer } => trace!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            "traversal: could not derive NodeAddr for dedup, answering offer"
+        ),
+        Log::ResponderStunObserved {
+            peer,
+            session,
+            accepted,
+            reflexive,
+            local,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            accepted = *accepted,
+            reflexive = %reflexive,
+            local = *local,
+            "traversal: responder STUN observed"
+        ),
+        Log::AnswerSent {
+            peer,
+            session,
+            accepted,
+            relays,
+            event,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            accepted = *accepted,
+            relays = *relays,
+            event = %event,
+            "traversal: answer sent"
+        ),
+        Log::ResponderPunchSucceeded {
+            peer,
+            session,
+            remote,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            remote = %remote,
+            "traversal: responder punch succeeded"
+        ),
+        Log::ResponderPunchFailed {
+            peer,
+            session,
+            error,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            session = %session,
+            error = %error,
+            "traversal: responder punch failed"
+        ),
+        Log::SignalRelaysResolved {
+            peer,
+            inbox,
+            usable,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            peer = %peer,
+            inbox = *inbox,
+            usable = *usable,
+            "traversal: signal relays resolved against the client pool"
+        ),
+        Log::InboxFetchFailed { error } => debug!(
+            target: "fips::nostr::runtime",
+            error = %error,
+            "failed to fetch inbox relays, falling back to configured DM relays"
+        ),
+        Log::PunchCandidatesRefused {
+            suppressed,
+            peer,
+            session,
+            tally,
+        } => {
+            let sample = tally.sample.as_deref().unwrap_or("-");
+            let reflexive = tally.reflexive.unwrap_or("-");
+            match suppressed {
+                // `warn` for the shapes no honest peer produces, which an
+                // operator needs to see at the default level; the routine
+                // off-subnet case stays at `debug`.
+                Some(suppressed) => warn!(
+                    target: "fips::nostr::runtime",
+                    peer = %peer,
+                    suppressed = *suppressed,
+                    session = %session,
+                    offered = tally.offered,
+                    admitted = tally.admitted,
+                    unparsable = tally.unparsable,
+                    zeroport = tally.zeroport,
+                    unroutable = tally.unroutable,
+                    offsubnet = tally.offsubnet,
+                    capped = tally.capped,
+                    over_offered = tally.over_offered,
+                    reflexive = %reflexive,
+                    sample = %sample,
+                    "traversal: punch candidates refused"
+                ),
+                None => debug!(
+                    target: "fips::nostr::runtime",
+                    peer = %peer,
+                    session = %session,
+                    offered = tally.offered,
+                    admitted = tally.admitted,
+                    unparsable = tally.unparsable,
+                    zeroport = tally.zeroport,
+                    unroutable = tally.unroutable,
+                    offsubnet = tally.offsubnet,
+                    capped = tally.capped,
+                    over_offered = tally.over_offered,
+                    reflexive = %reflexive,
+                    sample = %sample,
+                    "traversal: punch candidates refused"
+                ),
+            }
+        }
+        Log::PunchSourcesRefused {
+            session,
+            unplanned,
+            superseded,
+        } => debug!(
+            target: "fips::nostr::traversal",
+            session = %session,
+            unplanned = *unplanned,
+            superseded = *superseded,
+            "traversal: punch packets refused on their source address"
+        ),
+        Log::PunchRecvErrors {
+            session,
+            recv_errors,
+            last_error,
+        } => debug!(
+            target: "fips::nostr::traversal",
+            session = %session,
+            recv_errors = *recv_errors,
+            // As the I/O error's `Option` printed it: `Some(<its Debug>)`.
+            last_error = %last_error
+                .as_ref()
+                .map_or_else(|| "None".to_string(), |e| format!("Some({e})")),
+            "traversal: receive errors on the punch socket"
+        ),
+        Log::VersionMismatch {
+            npub,
+            transport_id,
+            remote_addr,
+            peer_version,
+            our_version,
+            cooldown_secs,
+        } => version_mismatch(
+            npub,
+            transport_id,
+            remote_addr,
+            *peer_version,
+            *our_version,
+            *cooldown_secs,
+        ),
+        _ => {}
     }
 }
 

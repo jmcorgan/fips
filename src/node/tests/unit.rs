@@ -1880,6 +1880,7 @@ async fn test_nostr_traversal_failure_skips_connected_peer() {
         .set_engine(bootstrap.clone());
 
     node.poll_nostr_rendezvous().await;
+    bootstrap.settled_for_test().await;
 
     assert!(
         bootstrap.failure_state_snapshot().is_empty(),
@@ -3345,28 +3346,6 @@ async fn poll_nostr_rendezvous_established_gated_at_capacity() {
         node.connection_count(),
         before_connections,
         "Established event must not start a handshake while at capacity"
-    );
-}
-
-#[tokio::test]
-async fn nostr_rendezvous_outbound_admission_atomic_roundtrip() {
-    // Verifies the runtime-side plumbing for the two NAT-traversal gate
-    // points: the setter mutates the atomic and the (super-visible)
-    // reader observes the value the Node-side wiring would publish.
-    let bootstrap = NostrRendezvous::new_for_test();
-    assert!(
-        bootstrap.outbound_admission_allowed(),
-        "default must allow (start unsaturated)"
-    );
-    bootstrap.set_capacity(false);
-    assert!(
-        !bootstrap.outbound_admission_allowed(),
-        "after suppression store: traversal initiator/responder must see false"
-    );
-    bootstrap.set_capacity(true);
-    assert!(
-        bootstrap.outbound_admission_allowed(),
-        "after recovery store: traversal initiator/responder must see true"
     );
 }
 

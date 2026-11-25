@@ -74,17 +74,20 @@ host, under the `#[cfg(test)]` the guard requires, and may use `std`.
   the validity horizon's arithmetic), the cache of peers' adverts, the
   local advert's assembly from the node's transports, and the local advert
   with its publishing decision.
-- `punch/`: the punch packet's prefixes and codec, punch planning, and the
-  suspicious-offer warning limit.
-- `stun/`: the STUN codec and local-candidate selection.
+- `punch/`: the punch packet's prefixes and codec, punch planning, the
+  punch attempt, and the suspicious-offer warning limit.
+- `stun/`: the STUN codec, the STUN client, and local-candidate selection.
 - `traversal/`: what the node remembers about traversal attempts: the
   failure streaks and cooldowns, the initiator election and the seen-sessions
-  cache, and the rate limit on inbound traversal signals.
+  cache, the rate limit on inbound traversal signals, the offer admission
+  counts, the traversal sessions in hand, and the traversal's pure rules.
 - `rendezvous/`: `Rendezvous`, the machine the shell's pump steps. It owns
-  the advert half: the peer advert cache, this node's advert and its publish
-  schedule, the transports it is assembled from and the public addresses
-  learned for them, the relay subscriptions and the inbox relay list. Its
-  inputs, actions and ids are in `io.rs`, its log lines in `log.rs`.
+  all of rendezvous: the peer advert cache, this node's advert and its
+  publish schedule, the transports it is assembled from and the public
+  addresses learned for them, the relay subscriptions and the inbox relay
+  list, and every traversal (`traversal.rs`). Its inputs, actions and ids
+  are in `io.rs`, its log lines in `log.rs`, and the status the node reads
+  without waiting in `status.rs`.
 - `relays.rs`: `relays::Book`, the two subscriptions opened at start and the
   retry of a failed subscribe, 2 s doubling to 60 s, under the same
   subscriptions.

@@ -10,7 +10,6 @@
 //! the 0.44 client FIPS ran before, the setting that keeps the 0.44 value is
 //! made here, with both values beside it.
 
-use std::collections::HashSet;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -247,11 +246,6 @@ impl RelayClient {
             .authentication_timeout(AUTH_TIMEOUT)
             .await?;
         Ok(output.success.len())
-    }
-
-    /// The relays in the client's pool.
-    pub(super) async fn pool_urls(&self) -> HashSet<RelayUrl> {
-        self.client.relays().all().await.into_keys().collect()
     }
 
     /// The admission policy the client was built with.

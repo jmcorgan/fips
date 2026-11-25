@@ -1,18 +1,16 @@
 //! Tests that the seen-sessions memory (`Election::note_session_seen` in
 //! `machine/traversal/election.rs`) never forgets a session id whose offer can
-//! still be fresh: a full memory refuses a new session instead, both in the
-//! machine and through the incoming-offer handler in `runtime.rs`, and its
+//! still be fresh: a full memory refuses a new session instead, and its
 //! default size holds every session the signal gate
-//! (`machine/traversal/gate.rs`) admits in one replay window.
+//! (`machine/traversal/gate.rs`) admits in one replay window. The same
+//! refusals through the responder's handling of an offer are tested in
+//! `machine/rendezvous/tests/traversal.rs`.
 
 use super::super::machine::tests::ZeroEntropy;
 use super::super::machine::traversal::election::{Election, SeenDecision};
 use super::super::machine::traversal::gate::{
     ANSWER_RESERVE_BURST, ANSWER_RESERVE_RATE_PER_SEC, SIGNAL_BURST, SIGNAL_RATE_PER_SEC,
 };
-use super::super::runtime::NostrRendezvous;
-use super::super::types::BootstrapError;
-use super::offer_between;
 use crate::config::NostrRendezvousConfig;
 use fips_core::utils::hash::KeyedHasher;
 
@@ -107,113 +105,5 @@ fn the_default_cap_holds_every_session_the_signal_gate_admits_in_one_replay_wind
          the signal gate admits in {} s",
         defaults.seen_sessions_max_entries,
         defaults.replay_window_secs
-    );
-}
-
-/// The handler refuses a new offer with the `seen-sessions-full` reason when
-/// the memory is full of live entries.
-#[tokio::test]
-async fn a_new_offer_is_refused_as_seen_sessions_full_by_the_handler_when_the_memory_is_full() {
-    use nostr::nips::nip19::ToBech32;
-    let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test_with_config(
-        NostrRendezvousConfig {
-            seen_sessions_max_entries: 2,
-            ..Default::default()
-        },
-    ));
-    let our_npub = runtime.npub_for_test().to_string();
-    let peer = nostr::key::Keys::generate();
-    let peer_npub = peer.public_key().to_bech32().unwrap();
-    for i in 0..2 {
-        let r = runtime
-            .clone()
-            .handle_incoming_offer_for_test(
-                offer_between(&format!("filler-{i}"), &peer_npub, &our_npub),
-                peer.public_key(),
-                peer_npub.clone(),
-            )
-            .await;
-        assert!(
-            matches!(r, Err(BootstrapError::MissingRelays(_))),
-            "precondition: offer {i} passes the replay check: {r:?}"
-        );
-    }
-    let r = runtime
-        .clone()
-        .handle_incoming_offer_for_test(
-            offer_between("past-the-cap", &peer_npub, &our_npub),
-            peer.public_key(),
-            peer_npub.clone(),
-        )
-        .await;
-    assert!(
-        matches!(&r, Err(BootstrapError::Protocol(reason)) if reason == "seen-sessions-full"),
-        "defect: an offer past the cap was not refused as seen-sessions-full: {r:?}"
-    );
-}
-
-/// An explicit cap, small enough that the handler fills it quickly. The
-/// default is not used, so the test turns on the memory's behaviour when
-/// full rather than on its size.
-const HANDLER_CAP: usize = 64;
-
-/// A responder records a captured offer, then receives as many other offers
-/// as its seen-sessions memory holds, all inside one replay window. A copy of
-/// the captured offer, still fresh, must still be refused as a replay.
-#[tokio::test]
-async fn a_captured_offer_is_still_refused_as_a_replay_after_the_seen_session_cap_fills() {
-    use nostr::nips::nip19::ToBech32;
-    let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test_with_config(
-        NostrRendezvousConfig {
-            seen_sessions_max_entries: HANDLER_CAP,
-            ..Default::default()
-        },
-    ));
-    let our_npub = runtime.npub_for_test().to_string();
-    let peer = nostr::key::Keys::generate();
-    let peer_npub = peer.public_key().to_bech32().unwrap();
-    let handle = |offer: super::super::TraversalOffer| {
-        let runtime = runtime.clone();
-        let (sender, sender_npub) = (peer.public_key(), peer_npub.clone());
-        async move {
-            runtime
-                .handle_incoming_offer_for_test(offer, sender, sender_npub)
-                .await
-        }
-    };
-
-    let captured = offer_between("captured", &peer_npub, &our_npub);
-    // The test runtime shares no signal relay with the peer, so an offer that
-    // passes the replay check fails afterwards with MissingRelays.
-    let r = handle(captured.clone()).await;
-    assert!(
-        matches!(r, Err(BootstrapError::MissingRelays(_))),
-        "precondition: the first copy passes the replay check: {r:?}"
-    );
-    let r = handle(captured.clone()).await;
-    assert!(
-        matches!(r, Err(BootstrapError::Replay(_))),
-        "precondition: an immediate copy is refused as a replay: {r:?}"
-    );
-    // Expiry is kept in whole milliseconds. Without this pause the first
-    // fillers can share the captured session's expiry, and an eviction by
-    // expiry order then picks among the tied entries in hash order, so the
-    // test would pass with the defect present on some runs.
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-
-    let started = std::time::Instant::now();
-    for i in 0..HANDLER_CAP {
-        let r = handle(offer_between(&format!("filler-{i}"), &peer_npub, &our_npub)).await;
-        assert!(
-            !matches!(r, Err(BootstrapError::Replay(_))),
-            "precondition: a new session is not taken for a replay: {r:?}"
-        );
-    }
-    let r = handle(captured.clone()).await;
-    assert!(
-        matches!(r, Err(BootstrapError::Replay(_))),
-        "defect: the captured offer, still fresh ({} ms after the first copy), passed the \
-         replay check: {r:?}",
-        started.elapsed().as_millis()
     );
 }

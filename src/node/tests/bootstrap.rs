@@ -661,18 +661,22 @@ async fn the_capacity_is_sent_only_when_it_changes() {
     node.poll_nostr_rendezvous().await;
     node.poll_nostr_rendezvous().await;
     assert_eq!(
-        engine.capacity_received_for_test(),
+        engine.capacity_received_for_test().await,
         1,
         "the first tick sends the capacity and the next, unchanged, sends nothing"
     );
 
     let driver = &mut node.supervisor.nostr_rendezvous;
     driver.send_capacity(&engine, false);
-    assert_eq!(engine.capacity_received_for_test(), 2, "a change is sent");
+    assert_eq!(
+        engine.capacity_received_for_test().await,
+        2,
+        "a change is sent"
+    );
     driver.send_capacity(&engine, false);
-    assert_eq!(engine.capacity_received_for_test(), 2);
+    assert_eq!(engine.capacity_received_for_test().await, 2);
     driver.send_capacity(&engine, true);
-    assert_eq!(engine.capacity_received_for_test(), 3);
+    assert_eq!(engine.capacity_received_for_test().await, 3);
 }
 
 /// A running node with one started UDP transport on loopback, for driving
@@ -1041,6 +1045,7 @@ async fn a_foreign_source_on_an_adopted_transport_cannot_set_a_mismatch_cooldown
         "203.0.113.99:5000",
     ))
     .await;
+    engine.settled_for_test().await;
     assert_eq!(engine.cooldown_until(&peer.npub(), Node::now_ms()), None);
 
     // Control: the same datagram from the traversed address sets it.
@@ -1049,6 +1054,7 @@ async fn a_foreign_source_on_an_adopted_transport_cannot_set_a_mismatch_cooldown
         "198.51.100.7:4000",
     ))
     .await;
+    engine.settled_for_test().await;
     assert!(
         engine
             .cooldown_until(&peer.npub(), Node::now_ms())
@@ -1079,6 +1085,7 @@ async fn a_mismatch_from_the_traversed_address_after_the_link_is_up_sets_no_cool
         "198.51.100.7:4000",
     ))
     .await;
+    engine.settled_for_test().await;
     assert_eq!(engine.cooldown_until(&peer.npub(), Node::now_ms()), None);
 
     node.poll_nostr_rendezvous().await;
@@ -1088,6 +1095,7 @@ async fn a_mismatch_from_the_traversed_address_after_the_link_is_up_sets_no_cool
         "198.51.100.7:4000",
     ))
     .await;
+    engine.settled_for_test().await;
     assert_eq!(
         engine.cooldown_until(&peer.npub(), Node::now_ms()),
         None,
@@ -1108,6 +1116,7 @@ async fn an_unknown_version_from_the_traversed_address_before_any_link_sets_the_
         "198.51.100.7:4000",
     ))
     .await;
+    engine.settled_for_test().await;
     let first = engine.cooldown_until(&peer.npub(), Node::now_ms());
     assert!(first.is_some());
 
@@ -1117,6 +1126,7 @@ async fn an_unknown_version_from_the_traversed_address_before_any_link_sets_the_
         "198.51.100.7:4000",
     ))
     .await;
+    engine.settled_for_test().await;
     assert_eq!(engine.cooldown_until(&peer.npub(), Node::now_ms()), first);
 }
 
@@ -1150,6 +1160,7 @@ async fn an_unknown_version_datagram_on_a_real_adopted_socket_sets_the_cooldown(
         }
         _ = tokio::time::sleep(Duration::from_millis(300)) => {}
     }
+    engine.settled_for_test().await;
 
     assert!(
         engine

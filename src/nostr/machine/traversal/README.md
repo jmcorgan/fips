@@ -2,10 +2,10 @@
 
 What the node remembers about traversal attempts, its own and its peers', and
 what it decides from that memory, including how many inbound signals it lets
-through to decryption, and the pure rules a traversal follows. No locks,
-clocks or logging: the shell's `runtime.rs` holds each piece behind one
-`std::sync::Mutex`, passes in the clock reading it took, and logs from the
-decision it gets back.
+through to decryption, the traversal sessions in hand, and the pure rules a
+traversal follows. No locks, clocks or logging: the rendezvous machine owns
+each piece, passes in the step's clock reading, and logs from the decision
+it gets back.
 
 ## Files
 
@@ -50,6 +50,14 @@ decision it gets back.
   peer's inbox relay list is looked up and the fallback to our DM relays.
   The punch hint a node sends, and the skew from which an observed clock
   offset is noted at debug.
+- `sessions.rs`: `Sessions`, the traversal sessions in hand, the
+  initiator's and the responder's in one table, each a `Session` whose
+  `Stage` names the step it is at and the operation it waits on. A session
+  is found by the nonce an answer names (only while its offer is being
+  published or is out), by its peer, by its socket or by its operation.
+  `Resend` is the one re-send of an initiator's offer a dual initiation
+  allows. A session keeps up to 64 datagrams that arrive between its
+  observation and its punch attempt, for the attempt.
 - `tests/`: this directory's unit tests.
 
 ## Rules for changing it
@@ -62,6 +70,5 @@ decision it gets back.
 - A constant a test outside the machine reads is `pub(crate)`, never
   `pub(in crate::nostr)`: the guard reads the latter as a `crate::` path
   outside the module.
-- Methods take `&mut self`; the shell's accessor holds the lock for one call
-  and never across an `.await` (the runtime binds a decision before any
-  `match` whose arms await).
+- Methods take `&mut self`, and only the rendezvous machine calls them, in
+  its steps.

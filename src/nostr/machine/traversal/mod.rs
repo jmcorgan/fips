@@ -7,3 +7,4 @@ pub mod election;
 pub mod failures;
 pub mod gate;
 pub mod rules;
+pub mod sessions;

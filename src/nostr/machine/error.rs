@@ -24,6 +24,21 @@ pub enum Error {
     InvalidPeerNpub { npub: String, reason: String },
     /// An offer's session id was seen inside the replay window.
     Replay(String),
+    /// The node has no room for another peer, so no traversal starts.
+    Disabled,
+    /// A peer's advert names no `udp:nat` endpoint; the text is its npub.
+    MissingNatEndpoint(String),
+    /// No relay we share with a peer can carry its signals; the text is its
+    /// npub.
+    MissingRelays(String),
+    /// A peer's answer did not arrive within the signal lifetime; the text
+    /// is its npub.
+    SignalTimeout(String),
+    /// A punch attempt adopted nothing in time; the text names the peer or
+    /// the session.
+    PunchTimeout(String),
+    /// A socket could not be made; the text is the I/O error's.
+    Io(String),
 }
 
 impl core::fmt::Display for Error {
@@ -38,6 +53,16 @@ impl core::fmt::Display for Error {
             Error::MissingAdvert(npub) => write!(f, "peer {npub} has no overlay advert"),
             Error::InvalidPeerNpub { npub, reason } => write!(f, "invalid npub '{npub}': {reason}"),
             Error::Replay(session) => write!(f, "replayed or duplicate session id: {session}"),
+            Error::Disabled => write!(f, "bootstrap disabled"),
+            Error::MissingNatEndpoint(npub) => {
+                write!(f, "peer {npub} advert does not contain udp:nat endpoint")
+            }
+            Error::MissingRelays(npub) => write!(f, "peer {npub} has no usable traversal relays"),
+            Error::SignalTimeout(npub) => {
+                write!(f, "signal timeout waiting for answer from {npub}")
+            }
+            Error::PunchTimeout(peer) => write!(f, "traversal attempt timed out for {peer}"),
+            Error::Io(error) => write!(f, "io error: {error}"),
         }
     }
 }

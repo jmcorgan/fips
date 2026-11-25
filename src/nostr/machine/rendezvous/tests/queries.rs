@@ -49,15 +49,36 @@ fn refetch_outcome(actions: Vec<Action>, reply: ReplyId) -> (usize, NostrRefetch
     }
 }
 
-fn resets(actions: &[Action]) -> Vec<(usize, String)> {
-    actions
-        .iter()
-        .enumerate()
-        .filter_map(|(i, action)| match action {
-            Action::ResetStreak { npub } => Some((i, npub.clone())),
-            _ => None,
-        })
-        .collect()
+/// The refetch of `hex`'s advert answered with `events`, after two
+/// recorded failures for the peer, and the peers whose failure streak the
+/// refetch's step reset. The reset and the reply are made in one step, so
+/// the reply's reader sees the reset streak.
+fn refetched_after_failures(
+    h: &mut Harness,
+    hex: &str,
+    events: Vec<Event>,
+) -> (Vec<Action>, ReplyId, Vec<String>) {
+    for _ in 0..2 {
+        let reply = h.reply();
+        h.input(Input::RecordFailure {
+            npub: npub(hex),
+            reply,
+        });
+    }
+    assert!(h.m.take_status().is_some(), "the failures are recorded");
+    let (actions, reply) = refetched(h, hex, events);
+    let reset =
+        h.m.take_status()
+            .map(|status| {
+                status
+                    .failures
+                    .into_iter()
+                    .filter(|(_, record)| record.consecutive_failures == 0)
+                    .map(|(npub, _)| npub)
+                    .collect()
+            })
+            .unwrap_or_default();
+    (actions, reply, reset)
 }
 
 #[test]
@@ -159,13 +180,10 @@ fn a_refetch_that_finds_nothing_evicts_and_resets_the_streak_before_replying() {
     let mut h = Harness::new(params(10));
     let event = advert_by(NODE_B_SECRET, h.unix_secs(), &body("8.8.8.8:443"));
     insert(&mut h, &event);
-    let (actions, reply) = refetched(&mut h, NODE_B_SECRET, Vec::new());
-    let reset = resets(&actions);
-    let (at, outcome) = refetch_outcome(actions, reply);
+    let (actions, reply, reset) = refetched_after_failures(&mut h, NODE_B_SECRET, Vec::new());
+    let (_, outcome) = refetch_outcome(actions, reply);
     assert_eq!(outcome, NostrRefetchOutcome::Evicted);
-    assert_eq!(reset.len(), 1);
-    assert_eq!(reset[0].1, npub(NODE_B_SECRET));
-    assert!(reset[0].0 < at, "the streak is reset before the reply");
+    assert_eq!(reset, vec![npub(NODE_B_SECRET)], "the streak is reset");
     assert_eq!(inspect(&mut h, &npub(NODE_B_SECRET)).created_at, None);
 }
 
@@ -175,8 +193,8 @@ fn a_refetch_with_only_foreign_answers_is_skipped() {
     let event = advert_by(NODE_B_SECRET, h.unix_secs(), &body("8.8.8.8:443"));
     insert(&mut h, &event);
     let foreign = advert_by(NODE_C_SECRET, h.unix_secs() + 10, &body("8.8.8.3:443"));
-    let (actions, reply) = refetched(&mut h, NODE_B_SECRET, vec![foreign]);
-    assert!(resets(&actions).is_empty());
+    let (actions, reply, reset) = refetched_after_failures(&mut h, NODE_B_SECRET, vec![foreign]);
+    assert!(reset.is_empty());
     assert_eq!(
         refetch_outcome(actions, reply).1,
         NostrRefetchOutcome::Skipped
@@ -194,8 +212,8 @@ fn a_refetch_with_an_older_or_equal_advert_is_the_same_advert() {
     );
     for created in [cached, cached - 1] {
         let event = advert_by(NODE_B_SECRET, created, &body("8.8.8.9:443"));
-        let (actions, reply) = refetched(&mut h, NODE_B_SECRET, vec![event]);
-        assert!(resets(&actions).is_empty());
+        let (actions, reply, reset) = refetched_after_failures(&mut h, NODE_B_SECRET, vec![event]);
+        assert!(reset.is_empty());
         assert_eq!(
             refetch_outcome(actions, reply).1,
             NostrRefetchOutcome::SameAdvert
@@ -213,8 +231,8 @@ fn a_refreshed_advert_that_the_full_cache_refuses_is_skipped_without_a_reset() {
     let event = advert_by(NODE_C_SECRET, h.unix_secs(), &body("8.8.8.3:443"));
     insert(&mut h, &event);
     let newer = advert_by(NODE_B_SECRET, h.unix_secs(), &body("8.8.8.8:443"));
-    let (actions, reply) = refetched(&mut h, NODE_B_SECRET, vec![newer]);
-    assert!(resets(&actions).is_empty(), "the streak is not reset");
+    let (actions, reply, reset) = refetched_after_failures(&mut h, NODE_B_SECRET, vec![newer]);
+    assert!(reset.is_empty(), "the streak is not reset");
     assert_eq!(
         logs(&actions),
         vec![
@@ -315,12 +333,10 @@ fn a_refetch_with_a_newer_valid_advert_refreshes_and_resets_the_streak_before_re
         &advert_by(NODE_B_SECRET, cached, &body("8.8.8.8:443")),
     );
     let newer = advert_by(NODE_B_SECRET, cached + 10, &body("8.8.8.9:443"));
-    let (actions, reply) = refetched(&mut h, NODE_B_SECRET, vec![newer]);
-    let reset = resets(&actions);
-    let (at, outcome) = refetch_outcome(actions, reply);
+    let (actions, reply, reset) = refetched_after_failures(&mut h, NODE_B_SECRET, vec![newer]);
+    let (_, outcome) = refetch_outcome(actions, reply);
     assert_eq!(outcome, NostrRefetchOutcome::Refreshed);
-    assert_eq!(reset.len(), 1);
-    assert!(reset[0].0 < at, "the streak is reset before the reply");
+    assert_eq!(reset, vec![npub(NODE_B_SECRET)], "the streak is reset");
     assert_eq!(
         inspect(&mut h, &npub(NODE_B_SECRET)).created_at,
         Some(cached + 10)

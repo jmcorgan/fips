@@ -1,3 +1,8 @@
+//! The traversal signal's envelope as the shell's tests build and open it:
+//! the machine seals and opens the signals it sends and receives itself
+//! (`machine/event/signal.rs`), and these wrappers give the tests the same
+//! codec with the host's clock and entropy.
+
 use nostr::event::{Event, UnsignedEvent};
 use nostr::key::PublicKey;
 use nostr::types::Timestamp;
@@ -11,11 +16,6 @@ pub(super) use super::machine::signal::{
 };
 use super::traversal::now_ms;
 use super::types::BootstrapError;
-
-pub(super) struct SignalEnvelope<T> {
-    pub(super) payload: T,
-    pub(super) sender_npub: String,
-}
 
 pub(super) struct UnwrappedSignal {
     pub(super) sender: PublicKey,

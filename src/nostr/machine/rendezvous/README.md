@@ -1,7 +1,8 @@
 # src/nostr/machine/rendezvous
 
-The rendezvous machine: `Rendezvous`, the one owner of the advert half of
-FRC-1601's state, stepped by the shell's pump (`src/nostr/pump.rs`).
+The rendezvous machine: `Rendezvous`, the one owner of FRC-1601's state,
+stepped by the shell's pump (`src/nostr/pump.rs`). It holds the only copy of
+the node key the Nostr code signs with.
 
 ## Files
 
@@ -34,18 +35,39 @@ FRC-1601's state, stepped by the shell's pump (`src/nostr/pump.rs`).
   - A relay's advert, the node's endpoint and open-discovery queries, the
     stale-advert refetch, protection changes and NIP-42 challenges.
   - Every step ends with a prune once the earliest entry is due to go, and
-    the release of the cache-full warning's latch.
+    the release of the cache-full warning's latch; a deadline at the
+    earliest expiry makes the prune happen on time with no input.
+- `traversal.rs`: the traversal half, as more of `Rendezvous`'s steps.
+  - `Connect`: capacity, the peer's advert (the cache, else a fetch), its
+    `udp:nat` endpoint, the peer's inbox relays (a 1.5 s fetch, falling back
+    to our DM relays) and the signal relays the pool holds, a socket, the
+    local candidates when shared, the STUN client's observation, the offer,
+    the wait for the answer, the on-link prefixes, the plan and the punch
+    attempt. A connect to a peer whose traversal already runs ends at once
+    (`Release`); any failure ends it with `Failed`, carrying the
+    `BootstrapError` text, and a success records it and asks to `Adopt`.
+  - A signal: the gate (reading whether any traversal of ours awaits an
+    answer from the session table), the open, then an answer routed to the
+    initiator by the nonce it names, or an offer: the admission slot, the
+    bounds, capacity, freshness, the election (suppressing the peer's offer
+    re-sends ours once), the replay check, then the same steps to the answer
+    and the punch. A refused offer is logged at warn when relay lag cannot
+    explain it.
+  - `RecordFailure`, `VersionMismatch` and `Capacity`: the node's failure
+    record, answered with the time it used, the mismatch cooldown and its
+    warning, and whether the node has room. A traversal's success is
+    recorded by the machine itself, when it adopts the initiator's socket.
+- `status.rs`: `Status`, what the node reads of rendezvous without waiting:
+  each peer's failure record, by canonical npub, with the cooldown rule the
+  open-discovery sweep checks and the rows `show peers` prints. The pump
+  stores the latest one where the node's synchronous queries read it, after
+  each step that changed it and before it carries out that step's actions,
+  so a reply never arrives ahead of the status it describes.
 - `io.rs`: the inputs, actions and replies, and the opaque ids (`ReqId`,
   `ReplyId`, `SubId`, `SocketId`) that tie a result to what asked for it.
   The shell keeps the map from each id to its `oneshot`, task or socket.
 - `log.rs`: `Log`, one variant per line the machine asks the shell to log,
   carrying that line's fields. The shell's `log.rs` renders each.
-- `status.rs`: `Status`, what the node reads of rendezvous without waiting:
-  each peer's failure record, by canonical npub, with the cooldown rule the
-  open-discovery sweep checks and the rows `show peers` prints. The shell
-  stores the latest one where the node's synchronous queries read it; for
-  now the traversal half outside the machine stores it after every change
-  to the failure state.
 - `tests/`: the machine's tests.
 
 ## Rules for changing it
@@ -54,8 +76,11 @@ FRC-1601's state, stepped by the shell's pump (`src/nostr/pump.rs`).
   and log line is an action, and every result comes back as an input. An
   action whose result the machine no longer expects is ignored when the
   result arrives.
-- A `ResetStreak` is queued before the `Reply` of the same refetch, so the
-  streak is reset before the node reads the outcome.
-- The traversal flows are still served outside the machine. They reach it
-  only through `ResolveAdvert`, and it reaches them only through
-  `ResetStreak`, until they move in.
+- A refetch that refreshes or evicts a peer's advert resets the peer's
+  failure streak in the same step as its reply.
+- Every check of a traversal keeps the order the code before the machine
+  gave it, the skew noted before the answer is checked and the admission
+  slot taken before the capacity check among them.
+- A traversal's socket is drained by its STUN observation until it ends, so
+  no punch is in flight before it; datagrams that arrive between the
+  observation and the attempt are kept (up to 64) for the attempt.

@@ -1,6 +1,8 @@
 //! Tests of the pump: one task owning the rendezvous machine, with the real
-//! relay client against nostr-sdk's in-process relay. The keys are FRC-1601
-//! Appendix C.1's; nothing here uses nostr's own clock or random source.
+//! relay client against nostr-sdk's in-process relay, and a pump built here
+//! and stepped by hand for the order of its status and replies and for what
+//! it sends the node. The keys are FRC-1601 Appendix C.1's; nothing here
+//! uses nostr's own clock or random source.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ use nostr_sdk::local_relay::{LocalRelay, LocalRelayBuilderNip42};
 use super::super::machine::NodeSigner;
 use super::super::machine::event::advert::advert_event;
 use super::super::machine::params::Params;
+use super::super::machine::rendezvous::SocketId;
 use super::super::relay::aux;
 use super::super::runtime::NostrRendezvous;
 use super::super::signal_route::SignalRouter;
@@ -135,7 +138,6 @@ async fn pump(
 ) {
     let (inbox, rx) = mpsc::unbounded_channel();
     let (router, signals) = SignalRouter::new();
-    let forwarder = router.forwarder();
     let client = RelayClient::build(
         super::super::relay::PumpAuthenticator::new(inbox.clone()),
         router,
@@ -145,23 +147,144 @@ async fn pump(
         client.connect().await;
     }
     let notifications = client.notifications();
-    let machine = Rendezvous::new(params, signer(NODE_A_SECRET), npub(NODE_A_SECRET), now());
+    let node = NodeSigner::new(SecretKey::from_hex(NODE_A_SECRET).unwrap());
+    let machine = Rendezvous::new(params, node, npub(NODE_A_SECRET), now());
+    let (events, _) = mpsc::unbounded_channel();
     let pump = Pump::new(
         machine,
         client.clone(),
         inbox.clone(),
-        Box::new(|_| {}),
-        forwarder,
-        Arc::new(FirstEvent::new()),
+        ToNode {
+            events,
+            status: Default::default(),
+        },
     );
     let in_flight = pump.in_flight();
-    drop(signals);
     (
         inbox,
-        tokio::spawn(pump.run(notifications, rx)),
+        tokio::spawn(pump.run(notifications, signals, rx)),
         in_flight,
         client,
     )
+}
+
+/// A pump for node A on the default settings, not running, with no relays
+/// in its client's pool: the pump, the node's end of its events channel,
+/// and the status it stores for the node.
+fn idle_pump() -> (
+    Pump,
+    mpsc::UnboundedReceiver<BootstrapEvent>,
+    Arc<ArcSwap<Status>>,
+) {
+    let (inbox, _) = mpsc::unbounded_channel();
+    let (router, _) = SignalRouter::new();
+    let client = RelayClient::build(
+        super::super::relay::PumpAuthenticator::new(inbox.clone()),
+        router,
+    );
+    let params = Params::from(&crate::config::NostrRendezvousConfig::default());
+    let node = NodeSigner::new(SecretKey::from_hex(NODE_A_SECRET).unwrap());
+    let machine = Rendezvous::new(params, node, npub(NODE_A_SECRET), now());
+    let (events, received) = mpsc::unbounded_channel();
+    let status: Arc<ArcSwap<Status>> = Default::default();
+    let pump = Pump::new(
+        machine,
+        client,
+        inbox,
+        ToNode {
+            events,
+            status: Arc::clone(&status),
+        },
+    );
+    (pump, received, status)
+}
+
+/// A reply completes a `oneshot` another thread can read at once, so the
+/// status the step changed is stored before the step's replies are sent:
+/// a caller that has awaited a failure record reads the record it was told
+/// of.
+#[tokio::test]
+async fn a_reply_is_sent_after_the_status_it_describes_is_stored() {
+    let (mut pump, _events, status) = idle_pump();
+    let peer = npub(NODE_B_SECRET);
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let reply = {
+        let (status, peer, seen) = (Arc::clone(&status), peer.clone(), Arc::clone(&seen));
+        pump.owe(Box::new(move |_| {
+            let failures = status
+                .load()
+                .failure_views()
+                .into_iter()
+                .find(|view| view.npub == peer)
+                .map_or(0, |view| view.consecutive_failures);
+            *seen.lock().unwrap() = Some(failures);
+        }))
+    };
+    pump.machine
+        .handle(Input::RecordFailure { npub: peer, reply }, now());
+    pump.flush();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some(1),
+        "the reply was sent before the status recording its failure was stored"
+    );
+}
+
+/// A punched socket the machine adopts reaches the node as an established
+/// link, under the `nostr-nat` transport name, and the connect it ends is
+/// forgotten.
+#[tokio::test]
+async fn an_adopted_socket_reaches_the_node_as_an_established_link() {
+    let (mut pump, mut events, _) = idle_pump();
+    let socket = SocketId(1);
+    let Input::SocketBound { local, .. } = pump.sockets.bind(socket) else {
+        panic!("setup: the socket did not bind");
+    };
+    pump.connects.insert(ConnectId(1), PeerConfig::default());
+    let peer = npub(NODE_B_SECRET);
+    let remote: std::net::SocketAddr = "192.0.2.7:2121".parse().unwrap();
+    pump.execute(Action::Adopt {
+        socket,
+        session: "session-1".to_string(),
+        peer_npub: peer.clone(),
+        remote,
+        connect: Some(ConnectId(1)),
+    });
+    let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("no event reached the node within 2 s")
+        .expect("the events channel is open");
+    let BootstrapEvent::Established { traversal } = event else {
+        panic!("the node was sent {event:?}, not an established link");
+    };
+    assert_eq!(traversal.socket.local_addr().unwrap(), local);
+    assert_eq!(traversal.transport_name.as_deref(), Some("nostr-nat"));
+    assert_eq!(traversal.session_id, "session-1");
+    assert_eq!(traversal.peer_npub, peer);
+    assert_eq!(traversal.remote_addr, remote);
+    assert!(
+        pump.connects.is_empty(),
+        "the adopted connect is still held"
+    );
+}
+
+/// A connect the machine releases (one to a peer a traversal already runs
+/// to) is forgotten, and the node is sent nothing for it.
+#[tokio::test]
+async fn a_released_connect_is_forgotten_without_an_event() {
+    let (mut pump, mut events, _) = idle_pump();
+    pump.connects.insert(ConnectId(1), PeerConfig::default());
+    pump.execute(Action::Release {
+        connect: ConnectId(1),
+    });
+    assert!(
+        pump.connects.is_empty(),
+        "the released connect is still held"
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "the node was sent an event for a released connect"
+    );
 }
 
 /// A relay requiring NIP-42 to read and write: the pump answers its
@@ -228,10 +351,10 @@ async fn the_stream_is_taken_before_the_first_subscribe_is_sent() {
     engine.shutdown().await.unwrap();
 }
 
-/// A traversal signal that ever reached the pool's stream is put on the
-/// signal router's channel, where the signal task opens it.
+/// A traversal signal that ever reached the pool's stream is handed to the
+/// machine as one on the signal router's channel is, and opened.
 #[tokio::test]
-async fn a_signal_on_the_pool_stream_reaches_the_signal_task() {
+async fn a_signal_on_the_pool_stream_reaches_the_machine() {
     use super::super::signal::{build_signal_event, create_traversal_answer, rumor};
     let runtime = NostrRendezvous::new_for_test();
     let ours = runtime.npub_for_test().to_string();
@@ -266,14 +389,12 @@ async fn a_signal_on_the_pool_stream_reaches_the_signal_task() {
         nostr::types::Timestamp::from(now_ms() / 1000 + 120),
     )
     .unwrap();
-    let signals = runtime.spawn_signals_for_test();
     runtime.deliver_unfiltered_for_test(ClientNotification::Event {
         relay_url: RelayUrl::parse("ws://127.0.0.1:1").unwrap(),
         subscription_id: nostr::message::SubscriptionId::new("s"),
         event: Box::new(wrap),
     });
     let handed = tokio::time::timeout(SOON, waiting).await;
-    signals.abort();
     assert!(
         matches!(handed, Ok(Ok(_))),
         "the signal on the pool's stream was not opened"

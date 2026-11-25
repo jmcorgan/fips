@@ -59,6 +59,19 @@ pub fn local_candidates(interfaces: &[InterfaceAddr], observed: &[Option<IpAddr>
     addresses
 }
 
+/// The local candidate addresses to offer for a socket: those of its family.
+/// The socket's port is offered on each, and no peer can reach an address of
+/// the other family on it.
+pub fn offerable(addresses: Vec<String>, socket_v4: bool) -> Vec<String> {
+    addresses
+        .into_iter()
+        .filter(|ip| {
+            ip.parse::<IpAddr>()
+                .is_ok_and(|ip| ip.is_ipv4() == socket_v4)
+        })
+        .collect()
+}
+
 /// Append `ip` as text unless it is unspecified or already present.
 fn push_ip(addresses: &mut Vec<String>, ip: IpAddr) {
     if ip.is_unspecified() {

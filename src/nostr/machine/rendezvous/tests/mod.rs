@@ -18,6 +18,7 @@ mod adverts;
 mod auth;
 mod queries;
 mod startup;
+mod traversal;
 
 /// Node A's secret key, FRC-1601 C.1: the machine's own node.
 pub(super) const NODE_A_SECRET: &str =
@@ -82,6 +83,15 @@ pub(super) fn params(cap: usize) -> Params {
         ],
         stun_servers: vec!["stun:stun.example:3478".to_string()],
         advert_ttl_secs: 3_600,
+        signal_ttl_secs: 120,
+        attempt_timeout_secs: 10,
+        punch_start_delay_ms: 2_000,
+        punch_interval_ms: 200,
+        punch_duration_ms: 10_000,
+        share_local_candidates: false,
+        protocol_mismatch_cooldown_secs: 86_400,
+        max_concurrent_incoming_offers: 16,
+        max_concurrent_offers_per_npub: 4,
     }
 }
 
@@ -97,17 +107,17 @@ impl Harness {
     /// A machine for node A with `params`.
     pub(super) fn new(params: Params) -> Self {
         SeededEntropy::seed(7);
+        Self::with_key(params, NODE_A_SECRET)
+    }
+
+    /// A machine for the node whose secret key is `hex`, with `params`.
+    pub(super) fn with_key(params: Params, hex: &str) -> Self {
         let now = Now {
             mono: TestInstant(0),
             unix_ms: T0_MS,
         };
         Self {
-            m: Rendezvous::new(
-                params,
-                Arc::new(signer(NODE_A_SECRET)),
-                npub(NODE_A_SECRET),
-                now,
-            ),
+            m: Rendezvous::new(params, signer(hex), npub(hex), now),
             ms: 0,
             next_reply: 1,
         }
@@ -173,7 +183,7 @@ pub(super) fn subscribe_of(action: &Action) -> Option<(ReqId, Vec<SubId>)> {
 }
 
 /// The publishes among `actions`, as request, relays and event.
-pub(super) fn publishes(actions: &[Action]) -> Vec<(ReqId, Vec<String>, Event, Duration)> {
+pub(super) fn publishes(actions: &[Action]) -> Vec<(ReqId, Vec<String>, Event, Option<Duration>)> {
     actions
         .iter()
         .filter_map(|action| match action {

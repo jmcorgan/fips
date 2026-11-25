@@ -1,30 +1,27 @@
-//! The rendezvous machine: one owner of the advert half of FRC-1601's
-//! state, stepped by the shell's pump.
+//! The rendezvous machine: the one owner of FRC-1601's state, stepped by
+//! the shell's pump.
 //!
 //! [`Rendezvous`] holds the peer advert cache, this node's own advert with
 //! its publish schedule and the transports it is assembled from, the relay
-//! subscriptions and the inbox relay list's schedule. The shell feeds it
-//! [`Input`]s and timeouts, each with the step's two clock readings
-//! ([`Now`]), and carries out the [`Action`]s it queues: relay operations,
-//! public-address observations, replies to the node, and log lines. It
-//! holds no lock and does no I/O; every relay call is the shell's, which
-//! posts the result back as an input.
-//!
-//! The traversal flows are still served outside the machine, in the
-//! shell's runtime, until they move in; they reach the machine only to
-//! resolve a peer's advert ([`Input::ResolveAdvert`]), and the machine
-//! reaches them only to reset a peer's failure streak
-//! ([`Action::ResetStreak`]).
+//! subscriptions and the inbox relay list's schedule, and the traversal
+//! half (`traversal.rs`): the sessions in hand, the dual-initiation
+//! election and the seen sessions, the signal gate, the offer admission and
+//! the per-peer failure state. The shell feeds it [`Input`]s and timeouts,
+//! each with the step's two clock readings ([`Now`]), and carries out the
+//! [`Action`]s it queues: relay operations, sockets, host reads, replies to
+//! the node, hand-offs, and log lines. It holds no lock and does no I/O;
+//! every relay call is the shell's, which posts the result back as an
+//! input. The only copy of the node key it signs with is its own.
 
 pub mod io;
 pub mod log;
 pub mod status;
+mod traversal;
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::time::Duration;
@@ -47,14 +44,25 @@ use super::event::auth::auth_event;
 use super::event::inbox::inbox_list;
 use super::inbox::{Lists, Purpose};
 use super::params::{ADVERT_FETCH_TIMEOUT, ADVERT_PUBLISH_TIMEOUT, Params, STARTUP_OP_TIMEOUT};
+use super::punch::refusal::RefusalWarnGate;
 use super::relays::Book;
 use super::stun::client::{Observation, Out};
+use super::traversal::admission::Admission;
+use super::traversal::election::Election;
+use super::traversal::failures::FailureState;
+use super::traversal::gate::SignalGate;
+use super::traversal::rules::short_id;
+use super::traversal::sessions::{Key as SessionKey, Sessions};
 use super::types::{
-    ADVERT_IDENTIFIER, ADVERT_KIND, CachedOverlayAdvert, NostrRefetchOutcome,
+    ADVERT_IDENTIFIER, ADVERT_KIND, CachedOverlayAdvert, NostrRefetchOutcome, OverlayAdvert,
     OverlayEndpointAdvert, SIGNAL_KIND,
 };
-pub use io::{Action, BindStage, Input, Outcome, PeerKey, Reply, ReplyId, ReqId, SocketId, SubId};
+pub use io::{
+    Action, BindStage, ConnectId, Input, Interfaces, Outcome, PeerKey, Read, Reply, ReplyId, ReqId,
+    SocketId, SubId,
+};
 use log::{IngestPath, Log, Source};
+use status::Status;
 
 /// A step's two clock readings: the monotonic one, for every deadline and
 /// schedule, and Unix time in milliseconds, for what FRC-1601 writes in
@@ -78,16 +86,12 @@ pub fn advert_cache<I: Instant, E: EntropySource>(npub: String, params: &Params)
     .with_lapse_grace(params.advert_refresh_secs.saturating_mul(1000))
 }
 
-/// A fetch the machine is waiting on, and what it is for.
+/// A fetch the machine is waiting on for the node, and what it is for.
+/// A traversal's fetches are its session's.
 #[derive(Debug)]
 enum Fetching {
-    /// A peer's advert for the node: its endpoints, or the whole advert
-    /// when `whole`.
-    Resolve {
-        key: PeerKey,
-        reply: ReplyId,
-        whole: bool,
-    },
+    /// A peer's advert endpoints for the node.
+    Resolve { key: PeerKey, reply: ReplyId },
     /// The stale-advert refetch, with the cached `created_at` when it was
     /// asked for.
     Refetch {
@@ -122,10 +126,10 @@ struct Publishing {
     endpoints: Vec<OverlayEndpointAdvert>,
 }
 
-/// The rendezvous machine's advert half. Single owner, no lock.
+/// The rendezvous machine. Single owner, no lock.
 pub struct Rendezvous<I: Instant, E: EntropySource> {
     params: Params,
-    signer: Arc<NodeSigner>,
+    signer: NodeSigner,
     npub: String,
     cache: Cache<I>,
     local: Publisher,
@@ -145,8 +149,34 @@ pub struct Rendezvous<I: Instant, E: EntropySource> {
     /// The last step's clock readings, from which the cache's earliest
     /// expiry, in Unix time, is turned into a monotonic deadline.
     last_step: Option<Now<I>>,
+    /// The initiators running, by peer, and the offers seen.
+    election: Election,
+    /// Each peer's traversal failures and cooldowns.
+    failures: FailureState,
+    /// Whether `failures` changed since the shell last took the status.
+    status_changed: bool,
+    /// The allowance for inbound signals ahead of any decryption.
+    gate: SignalGate<I>,
+    /// Inbound signals shed since start.
+    shed: u64,
+    /// Inbound offers in hand, per sender and in all.
+    admission: Admission,
+    /// One suspicious-offer warning a minute.
+    refusal: RefusalWarnGate<I>,
+    /// Whether the node has room for another peer.
+    capacity: bool,
+    /// The relays the client holds: the configured advert and DM relays.
+    pool: BTreeSet<nostr::types::RelayUrl>,
+    sessions: Sessions<I, E>,
+    /// The re-sends of initiators' offers in flight.
+    resends: BTreeMap<ReqId, traversal::Resending>,
+    /// Test requests waiting for an answer to a nonce.
+    #[cfg(test)]
+    answer_waits: BTreeMap<String, ReplyId>,
     #[cfg(test)]
     transports_taken: u64,
+    #[cfg(test)]
+    capacity_taken: u64,
     _entropy: PhantomData<fn() -> E>,
 }
 
@@ -154,11 +184,40 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
     /// A machine for the node whose key `signer` holds and whose npub is
     /// `npub`, configured by `params`. Nothing happens until
     /// [`Input::Start`], but the node's requests are answered at once.
-    pub fn new(params: Params, signer: Arc<NodeSigner>, npub: String, _now: Now<I>) -> Self {
+    pub fn new(params: Params, signer: NodeSigner, npub: String, now: Now<I>) -> Self {
         let cache = advert_cache::<I, E>(npub.clone(), &params);
         let refresh = Duration::from_secs(params.advert_refresh_secs.max(1));
         let success_ttl = Duration::from_secs(params.advert_refresh_secs.max(60));
         Self {
+            election: Election::new(
+                params.replay_window_secs * 1000,
+                params.seen_sessions_max_entries,
+                KeyedHasher::new::<E>(),
+            ),
+            failures: FailureState::new(
+                params.failure_streak_threshold,
+                params.extended_cooldown_secs,
+                params.warn_log_interval_secs,
+                params.failure_state_max_entries,
+                KeyedHasher::new::<E>(),
+            ),
+            status_changed: false,
+            gate: SignalGate::new(now.mono),
+            shed: 0,
+            admission: Admission::new(
+                params.max_concurrent_incoming_offers,
+                params.max_concurrent_offers_per_npub,
+                KeyedHasher::new::<E>(),
+            ),
+            refusal: RefusalWarnGate::default(),
+            capacity: true,
+            pool: Self::pool_of(&params.advert_relays, &params.dm_relays),
+            sessions: Sessions::new(),
+            resends: BTreeMap::new(),
+            #[cfg(test)]
+            answer_waits: BTreeMap::new(),
+            #[cfg(test)]
+            capacity_taken: 0,
             local: Publisher::new(params.advertise),
             schedule: PublishSchedule::new(refresh),
             transports: LocalTransports::new(success_ttl),
@@ -193,6 +252,7 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
                 self.stopped = true;
                 return;
             }
+            Input::RelayEvent { event, .. } if Self::is_signal(&event) => self.signal(event, now),
             Input::RelayEvent { relay, event } => self.relay_event(relay, event, now),
             Input::SubscribeDone { req, outcome } => self.subscribe_done(req, outcome, now),
             Input::PublishDone { req, outcome } => self.publish_done(req, outcome, now),
@@ -205,40 +265,72 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
                 let event = auth_event(&self.signer, &relay, &challenge, now.unix_ms, aux::<E>());
                 self.reply(reply, Reply::Auth(event));
             }
-            Input::SocketBound { socket, local } => self.socket_bound(socket, local, now),
+            Input::SocketBound { socket, local } => {
+                if let Some(key) = self.sessions.by_socket(socket) {
+                    self.session_bound(key, local, now);
+                } else {
+                    self.socket_bound(socket, local, now);
+                }
+            }
             Input::BindFailed {
                 socket,
                 stage,
                 error,
-            } => self.bind_failed(socket, stage, error, now),
+            } => {
+                if let Some(key) = self.sessions.by_socket(socket) {
+                    if let Some(session) = self.sessions.get(key) {
+                        session.socket = None;
+                    }
+                    self.fail(key, Error::Io(error).into());
+                } else {
+                    self.bind_failed(socket, stage, error, now);
+                }
+            }
             Input::Resolved { req, addrs } => {
                 if let Some(client) = self.resolving(req) {
                     let out = client.resolved(addrs, now.mono);
                     self.stun_out(out, now);
+                } else if let Some((key, client)) = self.session_resolving(req) {
+                    let out = client.resolved(addrs, now.mono);
+                    self.session_stun(key, out, now);
                 }
             }
             Input::ResolveFailed { req, error } => {
                 if let Some(client) = self.resolving(req) {
                     let out = client.resolve_failed(error, now.mono);
                     self.stun_out(out, now);
+                } else if let Some((key, client)) = self.session_resolving(req) {
+                    let out = client.resolve_failed(error, now.mono);
+                    self.session_stun(key, out, now);
                 }
             }
             Input::Datagram { socket, src, bytes } => {
                 if let Some(client) = self.observing(socket) {
                     let out = client.datagram(src, &bytes, now.mono);
                     self.stun_out(out, now);
+                } else if let Some(key) = self.sessions.by_socket(socket) {
+                    self.session_datagram(key, src, bytes, now);
                 }
             }
-            Input::RecvError { socket } => {
+            Input::RecvError { socket, error } => {
                 if let Some(client) = self.observing(socket) {
                     let out = client.recv_error(now.mono);
                     self.stun_out(out, now);
+                } else if let Some(key) = self.sessions.by_socket(socket) {
+                    self.session_recv_error(key, error, now);
                 }
             }
             Input::SendFailed { socket, dst, error } => {
                 if let Some(client) = self.observing(socket) {
                     let out = client.send_failed(dst, error, now.mono);
                     self.stun_out(out, now);
+                } else if let Some(key) = self.sessions.by_socket(socket)
+                    && let Some(client) = self.sessions.get(key).and_then(|s| s.stun.as_mut())
+                {
+                    // A failed probe or ack is ignored, as the next round
+                    // sends again; only the STUN client judges a send.
+                    let out = client.send_failed(dst, error, now.mono);
+                    self.session_stun(key, out, now);
                 }
             }
             Input::Transports { snapshot, reply } => {
@@ -253,8 +345,7 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
                 self.cache.set_protected(npubs);
                 self.prune(now.unix_ms);
             }
-            Input::Endpoints { key, reply } => self.resolve(key, reply, false, now),
-            Input::ResolveAdvert { key, reply } => self.resolve(key, reply, true, now),
+            Input::Endpoints { key, reply } => self.resolve(key, reply, now),
             Input::CachedEndpoints { npub, reply } => {
                 let endpoints = self
                     .cache
@@ -272,6 +363,28 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
                 self.reply(reply, Reply::OpenDiscovery(candidates));
             }
             Input::Refetch { key, reply } => self.refetch(key, reply),
+            Input::Connect { npub, connect } => self.connect(npub, connect, now),
+            Input::Capacity(capacity) => self.set_capacity(capacity),
+            Input::RecordFailure { npub, reply } => self.record_failure(&npub, reply, now),
+            Input::VersionMismatch {
+                npub,
+                transport_id,
+                remote_addr,
+                peer_version,
+                our_version,
+            } => self.version_mismatch(
+                npub,
+                transport_id,
+                remote_addr,
+                peer_version,
+                our_version,
+                now,
+            ),
+            Input::Interfaces { req, read } => self.interfaces(req, read, now),
+            #[cfg(test)]
+            Input::AwaitAnswer { nonce, reply } => {
+                self.answer_waits.insert(nonce, reply);
+            }
             #[cfg(test)]
             Input::Settle { reply } => self.reply(reply, Reply::Settled),
             #[cfg(test)]
@@ -280,6 +393,7 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
                     created_at: self.cache.cached_created_at(&npub),
                     protected: self.cache.protected().clone(),
                     transports: self.transports_taken,
+                    capacity: self.capacity_taken,
                 };
                 self.reply(reply, Reply::Inspected(inspection));
             }
@@ -330,6 +444,7 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
             let out = client.timeout(now.mono);
             self.stun_out(out, now);
         }
+        self.session_timeouts(now);
         self.after_step(now);
     }
 
@@ -346,10 +461,19 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
                 .as_ref()
                 .and_then(|o| o.client.as_ref())
                 .and_then(Observation::deadline),
+            self.sessions.deadline(),
         ]
         .into_iter()
         .flatten()
         .min()
+    }
+
+    /// The status the node reads, when it changed since the last call.
+    pub fn take_status(&mut self) -> Option<Status> {
+        if !core::mem::take(&mut self.status_changed) {
+            return None;
+        }
+        Some(Status::of(&self.failures))
     }
 
     /// When the cache's earliest entry is due to go, on the monotonic clock,
@@ -522,7 +646,7 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
                     req,
                     relays: self.params.dm_relays.clone(),
                     event,
-                    timeout: STARTUP_OP_TIMEOUT,
+                    timeout: Some(STARTUP_OP_TIMEOUT),
                 });
             }
             Err(error) => {
@@ -559,7 +683,28 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
                 relays: *relays,
             });
         }
-        self.sent.remove(&req);
+        let sent = self.sent.remove(&req);
+        // A signal publish fails only on the client's error, as the send
+        // it replaces did; reaching no relay is treated as sent.
+        let signal_outcome = || match &outcome {
+            Outcome::Ok { .. } => Ok(()),
+            Outcome::Err(error) => Err(error.clone()),
+            Outcome::TimedOut => Err("timed out".to_string()),
+        };
+        if self.resent(req, signal_outcome()) {
+            return;
+        }
+        if let Some(key) = self.sessions.by_req(req)
+            && self
+                .sessions
+                .get(key)
+                .is_some_and(|s| s.waits_on() == Some(req))
+        {
+            let event = sent
+                .map(|(_, id, _)| short_id(&id.to_string()))
+                .unwrap_or_default();
+            return self.session_sent(req, signal_outcome(), event, now);
+        }
         if let Some(purpose) = self.inbox.sent(req) {
             match outcome {
                 Outcome::Ok { .. } => {}
@@ -667,7 +812,7 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
             req,
             relays: self.params.advert_relays.clone(),
             event,
-            timeout: ADVERT_PUBLISH_TIMEOUT,
+            timeout: Some(ADVERT_PUBLISH_TIMEOUT),
         });
     }
 
@@ -902,8 +1047,8 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
             .identifier(ADVERT_IDENTIFIER)
     }
 
-    /// Answer with `key`'s advert from the cache, or fetch it.
-    fn resolve(&mut self, key: PeerKey, reply: ReplyId, whole: bool, now: Now<I>) {
+    /// Answer with `key`'s advert endpoints from the cache, or fetch them.
+    fn resolve(&mut self, key: PeerKey, reply: ReplyId, now: Now<I>) {
         self.prune(now.unix_ms);
         if let Some(advert) = self.cache.cached_advert(&key.npub, now.unix_ms) {
             self.log(Log::Resolved {
@@ -911,17 +1056,11 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
                 source: Source::Cache,
                 endpoints: advert.endpoints.clone(),
             });
-            let payload = if whole {
-                Reply::Advert(Ok(advert))
-            } else {
-                Reply::Endpoints(Ok(advert.endpoints))
-            };
-            return self.reply(reply, payload);
+            return self.reply(reply, Reply::Endpoints(Ok(advert.endpoints)));
         }
         let req = ReqId(self.id());
         let filter = Self::advert_filter(&key);
-        self.fetches
-            .insert(req, Fetching::Resolve { key, reply, whole });
+        self.fetches.insert(req, Fetching::Resolve { key, reply });
         self.actions.push_back(Action::Fetch {
             req,
             relays: self.params.advert_relays.clone(),
@@ -955,8 +1094,9 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
 
     fn fetch_done(&mut self, req: ReqId, outcome: Result<Vec<Event>, String>, now: Now<I>) {
         match self.fetches.remove(&req) {
-            Some(Fetching::Resolve { key, reply, whole }) => {
-                self.resolved(key, reply, whole, outcome, now)
+            Some(Fetching::Resolve { key, reply }) => {
+                let advert = self.fetched_advert(&key, outcome, now);
+                self.reply(reply, Reply::Endpoints(advert.map(|a| a.endpoints)));
             }
             Some(Fetching::Refetch {
                 key,
@@ -966,31 +1106,19 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
                 let result = self.refetched(&key, cached_created_at, outcome, now);
                 self.reply(reply, Reply::Refetch(result));
             }
-            None => {}
+            None => self.session_fetched(req, outcome, now),
         }
     }
 
-    /// The fetched advert for a dial: the newest valid one by the peer,
-    /// cached if there is room, and used either way.
-    fn resolved(
+    /// The fetched advert for a dial or a traversal: the newest valid one
+    /// by the peer, cached if there is room, and used either way.
+    fn fetched_advert(
         &mut self,
-        key: PeerKey,
-        reply: ReplyId,
-        whole: bool,
+        key: &PeerKey,
         outcome: Result<Vec<Event>, String>,
         now: Now<I>,
-    ) {
-        let answer = |result: Result<super::types::OverlayAdvert, Error>| {
-            if whole {
-                Reply::Advert(result)
-            } else {
-                Reply::Endpoints(result.map(|advert| advert.endpoints))
-            }
-        };
-        let events = match outcome {
-            Ok(events) => events,
-            Err(error) => return self.reply(reply, answer(Err(Error::Nostr(error)))),
-        };
+    ) -> Result<OverlayAdvert, Error> {
+        let events = outcome.map_err(Error::Nostr)?;
         let max_age_ms = self.max_age_ms();
         let mut best: Option<ingest::Checked> = None;
         for event in &events {
@@ -1009,7 +1137,7 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
             }
         }
         let Some(best) = best else {
-            return self.reply(reply, answer(Err(Error::MissingAdvert(key.npub))));
+            return Err(Error::MissingAdvert(key.npub.clone()));
         };
         self.log(Log::Resolved {
             peer: key.npub.clone(),
@@ -1030,7 +1158,7 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
             self.refused(&key.npub, first_at_bound, IngestPath::Fetch);
         }
         self.prune(now.unix_ms);
-        self.reply(reply, answer(Ok(best.advert)));
+        Ok(best.advert)
     }
 
     /// The stale-advert refetch's outcome: absent on the relays evicts,
@@ -1053,9 +1181,7 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
                 return NostrRefetchOutcome::Skipped;
             }
             self.cache.remove(&key.npub);
-            self.actions.push_back(Action::ResetStreak {
-                npub: key.npub.clone(),
-            });
+            self.reset_streak(&key.npub);
             return NostrRefetchOutcome::Evicted;
         };
         let relay_created_at = effective_created_at_secs(newest.created_at.as_secs(), now.unix_ms);
@@ -1082,10 +1208,27 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
             self.refused(&key.npub, first_at_bound, IngestPath::Refetch);
             return NostrRefetchOutcome::Skipped;
         }
-        self.actions.push_back(Action::ResetStreak {
-            npub: key.npub.clone(),
-        });
+        self.reset_streak(&key.npub);
         NostrRefetchOutcome::Refreshed
+    }
+
+    /// Reset `npub`'s failure streak, as a refreshed or evicted advert
+    /// warrants.
+    fn reset_streak(&mut self, npub: &str) {
+        self.failures.reset_streak_after_refresh(npub);
+        self.status_changed = true;
+    }
+
+    /// The session whose STUN client waits on the lookup `req`, which is
+    /// then no longer awaited.
+    fn session_resolving(&mut self, req: ReqId) -> Option<(SessionKey, &mut Observation<I, E>)> {
+        let key = self.sessions.by_req(req)?;
+        let session = self.sessions.get(key)?;
+        if session.resolving != Some(req) {
+            return None;
+        }
+        session.resolving = None;
+        session.stun.as_mut().map(|client| (key, client))
     }
 }
 

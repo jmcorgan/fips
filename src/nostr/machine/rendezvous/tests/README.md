@@ -20,7 +20,9 @@ the actions the machine queues.
   its address is learned, observed one transport at a time in snapshot
   order, and a learned address is kept for its time to live; start-up's
   request is answered only once the address is learned; the cache-full
-  warning is released a minute after the cache drops below its cap; a
+  warning is released a minute after the cache drops below its cap, and a
+  minute after its entries expire with no input, so a second flood is
+  warned again; a
   shrunk protected set trims the cache at once; the public address is
   learned through the STUN client on an ephemeral socket, a failed bind
   leaves it unknown, and with no STUN servers no socket is bound; and a
@@ -29,8 +31,29 @@ the actions the machine queues.
   snapshot; and the wildcard notes are logged once per assembly.
 - `queries.rs`: a peer's endpoints from the cache or the newest fetched
   advert by the peer, and `MissingAdvert` when there is none; the
-  stale-advert refetch's outcomes, with the streak reset queued before the
-  reply; open discovery after a prune; and results for operations the
-  machine no longer expects.
+  stale-advert refetch's outcomes, with the peer's failure streak reset in
+  the step that replies; open discovery after a prune; and results for
+  operations the machine no longer expects.
 - `auth.rs`: a NIP-42 challenge is answered with a kind 22242 event signed
   by the node key at the step's time.
+- `traversal.rs`: the responder refuses an oversized session id or nonce
+  before remembering it, at the byte bound exactly; a full seen-sessions
+  memory refuses a new offer, and a captured offer is still a replay after
+  it fills; capacity off drops the next offer and capacity on admits it;
+  a responder session that ends gives its admission slot back, so more
+  offers than the bounds allow at once are all admitted one after another,
+  and so does an offer dropped at capacity and a suppressed offer; a failed
+  initiator closes its socket, and so does a responder whose punch runs out;
+  the signal gate counts a traversal awaiting its answer from the session
+  table; suppressing a peer's offer re-sends ours once, a failed re-send is
+  tried again on the next suppression, and answering a peer's offer re-sends
+  nothing; the offer to a peer configured in any case is addressed to its
+  canonical npub and the initiator is registered under it; and a peer
+  configured in upper case still loses the dual-initiation election to our
+  initiator. Its second harness runs two machines (node A and node B) over a
+  fake relay that carries their signals and a fake network with cone and
+  symmetric NATs and a STUN server: a whole traversal through a cone NAT
+  (with a stale answer that must not be taken for the one routed by the
+  offer's nonce), through a symmetric NAT (adopted as a remapped port), and
+  a dual initiation that ends in B's one session, with B's one re-send and
+  A's own traversal timing out.

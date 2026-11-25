@@ -1,9 +1,9 @@
 # src/nostr/machine/punch
 
 The punch packet and the decisions around a punch attempt. No sockets and no
-clocks: the shell's `traversal.rs` plans the attempt through `plan.rs` and
-drives the attempt machine in `attempt.rs` on the traversal socket, sending
-what it asks and handing it what arrives with the host's monotonic clock.
+clocks: the rendezvous machine plans the attempt through `plan.rs` and runs
+the attempt machine in `attempt.rs`, and the shell's pump sends what it asks
+on the traversal socket and hands it what arrives.
 
 ## Files
 
