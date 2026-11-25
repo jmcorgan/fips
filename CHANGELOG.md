@@ -282,6 +282,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller credentials yet, so it still refuses ports 0 to 1023 to every client
   and an entry grants nothing over it.
 
+#### Routing and discovery
+
+- A `publish reached no relay` debug line, with the event's kind, its short
+  id and the number of relays asked, when a Nostr advert, inbox relay list or
+  traversal signal publish was accepted by the client but taken by none of
+  the relays. Such a publish is otherwise treated as sent, as before.
+- A `nostr event refused: signature does not verify` debug line, with the
+  event's `kind`, the key it `claimed`, its short `event` id and the `total`
+  refused so far, for each peer Nostr advert or inbox relay list whose id or
+  signature does not verify, and a `nostr events refused for a signature
+  that does not verify` warning, with the count as `forged`, each time the
+  count reaches a power of two.
+
 #### Packaging
 
 - An RPM package for Fedora and RHEL (`packaging/rpm/`,
@@ -826,6 +839,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   system, and is re-exported at its old path with `read_suspect`; the read
   stays in `fips`, and Rust allows no inherent method on another crate's
   type. The read, its result and its log lines are unchanged.
+- **Source-breaking for consumers of the library crate**: the Nostr
+  rendezvous handle's advert methods change. `fips::nostr::NostrRendezvous`
+  loses `update_local_advert`, `learn_public_udp_addr` and
+  `maintain_advert_cache`: the engine keeps its advert cache, learns its
+  public UDP address and prunes the cache itself. It gains `set_transports`,
+  which hands the engine the node's advertisable transports without
+  waiting, and `assemble_advert`, which waits until the advert is assembled
+  from them. `cached_endpoints` is now `async`, as is
+  `RendezvousDriver::cached_addresses`; `RendezvousDriver` gains
+  `publish_initial_advert`, and its `refresh_overlay_advert` takes
+  `&mut self`. `AdvertTransportSnapshot` derives `Debug`, `Clone`,
+  `PartialEq` and `Eq`.
+- **Source-breaking for consumers of the library crate**: the Nostr
+  rendezvous handle's traversal methods change. `record_traversal_failure`
+  is `async`, takes no time, and returns a `fips::nostr::FailureReply`: the
+  decision and the Unix time in milliseconds it was computed at, from which
+  the caller measures the cooldown. `note_version_mismatch` replaces
+  `record_protocol_mismatch`: it takes the datagram's transport, address
+  and versions, and logs the protocol-mismatch warning itself, with the
+  receive loop's target, text and fields. `set_capacity` replaces
+  `set_outbound_admission`; the node calls it when its capacity changes.
+  `record_traversal_success`, which nothing called, is removed: the engine
+  records a traversal's success itself when it adopts the socket.
 
 #### Packaging
 
@@ -919,6 +955,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The coordinate hint refusal reasons in the debug log are now
   `foreign-root` and `over-hint-budget`, like every other log reason, in
   place of `foreign root` and `over link peer's hint budget`.
+- The two Nostr advert warnings about a wildcard-bound transport left out of
+  the advert (`advert: udp public=true bound to wildcard but STUN observation
+  failed …` and `advert: tcp advertise_on_nostr=true bound to wildcard …`)
+  are logged each time the advert is assembled, which is when the node's
+  transports change or a learned public address ages out, instead of every
+  second while the condition holds.
+- Nostr relay connections are closed when the Nostr engine shuts down,
+  rather than left for the relays to time out.
+- A Nostr relay subscription retried after a failed subscribe no longer
+  opens a second subscription on a relay that took the first attempt, so
+  that relay no longer delivers each matching event twice.
 
 #### Transports
 
@@ -1040,6 +1087,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MIN_REACTIVE_PATH_MTU` are re-exported at the crate root. `PathMtuEntry`
   and `PathMtuLookup` are no longer public. `fipsctl` and the daemon behave as
   before.
+
+- The `nostr notification channel lagged; advert events dropped` warning is
+  no longer logged. The Nostr client the daemon now uses skips past what it
+  missed without reporting it. The warning for the traversal signals'
+  own channel, `nostr signal channel lagged; traversal signals dropped`, is
+  kept.
+
+- The default log filter no longer names `nostr_relay_pool`, a crate the
+  Nostr client no longer uses. The `nostr` and `nostr_sdk` targets are still
+  held to `info` below the `trace` level.
 
 ### Fixed
 
@@ -2387,6 +2444,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   most the first 32 entries of each of its own lists, in configured order,
   with a warning when it cuts one, and warns if its advert is still over
   8 KiB. The default configuration's advert is far inside both bounds.
+- With Nostr rendezvous enabled, the node checks the event id and
+  signature of every peer advert, and of every inbox relay list it looks
+  up for a traversal, itself, rather than relying on the Nostr client
+  library to have done so. An event that fails is dropped as if no relay
+  had sent it, so a forged newer advert cannot displace a genuine one in a
+  lookup, hold back a stale-advert refresh, or redirect a traversal's
+  offer.
+- With Nostr rendezvous enabled, a peer advert endpoint that names an
+  excluded address in another spelling, or a form no FIPS node publishes,
+  is now refused:
+  - an IPv4-mapped IPv6 address of an excluded range
+    (`[::ffff:10.0.0.1]:2121`);
+  - a host whose last label is a number (`127.1`, `2130706433`,
+    `0x7f000001`, `010.0.0.1`), which the system resolver reads as an IPv4
+    address;
+  - an IPv6 address with a zone index, or without brackets;
+  - a host with white space, brackets that do not hold an IPv6 address,
+    or `%`;
+  - `localhost` or a name under it;
+  - a host that is not ASCII letters, digits, `-` and `_` in labels of up
+    to 63 bytes, 253 in all;
+  - an address in `0.0.0.0/8`, `240.0.0.0/4` or `2001:db8::/32`;
+  - a Tor endpoint that is not a version 3 onion with a port.
+
+  Single-label names are still accepted. A host name is not checked for
+  what it resolves to, so a name that resolves to a private or loopback
+  address is still dialed. An advert left with no usable endpoint is
+  refused, as before. The same rule now trims the node's own advert before
+  it is published; no FIPS release publishes an endpoint in these forms.
 
 #### OpenWrt
 
@@ -2503,6 +2589,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer gives root an empty password, and its ssh server accepts keys
   only. The Nostr relay example images no longer install an ssh server or
   clear root's password.
+
+#### Dependencies
+
+- The Nostr client moves to `nostr-sdk` 0.45.6 and `nostr` 0.45.7, from 0.44.
+  This clears three advisories against crates only the 0.44 client pulled
+  in: RUSTSEC-2026-0243 (`nostr-relay-pool` is unmaintained; 0.45 folds it
+  into `nostr-sdk`), RUSTSEC-2024-0384 (`instant` is unmaintained) and
+  RUSTSEC-2026-0253 (a use-after-free in `lru` 0.16's `LruCache::pop`). It
+  brings in `heapless` 0.8.0, against which `cargo audit` reports nine
+  unsoundness advisories; its only user, `faster-hex`, uses it only when
+  built without `alloc`, and `nostr` builds it with `alloc`.
 
 ## [0.5.3] - 2026-10-16
 
