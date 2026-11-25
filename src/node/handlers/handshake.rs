@@ -2349,14 +2349,6 @@ impl Node {
                 });
             }
 
-            // Preserve tree announce rate-limit state from old peer (if reconnecting).
-            // Without this, reconnection resets the rate limit window to zero,
-            // allowing an immediate announce that can feed an announce loop.
-            let old_announce_ts = self
-                .peers
-                .get(&peer_node_addr)
-                .map(|p| p.last_tree_announce_sent_ms());
-
             self.seed_path_mtu_for_link_peer(&peer_node_addr, transport_id, &current_addr);
 
             let mut new_peer = ActivePeer::with_session(
@@ -2376,9 +2368,6 @@ impl Node {
             new_peer.set_tree_announce_min_interval_ms(
                 self.config().node.tree.announce_min_interval_ms,
             );
-            if let Some(ts) = old_announce_ts {
-                new_peer.set_last_tree_announce_sent_ms(ts);
-            }
 
             self.peers.insert(peer_node_addr, new_peer);
             self.peers_by_index
