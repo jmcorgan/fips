@@ -2,7 +2,9 @@
 
 Nostr rendezvous: overlay adverts published to relays, traversal offers and
 answers carried as encrypted Nostr events, STUN for the reflexive address, UDP
-hole punching, and the handoff of a punched socket to the UDP transport.
+hole punching, and the hand-over of a punched socket to the node as an
+externally established link (`crate::node::handoff::EstablishedTraversal`),
+which the node adopts as a UDP transport.
 
 ## Shell and machine
 
@@ -87,8 +89,11 @@ receive error or a failed send goes to the pump's inbox for the machine to
 judge. `Close` stops the task and drops the socket; `Adopt` is queued
 behind the socket's sends, so the ack to the probe a traversal adopts goes
 out first, and then the task stops and hands the socket to the node as a
-punched link (`EstablishedTraversal`, with the transport name `nostr-nat`);
-the pump closes every socket when it ends.
+punched link (the node's `EstablishedTraversal`, in `node/handoff.rs`, with
+the transport name `nostr-nat`); the pump closes every socket when it ends.
+`classify.rs` holds the punch-packet test and the datagram classifier
+registered with every UDP transport instance, so a punch packet that
+arrives on an adopted socket is dropped before FMP sees it.
 `stun.rs` reads the host for a traversal's local candidates (the interface
 list, and the local address of each probe and wildcard bind) and hands them
 to the machine raw; the machine selects. `traversal.rs` is the wall clock

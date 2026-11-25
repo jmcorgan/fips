@@ -44,6 +44,16 @@ async fn run_until_peered(node_a: &mut Node, node_b: &mut Node) {
     }
 }
 
+/// The hand-over types live in the node and keep both public paths a
+/// library user names them by: the crate root's and `fips::nostr`'s, each
+/// the same type. Removing either re-export fails to compile here.
+#[test]
+fn the_handoff_types_keep_their_crate_root_and_nostr_paths() {
+    let traversal: fn(crate::EstablishedTraversal) -> crate::nostr::EstablishedTraversal = |t| t;
+    let result: fn(crate::BootstrapHandoffResult) -> crate::nostr::BootstrapHandoffResult = |r| r;
+    let _ = (traversal, result);
+}
+
 #[tokio::test]
 async fn test_adopted_udp_traversal_completes_handshake() {
     let mut node_a = make_node();

@@ -117,6 +117,13 @@ Child modules of `mod.rs`:
 
 Tests of one file, each named `nostr::<file>::tests::...`:
 
+- `driver.rs`, of `driver.rs`: the dial candidates a peer's advert
+  endpoints give. A configured peer's fallback candidates start one past
+  the highest configured priority (101 with none, held at 255), and leave
+  out an address already configured or already taken and an endpoint of a
+  kind this node does not know; an open-discovery candidate's addresses
+  start at 120 in advert order under the same rules. Each carries the time
+  it was given.
 - `log.rs`, of `log.rs`: the golden list of the lines the rendezvous machine
   asks the shell to log, and the pump's three notify-loop lines, each with
   the level, text, fields and target it was logged with before the code

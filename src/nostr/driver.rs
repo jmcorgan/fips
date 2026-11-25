@@ -328,33 +328,53 @@ impl RendezvousDriver {
         existing: &[PeerAddress],
         now_ms: u64,
     ) -> Vec<PeerAddress> {
-        let mut fallback = Vec::new();
-        let mut next_priority = existing
+        let first_priority = existing
             .iter()
             .map(|addr| addr.priority)
             .max()
             .unwrap_or(100)
             .saturating_add(1);
-        let seen_at_ms = now_ms;
+        Self::addresses_from(&endpoints, existing, first_priority, now_ms)
+    }
+
+    /// The addresses an open-discovery candidate's advert `endpoints` give:
+    /// in advert order, from priority 120, each seen at `seen_at_ms`.
+    pub(crate) fn overlay_addresses(
+        endpoints: &[OverlayEndpointAdvert],
+        seen_at_ms: u64,
+    ) -> Vec<PeerAddress> {
+        Self::addresses_from(endpoints, &[], 120, seen_at_ms)
+    }
+
+    /// The dial candidates `endpoints` give: one per endpoint of a kind this
+    /// node knows whose (transport, address) pair is neither in `existing`
+    /// nor already taken, in advert order, the first at `first_priority`
+    /// and each one after it a step later (held at 255), all seen at
+    /// `seen_at_ms`.
+    fn addresses_from(
+        endpoints: &[OverlayEndpointAdvert],
+        existing: &[PeerAddress],
+        first_priority: u8,
+        seen_at_ms: u64,
+    ) -> Vec<PeerAddress> {
+        let mut taken: Vec<PeerAddress> = Vec::new();
+        let mut priority = first_priority;
         for endpoint in endpoints {
             let Some(candidate) =
-                Self::overlay_endpoint_to_peer_address(&endpoint, next_priority, seen_at_ms)
+                Self::overlay_endpoint_to_peer_address(endpoint, priority, seen_at_ms)
             else {
                 continue;
             };
-            if existing
-                .iter()
-                .any(|addr| addr.transport == candidate.transport && addr.addr == candidate.addr)
-                || fallback.iter().any(|addr: &PeerAddress| {
-                    addr.transport == candidate.transport && addr.addr == candidate.addr
-                })
-            {
+            let same = |addr: &PeerAddress| {
+                addr.transport == candidate.transport && addr.addr == candidate.addr
+            };
+            if existing.iter().any(same) || taken.iter().any(same) {
                 continue;
             }
-            fallback.push(candidate);
-            next_priority = next_priority.saturating_add(1);
+            taken.push(candidate);
+            priority = priority.saturating_add(1);
         }
-        fallback
+        taken
     }
 
     /// Hand the transports in `snapshot` to the engine when they differ from
@@ -418,3 +438,7 @@ impl RendezvousDriver {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/driver.rs"]
+mod tests;

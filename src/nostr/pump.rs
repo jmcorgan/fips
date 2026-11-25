@@ -32,7 +32,6 @@ use nostr_sdk::client::ClientNotification;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
 
-use super::handoff::EstablishedTraversal;
 use super::log::{self, FirstEvent};
 use super::machine::adverts::assemble::AdvertTransportSnapshot;
 use super::machine::error::Error as MachineError;
@@ -53,6 +52,7 @@ use super::types::{
 };
 use crate::config::PeerConfig;
 use crate::identity::OsEntropy;
+use crate::node::handoff::EstablishedTraversal;
 use crate::time::HostInstant;
 
 /// What the rest of the shell posts to the pump: an input as it is, or a

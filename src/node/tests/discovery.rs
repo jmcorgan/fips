@@ -1872,6 +1872,84 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
     assert_eq!(node.peering.reconciler.retry_pending.len(), 1);
 }
 
+/// The sweep queues an eligible advert's endpoints as the peer's addresses:
+/// in advert order, from priority 120 up, one per (transport, address)
+/// pair, with an endpoint of a kind this node does not know left out, each
+/// stamped with the sweep's own time.
+#[tokio::test]
+async fn the_open_discovery_sweep_queues_an_advert_s_addresses_in_order_from_priority_120() {
+    use crate::config::NostrRendezvousPolicy;
+    use crate::nostr::{NostrRendezvous, OverlayEndpointAdvert, OverlayTransportKind};
+    use std::sync::Arc;
+
+    let mut config = crate::Config::new();
+    config.node.rendezvous.nostr.enabled = true;
+    config.node.rendezvous.nostr.policy = NostrRendezvousPolicy::Open;
+    let mut node = crate::Node::new(config).unwrap();
+    node.supervisor.state = crate::node::NodeState::Running;
+
+    let peer = crate::Identity::generate();
+    let peer_npub = crate::encode_npub(&peer.pubkey());
+    let peer_node_addr = *peer.node_addr();
+    let endpoint = |transport, addr: &str| OverlayEndpointAdvert {
+        transport,
+        addr: addr.to_string(),
+    };
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let bootstrap = Arc::new(NostrRendezvous::new_for_test());
+    let mut advert = NostrRendezvous::cached_advert_for_test(
+        peer_npub.clone(),
+        endpoint(OverlayTransportKind::Udp, "203.0.113.7:2121"),
+        now_secs,
+    );
+    advert.advert.endpoints = vec![
+        endpoint(OverlayTransportKind::Udp, "203.0.113.7:2121"),
+        endpoint(OverlayTransportKind::Tcp, "203.0.113.8:443"),
+        endpoint(OverlayTransportKind::Unknown, "198.51.100.9:9"),
+        endpoint(OverlayTransportKind::Udp, "203.0.113.7:2121"),
+        endpoint(OverlayTransportKind::Tor, "abcdefghijklmnop.onion:443"),
+    ];
+    bootstrap
+        .insert_advert_for_test(peer_npub.clone(), advert)
+        .await;
+
+    let before = crate::time::wall_ms();
+    node.run_open_discovery_sweep(&bootstrap, None).await;
+    let after = crate::time::wall_ms();
+
+    let queued = node
+        .peering
+        .reconciler
+        .retry_pending
+        .get(&peer_node_addr)
+        .expect("the advert's author is queued");
+    let addresses: Vec<_> = queued
+        .peer_config
+        .addresses
+        .iter()
+        .map(|a| (a.transport.as_str(), a.addr.as_str(), a.priority))
+        .collect();
+    assert_eq!(
+        addresses,
+        [
+            ("udp", "203.0.113.7:2121", 120),
+            ("tcp", "203.0.113.8:443", 121),
+            ("tor", "abcdefghijklmnop.onion:443", 122),
+        ]
+    );
+    for address in &queued.peer_config.addresses {
+        let seen = address.seen_at_ms.expect("each address carries its time");
+        assert!(
+            (before..=after).contains(&seen),
+            "{} was stamped {seen}, outside the sweep's {before}..={after}",
+            address.addr
+        );
+    }
+}
+
 /// The startup sweep's age filter measures each advert's age against the
 /// wall clock, the clock its `created_at` stamp was written on, and not
 /// against the retry schedule's instant. With the schedule instant near its
@@ -1879,25 +1957,22 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
 /// and one two hours old is skipped.
 #[test]
 fn the_startup_sweep_age_filter_measures_advert_age_on_the_wall_clock() {
+    use crate::config::PeerAddress;
     use crate::node::peering::reconcile::{
-        Budget, DiscoveryPools, Gate, Observed, PeeringReconciler, Policy,
+        Budget, DiscoveryPools, Gate, Observed, OverlayRow, PeeringReconciler, Policy,
     };
     use crate::node::peering::retry::peering_at;
-    use crate::nostr::{OverlayEndpointAdvert, OverlayTransportKind};
 
     let wall_ms = crate::time::wall_ms();
     let wall_secs = wall_ms / 1000;
     let fresh = crate::PeerIdentity::from_pubkey(crate::Identity::generate().pubkey());
     let stale = crate::PeerIdentity::from_pubkey(crate::Identity::generate().pubkey());
-    let advert = |peer: &crate::PeerIdentity, age_secs: u64| {
-        (
-            peer.npub(),
-            vec![OverlayEndpointAdvert {
-                transport: OverlayTransportKind::Udp,
-                addr: "203.0.113.7:2121".to_string(),
-            }],
-            wall_secs - age_secs,
-        )
+    let advert = |peer: &crate::PeerIdentity, age_secs: u64| OverlayRow {
+        npub: peer.npub(),
+        addresses: vec![
+            PeerAddress::with_priority("udp", "203.0.113.7:2121", 120).with_seen_at_ms(wall_ms),
+        ],
+        created_at_secs: wall_secs - age_secs,
     };
     let pools = DiscoveryPools {
         overlay: vec![advert(&fresh, 10 * 60), advert(&stale, 2 * 60 * 60)],

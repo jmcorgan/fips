@@ -1,5 +1,5 @@
+mod classify;
 mod driver;
-mod handoff;
 mod log;
 pub(crate) mod machine;
 mod pump;
@@ -18,10 +18,9 @@ mod tests;
 
 pub(crate) use machine::signal::FRESHNESS_SKEW_TOLERANCE_MS;
 
+pub use crate::node::handoff::{BootstrapHandoffResult, EstablishedTraversal};
+pub use classify::{classify_datagram, is_punch_packet};
 pub use driver::{AdvertTransportSnapshot, BootstrapPeer, MismatchEvidence, RendezvousDriver};
-pub use handoff::{
-    BootstrapHandoffResult, EstablishedTraversal, classify_datagram, is_punch_packet,
-};
 pub use runtime::NostrRendezvous;
 pub use types::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, BootstrapError, BootstrapEvent,

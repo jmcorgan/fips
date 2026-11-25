@@ -16,6 +16,7 @@ pub(crate) mod diag;
 #[cfg(unix)]
 pub(crate) mod encrypt_worker;
 mod handlers;
+pub(crate) mod handoff;
 pub(crate) mod identities;
 pub(crate) mod lifecycle;
 pub(crate) mod metrics;

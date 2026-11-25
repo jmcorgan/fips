@@ -75,8 +75,10 @@ pub use identity::FipsAddress;
 pub use config::{Config, ConfigError, IdentityConfig, NymConfig, TorConfig, UdpConfig};
 pub use ipv6tun::config::{DnsConfig, TunConfig};
 
-// Re-export nostr rendezvous handoff types
-pub use nostr::{BootstrapHandoffResult, EstablishedTraversal, is_punch_packet};
+// Re-export the hand-over of an externally established link, and the
+// Nostr punch-packet test
+pub use node::handoff::{BootstrapHandoffResult, EstablishedTraversal};
+pub use nostr::is_punch_packet;
 
 // Re-export tree types (relocated from tree:: to proto::stp)
 pub use proto::stp::{

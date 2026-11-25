@@ -11,15 +11,15 @@ use super::peering::lan::{
     KnownLabels, LanOffer, MAX_PENDING_LAN_CANDIDATES, PendingLan, PendingPair, lan_target_on_link,
 };
 use super::peering::reconcile::{
-    Budget, Candidate, DiscoveryPools, Gate, Observed, PeeringAction, Policy,
+    Budget, Candidate, DiscoveryPools, Gate, Observed, OverlayRow, PeeringAction, Policy,
 };
 use super::peering::retry::MAX_RETRY_CONNECTIONS_PER_TICK;
 
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
 use crate::node::acl::PeerAclContext;
+use crate::node::handoff::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::node::settle::exec::Removed;
-use crate::nostr::{BootstrapEvent, NostrRendezvous};
-use crate::nostr::{BootstrapHandoffResult, EstablishedTraversal};
+use crate::nostr::{BootstrapEvent, NostrRendezvous, RendezvousDriver};
 use crate::peer::handshake::{DialOrigin, Handshake, HandshakeCrypto};
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
@@ -2963,7 +2963,13 @@ impl Node {
             if bootstrap.cooldown_until(&npub, now_ms).is_some() {
                 overlay_cooldown.insert(npub.clone());
             }
-            overlay.push((npub, endpoints, created_at_secs));
+            // Mapped here, on the sweep's clock, which the reconciler's
+            // `wall_ms` reads too.
+            overlay.push(OverlayRow {
+                addresses: RendezvousDriver::overlay_addresses(&endpoints, now_ms),
+                npub,
+                created_at_secs,
+            });
         }
 
         let pools = DiscoveryPools {

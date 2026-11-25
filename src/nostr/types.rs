@@ -1,8 +1,8 @@
 //! Shell-side Nostr rendezvous types: the error and the events the node
 //! receives. The wire and payload types are the machine's, re-exported here.
 
-use super::handoff::EstablishedTraversal;
 use crate::config::PeerConfig;
+use crate::node::handoff::EstablishedTraversal;
 
 pub use super::machine::types::*;
 

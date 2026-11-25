@@ -1,27 +1,16 @@
-//! Bootstrap handoff types.
+//! The hand-over of a link established outside the node.
 //!
-//! These types model the boundary between an external rendezvous/bootstrap
-//! runtime and the core FIPS transport/handshake stack. The rendezvous side
-//! owns Nostr/STUN/UDP hole punching; once a direct UDP path is established,
-//! it hands the live socket and selected remote endpoint to FIPS so the
-//! existing Noise/FMP transport path can take over.
+//! A rendezvous that runs beside the node may establish a direct UDP path
+//! to a peer on a socket of its own, by hole punching through the NATs
+//! between them. It hands that path to the node as an
+//! [`EstablishedTraversal`]: the live socket, whose NAT mapping the punch
+//! opened, and the remote endpoint it reached. The node adopts the socket
+//! as a UDP transport and runs its ordinary Noise and FMP handshake over
+//! it; [`BootstrapHandoffResult`] reports what the adoption allocated.
 
 use crate::config::UdpConfig;
 use crate::{NodeAddr, TransportId};
 use std::net::{SocketAddr, UdpSocket};
-
-pub use super::machine::punch::is_punch_packet;
-
-/// The classifier the Nostr rendezvous registers with every UDP transport
-/// instance: a punch packet is discarded before FMP sees it, anything else
-/// goes to FMP.
-pub fn classify_datagram(data: &[u8]) -> crate::transport::udp::DatagramClass {
-    if is_punch_packet(data) {
-        crate::transport::udp::DatagramClass::Discard
-    } else {
-        crate::transport::udp::DatagramClass::Fmp
-    }
-}
 
 /// Result of handing an established traversal session into FIPS.
 #[derive(Debug, Clone)]
@@ -34,14 +23,15 @@ pub struct BootstrapHandoffResult {
     pub remote_addr: SocketAddr,
     /// Peer node address derived from the supplied peer identity.
     pub peer_node_addr: NodeAddr,
-    /// Nostr session identifier used by the bootstrap runtime.
+    /// The establishing runtime's session identifier, for logs.
     pub session_id: String,
 }
 
 /// Established UDP traversal ready to be handed into FIPS.
 ///
-/// The socket must already be bound and must be the same socket used for the
-/// traversal runtime's STUN and punch traffic so the NAT mapping is preserved.
+/// The socket must already be bound and must be the same socket the
+/// establishing runtime used for its address observation and punch
+/// traffic, so the NAT mapping is preserved.
 #[derive(Debug)]
 pub struct EstablishedTraversal {
     /// Rendezvous session identifier for logging/correlation.
