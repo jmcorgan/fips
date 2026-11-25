@@ -60,6 +60,15 @@ pub struct BleConnection<S> {
     /// connected under an address never seen before, once the claim is
     /// verified. `None` for a connection whose peer is not yet identified.
     pub node_addr: Option<NodeAddr>,
+    /// Whether a handshake has ever completed on this link: set with
+    /// `verified` by [`ConnectionPool::mark_verified`] and never cleared. A
+    /// link that once carried its node's session is not a channel that
+    /// never carried a handshake, whatever its `verified` mark says now.
+    pub proven: bool,
+    /// When the node last held a handshake or link on this channel, or its
+    /// admission if it never has. The node moves it forward on each tick at
+    /// which it holds the address ([`ConnectionPool::hold`]).
+    pub held_from: tokio::time::Instant,
 }
 
 impl<S> BleConnection<S> {
@@ -228,7 +237,9 @@ impl<S> ConnectionPool<S> {
     /// of a pair can briefly send over different links, and each end marks
     /// the link its peer's frames arrive on, so closing the others here could
     /// close the link the other end is sending over. Demoted and unverified
-    /// links leave by eviction or link loss.
+    /// links leave by eviction or link loss; an unverified link that never
+    /// completed a handshake also leaves by the node's sweep, once
+    /// [`Self::unproven`] names it.
     ///
     /// A link that claimed a different key than the one that authenticated on
     /// it is left unverified. A link with no claim, which only a transport
@@ -241,6 +252,7 @@ impl<S> ConnectionPool<S> {
                 _ => {
                     c.node_addr = Some(*node);
                     c.verified = true;
+                    c.proven = true;
                 }
             },
         }
@@ -282,6 +294,29 @@ impl<S> ConnectionPool<S> {
             }
             _ => false,
         }
+    }
+
+    /// Record that the node holds a handshake or link on the channel at
+    /// `addr` at `now`, so its clock for [`Self::unproven`] starts again.
+    pub fn hold(&mut self, addr: &TransportAddr, now: tokio::time::Instant) {
+        if let Some(c) = self.connections.get_mut(addr) {
+            c.held_from = now;
+        }
+    }
+
+    /// The channels on which no handshake has completed and that have gone
+    /// `timeout` at `now` since the node last held them, or since their
+    /// admission: unverified, never proven, and past `timeout` since
+    /// `held_from`. These are the channels FRC-1301 Section 6.5.4 says to
+    /// close.
+    pub fn unproven(&self, now: tokio::time::Instant, timeout: Duration) -> Vec<TransportAddr> {
+        self.connections
+            .iter()
+            .filter(|(_, c)| {
+                !c.verified && !c.proven && now.saturating_duration_since(c.held_from) >= timeout
+            })
+            .map(|(addr, _)| addr.clone())
+            .collect()
     }
 
     /// Offer a link to the pool at `now`.
@@ -395,6 +430,10 @@ impl<S> ConnectionPool<S> {
 // ============================================================================
 
 #[cfg(test)]
+#[path = "tests/unproven.rs"]
+mod unproven_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -427,6 +466,8 @@ mod tests {
             grace_from: tokio::time::Instant::now(),
             addr: test_ble_addr(n),
             node_addr: None,
+            proven: false,
+            held_from: tokio::time::Instant::now(),
         }
     }
 

@@ -16,6 +16,11 @@ source file already has a `mod tests` block, so the names would clash.
   nor in the retry book once it has gone unseen for the age limit, and
   keeps the address of a pooled link. Declared from `mod.rs` as
   `mod retry_tests`.
+- `unproven.rs`: tests for the pool's account of channels on which no
+  handshake has completed, in `pool.rs`: when `unproven` names a
+  never-verified link, that `hold` starts its timeout again, and that a link
+  verified once, or verified now, is never named. Declared from `pool.rs`
+  as `mod unproven_tests`.
 - `bluez.rs`: tests for the scan-start and dial-address decisions of the
   BlueZ backend in `io_linux.rs`: which cached device objects scan start
   removes, and which LE address type a dial uses. Declared from

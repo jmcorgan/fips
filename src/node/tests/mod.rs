@@ -8,6 +8,8 @@ use std::time::Duration;
 mod acl;
 #[cfg(ble_available)]
 mod ble;
+#[cfg(ble_available)]
+mod ble_unverified_close;
 mod bloom;
 mod bloom_hold;
 mod bloom_mtu;

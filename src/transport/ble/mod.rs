@@ -34,9 +34,11 @@
 //! be evicted, once it has had at least `connect_timeout_ms` (never less than
 //! 10 s) to verify; a verified link is never evicted, and a newcomer that
 //! finds nothing evictable is refused. Eviction happens only when the pool is
-//! full and nothing closes an unverified link on a timer, so with
-//! `max_connections` above what the adapter can hold, links that never
-//! verify can keep the adapter's remaining connections.
+//! full. Apart from it, the node's timeout tick closes, through
+//! [`BleTransport::close_unproven`], a channel that is unverified, has never
+//! completed a handshake, and has gone the handshake timeout since it was
+//! admitted or since the node last held a handshake or link on it
+//! (FRC-1301 Section 6.5.4).
 
 pub mod addr;
 pub mod io;
@@ -553,6 +555,8 @@ impl<I: BleIo> BleTransport<I> {
             verified: false,
             addr: ble_addr.clone(),
             node_addr,
+            proven: false,
+            held_from: admitted,
         };
 
         let mut pool = self.pool.lock().await;
@@ -680,6 +684,8 @@ impl<I: BleIo> BleTransport<I> {
                         verified: false,
                         addr: ble_addr.clone(),
                         node_addr: peer_node,
+                        proven: false,
+                        held_from: admitted,
                     };
 
                     let mut pool = pool.lock().await;
@@ -753,6 +759,47 @@ impl<I: BleIo> BleTransport<I> {
             debug!(addr = %addr, "BLE connection closed");
             drop(conn); // recv_task aborted via Drop
         }
+    }
+
+    /// Close each channel on which no handshake has completed and that has
+    /// gone `timeout` since it was admitted or since the node last held it,
+    /// as FRC-1301 Section 6.5.4 asks, and return the addresses closed.
+    ///
+    /// `held` says whether the node holds a handshake or link on an address
+    /// now; each channel it holds starts its clock again. Only the node knows
+    /// that, so the node's timeout tick calls this; the transport sets no
+    /// timer of its own. A closed channel is dropped as on
+    /// [`close_connection_async`](Self::close_connection_async).
+    pub async fn close_unproven(
+        &self,
+        timeout: std::time::Duration,
+        held: impl Fn(&TransportAddr) -> bool,
+    ) -> Vec<TransportAddr> {
+        let now = tokio::time::Instant::now();
+        let closed: Vec<_> = {
+            let mut pool = self.pool.lock().await;
+            for addr in pool.addrs() {
+                if held(&addr) {
+                    pool.hold(&addr, now);
+                }
+            }
+            pool.unproven(now, timeout)
+                .into_iter()
+                .filter_map(|addr| pool.remove(&addr).map(|conn| (addr, conn)))
+                .collect()
+        };
+        closed
+            .into_iter()
+            .map(|(addr, conn)| {
+                drop(conn); // recv_task aborted via Drop
+                debug!(
+                    addr = %addr,
+                    timeout_secs = timeout.as_secs(),
+                    "BLE channel closed: no handshake within the handshake timeout"
+                );
+                addr
+            })
+            .collect()
     }
 
     /// Records that the node's active peer `node` now uses the link at `addr`.
@@ -1300,6 +1347,8 @@ async fn admit_inbound<S>(
         verified: false,
         addr: addr.clone(),
         node_addr: peer_node_addr,
+        proven: false,
+        held_from: admitted,
     };
 
     let mut pool_guard = pool.lock().await;
@@ -1868,6 +1917,8 @@ async fn scan_probe_loop<I: io::BleIo>(
                     verified: false,
                     addr: addr.clone(),
                     node_addr: Some(peer_node),
+                    proven: false,
+                    held_from: admitted,
                 };
 
                 let mut pool_guard = pool.lock().await;
@@ -2452,6 +2503,8 @@ mod tests {
                 grace_from: tokio::time::Instant::now(),
                 addr: test_addr(2),
                 node_addr: None,
+                proven: false,
+                held_from: tokio::time::Instant::now(),
             },
             tokio::time::Instant::now(),
         );
@@ -3138,6 +3191,8 @@ mod tests {
                 grace_from: tokio::time::Instant::now(),
                 addr: test_addr(2),
                 node_addr: None,
+                proven: false,
+                held_from: tokio::time::Instant::now(),
             },
             tokio::time::Instant::now(),
         );
@@ -3770,10 +3825,12 @@ mod tests {
         transport.stop_async().await.unwrap();
     }
 
-    /// A link that never completes a handshake is not closed by any timer:
-    /// it leaves only by eviction or link loss.
+    /// The transport alone closes no unverified link on a timer: the node's
+    /// timeout tick owns the deadline, through `close_unproven`. Without it,
+    /// a link that never completes a handshake leaves only by eviction or
+    /// link loss.
     #[tokio::test(start_paused = true)]
-    async fn an_unverified_link_that_never_handshakes_stays_open() {
+    async fn the_transport_alone_sets_no_timer_on_an_unverified_link() {
         let keys = pubkeys_by_node_addr(2);
         let (p, ours) = (keys[0], keys[1]);
         let mut transport = accepting_transport(ours).await;
