@@ -49,8 +49,9 @@
 #     testing/cross-check/ scripts, testing/check-crate.sh,
 #     testing/root-tests.sh, testing/check-node-context.sh,
 #     testing/install-shellcheck.sh, the two
-#     testing/lib/test-verdict scripts, the two agreement break scripts,
-#     testing/check-nft-syntax.sh, testing/check-package-versions.sh,
+#     testing/lib/test-verdict scripts, testing/mutations/run.sh, the two
+#     agreement break scripts, testing/check-nft-syntax.sh,
+#     testing/check-package-versions.sh,
 #     testing/check-glibc-floor.sh, testing/glibc-floor/test.sh,
 #     testing/lib/tool-hint.sh and the WireGuard example's
 #     entrypoint-sidecar.sh as bash, with no exclusions, following what each

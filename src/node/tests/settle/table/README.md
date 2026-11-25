@@ -109,3 +109,15 @@ sites run on loopback, where the mark is not read. They stand on the golden
 line and on reading the code, which has no `relink`, `mark_verified` or
 `clear_verified` at those sites but the one a frame makes on its own link.
 `assert_cells` reports such a row unread; it never counts it as kept.
+
+## Stated cells
+
+`assert_cells` takes a Stated cell's outcome from the test that runs it and
+from nothing else. No model or second account of the rules decides it: the
+real-node explorer's check against the reference model, which decided some
+stated rows, was retired with the model's tap. What `check_cells` holds is the
+shape of `others`: it panics, at `precondition:`, when a test leaves a Stated
+row unnamed or names a row the table decides, so a test can neither skip a
+stated row nor overrule a decided one. Whether the outcome a test states is
+right for its script rests on the test's own reading of the site; a wrong
+statement there passes.
