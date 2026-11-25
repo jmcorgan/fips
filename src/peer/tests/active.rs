@@ -629,6 +629,11 @@ fn advancing_the_monotonic_clock_passes_the_pending_hold_the_rekey_dampening_and
     let drain = crate::peer::test_link_params().config().drain;
     let tick = Duration::from_millis(100);
 
+    // Each step below advances the clock to just short of a length, then
+    // past it. On a running clock a slow host's real time adds to the step
+    // and passes the length early, so the clock moves only by `advance`.
+    crate::time::freeze();
+
     // b answers a's rekey: it holds a responder pending and is dampened.
     let (mut a, mut b) = ends();
     rekey_to_pending(&mut a, &mut b);

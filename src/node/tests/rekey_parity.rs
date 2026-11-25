@@ -460,6 +460,10 @@ pub(super) fn stale_session(node: &mut Node, peer: NodeAddr) {
 #[tokio::test]
 async fn our_cutover_after_a_restart_revealing_msg2_takes_k_bit_zero_and_our_next_rekey_toggles_it()
 {
+    // The script counts the frames each step queues. On a running clock a
+    // slow host's real time can bring a timed send forward to a step that
+    // does not expect it, so the clock moves only as the test moves it.
+    crate::time::freeze();
     let mut r = restart_revealed_by_our_rekey().await;
     let (a_addr, b_addr) = (r.a_addr, r.b_addr);
     stale_session(&mut r.nodes[0].node, b_addr);
