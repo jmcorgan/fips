@@ -1308,6 +1308,11 @@ async fn a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_
 async fn late_cross_outlasted(on: bool) {
     let what = "a crossed msg1 on the same transport read past the heard floor";
     let (mut nodes, s, l) = late_cross_pair(on, false, SILENCE).await;
+    let floor = nodes[s].node.gate_params().interval;
+    assert!(
+        SILENCE > floor,
+        "precondition: the late msg1 met a peering heard {SILENCE:?} ago, past the heard floor of {floor:?}"
+    );
     assert_split(&nodes, s, l, what);
     outlast(&mut nodes, s, l, what).await;
     let out = settled(&mut nodes, s, l).await;

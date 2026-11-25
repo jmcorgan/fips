@@ -835,3 +835,143 @@ async fn the_audit_passes_a_rekey_left_at_both_ends_pending() {
 async fn the_audit_passes_a_rekey_left_at_both_ends_pending_with_multipath_on() {
     pending_passes(true).await;
 }
+
+/// After a healthy loopback dial, one end drops the other's peer: the audit
+/// reports `OneSession`'s one-sided breach at the end that still holds the
+/// peer, for each end in turn.
+async fn one_sided_flagged(on: bool) {
+    for dropped in [0, 1] {
+        let kept = 1 - dropped;
+        let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
+        initiate_handshake(&mut nodes, 0, 1).await;
+        pump(&mut nodes).await;
+        let kept_addr = *nodes[kept].node.node_addr();
+        let dropped_addr = *nodes[dropped].node.node_addr();
+        assert!(
+            nodes[kept].node.get_peer(&dropped_addr).is_some(),
+            "precondition: the dial promoted the peer at node {kept}"
+        );
+        assert!(
+            nodes[dropped].node.remove_active_peer(&kept_addr).is_some(),
+            "precondition: node {dropped} held node {kept} and dropped it"
+        );
+        let breaches = audit(&mut nodes).await;
+        assert!(
+            breaches.iter().any(|b| matches!(
+                b,
+                Breach::OneSided { node, peer } if *node == kept && *peer == dropped
+            )),
+            "defect: the peer node {kept} holds alone is not flagged: {breaches:#?}"
+        );
+        cleanup_nodes(&mut nodes).await;
+    }
+}
+
+/// [`one_sided_flagged`] with multipath off.
+#[tokio::test]
+async fn the_audit_flags_a_peer_that_only_one_end_holds() {
+    one_sided_flagged(false).await;
+}
+
+/// [`one_sided_flagged`] with multipath on.
+#[tokio::test]
+async fn the_audit_flags_a_peer_that_only_one_end_holds_with_multipath_on() {
+    one_sided_flagged(true).await;
+}
+
+/// Replace `nodes[at]`'s peer for `nodes[peer]` with one on the same link,
+/// indices, transport and address whose session keys come from another
+/// handshake between the two identities. The indices still complement the
+/// other end's; no frame either end sends authenticates at the other.
+/// Returns the peer it replaced. No writer builds this state, so it is
+/// planted through `raw`, which turns off `nodes[at]`'s live audit.
+fn rekeyed_apart(nodes: &mut [TestNode], at: usize, peer: usize) -> ActivePeer {
+    let peer_addr = *nodes[peer].node.node_addr();
+    let remote = nodes[peer].node.identity().clone();
+    let mut initiator = crate::noise::HandshakeState::new_initiator(
+        nodes[at].node.identity().keypair(),
+        remote.pubkey_full(),
+    );
+    initiator.set_local_epoch(nodes[at].node.startup_epoch());
+    let mut responder = crate::noise::HandshakeState::new_responder(remote.keypair());
+    responder.set_local_epoch(nodes[peer].node.startup_epoch());
+    let msg1 = initiator.write_message_1().unwrap();
+    responder.read_message_1(&msg1).unwrap();
+    let msg2 = responder.write_message_2().unwrap();
+    initiator.read_message_2(&msg2).unwrap();
+    let old = nodes[at]
+        .node
+        .peers
+        .raw()
+        .remove(&peer_addr)
+        .expect("precondition: the end holds the peer");
+    let new = ActivePeer::with_test_session(
+        *old.identity(),
+        old.link_id(),
+        old.authenticated_at(),
+        initiator.into_session().unwrap(),
+        old.our_index()
+            .expect("precondition: the peer has a session"),
+        old.their_index()
+            .expect("precondition: the peer has a session"),
+        old.transport_id()
+            .expect("precondition: the peer has a transport"),
+        old.current_addr()
+            .cloned()
+            .expect("precondition: the peer has an address"),
+        crate::transport::LinkStats::new(),
+        true,
+        &crate::config::MmpConfig::default(),
+        old.remote_epoch(),
+    );
+    nodes[at].node.peers.raw().insert(peer_addr, new);
+    old
+}
+
+/// Two ends whose indices complement each other but whose session keys
+/// differ, after one end's keys are replaced: the audit reports
+/// `OneSession`'s split on the heartbeat half alone, with the indices
+/// complementary and neither heartbeat authenticating.
+async fn stale_keys_flagged(on: bool) {
+    let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    pump(&mut nodes).await;
+    let a1 = *nodes[1].node.node_addr();
+    assert!(
+        nodes[0].node.get_peer(&a1).is_some(),
+        "precondition: the dial promoted the peer"
+    );
+    let old = rekeyed_apart(&mut nodes, 0, 1);
+    let breaches = audit(&mut nodes).await;
+    let planted = heartbeat_reaches(&mut nodes, 0, 1).await;
+    nodes[0].node.peers.raw().insert(a1, old);
+    assert!(
+        planted.is_err(),
+        "precondition: node 0's heartbeat to node 1 does not authenticate"
+    );
+    assert!(
+        breaches.iter().any(|b| matches!(
+            b,
+            Breach::Split { node: 0, peer: 1, indices, fresh }
+                if indices[0].0.is_some()
+                    && indices[0].0 == indices[1].1
+                    && indices[0].1 == indices[1].0
+                    && *fresh == [false, false]
+        )),
+        "defect: a split with complementary indices and no fresh heartbeat is not flagged: {breaches:#?}"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// [`stale_keys_flagged`] with multipath off.
+#[tokio::test]
+async fn the_audit_flags_complementary_indices_on_which_no_heartbeat_authenticates() {
+    stale_keys_flagged(false).await;
+}
+
+/// [`stale_keys_flagged`] with multipath on.
+#[tokio::test]
+async fn the_audit_flags_complementary_indices_on_which_no_heartbeat_authenticates_with_multipath_on()
+ {
+    stale_keys_flagged(true).await;
+}

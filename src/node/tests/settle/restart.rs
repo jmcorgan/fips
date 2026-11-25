@@ -126,6 +126,11 @@ async fn a_rekey_msg1_of_the_peers_previous_run_read_late_by_the_restarted_node_
         for (d_smaller, d_dialed) in PLACEMENTS {
             let what = format!("D smaller {d_smaller}, D dialed {d_dialed}, R dials too {both}");
             let (mut nodes, d, r) = late_rekey_pair(d_smaller, d_dialed, both, PAST_FLOOR).await;
+            let floor = nodes[r].node.gate_params().unheard;
+            assert!(
+                PAST_FLOOR > floor,
+                "precondition: the late msg1 met a peering {PAST_FLOOR:?} old, past the unheard floor of {floor:?} ({what})"
+            );
             assert_split(&nodes, d, r, &what);
             outlast(&mut nodes, d, r, &what).await;
             let out = settled(&mut nodes, d, r).await;
