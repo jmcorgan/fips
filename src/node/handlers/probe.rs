@@ -59,8 +59,10 @@ pub(crate) struct ProbeJob {
     lookup_fanout: Option<usize>,
     lookup_attempts: Option<u8>,
     session_error: Option<String>,
-    /// Set when the drive-time guard refused a teardown the core had already
-    /// decided on, so the report says the session was left in place.
+    /// Set when the driver left in place an entry the core had decided to
+    /// end: because the drive-time guard refused, because the session is
+    /// established and left to the idle timeout, or because the target's
+    /// handshake holds it. The report then says the session was left in place.
     teardown_refused: Option<LeftIntact>,
     reap_at_ms: Option<u64>,
 }
@@ -438,7 +440,20 @@ impl Node {
         }
     }
 
-    /// Remove a probe-created session, or decline and say why.
+    /// End the probe's hold on the session it opened, or decline and say why.
+    ///
+    /// An established session is left in place for the idle timeout to close
+    /// on both nodes. No message ends the target's end, so removing ours would
+    /// leave the target holding a session whose every frame, its own probe's
+    /// reports included, this node drops as belonging to an unknown session.
+    ///
+    /// For a session whose handshake never completed, only the probe's own
+    /// initiator leg is dropped. The target can be established here only by
+    /// having completed its own setup on this node's answer, after this node
+    /// lost the tie-break, so a responder candidate the target's setup left is
+    /// kept for its msg3, by the same rule as `keep_candidates_only`. An entry
+    /// left with nothing is removed, with its clamp entry, so it does not go
+    /// on resending the handshake.
     ///
     /// `pending_tun_packets` is deliberately untouched: the idle-purge path
     /// removes it because it runs after the idle timeout, but here the map can
@@ -457,14 +472,36 @@ impl Node {
             return;
         }
         let name = self.peer_display_name(&job.target);
+        if self
+            .sessions
+            .get(&job.target)
+            .is_some_and(SessionEntry::is_established)
+        {
+            job.teardown_refused = Some(LeftIntact::IdleTimeout);
+            debug!(probe_id = job.id, dest = %name, "Probe left the session it opened to the idle timeout");
+            return;
+        }
         if let Some(entry) = self.sessions.get(&job.target)
             && let Some(mmp) = entry.mmp()
         {
             Self::log_session_mmp_teardown(&name, mmp);
         }
-        self.sessions.remove(&job.target);
-        self.path_mtu_lookup_release(&job.target);
-        debug!(probe_id = job.id, dest = %name, "Probe tore down the session it opened");
+        if let Some(entry) = self.sessions.remove(&job.target) {
+            self.keep_candidates_only(&job.target, entry);
+        }
+        if self
+            .sessions
+            .get(&job.target)
+            .is_some_and(SessionEntry::has_candidates)
+        {
+            job.teardown_refused = Some(LeftIntact::Replaced);
+            debug!(probe_id = job.id, dest = %name, "Probe dropped its own handshake and kept the target's");
+            return;
+        }
+        if !self.sessions.contains_key(&job.target) {
+            self.path_mtu_lookup_release(&job.target);
+        }
+        debug!(probe_id = job.id, dest = %name, "Probe removed the unfinished session it opened");
     }
 
     fn release_probe_claim(&mut self, job: &mut ProbeJob) {

@@ -1525,8 +1525,9 @@ impl Node {
 
     /// Put `entry` back holding only its responder candidates, after its
     /// initiator leg failed locally; drop it if it holds none and no open
-    /// hold.
-    fn keep_candidates_only(&mut self, src_addr: &NodeAddr, mut entry: SessionEntry) {
+    /// hold. The probe's teardown uses it too, to end an unfinished session
+    /// it opened without dropping the peer's handshake.
+    pub(super) fn keep_candidates_only(&mut self, src_addr: &NodeAddr, mut entry: SessionEntry) {
         if entry.has_candidates() || self.hold_open(&entry) {
             entry.drop_initiator_leg();
             self.sessions.insert(*src_addr, entry);

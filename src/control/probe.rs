@@ -142,7 +142,7 @@ pub struct RttStage {
 pub struct CleanupInfo {
     pub session_created_and_torn_down: bool,
     pub session_left_intact: bool,
-    /// "preexisting" | "adopted_by_traffic" | "replaced" | null
+    /// "preexisting" | "adopted_by_traffic" | "replaced" | "idle_timeout" | null
     pub left_intact_reason: Option<&'static str>,
     pub lookup_issued: bool,
     /// The coord-cache and identity-cache entries a lookup produced are
@@ -250,8 +250,10 @@ fn path_stage(node: &Node, snap: &ProbeSnapshot) -> PathStage {
 }
 
 fn cleanup_info(job: &ProbeJob, snap: &ProbeSnapshot) -> CleanupInfo {
-    // A drive-time refusal overrides the core's decision: the action was
-    // emitted but the guard declined, so the session is still there.
+    // The driver's override wins over the core's decision: the action was
+    // emitted, but the guard refused, the session was established and left
+    // to the idle timeout, or the target's handshake holds the entry, so the
+    // session is still there.
     let refused = job.teardown_refused();
     let torn_down = snap.torn_down && refused.is_none();
     let left_intact = refused.or(snap.left_intact);

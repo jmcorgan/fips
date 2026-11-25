@@ -52,6 +52,16 @@ async fn pump_until_done(nodes: &mut [TestNode], id: u64, rounds: usize) -> bool
     false
 }
 
+/// Run the idle purge on every node as if `idle_timeout_secs` and a second
+/// more had passed since the last application data.
+fn purge_idle_everywhere(nodes: &mut [TestNode]) {
+    for tn in nodes.iter_mut() {
+        let idle_ms = tn.node.config().node.session.idle_timeout_secs * 1000;
+        tn.node
+            .purge_idle_sessions(Node::now_ms() + idle_ms + 1_000);
+    }
+}
+
 fn npub_of(nodes: &[TestNode], idx: usize) -> String {
     nodes[idx].node.identity().npub()
 }
@@ -143,8 +153,9 @@ async fn probe_reaches_session_stage_against_direct_peer() {
 }
 
 #[tokio::test]
-async fn probe_tears_down_the_session_it_opened() {
+async fn probe_leaves_the_established_session_it_opened_to_the_idle_timeout() {
     let mut nodes = two_peered_nodes().await;
+    let node0_addr = *nodes[0].node.node_addr();
     let node1_addr = *nodes[1].node.node_addr();
     let id = start_probe(&mut nodes, 1).await;
 
@@ -153,10 +164,20 @@ async fn probe_tears_down_the_session_it_opened() {
         "probe must reach a terminal state"
     );
     let snap = nodes[0].node.probe_job(id).unwrap().probe().snapshot();
-    assert!(snap.torn_down, "cleanup: {:?}", snap.left_intact);
+    assert!(!snap.session_preexisting, "the probe opened the session");
     assert!(
-        nodes[0].node.get_session(&node1_addr).is_none(),
-        "the probe-created session must be gone"
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .is_some_and(|e| e.is_established() && e.is_initiator()),
+        "the probe's own end must stay while the target holds its end"
+    );
+    assert!(
+        nodes[1]
+            .node
+            .get_session(&node0_addr)
+            .is_some_and(|e| e.is_established()),
+        "the target's end is established"
     );
 
     // The rtt stage must terminate rather than hang, either with a real
@@ -174,12 +195,9 @@ async fn probe_tears_down_the_session_it_opened() {
     assert_eq!(data["state"], "done");
     let report = &data["report"];
     assert_eq!(report["probe_id"].as_u64(), Some(id));
-    assert_eq!(report["cleanup"]["session_created_and_torn_down"], true);
-    assert_eq!(report["cleanup"]["session_left_intact"], false);
-    assert_eq!(
-        report["cleanup"]["left_intact_reason"],
-        serde_json::Value::Null
-    );
+    assert_eq!(report["cleanup"]["session_created_and_torn_down"], false);
+    assert_eq!(report["cleanup"]["session_left_intact"], true);
+    assert_eq!(report["cleanup"]["left_intact_reason"], "idle_timeout");
     assert_eq!(report["session"]["preexisting"], false);
     assert_eq!(report["session"]["established"], true);
     assert_eq!(report["path"]["computed_locally"], true);
@@ -188,6 +206,11 @@ async fn probe_tears_down_the_session_it_opened() {
         nodes[0].node.api_probe_poll(id).is_err(),
         "a terminal report is delivered exactly once"
     );
+
+    // The idle timeout closes both ends.
+    purge_idle_everywhere(&mut nodes);
+    assert!(nodes[0].node.get_session(&node1_addr).is_none());
+    assert!(nodes[1].node.get_session(&node0_addr).is_none());
 
     cleanup_nodes(&mut nodes).await;
 }
@@ -425,22 +448,23 @@ async fn probe_does_not_own_a_session_replaced_after_start() {
 }
 
 #[tokio::test]
-async fn probe_does_not_discard_queued_tun_packets() {
+async fn probe_removes_its_unfinished_session_without_discarding_queued_tun_packets() {
     let mut nodes = two_peered_nodes().await;
     let node1_addr = *nodes[1].node.node_addr();
     let id = start_probe(&mut nodes, 1).await;
 
-    // Establish the probe's session first. The normal establish and inbound
-    // paths legitimately flush anything queued for a destination, so the
-    // packet is queued after the last delivery pass and the teardown is driven
-    // by cancelling — the queue is then observed across the teardown alone.
-    for _ in 0..20 {
-        pump(&mut nodes).await;
-        let snap = nodes[0].node.probe_job(id).unwrap().probe().snapshot();
-        if snap.session.verdict == StageVerdict::Ok {
-            break;
-        }
-    }
+    // The probe opens its session at admission, and nothing has been
+    // delivered yet, so its handshake is still in flight. The establish and
+    // inbound paths legitimately flush anything queued for a destination, so
+    // the packet is queued with no delivery pass after it and the teardown is
+    // driven by cancelling: the queue is observed across the teardown alone.
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .is_some_and(|e| !e.is_established()),
+        "precondition: the probe's handshake has not completed"
+    );
     nodes[0]
         .node
         .queue_pending_tun_packet_for_test(node1_addr, vec![0u8; 64]);
@@ -453,12 +477,62 @@ async fn probe_does_not_discard_queued_tun_packets() {
         .expect("cancel accepted");
     assert!(
         nodes[0].node.get_session(&node1_addr).is_none(),
-        "cancel must still tear the probe's own session down"
+        "cancel must remove the probe's own unfinished session"
     );
     assert_eq!(
         nodes[0].node.pending_tun_total_packets(),
         1,
         "the probe must not touch queued user packets"
+    );
+    let data = nodes[0].node.api_probe_poll(id).expect("poll accepted");
+    let cleanup = &data["report"]["cleanup"];
+    assert_eq!(cleanup["session_created_and_torn_down"], true);
+    assert_eq!(cleanup["session_left_intact"], false);
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// A probe whose handshake never completed removes its session, and with it
+/// the clamp entry the session holds, restoring the direct peer's link seed.
+/// No idle purge will come for a session that is gone, so the teardown is the
+/// only event that can release it.
+#[tokio::test]
+async fn removing_an_unfinished_probe_session_releases_its_clamp_entry() {
+    let mut nodes = two_peered_nodes().await;
+    let node1_addr = *nodes[1].node.node_addr();
+    let node1_fips = crate::FipsAddress::from_node_addr(&node1_addr);
+    let seed = nodes[0].node.path_mtu_lookup_get(&node1_fips);
+    let id = start_probe(&mut nodes, 1).await;
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .is_some_and(|e| !e.is_established()),
+        "precondition: the probe's handshake has not completed"
+    );
+
+    let tightened = seed.map_or(1300, |s| s - 100);
+    nodes[0].node.path_mtu_lookup_insert(node1_fips, tightened);
+
+    nodes[0]
+        .node
+        .api_probe_cancel(id)
+        .await
+        .expect("cancel accepted");
+    assert!(
+        nodes[0].node.get_session(&node1_addr).is_none(),
+        "precondition: cancel removed the probe's unfinished session"
+    );
+
+    // Nothing else releases a held entry: the expiry pass skips it.
+    nodes[0]
+        .node
+        .purge_expired_path_mtu(Node::now_ms() + 86_400_000);
+    assert_eq!(
+        nodes[0].node.path_mtu_lookup_get(&node1_fips),
+        seed,
+        "defect: the clamp entry the probe's unfinished session tightened (seed {seed:?}, \
+         tightened {tightened}) must not outlive the session"
     );
 
     cleanup_nodes(&mut nodes).await;
@@ -474,7 +548,13 @@ async fn probe_terminates_without_a_poller() {
     // tick, which is what makes the feature safe when the client goes away.
     assert!(pump_until_done(&mut nodes, id, 600).await);
     assert!(nodes[0].node.probe_job(id).unwrap().probe().is_finished());
-    assert!(nodes[0].node.get_session(&node1_addr).is_none());
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .is_some_and(|e| e.is_established()),
+        "the established session is left to the idle timeout"
+    );
 
     cleanup_nodes(&mut nodes).await;
 }
@@ -495,22 +575,40 @@ async fn concurrent_probes_to_one_target_do_not_both_own_it() {
     assert_eq!(
         usize::from(a.torn_down) + usize::from(b.torn_down),
         1,
-        "exactly one job may own and tear down the session"
+        "exactly one job may own the session"
     );
     assert!(a.session_preexisting || b.session_preexisting);
-    assert!(nodes[0].node.get_session(&node1_addr).is_none());
+    let reasons: Vec<_> = [first, second]
+        .iter()
+        .map(|id| {
+            nodes[0].node.api_probe_poll(*id).expect("poll accepted")["report"]["cleanup"]
+                ["left_intact_reason"]
+                .clone()
+        })
+        .collect();
+    assert!(
+        reasons.contains(&serde_json::json!("idle_timeout"))
+            && reasons.contains(&serde_json::json!("preexisting")),
+        "one job opened the session and the other found it: {reasons:?}"
+    );
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .is_some_and(|e| e.is_established())
+    );
 
     cleanup_nodes(&mut nodes).await;
 }
 
 /// A value written into `path_mtu_lookup` inside a session (a path MTU
 /// notification, a reactive MtuExceeded) carries no deadline: it is
-/// released by the event that ends the session. The idle purge and the
-/// handshake timeout do that. The probe's teardown removes the session it
-/// opened the same way, so it must release the entry too, restoring the
-/// direct peer's link seed.
+/// released by the event that ends the session. The probe leaves its
+/// established session to the idle timeout, so the entry stays while the
+/// session does and goes with it at the idle purge, restoring the direct
+/// peer's link seed.
 #[tokio::test]
-async fn probe_teardown_releases_the_clamp_entry_the_probes_session_tightened() {
+async fn the_clamp_entry_a_probes_session_tightened_goes_with_the_session() {
     let mut nodes = two_peered_nodes().await;
     let node1_addr = *nodes[1].node.node_addr();
     let node1_fips = crate::FipsAddress::from_node_addr(&node1_addr);
@@ -541,9 +639,16 @@ async fn probe_teardown_releases_the_clamp_entry_the_probes_session_tightened() 
         .api_probe_cancel(id)
         .await
         .expect("cancel accepted");
+    assert_eq!(
+        nodes[0].node.path_mtu_lookup_get(&node1_fips),
+        Some(tightened),
+        "the session the probe left in place keeps the value it learned"
+    );
+
+    purge_idle_everywhere(&mut nodes);
     assert!(
         nodes[0].node.get_session(&node1_addr).is_none(),
-        "precondition: the teardown removed the probe's session"
+        "precondition: the idle purge removed the probe's session"
     );
 
     // Nothing else releases a held entry: the expiry pass skips it.
@@ -555,6 +660,241 @@ async fn probe_teardown_releases_the_clamp_entry_the_probes_session_tightened() 
         seed,
         "defect: the clamp entry the probe's session tightened (seed {seed:?}, tightened \
          {tightened}) must not outlive the session"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// Deliver packets, let both nodes emit their MMP reports, and advance node
+/// 1's probes: `pump` for a probe started on node 1.
+async fn pump_node1(nodes: &mut [TestNode]) {
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    process_available_packets(nodes).await;
+    for tn in nodes.iter_mut() {
+        tn.node.check_session_mmp_reports().await;
+    }
+    nodes[1].node.poll_probes().await;
+}
+
+/// Node 0's probe opens a session to node 1 and finishes. Node 1, the
+/// responder, still holds an established session, and there is no message
+/// that would end it. Everything it then sends on that session, application
+/// data and its own probe of node 0 alike, must reach node 0 rather than be
+/// dropped there as belonging to an unknown session.
+#[tokio::test]
+async fn the_target_of_a_probe_that_opened_a_session_can_still_reach_the_prober() {
+    let mut nodes = two_peered_nodes().await;
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+
+    let id = start_probe(&mut nodes, 1).await;
+    assert!(pump_until_done(&mut nodes, id, 600).await);
+    let snap = nodes[0].node.probe_job(id).unwrap().probe().snapshot();
+    assert!(
+        !snap.session_preexisting,
+        "node 0's probe opened the session"
+    );
+    // Let anything still in flight land before reading the state.
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    assert!(
+        nodes[1]
+            .node
+            .get_session(&node0_addr)
+            .is_some_and(|e| e.is_established() && !e.is_initiator()),
+        "precondition: node 1 holds an established responder session"
+    );
+
+    let unknown_before = nodes[0].node.stats().session.unknown_session;
+
+    nodes[1]
+        .node
+        .send_session_data(&node0_addr, 0, 0, b"responder speaks first")
+        .await
+        .expect("node 1 sends on the session it holds");
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(&mut nodes).await;
+    }
+
+    // Node 1's own probe of node 0 runs over the session it holds.
+    let npub0 = npub_of(&nodes, 0);
+    let id1 = nodes[1]
+        .node
+        .api_probe_start(&npub0)
+        .await
+        .expect("probe admitted")["probe_id"]
+        .as_u64()
+        .expect("probe_id is a number");
+    let mut done = false;
+    for _ in 0..800 {
+        pump_node1(&mut nodes).await;
+        if nodes[1]
+            .node
+            .probe_job(id1)
+            .is_none_or(|job| job.probe().is_finished())
+        {
+            done = true;
+            break;
+        }
+    }
+    assert!(done, "node 1's probe must finish");
+    let snap1 = nodes[1].node.probe_job(id1).unwrap().probe().snapshot();
+
+    assert_eq!(
+        nodes[0].node.stats().session.unknown_session,
+        unknown_before,
+        "node 0 dropped node 1's frames as belonging to an unknown session"
+    );
+    assert!(snap1.session_preexisting);
+    assert_ne!(
+        snap1.rtt.reason.map(|r| r.name()),
+        Some("no_report"),
+        "node 1's probe of node 0 got no report: {:?}",
+        snap1.rtt
+    );
+    let received = nodes[0]
+        .node
+        .get_session(&node1_addr)
+        .map_or(0, |e| e.traffic_counters().1);
+    assert!(received >= 1, "node 1's data frame reached node 0");
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The probe loses a simultaneous-initiation tie-break: the target initiates
+/// to the prober while the probe's handshake is in flight, and the target has
+/// the smaller address. The prober pauses its own leg and answers the
+/// target's setup; the target establishes as initiator on that answer. The
+/// probe is cancelled before the target's msg3 lands. The prober must keep
+/// the target's handshake, so the msg3 completes it and the target's frames
+/// are not dropped as belonging to an unknown session.
+#[tokio::test]
+async fn the_target_can_reach_a_prober_that_lost_the_initiation_tie_break_and_was_cancelled() {
+    let mut nodes = two_peered_nodes().await;
+    let a0 = *nodes[0].node.node_addr();
+    let a1 = *nodes[1].node.node_addr();
+    let (p, t) = if crate::proto::fsp::initiation_winner(&a0, &a1) {
+        (1, 0)
+    } else {
+        (0, 1)
+    };
+    let p_addr = *nodes[p].node.node_addr();
+    let t_addr = *nodes[t].node.node_addr();
+    let p_pub = nodes[p].node.identity().pubkey_full();
+    let npub_t = npub_of(&nodes, t);
+    let id = nodes[p]
+        .node
+        .api_probe_start(&npub_t)
+        .await
+        .expect("probe admitted")["probe_id"]
+        .as_u64()
+        .expect("probe_id is a number");
+    assert!(
+        nodes[p]
+            .node
+            .get_session(&t_addr)
+            .is_some_and(|e| e.has_initiator_leg()),
+        "the probe opened its session at admission"
+    );
+    nodes[t]
+        .node
+        .initiate_session(p_addr, p_pub)
+        .await
+        .expect("the target initiates");
+    // Both setups land; the prober loses and answers the target's.
+    process_available_packets(&mut nodes).await;
+    // The target takes the answer, establishes and sends its msg3.
+    process_available_packets(&mut nodes).await;
+    assert!(
+        nodes[t]
+            .node
+            .get_session(&p_addr)
+            .is_some_and(|e| e.is_established())
+            && nodes[p]
+                .node
+                .get_session(&t_addr)
+                .is_some_and(|e| !e.is_established() && e.has_candidates()),
+        "precondition: the target is established and the prober holds its candidate"
+    );
+
+    nodes[p].node.api_probe_cancel(id).await.expect("cancel");
+    let cleanup = nodes[p].node.api_probe_poll(id).expect("poll")["report"]["cleanup"].clone();
+
+    let unknown_before = nodes[p].node.stats().session.unknown_session;
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    nodes[t]
+        .node
+        .send_session_data(&p_addr, 0, 0, b"target speaks")
+        .await
+        .expect("the target sends on the session it holds");
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(&mut nodes).await;
+    }
+
+    assert_eq!(
+        nodes[p].node.stats().session.unknown_session,
+        unknown_before,
+        "the prober dropped the target's frames as belonging to an unknown session"
+    );
+    let entry = nodes[p].node.get_session(&t_addr);
+    assert!(
+        entry.is_some_and(|e| e.is_established() && !e.is_initiator()),
+        "the target's msg3 completed the prober's end as responder"
+    );
+    assert!(
+        entry.map_or(0, |e| e.traffic_counters().1) >= 1,
+        "the target's data frame reached the prober"
+    );
+    assert_eq!(cleanup["session_created_and_torn_down"], false);
+    assert_eq!(cleanup["left_intact_reason"], "replaced");
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// A second probe of the same target, run while the first probe's session
+/// is still up, reuses it: the session stage finds it already established
+/// and the second probe leaves it as it found it.
+#[tokio::test]
+async fn a_second_probe_within_the_idle_timeout_finds_the_session_the_first_left() {
+    let mut nodes = two_peered_nodes().await;
+    let node1_addr = *nodes[1].node.node_addr();
+
+    let first = start_probe(&mut nodes, 1).await;
+    assert!(pump_until_done(&mut nodes, first, 600).await);
+    let first_snap = nodes[0].node.probe_job(first).unwrap().probe().snapshot();
+    assert!(
+        !first_snap.session_preexisting,
+        "the first probe opened the session"
+    );
+
+    let second = start_probe(&mut nodes, 1).await;
+    assert!(pump_until_done(&mut nodes, second, 600).await);
+    let snap = nodes[0].node.probe_job(second).unwrap().probe().snapshot();
+    assert!(
+        snap.session_preexisting,
+        "the second probe found the first probe's session up"
+    );
+    assert_ne!(
+        snap.rtt.reason.map(|r| r.name()),
+        Some("no_report"),
+        "the second probe got reports over the session the first left: {:?}",
+        snap.rtt
+    );
+    let cleanup = nodes[0].node.api_probe_poll(second).expect("poll")["report"]["cleanup"].clone();
+    assert_eq!(cleanup["left_intact_reason"], "preexisting");
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .is_some_and(|e| e.is_established()),
+        "the session is still up after the second probe"
     );
 
     cleanup_nodes(&mut nodes).await;

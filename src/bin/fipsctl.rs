@@ -1697,33 +1697,45 @@ fn probe_detail(report: &serde_json::Value, tty: bool) {
     probe_close(report);
 }
 
+/// The `cleanup` lines of the probe summary: what became of the session, and
+/// a note when the probe's warmups went out on a session it does not own.
+fn probe_cleanup_lines(cleanup: &serde_json::Value) -> Vec<String> {
+    let torn = cleanup
+        .get("session_created_and_torn_down")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let reason = cleanup.get("left_intact_reason").and_then(|v| v.as_str());
+    let cleanup_text = if torn {
+        "session was opened by this probe and has been torn down".to_string()
+    } else if reason == Some("idle_timeout") {
+        "session was opened by this probe and is left for the idle timeout to close".to_string()
+    } else if let Some(reason) = reason {
+        format!("session left in place ({reason})")
+    } else {
+        "nothing to clean up".to_string()
+    };
+    let mut lines = vec![format!("  cleanup    {cleanup_text}")];
+    let warmups = cleanup
+        .get("warmups_sent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let owned = torn || reason == Some("idle_timeout");
+    if warmups > 0 && !owned {
+        lines.push(format!(
+            "             {warmups} coords-warmup message(s) were sent on a session this \
+             probe does not own"
+        ));
+    }
+    lines
+}
+
 /// What the probe left behind, and the verdict. Printed whether or not there
 /// was a route to describe.
 fn probe_close(report: &serde_json::Value) {
     let empty = serde_json::Value::Null;
     println!();
-    let cleanup = report.get("cleanup").unwrap_or(&empty);
-    let torn = cleanup
-        .get("session_created_and_torn_down")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let cleanup_text = if torn {
-        "session was opened by this probe and has been torn down".to_string()
-    } else if let Some(reason) = cleanup.get("left_intact_reason").and_then(|v| v.as_str()) {
-        format!("session left in place ({reason})")
-    } else {
-        "nothing to clean up".to_string()
-    };
-    println!("  cleanup    {cleanup_text}");
-    let warmups = cleanup
-        .get("warmups_sent")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    if warmups > 0 && !torn {
-        println!(
-            "             {warmups} coords-warmup message(s) were sent on a session this \
-             probe does not own"
-        );
+    for line in probe_cleanup_lines(report.get("cleanup").unwrap_or(&empty)) {
+        println!("{line}");
     }
     let tick = report.get("tick_ms").and_then(|v| v.as_u64()).unwrap_or(0);
     println!(

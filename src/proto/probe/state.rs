@@ -287,7 +287,13 @@ impl RttCounters {
 pub(crate) enum LeftIntact {
     Preexisting,
     AdoptedByTraffic,
+    /// The entry is no longer the probe's: replaced, taken over by the peer,
+    /// or holding only the peer's handshake after the probe's own leg was
+    /// dropped.
     Replaced,
+    /// The probe opened it and it is established: it is left for the idle
+    /// timeout to close on both ends.
+    IdleTimeout,
 }
 
 impl LeftIntact {
@@ -296,6 +302,7 @@ impl LeftIntact {
             LeftIntact::Preexisting => "preexisting",
             LeftIntact::AdoptedByTraffic => "adopted_by_traffic",
             LeftIntact::Replaced => "replaced",
+            LeftIntact::IdleTimeout => "idle_timeout",
         }
     }
 }

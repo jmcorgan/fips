@@ -7,11 +7,15 @@ it is a child module of the binary's crate root and can reach its private
 items. This directory has no `main.rs`, so Cargo does not take it for a binary
 of its own.
 
-- `fipsctl.rs`: tests for the probe client's ceiling (`probe_ceiling_ms`). The
-  client waits for the daemon's reported budget plus five seconds, or for an
-  explicit `--timeout` instead. A saturated budget, which a daemon reports for
-  a lookup retry ladder with a huge entry, and a huge `--timeout` both give a
-  ceiling of `u64::MAX` rather than overflowing. `fipsctl`'s older tests are
+- `fipsctl.rs`: tests for the probe client's ceiling (`probe_ceiling_ms`) and
+  its cleanup lines (`probe_cleanup_lines`). The client waits for the daemon's
+  reported budget plus five seconds, or for an explicit `--timeout` instead. A
+  saturated budget, which a daemon reports for a lookup retry ladder with a
+  huge entry, and a huge `--timeout` both give a ceiling of `u64::MAX` rather
+  than overflowing. The cleanup lines describe a session the probe opened and
+  left to the idle timeout as its own, with no note about warmups on a session
+  it does not own; a preexisting session with warmups gets that note, and a
+  removed session is described as torn down. `fipsctl`'s older tests are
   still in its inline `tests` module.
 - `fipsctl_npub.rs`: a second test module of `fipsctl`, declared as
   `mod npub_tests`, for an npub given in any letter case. An argument in upper

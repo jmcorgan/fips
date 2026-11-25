@@ -226,23 +226,34 @@ replaces the tree lines and the `next hop` line follows. A
 probe ends, so a script parsing the report does not have to skip past
 progress output.
 
-**What the probe leaves behind.** It tears down a session it opened
-itself and never touches one that already existed. Three residues are
-deliberate and worth knowing about:
+**What the probe leaves behind.** A session the probe opened and
+established is left in place, and the session idle timeout
+(`node.session.idle_timeout_secs`, default 90s) closes it on both
+nodes, as it does any session that carries no application data. No
+message ends a session at the other node, so removing this node's end
+would leave the target holding a session whose every frame, its own
+probe's reports included, this node would drop. Until the idle timeout,
+`fipsctl show sessions` lists the session, and a second probe of the
+same target finds it already up (`session.preexisting`). The report
+says so with `cleanup.left_intact_reason` `idle_timeout`.
+
+A session whose handshake did not complete is removed when the probe
+ends (`cleanup.session_created_and_torn_down`), unless the target was
+opening a session to this node at the same moment: then the probe drops
+only its own handshake and keeps the target's, which completes, and the
+report gives `left_intact_reason` `replaced`. A session that existed
+before the probe is never touched. Two residues are deliberate:
 
 - The coordinate-cache and identity-cache entries a lookup produced are
   not evicted. They are TTL-bounded shared read caches, and evicting
   them could strand an unrelated flow mid-route.
-- The remote's half of a probe-created session persists until its own
-  idle timeout (default 90s). There is no teardown wire message. In the
-  window between our removal and its idle purge, any session frame the
-  remote sends lands here as one unknown-session reject.
 - To obtain a round-trip time the probe sends a `CoordsWarmup`, which
-  starts MMP reporting on the session. On a session the probe does not
-  own, that reporting continues until the idle purge — the same traffic
-  any single data packet would cause, and bounded, but a real change to
-  a session the probe did not create. The report names it under
-  `cleanup.warmups_sent`.
+  starts MMP reporting on the session in both directions. That
+  reporting continues until the idle purge, on a session the probe
+  opened and left as on one it found: the same traffic any single data
+  packet would cause, and bounded, since MMP reports do not reset the
+  idle timer. On a session the probe did not create it is a real change
+  to that session. The report names it under `cleanup.warmups_sent`.
 
 Running a probe against a production node is safe: the job carries its
 own deadline daemon-side, so it cleans up whether or not the client is
