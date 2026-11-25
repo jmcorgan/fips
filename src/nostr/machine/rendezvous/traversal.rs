@@ -1235,7 +1235,9 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
         });
     }
 
-    /// The punch reached the peer at `remote`: hand the socket over.
+    /// The punch reached the peer at `remote`: hand the socket over, and
+    /// clear the peer's failure streak and cooldown, whichever end began
+    /// the traversal.
     fn punched(&mut self, key: Key, remote: SocketAddr, now: Now<I>) {
         self.attempt_tally(key);
         let Some(session) = self.end(key, false) else {
@@ -1246,6 +1248,9 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
         };
         let peer = short_npub(&session.peer.npub);
         let short = short_id(&session.session_id);
+        self.failures
+            .record_success(&session.peer.npub, now.unix_ms);
+        self.status_changed = true;
         let connect = match session.role {
             Role::Initiator { connect } => {
                 self.log(Log::InitiatorPunchSucceeded {
@@ -1253,9 +1258,6 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
                     session: short,
                     remote,
                 });
-                self.failures
-                    .record_success(&session.peer.npub, now.unix_ms);
-                self.status_changed = true;
                 Some(connect)
             }
             Role::Responder { .. } => {

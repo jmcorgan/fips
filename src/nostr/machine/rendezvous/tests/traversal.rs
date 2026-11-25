@@ -1109,3 +1109,65 @@ fn dual_initiation_ends_in_one_session_with_one_resend() {
         )]
     );
 }
+
+/// Trip `n`'s failure streak for the node whose secret key is `of` to the
+/// threshold of [`params`], so its cooldown for that peer is set, and drain
+/// the status the streak published.
+fn trip_streak(n: &mut Node, of: &str) {
+    for _ in 0..params(10).failure_streak_threshold {
+        let reply = n.h.reply();
+        n.h.input(Input::RecordFailure {
+            npub: npub(of),
+            reply,
+        });
+    }
+    let _ = n.h.m.take_status();
+}
+
+#[test]
+fn an_initiator_punch_success_clears_its_cooldown_for_the_peer() {
+    let mut a = Node::new(NODE_A_SECRET, [9, 9, 9, 9], Nat::Cone);
+    let mut b = Node::new(NODE_B_SECRET, [8, 8, 4, 4], Nat::Cone);
+    trip_streak(&mut a, NODE_B_SECRET);
+    let now = a.h.now().unix_ms;
+    let before = a.h.m.failures.cooldown_until(&npub(NODE_B_SECRET), now);
+    assert!(before.is_some(), "precondition: A's cooldown for B is set");
+    cache_nat_advert(&mut a.h, NODE_B_SECRET);
+    let first = a.h.input(Input::Connect {
+        npub: npub(NODE_B_SECRET),
+        connect: ConnectId(1),
+    });
+    settle(&mut a, &mut b, first, Vec::new(), 30_000);
+    assert_eq!(a.adopted.len(), 1, "precondition: A adopts as initiator");
+    let now = a.h.now().unix_ms;
+    let after = a.h.m.failures.cooldown_until(&npub(NODE_B_SECRET), now);
+    let published = a.h.m.take_status().is_some();
+    assert!(
+        after.is_none() && published,
+        "before={before:?} after={after:?} status_published={published}"
+    );
+}
+
+#[test]
+fn a_responder_punch_success_clears_the_peers_cooldown() {
+    let mut a = Node::new(NODE_A_SECRET, [9, 9, 9, 9], Nat::Cone);
+    let mut b = Node::new(NODE_B_SECRET, [8, 8, 4, 4], Nat::Cone);
+    trip_streak(&mut b, NODE_A_SECRET);
+    let now = b.h.now().unix_ms;
+    let before = b.h.m.failures.cooldown_until(&npub(NODE_A_SECRET), now);
+    assert!(before.is_some(), "precondition: B's cooldown for A is set");
+    cache_nat_advert(&mut a.h, NODE_B_SECRET);
+    let first = a.h.input(Input::Connect {
+        npub: npub(NODE_B_SECRET),
+        connect: ConnectId(1),
+    });
+    settle(&mut a, &mut b, first, Vec::new(), 30_000);
+    assert_eq!(b.adopted.len(), 1, "precondition: B adopts as responder");
+    let now = b.h.now().unix_ms;
+    let after = b.h.m.failures.cooldown_until(&npub(NODE_A_SECRET), now);
+    let published = b.h.m.take_status().is_some();
+    assert!(
+        after.is_none() && published,
+        "defect: before={before:?} after={after:?} status_published={published}"
+    );
+}
