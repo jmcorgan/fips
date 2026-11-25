@@ -9,7 +9,7 @@
 
 use alloc::format;
 use alloc::string::ToString;
-use core::net::{IpAddr, SocketAddr};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use super::error::Error;
 use super::punch::plan::{is_doc_ip, is_never_punchable_ip, is_private_ip};
@@ -25,15 +25,117 @@ pub mod publisher;
 
 /// Addresses an advert must not name as a directly dialable endpoint: the
 /// never-punchable ranges plus the private and documentation ones, which are
-/// useless to a peer that found the advert on a relay.
+/// useless to a peer that found the advert on a relay, and the reserved ones
+/// of [`is_reserved_ip`].
 pub fn is_unroutable_direct_advert_ip(ip: IpAddr) -> bool {
-    is_never_punchable_ip(ip) || is_private_ip(ip) || is_doc_ip(ip)
+    is_never_punchable_ip(ip) || is_private_ip(ip) || is_doc_ip(ip) || is_reserved_ip(ip)
 }
 
-/// Whether an advert may name `endpoint`: `udp:nat`, a Tor address, or a UDP
+/// Ranges no host is reachable at on the public internet: `0.0.0.0/8`,
+/// `240.0.0.0/4` (which holds the broadcast address) and the IPv6
+/// documentation range `2001:db8::/32`.
+///
+/// The advert's term only: the punch planner (`punch/plan.rs`) does not use
+/// it, so traversal targets are unchanged. `198.18.0.0/15`, the benchmarking
+/// range, is left out on purpose: the NAT lab uses it as its public
+/// internet, and it is never on a receiver's own network.
+pub fn is_reserved_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.octets()[0] == 0 || v4.octets()[0] >= 240,
+        IpAddr::V6(v6) => v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8,
+    }
+}
+
+/// Whether an advert may name the IP literal `ip` as a direct endpoint. An
+/// IPv4-mapped IPv6 address is judged by the IPv4 address it maps, which is
+/// the address a dial reaches.
+fn routable_literal(ip: IpAddr) -> bool {
+    !is_unroutable_direct_advert_ip(ip.to_canonical())
+}
+
+/// Whether a label is a number as a URL host parser reads one: all decimal
+/// digits, or `0x` followed by hex digits, in either case.
+fn numeric_label(label: &str) -> bool {
+    let hex = label
+        .get(..2)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("0x"));
+    if hex {
+        label.bytes().skip(2).all(|b| b.is_ascii_hexdigit())
+    } else {
+        !label.is_empty() && label.bytes().all(|b| b.is_ascii_digit())
+    }
+}
+
+/// Whether an advert may name `host` with a port, where the endpoint is not
+/// a socket address as written. A bracketed host must be an IPv6 address,
+/// and a canonical dotted quad is an IPv4 one; either is judged as an IP
+/// literal. Anything else must be a host name: one trailing dot allowed,
+/// labels of ASCII letters, digits, `-` and `_` of 1 to 63 bytes, 253 bytes
+/// in all, not `localhost` or a name under it, and not ending in a numeric
+/// label. A host that ends in a number is an IPv4 address in another
+/// spelling (`127.1`, `2130706433`, `0x7f000001`, `010.0.0.1`), which the
+/// system resolver turns into an address without asking DNS, so it is
+/// refused rather than judged.
+fn dial_host(host: &str) -> bool {
+    let host = host.trim();
+    if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        return inner
+            .parse::<Ipv6Addr>()
+            .is_ok_and(|ip| routable_literal(IpAddr::V6(ip)));
+    }
+    if host.contains(['[', ']']) {
+        return false;
+    }
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        return routable_literal(IpAddr::V4(ip));
+    }
+    let name = host.strip_suffix('.').unwrap_or(host);
+    let label_ok = |label: &str| {
+        (1..=63).contains(&label.len())
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    if name.is_empty() || name.len() > 253 || !name.split('.').all(label_ok) {
+        return false;
+    }
+    let under_localhost =
+        name.len() > 10 && name.as_bytes()[name.len() - 10..].eq_ignore_ascii_case(b".localhost");
+    if name.eq_ignore_ascii_case("localhost") || under_localhost {
+        return false;
+    }
+    !name.rsplit('.').next().is_some_and(numeric_label)
+}
+
+/// Whether `addr` names a version 3 onion service with a port: 56 base32
+/// characters, `.onion`, ignoring case, then a port of 1 to 65535. The check
+/// is of syntax only: no checksum or version byte is checked.
+///
+/// The other forms a Tor address may take (an IP address or a DNS name) are
+/// not accepted from an advert. A FIPS node publishes only its onion, and
+/// those forms would let an advert's author choose a clearnet destination
+/// for this node's Tor exit.
+fn onion_endpoint(addr: &str) -> bool {
+    let Some((host, port)) = addr.rsplit_once(':') else {
+        return false;
+    };
+    if port.trim().parse::<u16>().ok().is_none_or(|p| p == 0) {
+        return false;
+    }
+    let host = host.as_bytes();
+    host.len() == 62
+        && host[56..].eq_ignore_ascii_case(b".onion")
+        && host[..56]
+            .iter()
+            .all(|b| matches!(b.to_ascii_lowercase(), b'a'..=b'z' | b'2'..=b'7'))
+}
+
+/// Whether an advert may name `endpoint`: `udp:nat`, a version 3 onion, or a UDP
 /// or TCP address with a nonzero port whose host is not one of the addresses
-/// [`is_unroutable_direct_advert_ip`] refuses (a host name other than
-/// `localhost` is allowed).
+/// [`is_unroutable_direct_advert_ip`] refuses, judged by the address it
+/// actually names, or is a host name `dial_host` accepts. An IPv6 address
+/// with a zone index is refused: the zone names one of the receiver's own
+/// interfaces, which a remote publisher cannot know.
 pub fn endpoint_advert_is_publicly_usable(endpoint: &OverlayEndpointAdvert) -> bool {
     let addr = endpoint.addr.trim();
     if addr.is_empty() {
@@ -53,21 +155,15 @@ pub fn endpoint_advert_is_publicly_usable(endpoint: &OverlayEndpointAdvert) -> b
                 let Some((host, port)) = addr.rsplit_once(':') else {
                     return false;
                 };
-                let host = host.trim().trim_start_matches('[').trim_end_matches(']');
-                if host.is_empty() || port.trim().parse::<u16>().ok().is_none_or(|p| p == 0) {
+                if port.trim().parse::<u16>().ok().is_none_or(|p| p == 0) {
                     return false;
                 }
-                if host.eq_ignore_ascii_case("localhost") {
-                    return false;
-                }
-                return host
-                    .parse::<IpAddr>()
-                    .ok()
-                    .is_none_or(|ip| !is_unroutable_direct_advert_ip(ip));
+                return dial_host(host);
             };
-            socket_addr.port() != 0 && !is_unroutable_direct_advert_ip(socket_addr.ip())
+            let zoned = matches!(socket_addr, SocketAddr::V6(v6) if v6.scope_id() != 0);
+            socket_addr.port() != 0 && !zoned && routable_literal(socket_addr.ip())
         }
-        OverlayTransportKind::Tor => true,
+        OverlayTransportKind::Tor => onion_endpoint(addr),
         OverlayTransportKind::Unknown => false,
     }
 }

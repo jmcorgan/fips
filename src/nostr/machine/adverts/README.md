@@ -13,9 +13,29 @@ publish.
 
 - `mod.rs`:
   - the endpoint rule: `endpoint_advert_is_publicly_usable` keeps `udp:nat`,
-    a Tor address, and a UDP or TCP address with a nonzero port whose host is
+    a Tor endpoint naming a version 3 onion with a port (56 base32
+    characters and `.onion`, checked for syntax only, so no IP address or
+    DNS name for Tor), and a UDP or TCP address with a nonzero port whose host is
     not one `is_unroutable_direct_advert_ip` refuses (the never-punchable,
-    private and documentation ranges of `punch/plan.rs`);
+    private and documentation ranges of `punch/plan.rs`, and the advert's
+    own reserved term, `is_reserved_ip`: `0.0.0.0/8`, `240.0.0.0/4` and
+    `2001:db8::/32`, which the punch planner does not use; `198.18.0.0/15`
+    is left out, since the NAT lab uses it as its public internet). An IP
+    literal is judged by the address it names, so an IPv4-mapped IPv6
+    address is judged as its IPv4 address, and an IPv6 address with a zone
+    index is refused, since the zone names one of the receiver's
+    interfaces. An
+    endpoint that is not a socket address as written goes to `dial_host`:
+    a bracketed host must be an IPv6 address and a canonical dotted quad an
+    IPv4 one, each judged as a literal; anything else must be a host name
+    of ASCII letters, digits, `-` and `_` in labels of up to 63 bytes, 253
+    in all, one trailing dot allowed, not under `localhost`, and not ending
+    in a numeric label, since such a host is an IPv4 address in another
+    spelling (`127.1`, `0x7f000001`). A host name is not resolved here, so
+    one that resolves to a private address is still accepted. The same
+    rule trims our own advert before it is published (`publisher.rs`).
+    Where it is stricter than FRC-1601 Appendix C.8, the tests say so row by
+    row;
   - `apply_nat_rule`, the rule for a `udp:nat` endpoint, written once for
     publishing and validation: an advert with one must name signal relays
     and STUN servers, and one without carries neither. It returns which is

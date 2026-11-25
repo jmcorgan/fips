@@ -62,12 +62,24 @@ fn endpoint(transport: OverlayTransportKind, addr: &str) -> OverlayEndpointAdver
     }
 }
 
+/// A version 3 onion host, distinct for each `i` below `32^4`: 52 `a`s, then
+/// `i` in four base32 characters, then `.onion`.
+fn v3_onion(i: usize) -> String {
+    const BASE32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let digits: String = (0..4)
+        .rev()
+        .map(|place| BASE32[(i >> (5 * place)) & 31] as char)
+        .collect();
+    format!("{}{digits}.onion", "a".repeat(52))
+}
+
 /// A `udp:nat` advert followed by `onions` Tor endpoints, with `relays`
 /// signal relays and `stuns` STUN servers.
 fn nat_advert(onions: usize, relays: usize, stuns: usize) -> OverlayAdvert {
     let mut endpoints = vec![endpoint(OverlayTransportKind::Udp, "nat")];
-    endpoints
-        .extend((0..onions).map(|i| endpoint(OverlayTransportKind::Tor, &format!("o{i}.onion:1"))));
+    endpoints.extend(
+        (0..onions).map(|i| endpoint(OverlayTransportKind::Tor, &format!("{}:1", v3_onion(i)))),
+    );
     OverlayAdvert {
         identifier: ADVERT_IDENTIFIER.to_string(),
         version: ADVERT_VERSION,
@@ -78,6 +90,8 @@ fn nat_advert(onions: usize, relays: usize, stuns: usize) -> OverlayAdvert {
 }
 
 /// An advert with a single Tor endpoint, padded so its JSON is `len` bytes.
+/// The padding is one signal relay entry, which has no length or form rule;
+/// an onion host has a fixed length.
 fn advert_json_of_len(len: usize) -> String {
     let with = |pad: usize| {
         serde_json::to_string(&OverlayAdvert {
@@ -85,9 +99,9 @@ fn advert_json_of_len(len: usize) -> String {
             version: ADVERT_VERSION,
             endpoints: vec![endpoint(
                 OverlayTransportKind::Tor,
-                &format!("{}.onion:443", "x".repeat(pad)),
+                &format!("{}:443", v3_onion(0)),
             )],
-            signal_relays: None,
+            signal_relays: Some(vec![format!("wss://{}", "x".repeat(pad))]),
             stun_servers: None,
         })
         .unwrap()
@@ -296,7 +310,7 @@ fn nat_snapshot() -> AdvertTransportSnapshot {
 fn tor_snapshot(i: usize) -> AdvertTransportSnapshot {
     AdvertTransportSnapshot::Tor {
         advertise: true,
-        onion_addr: Some(format!("{}{i:04}.onion", "v".repeat(52))),
+        onion_addr: Some(v3_onion(i)),
         advertised_port: 443,
     }
 }
@@ -339,11 +353,7 @@ async fn a_config_with_lists_past_the_bound_publishes_a_clamped_advert_peers_acc
     );
     assert_eq!(
         advert.endpoints.last().map(|e| e.addr.clone()),
-        Some(format!(
-            "{}{:04}.onion:443",
-            "v".repeat(52),
-            ADVERT_LIST_CAP - 2
-        )),
+        Some(format!("{}:443", v3_onion(ADVERT_LIST_CAP - 2))),
         "defect: the clamp did not keep the first endpoints in order"
     );
     assert_eq!(

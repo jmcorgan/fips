@@ -195,6 +195,16 @@ advert, in which each list entry costs a string header beyond its
 bytes: about 2,000 one-character relays fit in 8 KiB and hold about
 51 KB once parsed.
 
+On every path the node also checks the advert's event id and signature
+itself, after the `protocol` tag and the content bound and before the
+content is decoded, and drops a forged advert as if no relay had sent it;
+a traversal checks a peer's inbox relay list the same way. An endpoint is
+dropped unless it is `udp:nat`, a version 3 onion for `tor`, a public IP
+address judged by the address it names, or a host name in a strict
+grammar, which refuses numeric spellings of IPv4 addresses such as
+`127.1`. The rules are listed in the event reference
+(`docs/reference/nostr-events.md`).
+
 Results are kept in an in-memory cache keyed by author npub. Cache
 entries carry the advert's expiration time, and a periodic prune drops
 expired entries. When the cache holds `advert_cache_max_entries` valid

@@ -9,7 +9,7 @@ use nostr::event::FinalizeEvent;
 use nostr::prelude::{EventBuilder, Kind, RelayUrl, Tag, Timestamp};
 
 use super::machine::NodeSigner;
-use super::machine::adverts::is_unroutable_direct_advert_ip;
+use super::machine::adverts::{is_reserved_ip, is_unroutable_direct_advert_ip};
 use super::machine::error::Error as MachineError;
 use super::machine::params::Params;
 use super::machine::punch::parse_punch_packet;
@@ -1365,45 +1365,52 @@ fn note_linked_bootstraps_keeps_refusing_after_the_link_drops() {
     );
 }
 
+/// The advert predicate is the three punch predicates plus the advert's own
+/// reserved term. Each row gives the three punch predicates' verdict, taken
+/// from the single disjunction the advert filter used before the split, and
+/// the reserved term's.
 #[test]
-fn split_address_predicates_match_the_old_advert_predicate() {
-    // Expected values are hand-derived from the single disjunction the advert
-    // filter used before the split, which is the spec for this refactor.
+fn split_address_predicates_and_the_reserved_term_make_the_advert_predicate() {
     let cases = [
-        ("127.0.0.1", true),
-        ("::1", true),
-        ("0.0.0.0", true),
-        ("::", true),
-        ("224.0.0.1", true),
-        ("ff02::1", true),
-        ("255.255.255.255", true),
-        ("169.254.1.1", true),
-        ("fe80::1", true),
-        ("192.0.2.1", true),
-        ("198.51.100.1", true),
-        ("203.0.113.1", true),
-        ("100.64.0.1", true),
-        ("100.127.255.255", true),
-        ("100.128.0.1", false),
-        ("10.0.0.1", true),
-        ("192.168.1.1", true),
-        ("172.16.0.1", true),
-        ("fd00::1", true),
-        ("8.8.8.8", false),
-        ("2001:4860:4860::8888", false),
+        ("127.0.0.1", true, false),
+        ("::1", true, false),
+        ("0.0.0.0", true, true),
+        ("::", true, false),
+        ("224.0.0.1", true, false),
+        ("ff02::1", true, false),
+        ("255.255.255.255", true, true),
+        ("169.254.1.1", true, false),
+        ("fe80::1", true, false),
+        ("192.0.2.1", true, false),
+        ("198.51.100.1", true, false),
+        ("203.0.113.1", true, false),
+        ("100.64.0.1", true, false),
+        ("100.127.255.255", true, false),
+        ("100.128.0.1", false, false),
+        ("10.0.0.1", true, false),
+        ("192.168.1.1", true, false),
+        ("172.16.0.1", true, false),
+        ("fd00::1", true, false),
+        ("8.8.8.8", false, false),
+        ("2001:4860:4860::8888", false, false),
+        ("0.1.2.3", false, true),
+        ("240.0.0.1", false, true),
+        ("2001:db8::1", false, true),
+        ("198.18.0.1", false, false),
     ];
 
-    for (text, expected) in cases {
+    for (text, punch, reserved) in cases {
         let ip = text.parse::<IpAddr>().unwrap();
         assert_eq!(
-            is_unroutable_direct_advert_ip(ip),
-            expected,
-            "unexpected advert verdict for {text}"
-        );
-        assert_eq!(
             is_never_punchable_ip(ip) || is_private_ip(ip) || is_doc_ip(ip),
-            expected,
-            "the split predicates disagree with the advert filter for {text}"
+            punch,
+            "the split predicates disagree with the old advert filter for {text}"
+        );
+        assert_eq!(is_reserved_ip(ip), reserved, "reserved term for {text}");
+        assert_eq!(
+            is_unroutable_direct_advert_ip(ip),
+            punch || reserved,
+            "unexpected advert verdict for {text}"
         );
     }
 }

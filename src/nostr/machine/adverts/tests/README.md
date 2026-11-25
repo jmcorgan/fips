@@ -24,8 +24,16 @@ Unit tests of `src/nostr/machine/adverts/`.
     an oversized one are refused (the latter before decoding), a future
     `created_at` is clamped, the newest event is chosen only among the
     author's, our own advert's long lists are cut and named, and the
-    validity horizon and the endpoint rule hold FRC-1601 Appendix C.3's
-    and C.8's rows.
+    validity horizon holds FRC-1601 Appendix C.3's rows. The endpoint rule
+    holds C.8's rows where the node follows them, and a second test holds
+    each C.8 row the node is stricter on, with C.8's verdict and the
+    node's; then the forms each tightening refuses, with the deployed forms
+    beside them still accepted: an excluded address in IPv4-mapped form,
+    and a zoned IPv6 address; numeric and malformed host spellings, with
+    the host names the tree dials still accepted; the reserved ranges,
+    with `198.18.0.0/15` kept; and Tor endpoints other than a version 3
+    onion with a port, with the public test node's onion and the
+    open-discovery seed name kept.
   - `cache.rs`, of `cache.rs`: admission and replacement, pruning, the size
     cap and the protection of configured and linked authors against a flood
     of new keys, the open-discovery candidates (drawn from a seeded entropy

@@ -399,8 +399,19 @@ fn the_frc_c3_validity_horizon_holds() {
     );
 }
 
+/// Whether the endpoint rule keeps `addr` over `transport`, read from JSON
+/// as a peer's advert carries it.
+fn usable(transport: &str, addr: &str) -> bool {
+    let endpoint: OverlayEndpointAdvert = serde_json::from_str(&format!(
+        r#"{{"transport":"{transport}","addr":"{}"}}"#,
+        addr.replace('\t', "\\t")
+    ))
+    .expect("an endpoint");
+    endpoint_advert_is_publicly_usable(&endpoint)
+}
+
 #[test]
-fn the_frc_c8_endpoint_rule_holds() {
+fn the_frc_c8_endpoint_rule_holds_where_the_node_follows_it() {
     let rows: &[(&str, &str, bool)] = &[
         ("udp", "nat", true),
         ("udp", "NAT", true),
@@ -411,8 +422,6 @@ fn the_frc_c8_endpoint_rule_holds() {
         ("udp", "10.0.0.1:2121", false),
         ("udp", "100.64.0.1:2121", false),
         ("udp", "[fd00::1]:2121", false),
-        ("udp", "[2001:db8::1]:2121", true),
-        ("udp", "[::ffff:10.0.0.1]:2121", true),
         ("udp", "198.18.0.1:2121", true),
         ("tcp", "localhost:80", false),
         ("tcp", "[localhost]:80", false),
@@ -420,27 +429,16 @@ fn the_frc_c8_endpoint_rule_holds() {
         ("tcp", "example.com:0", false),
         ("udp", "example.com", false),
         ("udp", " nat ", true),
-        ("udp", "127.1:2121", true),
-        ("udp", "[ 10.0.0.1]:2121", true),
-        ("udp", "[fe80::1%eth0]:2121", true),
         ("udp", "[fe80::1%4294967295]:2121", false),
-        ("udp", "[fe80::1%4294967296]:2121", true),
         ("udp", "example.com:+080", true),
         ("tor", "", false),
         ("tor", "  \t", false),
         ("tor", "nat", false),
         ("tor", " NaT ", false),
-        ("tor", "abc.onion:443", true),
-        ("tor", "anything else", true),
     ];
     for (transport, addr, passes) in rows {
-        let endpoint: OverlayEndpointAdvert = serde_json::from_str(&format!(
-            r#"{{"transport":"{transport}","addr":"{}"}}"#,
-            addr.replace('\t', "\\t")
-        ))
-        .expect("an endpoint");
         assert_eq!(
-            endpoint_advert_is_publicly_usable(&endpoint),
+            usable(transport, addr),
             *passes,
             "C.8: {transport} {addr:?}"
         );
@@ -458,4 +456,169 @@ fn the_frc_c8_endpoint_rule_holds() {
         stun_servers: None,
     };
     assert!(!spaced.has_udp_nat_endpoint());
+}
+
+/// The rows of FRC-1601 Appendix C.8 whose verdict the node does not
+/// follow: each is a form Section 8.1 of that document lists as admitted by
+/// its endpoint rule though meant to be excluded. The node refuses them; the
+/// document's endpoint rule and C.8 are to be brought in line. Each row is
+/// its transport, its address, C.8's verdict and the node's.
+#[test]
+fn the_endpoint_rule_is_stricter_than_frc_c8_for_these_forms() {
+    let rows: &[(&str, &str, bool, bool)] = &[
+        ("udp", "[::ffff:10.0.0.1]:2121", true, false),
+        ("udp", "127.1:2121", true, false),
+        ("udp", "[ 10.0.0.1]:2121", true, false),
+        ("udp", "[fe80::1%eth0]:2121", true, false),
+        ("udp", "[fe80::1%4294967296]:2121", true, false),
+        ("udp", "[2001:db8::1]:2121", true, false),
+        ("tor", "abc.onion:443", true, false),
+        ("tor", "anything else", true, false),
+    ];
+    for (transport, addr, c8, node) in rows {
+        assert_ne!(c8, node, "{transport} {addr:?} differs from C.8");
+        assert_eq!(usable(transport, addr), *node, "{transport} {addr:?}");
+    }
+}
+
+#[test]
+fn the_endpoint_rule_refuses_an_excluded_address_in_ipv4_mapped_form() {
+    for transport in ["udp", "tcp"] {
+        for addr in [
+            "[::ffff:127.0.0.1]:2121",
+            "[::ffff:10.0.0.1]:2121",
+            "[::ffff:192.168.1.1]:2121",
+            "[::ffff:100.64.0.1]:2121",
+            "[::ffff:192.0.2.1]:2121",
+        ] {
+            assert!(!usable(transport, addr), "{transport} {addr}");
+        }
+        assert!(
+            usable(transport, "[::ffff:8.8.8.8]:2121"),
+            "a public address in mapped form is kept"
+        );
+    }
+}
+
+#[test]
+fn the_endpoint_rule_refuses_a_zoned_address() {
+    assert!(!usable("udp", "[2600::1%7]:2121"), "a zoned global address");
+    assert!(usable("udp", "[2600::1]:2121"), "the same address unzoned");
+    assert!(
+        !usable("udp", "[fe80::1%3]:2121"),
+        "a zoned link-local address"
+    );
+}
+
+/// A host name of `len` bytes, of labels of 63 bytes but the last.
+fn name_of_len(len: usize) -> String {
+    let name = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "b".repeat(len - 192));
+    assert_eq!(name.len(), len);
+    name
+}
+
+#[test]
+fn the_endpoint_rule_refuses_numeric_and_malformed_host_spellings() {
+    let long_label = format!("{}.example", "a".repeat(64));
+    let long_name = name_of_len(254);
+    let rows = [
+        // A host whose last label is a number: an IPv4 address in another
+        // spelling, or not an address at all.
+        "127.1:2121",
+        "10.1:2121",
+        "2130706433:2121",
+        "0x7f000001:2121",
+        "0X7F000001:2121",
+        "0x7F000001:2121",
+        "0x7f.1:2121",
+        "0177.0.0.1:2121",
+        "010.0.0.1:2121",
+        "127.000000000000000001:2121",
+        "10.0.0.1.:2121",
+        "1.2.3.4.5:2121",
+        // A canonical excluded address with a port the rule tolerates.
+        "10.0.0.1:+2121",
+        // Malformed brackets, zones and unbracketed IPv6.
+        "[ 10.0.0.1]:2121",
+        "[fe80::1%eth0]:2121",
+        "[fe80::1%4294967296]:2121",
+        "[example.com]:443",
+        "2600::1:2121",
+        // White space, names under localhost, non-ASCII, and lengths.
+        "exa mple.com:80",
+        "foo.localhost:80",
+        "localhost.:80",
+        "bücher.de:443",
+        &format!("{long_label}:443"),
+        &format!("{long_name}:443"),
+    ];
+    for transport in ["udp", "tcp"] {
+        for addr in rows {
+            assert!(!usable(transport, addr), "{transport} {addr:?}");
+        }
+    }
+}
+
+#[test]
+fn the_endpoint_rule_still_accepts_the_host_names_the_tree_dials() {
+    let label = format!("{}.example", "a".repeat(63));
+    let name = name_of_len(253);
+    let rows = [
+        "fips.example.com:8443",
+        "fips-nat-relay:7777",
+        "my_container:2121",
+        "example.com.:443",
+        "example.com:+080",
+        "1e100.net:443",
+        "123.example:80",
+        "0xdeadbeef.example:443",
+        "8.8.8.8:+2121",
+        &format!("{label}:443"),
+        &format!("{name}:443"),
+    ];
+    for transport in ["udp", "tcp"] {
+        for addr in rows {
+            assert!(usable(transport, addr), "{transport} {addr:?}");
+        }
+    }
+}
+
+#[test]
+fn the_endpoint_rule_refuses_the_reserved_ranges() {
+    for addr in ["0.1.2.3:2121", "240.0.0.1:2121", "[2001:db8::1]:2121"] {
+        assert!(!usable("udp", addr), "{addr}");
+    }
+    assert!(
+        usable("udp", "198.18.0.1:2121"),
+        "the benchmarking range is kept"
+    );
+}
+
+#[test]
+fn the_endpoint_rule_accepts_a_version_3_onion_and_nothing_else_for_tor() {
+    // The public test node's onion, and the open-discovery scenario's seed
+    // name, which has no valid checksum.
+    let real = "7c5mtyo5mk477t7l4mg56xs4wcnt4zrsqtjampijy532ggxgdg42gcyd.onion";
+    let seed = "fipsopendiscoveryseedxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion";
+    for addr in [
+        format!("{real}:443"),
+        format!("{}:443", real.to_ascii_uppercase()),
+        format!("{seed}:443"),
+    ] {
+        assert!(usable("tor", &addr), "{addr}");
+    }
+    let one = format!("{}1.onion:443", "a".repeat(55));
+    for addr in [
+        "abc.onion:443".to_string(),
+        "abcdefghij234567.onion:443".to_string(),
+        real.to_string(),
+        format!("{real}:0"),
+        format!("www.{real}:443"),
+        "example.com:443".to_string(),
+        "10.0.0.1:443".to_string(),
+        "anything else".to_string(),
+        one,
+    ] {
+        assert!(!usable("tor", &addr), "{addr}");
+    }
 }
