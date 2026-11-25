@@ -692,6 +692,59 @@ fn a_peer_configured_in_any_case_is_sent_an_offer_addressed_to_its_canonical_npu
 }
 
 #[test]
+fn a_forged_newer_inbox_list_does_not_redirect_an_offer() {
+    use super::super::super::event::inbox::inbox_list;
+    let mut h = Harness::new(params(10));
+    // Two relays in the pool, named by neither our DM relays nor the
+    // peer's advert, so only the inbox list can put either in the offer's
+    // relays.
+    let p = params(10);
+    let (named, redirected) = (&p.advert_relays[0], &p.advert_relays[1]);
+    let now_ms = h.now().unix_ms;
+    let b = signer(NODE_B_SECRET);
+    let genuine = inbox_list(&b, &[named], now_ms - 20_000, [0u8; 32]).unwrap();
+    let mut forged = inbox_list(&b, &[named], now_ms - 10_000, [0u8; 32]).unwrap();
+    forged.tags = inbox_list(&b, &[redirected], now_ms - 10_000, [0u8; 32])
+        .unwrap()
+        .tags;
+
+    cache_nat_advert(&mut h, NODE_B_SECRET);
+    let actions = h.input(Input::Connect {
+        npub: npub(NODE_B_SECRET),
+        connect: ConnectId(1),
+    });
+    let inbox = fetches(&actions);
+    assert_eq!(inbox.len(), 1, "the inbox lookup: {actions:?}");
+    let actions = h.input(Input::FetchDone {
+        req: inbox[0].0,
+        outcome: Ok(vec![genuine, forged.clone()]),
+    });
+    let forged_lines: Vec<Log> = logs(&actions)
+        .into_iter()
+        .filter(|line| matches!(line, Log::EventForged { .. }))
+        .collect();
+    let socket = binds(&actions)[0];
+    let actions = complete(&mut h, socket, Some("198.51.100.20".parse().unwrap()));
+    let offers: Vec<Vec<String>> = publishes(&actions)
+        .into_iter()
+        .filter(|(_, _, event, _)| event.kind == nostr::event::Kind::Custom(SIGNAL_KIND))
+        .map(|(_, relays, _, _)| relays)
+        .collect();
+    assert_eq!(offers.len(), 1, "the offer: {actions:?}");
+    assert!(offers[0].contains(named), "{:?}", offers[0]);
+    assert!(!offers[0].contains(redirected), "{:?}", offers[0]);
+    assert_eq!(
+        forged_lines,
+        vec![Log::EventForged {
+            kind: 10050,
+            author: npub(NODE_B_SECRET),
+            event: forged.id,
+            total: 1,
+        }]
+    );
+}
+
+#[test]
 fn a_failed_initiator_closes_its_socket() {
     let mut h = Harness::new(params(10));
     let (req, _, socket) = initiate_on(&mut h, NODE_B_SECRET, &npub(NODE_B_SECRET), 1);

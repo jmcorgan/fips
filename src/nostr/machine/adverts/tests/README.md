@@ -15,7 +15,12 @@ Unit tests of `src/nostr/machine/adverts/`.
     servers, Tor, the `advertise` gate, and which transports need a learned
     address, in snapshot order.
   - `ingest.rs`, of `ingest.rs`: an expired advert is refused before it is
-    parsed (seen through a counting parse), an advert for another app and
+    parsed (seen through a counting decode), a forged advert (its content
+    changed after signing, or a signature by another key than its
+    `pubkey`) is refused as `Forged` before it is decoded, the FRC-1601
+    C.2 advert and the nostr 0.44 fixture advert pass the signature check,
+    an event without our `protocol` tag or over the content bound is
+    refused before its signature is checked, an advert for another app and
     an oversized one are refused (the latter before decoding), a future
     `created_at` is clamped, the newest event is chosen only among the
     author's, our own advert's long lists are cut and named, and the

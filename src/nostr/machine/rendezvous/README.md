@@ -34,13 +34,25 @@ the node key the Nostr code signs with.
     the node sends its transports only when they change.
   - A relay's advert, the node's endpoint and open-discovery queries, the
     stale-advert refetch, protection changes and NIP-42 challenges.
+  - A peer's event whose id or signature does not verify is counted in
+    `forged` and logged at debug (`EventForged`), with a warning
+    (`EventsForged`) each time the count reaches a power of two, as shed
+    signals are. The stream counts every forged advert. The dial fetch
+    tests the author first, so it counts a forged advert under the peer's
+    key only. The refetch drops every forged event before choosing the
+    newest, counting each, so what is dropped is treated as if no relay had
+    sent it: a forged newer advert does not hold back a genuine refresh,
+    and an answer of forged events alone evicts. A traversal's inbox
+    lookup drops a forged inbox relay list the same way, counting each, so
+    a forged newer list cannot choose the relays our signals go to.
   - Every step ends with a prune once the earliest entry is due to go, and
     the release of the cache-full warning's latch; a deadline at the
     earliest expiry makes the prune happen on time with no input.
 - `traversal.rs`: the traversal half, as more of `Rendezvous`'s steps.
   - `Connect`: capacity, the peer's advert (the cache, else a fetch), its
     `udp:nat` endpoint, the peer's inbox relays (a 1.5 s fetch, falling back
-    to our DM relays) and the signal relays the pool holds, a socket, the
+    to our DM relays, with any list whose signature does not verify
+    dropped first) and the signal relays the pool holds, a socket, the
     local candidates when shared, the STUN client's observation, the offer,
     the wait for the answer, the on-link prefixes, the plan and the punch
     attempt. A connect to a peer whose traversal already runs ends at once

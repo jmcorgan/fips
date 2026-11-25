@@ -159,6 +159,9 @@ pub struct Rendezvous<I: Instant, E: EntropySource> {
     gate: SignalGate<I>,
     /// Inbound signals shed since start.
     shed: u64,
+    /// Peer events refused since start because their id or signature does
+    /// not verify.
+    forged: u64,
     /// Inbound offers in hand, per sender and in all.
     admission: Admission,
     /// One suspicious-offer warning a minute.
@@ -204,6 +207,7 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
             status_changed: false,
             gate: SignalGate::new(now.mono),
             shed: 0,
+            forged: 0,
             admission: Admission::new(
                 params.max_concurrent_incoming_offers,
                 params.max_concurrent_offers_per_npub,
@@ -551,6 +555,39 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
             peer: peer.to_string(),
             path,
         });
+    }
+
+    /// Count and log `event`, a peer's event refused because its id or
+    /// signature does not verify. Debug per event, since a forger could
+    /// turn a line each into log volume; the warning at each power of two
+    /// is the operator's signal.
+    fn forged(&mut self, event: &Event) {
+        self.forged += 1;
+        let total = self.forged;
+        self.log(Log::EventForged {
+            kind: event.kind.as_u16(),
+            author: ingest::author_npub(event),
+            event: event.id,
+            total,
+        });
+        if total.is_power_of_two() {
+            self.log(Log::EventsForged { forged: total });
+        }
+    }
+
+    /// `events` without those whose id or signature does not verify, each
+    /// of which is counted and logged. What is dropped is treated as if no
+    /// relay had sent it.
+    fn authentic_only(&mut self, events: Vec<Event>) -> Vec<Event> {
+        let mut kept = Vec::with_capacity(events.len());
+        for event in events {
+            if ingest::authentic(&event) {
+                kept.push(event);
+            } else {
+                self.forged(&event);
+            }
+        }
+        kept
     }
 
     // --- start-up: subscribe, inbox relay list, advert ------------------
@@ -1005,37 +1042,40 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
     }
 
     /// Cache an advert a relay delivered, if it passes the ingest checks,
-    /// then prune.
+    /// then prune. A forged advert is counted; any other refusal is
+    /// silent.
     fn relay_event(&mut self, _relay: RelayUrl, event: Box<Event>, now: Now<I>) {
         if event.kind != Kind::Custom(ADVERT_KIND) {
             return;
         }
-        if let Some(checked) =
-            ingest::check(&event, &self.params.app, self.max_age_ms(), now.unix_ms)
-        {
-            let endpoints = checked.advert.endpoints.clone();
-            let admission = self.cache.observe_advert(
-                &checked.author_npub,
-                checked.advert,
-                checked.created_at,
-                checked.valid_until_ms,
-                now.unix_ms,
-            );
-            match admission {
-                AdvertAdmission::Admitted | AdvertAdmission::Updated
-                    if checked.author_npub != self.npub =>
-                {
-                    self.log(Log::PeerCached {
-                        peer: checked.author_npub,
-                        endpoints,
-                        event: event.id,
-                    });
+        match ingest::check(&event, &self.params.app, self.max_age_ms(), now.unix_ms) {
+            Ok(checked) => {
+                let endpoints = checked.advert.endpoints.clone();
+                let admission = self.cache.observe_advert(
+                    &checked.author_npub,
+                    checked.advert,
+                    checked.created_at,
+                    checked.valid_until_ms,
+                    now.unix_ms,
+                );
+                match admission {
+                    AdvertAdmission::Admitted | AdvertAdmission::Updated
+                        if checked.author_npub != self.npub =>
+                    {
+                        self.log(Log::PeerCached {
+                            peer: checked.author_npub,
+                            endpoints,
+                            event: event.id,
+                        });
+                    }
+                    AdvertAdmission::Refused { first_at_bound } => {
+                        self.refused(&checked.author_npub, first_at_bound, IngestPath::Stream);
+                    }
+                    _ => {}
                 }
-                AdvertAdmission::Refused { first_at_bound } => {
-                    self.refused(&checked.author_npub, first_at_bound, IngestPath::Stream);
-                }
-                _ => {}
             }
+            Err(ingest::Refusal::Forged) => self.forged(&event),
+            Err(_) => {}
         }
         self.prune(now.unix_ms);
     }
@@ -1122,13 +1162,20 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
         let max_age_ms = self.max_age_ms();
         let mut best: Option<ingest::Checked> = None;
         for event in &events {
-            let Some(checked) = ingest::check(event, &self.params.app, max_age_ms, now.unix_ms)
-            else {
-                continue;
-            };
-            if checked.author_npub != key.npub {
+            // The author test comes first, so a foreign event costs no
+            // signature check. A forged event under the peer's key is
+            // counted.
+            if event.pubkey != key.pubkey {
                 continue;
             }
+            let checked = match ingest::check(event, &self.params.app, max_age_ms, now.unix_ms) {
+                Ok(checked) => checked,
+                Err(ingest::Refusal::Forged) => {
+                    self.forged(event);
+                    continue;
+                }
+                Err(_) => continue,
+            };
             if best
                 .as_ref()
                 .is_none_or(|current| checked.created_at >= current.created_at)
@@ -1164,6 +1211,7 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
     /// The stale-advert refetch's outcome: absent on the relays evicts,
     /// older or equal is the same advert, newer and valid refreshes when
     /// the cache keeps it. Foreign-only answers and errors change nothing.
+    /// A forged event counts as absent.
     fn refetched(
         &mut self,
         key: &PeerKey,
@@ -1174,6 +1222,11 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
         let Ok(events) = outcome else {
             return NostrRefetchOutcome::Skipped;
         };
+        // A forged event is dropped before the contest, as if no relay had
+        // sent it, so a forged newer advert cannot hold back a genuine
+        // refresh, and an answer of forged events alone evicts. The event
+        // chosen is checked again by `check` below; refetches are rare.
+        let events = self.authentic_only(events);
         let Some(newest) = ingest::newest_by_author(events.iter(), key.pubkey) else {
             if !events.is_empty() {
                 // The relays answered, but nothing they returned was signed
@@ -1188,7 +1241,7 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
         if cached_created_at.is_some_and(|cached| relay_created_at <= cached) {
             return NostrRefetchOutcome::SameAdvert;
         }
-        let Some(checked) = ingest::check(newest, &self.params.app, self.max_age_ms(), now.unix_ms)
+        let Ok(checked) = ingest::check(newest, &self.params.app, self.max_age_ms(), now.unix_ms)
         else {
             return NostrRefetchOutcome::Skipped;
         };

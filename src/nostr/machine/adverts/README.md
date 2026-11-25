@@ -39,18 +39,27 @@ publish.
   then the learned one) and the endpoint order are the node's long-standing
   ones; the shell learns the addresses and logs the notes.
 - `ingest.rs`: the checks every advert a relay delivers passes before it is
-  cached. `check` runs the validity horizon (`valid_until_ms`, which reads
-  the event's NIP-40 expiration as the relay client does) before anything
-  is parsed, then `parse` (the `protocol` tag, the 8 KiB content bound
-  before decoding, the JSON, the 32-entry list bound before unusable
-  endpoints are dropped, then `validate_overlay_advert`), then the clamp on
-  a future `created_at`. All three ingest paths call it: the subscription's
-  stream, the targeted fetch on a dial, and the stale-advert refetch, which
-  calls it only after comparing `created_at` with the cached entry's. The
-  author test (`newest_by_author`, and the fetch's own test) stays with
-  each path. Also the lifetime arithmetic (`max_age_ms`: two advert
-  lifetimes) and `clamp_own`, which cuts our own advert's lists to the
-  bound peers accept and names each list it cut.
+  cached. `check` runs, refusing at the first that fails, the validity
+  horizon (`valid_until_ms`, which reads the event's NIP-40 expiration as
+  the relay client does) before anything else is read, then `screen` (the
+  `protocol` tag and the 8 KiB content bound), then `authentic` (the
+  event's id and signature, checked by the node itself rather than left to
+  the relay client), then `decode` (the JSON, the 32-entry list bound
+  before unusable endpoints are dropped, then `validate_overlay_advert`),
+  then the clamp on a future `created_at`. It returns the `Checked` advert
+  or a `Refusal` naming the step that refused it: `Expired`, `Forged` or
+  `Invalid`. The cheap refusals run before the signature check, so a
+  flood of events that are not our adverts costs no signature check, and a
+  forged advert is never decoded. All three ingest paths call it: the
+  subscription's stream, the targeted fetch on a dial, and the
+  stale-advert refetch, which calls it only after comparing `created_at`
+  with the cached entry's, and which drops events that are not `authentic`
+  before that comparison. The author test (`newest_by_author`, which reads
+  the `pubkey` field only, and the fetch's own test) stays with each path.
+  `parse`, `screen` then `decode` with no signature check, is test-only.
+  Also the lifetime arithmetic (`max_age_ms`: two advert lifetimes) and
+  `clamp_own`, which cuts our own advert's lists to the bound peers accept
+  and names each list it cut.
 - `cache.rs`: `Cache`, the peers' adverts keyed by author npub. An author
   already cached has its entry replaced by an advert no older than it; a new
   author is admitted while there is room; at the cap, a protected author (a

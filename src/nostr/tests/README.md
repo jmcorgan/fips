@@ -127,9 +127,10 @@ Tests of one file, each named `nostr::<file>::tests::...`:
 - `log.rs`, of `log.rs`: the golden list of the lines the rendezvous machine
   asks the shell to log, and the pump's three notify-loop lines, each with
   the level, text, fields and target it was logged with before the code
-  moved; and the protocol-mismatch warning, which keeps the receive loop's
-  target, text and fields now that the engine's handle logs it, once per
-  cooldown.
+  moved, and the two lines added since for a peer event whose signature
+  does not verify; and the protocol-mismatch warning, which keeps the
+  receive loop's target, text and fields now that the engine's handle logs
+  it, once per cooldown.
 - `pump.rs`, of `pump.rs`: the pump against nostr-sdk's in-process relay. It
   answers a relay that requires NIP-42 through the machine, and the stored
   advert the relay replays to the first subscribe is cached, which needs the

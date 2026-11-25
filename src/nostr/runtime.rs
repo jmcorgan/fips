@@ -630,7 +630,7 @@ impl NostrRendezvous {
     }
 
     /// The advert `event` carries, if it is for `expected_app` and passes
-    /// every content rule (`ingest::parse`).
+    /// every content rule (`ingest::parse`, which checks no signature).
     pub(super) fn parse_overlay_advert_event(
         event: &Event,
         expected_app: &str,
@@ -649,8 +649,8 @@ impl NostrRendezvous {
         Ok(super::machine::adverts::ingest::validate(advert)?)
     }
 
-    /// Newest event in `events` that was actually signed by `author`
-    /// (`ingest::newest_by_author`).
+    /// Newest event in `events` whose `pubkey` field is `author`, with no
+    /// signature check (`ingest::newest_by_author`).
     pub(super) fn newest_event_by_author<'a>(
         events: impl Iterator<Item = &'a Event>,
         author: PublicKey,

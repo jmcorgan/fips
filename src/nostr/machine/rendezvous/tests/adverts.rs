@@ -62,6 +62,48 @@ fn udp_endpoints(event: &Event) -> Vec<String> {
 }
 
 #[test]
+fn a_forged_advert_on_the_stream_is_not_cached_and_is_counted() {
+    let mut h = Harness::new(params(10));
+    let now = h.unix_secs();
+    let mut totals = Vec::new();
+    let mut warned = Vec::new();
+    for i in 0..5 {
+        let forged = forged_by(
+            NODE_B_SECRET,
+            now - 10 + i,
+            &body("8.8.8.8:443"),
+            &body("8.8.4.4:443"),
+        );
+        let lines = logs(&h.input(delivered(forged.clone())));
+        assert!(
+            lines.contains(&Log::EventForged {
+                kind: ADVERT_KIND,
+                author: npub(NODE_B_SECRET),
+                event: forged.id,
+                total: i + 1,
+            }),
+            "{lines:?}"
+        );
+        let (each, warnings) = forged_totals(&lines);
+        totals.extend(each);
+        warned.extend(warnings);
+    }
+    assert_eq!(totals, vec![1, 2, 3, 4, 5]);
+    assert_eq!(warned, vec![1, 2, 4], "a warning at each power of two");
+    assert_eq!(
+        inspect(&mut h, &npub(NODE_B_SECRET)).created_at,
+        None,
+        "nothing forged is cached"
+    );
+
+    // Control: a genuine advert delivered afterwards is cached.
+    let genuine = advert_by(NODE_B_SECRET, now, &body("8.8.8.8:443"));
+    let lines = logs(&h.input(delivered(genuine)));
+    assert_eq!(forged_totals(&lines), (Vec::new(), Vec::new()));
+    assert_eq!(inspect(&mut h, &npub(NODE_B_SECRET)).created_at, Some(now));
+}
+
+#[test]
 fn a_relay_delivered_advert_is_cached_and_logged_unless_it_is_our_own() {
     let mut h = Harness::new(params(10));
     let theirs = advert_by(NODE_B_SECRET, h.unix_secs(), &body("8.8.8.8:443"));

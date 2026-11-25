@@ -667,13 +667,17 @@ impl<I: Instant, E: EntropySource> Rendezvous<I, E> {
     }
 
     /// The peer's inbox relay list was looked up: choose the relays its
-    /// signals go to, from those the relay pool holds, then bind.
+    /// signals go to, from those the relay pool holds, then bind. A list
+    /// whose id or signature does not verify is counted and dropped, as if
+    /// no relay had sent it, so a forged newer list cannot redirect the
+    /// signals.
     fn inbox_fetched(&mut self, key: Key, outcome: Result<Vec<Event>, String>) {
         if let Err(error) = &outcome {
             self.log(Log::InboxFetchFailed {
                 error: error.clone(),
             });
         }
+        let outcome = outcome.map(|events| self.authentic_only(events));
         let Some(session) = self.sessions.get(key) else {
             return;
         };

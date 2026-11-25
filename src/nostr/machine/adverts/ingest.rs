@@ -2,11 +2,22 @@
 //!
 //! Three paths bring a peer's advert in: the subscription's stream, the
 //! targeted fetch on a dial, and the stale-advert refetch. Each calls
-//! [`check`], which runs the validity horizon before anything is parsed,
-//! then the parse (the `protocol` tag, the content bound, the JSON, the list
-//! bounds and the body rules of `adverts/mod.rs`), then the clamp on a
-//! future `created_at`. The author test and the choice among several
-//! adverts stay with each path, which take them in different orders.
+//! [`check`], which runs, refusing at the first that fails:
+//!
+//! 1. the validity horizon, before anything else is read;
+//! 2. [`screen`]: the `protocol` tag and the content bound;
+//! 3. [`authentic`]: the event's id and signature. This is where the node
+//!    checks a peer advert's signature itself, rather than relying on the
+//!    relay client to have done so;
+//! 4. [`decode`]: the JSON, the list bounds and the body rules of
+//!    `adverts/mod.rs`;
+//! 5. the clamp on a future `created_at`.
+//!
+//! The cheap refusals come before the signature check, so a flood of events
+//! that are not our adverts, or are oversized, costs no signature check, and
+//! a forged advert is never decoded. Every refusal is a silent discard, so
+//! the order is not visible to a peer. The author test and the choice among
+//! several adverts stay with each path, which take them in different orders.
 //!
 //! Also here: the bounds a node's own advert is cut to before it is
 //! published ([`clamp_own`]), and the advert lifetime arithmetic.
@@ -15,6 +26,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use fips_core::identity::secp;
 use nostr::event::Event;
 use nostr::key::PublicKey;
 use nostr::nips::nip19::ToBech32;
@@ -90,10 +102,9 @@ pub fn validate(advert: OverlayAdvert) -> Result<OverlayAdvert, Error> {
     validate_overlay_advert(advert)
 }
 
-/// The advert `event` carries, if it is for `app` and passes every content
-/// rule. The `protocol` tag and the content's size are checked before the
-/// content is decoded.
-pub fn parse(event: &Event, app: &str) -> Result<OverlayAdvert, ParseError> {
+/// Screen `event` before its signature is checked: it carries our
+/// `protocol` tag for `app`, and its content is within the content bound.
+pub fn screen(event: &Event, app: &str) -> Result<(), ParseError> {
     let advertised_app = protocol(event).ok_or_else(|| {
         ParseError::Invalid(Error::InvalidAdvert("missing required protocol tag".into()))
     })?;
@@ -109,8 +120,29 @@ pub fn parse(event: &Event, app: &str) -> Result<OverlayAdvert, ParseError> {
             event.content.len()
         ))));
     }
+    Ok(())
+}
+
+/// The advert body `event` carries: its content decoded as the advert's
+/// JSON, then [`validate`]d.
+pub fn decode(event: &Event) -> Result<OverlayAdvert, ParseError> {
     let advert: OverlayAdvert = serde_json::from_str(&event.content).map_err(ParseError::Json)?;
     validate(advert).map_err(ParseError::Invalid)
+}
+
+/// The advert `event` carries, if it is for `app` and passes every content
+/// rule: [`screen`], then [`decode`]. It does not check the signature.
+#[cfg(test)]
+pub fn parse(event: &Event, app: &str) -> Result<OverlayAdvert, ParseError> {
+    screen(event, app)?;
+    decode(event)
+}
+
+/// Whether `event`'s id is the hash of what it carries and its signature is
+/// its `pubkey`'s over that id. A peer's signed event is acted on only if
+/// this holds.
+pub fn authentic(event: &Event) -> bool {
+    event.verify_with_ctx(secp()).is_ok()
 }
 
 /// The time `event`, an advert, stops being valid at `now_ms`, or `None` if
@@ -128,9 +160,10 @@ pub fn valid_until_ms(event: &Event, max_age_ms: u64, now_ms: u64) -> Option<u64
     )
 }
 
-/// Newest event in `events` that was actually signed by `author`.
+/// Newest event in `events` whose `pubkey` field is `author`.
 ///
-/// The relay pool verifies each event's signature but does not check a
+/// It reads the field only and checks no signature: a caller drops the
+/// events that are not [`authentic`] first. The relay pool does not check a
 /// reply against the REQ filter unless `verify_subscriptions` or
 /// `ban_relay_on_mismatch` is set, and neither is. A relay may therefore
 /// answer an author-filtered request with an event it signed itself, so
@@ -161,26 +194,43 @@ pub struct Checked {
     pub valid_until_ms: u64,
 }
 
-/// `event` as an advert to cache at `now_ms`, if it is one: still inside its
-/// validity horizon (checked first, before anything is parsed), for `app`
-/// and within every content rule, with its `created_at` clamped to no more
-/// than the skew tolerance ahead of `now_ms`. Every advert a relay delivers
-/// passes through here.
-pub fn check(event: &Event, app: &str, max_age_ms: u64, now_ms: u64) -> Option<Checked> {
-    check_with(event, app, max_age_ms, now_ms, parse)
+/// Why [`check`] refused an advert event. The callers act only on which
+/// step refused it, so the reason within a step is not kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// It is past its validity horizon.
+    Expired,
+    /// Its id or signature does not verify.
+    Forged,
+    /// It is not our advert, or it breaks a content rule.
+    Invalid,
 }
 
-/// [`check`], parsing with `parse`, so a test can see when the parse runs.
+/// `event` as an advert to cache at `now_ms`, if it is one: still inside its
+/// validity horizon (checked first, before anything is read), passing
+/// [`screen`], [`authentic`], then [`decode`], with its `created_at` clamped
+/// to no more than the skew tolerance ahead of `now_ms`. Every advert a
+/// relay delivers passes through here.
+pub fn check(event: &Event, app: &str, max_age_ms: u64, now_ms: u64) -> Result<Checked, Refusal> {
+    check_with(event, app, max_age_ms, now_ms, decode)
+}
+
+/// [`check`], decoding with `decode`, so a test can see when the decode
+/// runs.
 fn check_with(
     event: &Event,
     app: &str,
     max_age_ms: u64,
     now_ms: u64,
-    parse: impl FnOnce(&Event, &str) -> Result<OverlayAdvert, ParseError>,
-) -> Option<Checked> {
-    let valid_until_ms = valid_until_ms(event, max_age_ms, now_ms)?;
-    let advert = parse(event, app).ok()?;
-    Some(Checked {
+    decode: impl FnOnce(&Event) -> Result<OverlayAdvert, ParseError>,
+) -> Result<Checked, Refusal> {
+    let valid_until_ms = valid_until_ms(event, max_age_ms, now_ms).ok_or(Refusal::Expired)?;
+    screen(event, app).map_err(|_| Refusal::Invalid)?;
+    if !authentic(event) {
+        return Err(Refusal::Forged);
+    }
+    let advert = decode(event).map_err(|_| Refusal::Invalid)?;
+    Ok(Checked {
         author_npub: author_npub(event),
         advert,
         created_at: effective_created_at_secs(event.created_at.as_secs(), now_ms),

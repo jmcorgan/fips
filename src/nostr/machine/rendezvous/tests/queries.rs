@@ -188,6 +188,97 @@ fn a_refetch_that_finds_nothing_evicts_and_resets_the_streak_before_replying() {
 }
 
 #[test]
+fn a_forged_newer_advert_does_not_displace_the_genuine_one_in_a_fetch() {
+    let mut h = Harness::new(params(10));
+    let (actions, reply) = endpoints(&mut h, NODE_B_SECRET);
+    let req = fetches(&actions)[0].0;
+    let now = h.unix_secs();
+    let genuine = advert_by(NODE_B_SECRET, now - 20, &body("8.8.8.1:443"));
+    let forged = forged_by(
+        NODE_B_SECRET,
+        now - 10,
+        &body("8.8.8.1:443"),
+        &body("8.8.4.4:443"),
+    );
+    let actions = h.input(Input::FetchDone {
+        req,
+        outcome: Ok(vec![genuine, forged]),
+    });
+    let lines = logs(&actions);
+    assert!(matches!(
+        reply_to(actions, reply),
+        Some((_, Reply::Endpoints(Ok(e)))) if e == body("8.8.8.1:443").endpoints
+    ));
+    assert_eq!(
+        inspect(&mut h, &npub(NODE_B_SECRET)).created_at,
+        Some(now - 20),
+        "the genuine advert is cached"
+    );
+    assert_eq!(forged_totals(&lines).0, vec![1], "one forged event");
+}
+
+#[test]
+fn a_forged_newer_advert_does_not_hold_back_a_refetch_refresh() {
+    let mut h = Harness::new(params(10));
+    let now = h.unix_secs();
+    insert(
+        &mut h,
+        &advert_by(NODE_B_SECRET, now - 30, &body("8.8.8.8:443")),
+    );
+    let genuine = advert_by(NODE_B_SECRET, now - 25, &body("8.8.8.1:443"));
+    let forged = forged_by(
+        NODE_B_SECRET,
+        now - 20,
+        &body("8.8.8.1:443"),
+        &body("8.8.4.4:443"),
+    );
+    let (actions, reply, reset) =
+        refetched_after_failures(&mut h, NODE_B_SECRET, vec![genuine, forged]);
+    let lines = logs(&actions);
+    assert_eq!(
+        refetch_outcome(actions, reply).1,
+        NostrRefetchOutcome::Refreshed
+    );
+    assert_eq!(reset, vec![npub(NODE_B_SECRET)], "the streak is reset");
+    assert_eq!(
+        inspect(&mut h, &npub(NODE_B_SECRET)).created_at,
+        Some(now - 25),
+        "the genuine advert is cached"
+    );
+    let (actions, reply) = endpoints(&mut h, NODE_B_SECRET);
+    assert!(matches!(
+        reply_to(actions, reply),
+        Some((_, Reply::Endpoints(Ok(e)))) if e == body("8.8.8.1:443").endpoints
+    ));
+    assert_eq!(forged_totals(&lines).0, vec![1], "one forged event");
+}
+
+#[test]
+fn a_refetch_answered_only_by_a_forged_advert_evicts_as_if_nothing_came_back() {
+    let mut h = Harness::new(params(10));
+    let now = h.unix_secs();
+    insert(
+        &mut h,
+        &advert_by(NODE_B_SECRET, now - 30, &body("8.8.8.8:443")),
+    );
+    let forged = forged_by(
+        NODE_B_SECRET,
+        now - 20,
+        &body("8.8.8.8:443"),
+        &body("8.8.4.4:443"),
+    );
+    let (actions, reply, reset) = refetched_after_failures(&mut h, NODE_B_SECRET, vec![forged]);
+    let lines = logs(&actions);
+    assert_eq!(
+        refetch_outcome(actions, reply).1,
+        NostrRefetchOutcome::Evicted
+    );
+    assert_eq!(reset, vec![npub(NODE_B_SECRET)], "the streak is reset");
+    assert_eq!(inspect(&mut h, &npub(NODE_B_SECRET)).created_at, None);
+    assert_eq!(forged_totals(&lines).0, vec![1], "one forged event");
+}
+
+#[test]
 fn a_refetch_with_only_foreign_answers_is_skipped() {
     let mut h = Harness::new(params(10));
     let event = advert_by(NODE_B_SECRET, h.unix_secs(), &body("8.8.8.8:443"));

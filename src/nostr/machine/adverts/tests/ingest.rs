@@ -66,12 +66,39 @@ fn advert_a(expiration: u64) -> Event {
     )
 }
 
+/// `event` with its content replaced by `content` after signing, so its id
+/// no longer verifies.
+fn tampered(mut event: Event, content: &str) -> Event {
+    event.content = content.to_string();
+    event
+}
+
+/// Node B's advert carrying `content`, created at C.1's time, with the
+/// signature of node A's advert of the same content: its id is right for
+/// what it carries, and its signature is not B's over that id.
+fn signed_by_another_key(content: &str) -> Event {
+    let b = advert_with(NODE_B_SECRET, C1_SECS, APP, Vec::new(), content);
+    let a = advert_with(NODE_A_SECRET, C1_SECS, APP, Vec::new(), content);
+    Event::new(
+        b.id,
+        b.pubkey,
+        b.created_at,
+        b.kind,
+        b.tags.clone(),
+        b.content.clone(),
+        a.sig,
+    )
+}
+
+/// A body naming one TCP endpoint other than Section 4.2's.
+const ELSEWHERE: &str = r#"{"identifier":"fips-overlay-v1","version":1,"endpoints":[{"transport":"tcp","addr":"8.8.8.8:443"}]}"#;
+
 #[test]
 fn an_expired_advert_is_refused_before_it_is_parsed() {
     let parses = Cell::new(0);
-    let counting = |event: &Event, app: &str| {
+    let counting = |event: &Event| {
         parses.set(parses.get() + 1);
-        parse(event, app)
+        decode(event)
     };
     // Malformed content: were it parsed, the parse would fail too, so only
     // the count tells the two orders apart.
@@ -83,13 +110,125 @@ fn an_expired_advert_is_refused_before_it_is_parsed() {
         "not json",
     );
     let now_ms = (C1_SECS + 20) * 1000;
-    assert_eq!(check_with(&expired, APP, 7_200_000, now_ms, counting), None);
+    assert_eq!(
+        check_with(&expired, APP, 7_200_000, now_ms, counting),
+        Err(Refusal::Expired)
+    );
     assert_eq!(parses.get(), 0, "an expired advert was parsed");
 
     // Control: a current advert with the same content is parsed, once.
     let current = advert_with(NODE_A_SECRET, C1_SECS, APP, Vec::new(), "not json");
-    assert_eq!(check_with(&current, APP, 7_200_000, now_ms, counting), None);
+    assert_eq!(
+        check_with(&current, APP, 7_200_000, now_ms, counting),
+        Err(Refusal::Invalid)
+    );
     assert_eq!(parses.get(), 1);
+}
+
+#[test]
+fn a_forged_advert_is_refused_before_it_is_decoded() {
+    let decodes = Cell::new(0);
+    let counting = |event: &Event| {
+        decodes.set(decodes.get() + 1);
+        decode(event)
+    };
+    let now_ms = C1_SECS * 1000;
+    let genuine = advert_with(NODE_B_SECRET, C1_SECS, APP, Vec::new(), SECTION_4_2);
+    let forged = [
+        tampered(genuine.clone(), ELSEWHERE),
+        signed_by_another_key(SECTION_4_2),
+    ];
+    for event in &forged {
+        assert_eq!(
+            check_with(event, APP, 7_200_000, now_ms, counting),
+            Err(Refusal::Forged)
+        );
+        assert!(!authentic(event));
+    }
+    assert_eq!(decodes.get(), 0, "a forged advert was decoded");
+
+    // Control: the genuine advert is decoded, once, and admitted.
+    assert!(check_with(&genuine, APP, 7_200_000, now_ms, counting).is_ok());
+    assert_eq!(decodes.get(), 1);
+}
+
+#[test]
+fn an_advert_signed_by_another_key_than_its_pubkey_is_forged() {
+    let event = signed_by_another_key(SECTION_4_2);
+    assert_eq!(
+        event.id,
+        advert_with(NODE_B_SECRET, C1_SECS, APP, Vec::new(), SECTION_4_2).id,
+        "the id is right for what the event carries"
+    );
+    assert!(!authentic(&event));
+    assert_eq!(
+        check(&event, APP, 7_200_000, C1_SECS * 1000),
+        Err(Refusal::Forged)
+    );
+}
+
+#[test]
+fn a_genuine_advert_passes_the_signature_check() {
+    // FRC-1601 C.2's advert of Section 4.2, by node A.
+    let c2 = super::super::super::event::advert::advert_event(
+        &signer(NODE_A_SECRET),
+        SECTION_4_2.to_string(),
+        "fips-overlay-v1",
+        "fips-overlay-v1",
+        3_600,
+        C1_SECS * 1000,
+        [0u8; 32],
+    )
+    .expect("an advert");
+    assert_eq!(
+        c2.id.to_hex(),
+        "8f7476a38d5f5ea8c139b8cef70a215f9733a5ee36dd2fab0f164e7123c9436e",
+        "C.2's id"
+    );
+    assert!(authentic(&c2));
+    let checked = check(&c2, APP, 7_200_000, C1_SECS * 1000).expect("C.2's advert is admitted");
+    assert_eq!(checked.advert.endpoints.len(), 2);
+
+    // The advert a node running the nostr 0.44 code sent, captured then.
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/nostr/fixtures/v044/advert.json"
+    )))
+    .expect("the fixture");
+    let captured_ms = fixture["captureUnixMs"].as_u64().expect("its time");
+    let event = Event::from_json(fixture["event"].to_string()).expect("its event");
+    assert!(authentic(&event));
+    let checked = check(&event, APP, 7_200_000, captured_ms).expect("the 0.44 advert is admitted");
+    assert_eq!(checked.advert.endpoints.len(), 2);
+}
+
+#[test]
+fn an_advert_without_our_protocol_tag_is_refused_before_its_signature_is_checked() {
+    let now_ms = C1_SECS * 1000;
+    let untagged = signer(NODE_B_SECRET)
+        .sign(
+            SignedKind::Advert,
+            Timestamp::from(C1_SECS),
+            vec![Tag::identifier("fips-overlay-v1".to_string())],
+            SECTION_4_2.to_string(),
+            [0u8; 32],
+        )
+        .expect("an event");
+    let theirs = advert_with(NODE_B_SECRET, C1_SECS, "other-app", Vec::new(), SECTION_4_2);
+    let oversized = advert_with(NODE_B_SECRET, C1_SECS, APP, Vec::new(), SECTION_4_2);
+    let refused_unchecked = [
+        tampered(untagged, ELSEWHERE),
+        tampered(theirs, ELSEWHERE),
+        tampered(oversized, &"x".repeat(MAX_ADVERT_CONTENT_BYTES + 1)),
+    ];
+    for event in &refused_unchecked {
+        assert!(!authentic(event), "control: the event is forged");
+        assert_eq!(
+            check(event, APP, 7_200_000, now_ms),
+            Err(Refusal::Invalid),
+            "the screen refuses it before the signature check"
+        );
+    }
 }
 
 #[test]
@@ -102,9 +241,12 @@ fn an_advert_for_another_app_is_refused() {
         "{refused:?}"
     );
     let now_ms = C1_SECS * 1000;
-    assert_eq!(check(&theirs, APP, 7_200_000, now_ms), None);
+    assert_eq!(
+        check(&theirs, APP, 7_200_000, now_ms),
+        Err(Refusal::Invalid)
+    );
     let ours = advert_with(NODE_A_SECRET, C1_SECS, APP, Vec::new(), SECTION_4_2);
-    assert!(check(&ours, APP, 7_200_000, now_ms).is_some(), "control");
+    assert!(check(&ours, APP, 7_200_000, now_ms).is_ok(), "control");
 }
 
 #[test]
@@ -149,7 +291,9 @@ fn a_future_created_at_is_clamped_before_admission() {
     );
     let near = advert_with(NODE_A_SECRET, C1_SECS + 30, APP, Vec::new(), SECTION_4_2);
     assert_eq!(
-        check(&near, APP, 7_200_000, now_ms).unwrap().created_at,
+        check(&near, APP, 7_200_000, now_ms)
+            .expect("admitted")
+            .created_at,
         C1_SECS + 30,
         "control: a created_at inside the tolerance is kept"
     );
@@ -248,7 +392,7 @@ fn the_frc_c3_validity_horizon_holds() {
         let checked = check(event, APP, *max_age_ms, C3_NOW_MS).expect("admitted");
         assert_eq!(Some(checked.valid_until_ms), *horizon, "C.3 row {}", i + 1);
     }
-    let clamped = check(&rows[2].0, APP, 3_600_000, C3_NOW_MS).unwrap();
+    let clamped = check(&rows[2].0, APP, 3_600_000, C3_NOW_MS).expect("admitted");
     assert_eq!(
         clamped.created_at, 1_830_297_720,
         "C.3 row 3's clamped created"

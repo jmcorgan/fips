@@ -219,6 +219,24 @@ pub(super) fn render(line: &Log) {
             relays = *relays,
             "publish reached no relay"
         ),
+        Log::EventForged {
+            kind,
+            author,
+            event,
+            total,
+        } => debug!(
+            target: "fips::nostr::runtime",
+            kind = *kind,
+            claimed = %short_npub(author),
+            event = %short_id(&event.to_string()),
+            total = *total,
+            "nostr event refused: signature does not verify"
+        ),
+        Log::EventsForged { forged } => warn!(
+            target: "fips::nostr::runtime",
+            forged = *forged,
+            "nostr events refused for a signature that does not verify"
+        ),
         Log::PublicAddrFailed { error } => debug!(
             target: "fips::nostr::runtime",
             error = %error,

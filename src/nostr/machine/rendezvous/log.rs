@@ -123,6 +123,18 @@ pub enum Log {
     },
     /// The public-address observation could not run (debug).
     PublicAddrFailed { error: String },
+    /// A peer's event of `kind` was refused because its id or signature
+    /// does not verify (debug), and the count since start. `author` is the
+    /// npub of the key the event claims, which did not sign it.
+    EventForged {
+        kind: u16,
+        author: String,
+        event: EventId,
+        total: u64,
+    },
+    /// The count of events refused for a signature that does not verify
+    /// reached a power of two (warn).
+    EventsForged { forged: u64 },
     /// A publish of an event of `kind` to `relays` relays was accepted by
     /// the client but reached none of them (debug).
     PublishReachedNone {

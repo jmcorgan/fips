@@ -346,6 +346,25 @@ fn machine_cases() -> Vec<(Log, &'static str, &'static str, &'static str, &'stat
             "publish reached no relay",
             "kind=37195 event=8f7476a3 relays=2",
         ),
+        (
+            Log::EventForged {
+                kind: 37195,
+                author: PEER.to_string(),
+                event: event_id(),
+                total: 3,
+            },
+            RUNTIME,
+            "DEBUG",
+            "nostr event refused: signature does not verify",
+            "kind=37195 claimed=npub1lycg..q266 event=8f7476a3 total=3",
+        ),
+        (
+            Log::EventsForged { forged: 4 },
+            RUNTIME,
+            "WARN",
+            "nostr events refused for a signature that does not verify",
+            "forged=4",
+        ),
     ]
 }
 

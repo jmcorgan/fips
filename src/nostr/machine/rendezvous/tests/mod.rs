@@ -342,6 +342,41 @@ pub(super) fn advert_by(hex: &str, created_secs: u64, advert: &OverlayAdvert) ->
     .expect("an advert")
 }
 
+/// A forged advert under the key written as `hex`: its advert of
+/// `genuine`, created at `created_secs`, with its content replaced after
+/// signing by `claimed`, so its id does not verify. Were it accepted, both
+/// its endpoints and its `created_at` would show it.
+pub(super) fn forged_by(
+    hex: &str,
+    created_secs: u64,
+    genuine: &OverlayAdvert,
+    claimed: &OverlayAdvert,
+) -> Event {
+    let mut event = advert_by(hex, created_secs, genuine);
+    event.content = serde_json::to_string(claimed).unwrap();
+    event
+}
+
+/// The totals of the forged-event lines among `lines`, and of the
+/// power-of-two warnings.
+pub(super) fn forged_totals(lines: &[Log]) -> (Vec<u64>, Vec<u64>) {
+    let each = lines
+        .iter()
+        .filter_map(|line| match line {
+            Log::EventForged { total, .. } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    let warned = lines
+        .iter()
+        .filter_map(|line| match line {
+            Log::EventsForged { forged } => Some(*forged),
+            _ => None,
+        })
+        .collect();
+    (each, warned)
+}
+
 /// `event` as a relay delivers it.
 pub(super) fn delivered(event: Event) -> Input {
     Input::RelayEvent {
