@@ -448,13 +448,19 @@ refused is refused again; its next attempt, with a fresh msg1, is answered.
 
 ### Mechanism
 
-A rekey reuses the Noise IK pattern of the initial handshake, but the two
-messages travel over the existing link as ordinary encrypted FMP frames
-rather than as plaintext bootstrap packets. The initiator builds a fresh
-`HandshakeState`, generates msg1, and sends it through the current session;
-the responder consumes msg1, builds msg2, and replies. After both sides
-have exchanged messages and finalised the new keys, traffic transitions
-from the old session to the new one.
+A rekey reuses the Noise IK pattern of the initial handshake, and its two
+messages are the same cleartext handshake packets a first handshake uses:
+msg1 (phase 0x1) and msg2 (phase 0x2), sent to the link's current
+transport address rather than through the session. The responder treats a
+msg1 as a rekey only when it arrives on the link of a peer it already
+holds at the same epoch, and only once the link is 30 s old and its
+current session 10 s old. Before then, a msg1 from that peer draws
+the msg2 stored at link setup if it resends the setup msg1, and is
+otherwise handled as a fresh dial; a msg1 at a different epoch is a
+restart. The initiator builds a fresh `HandshakeState` and sends msg1; the
+responder consumes it, builds msg2 and replies. The old session keeps
+carrying traffic until both sides have finalised the new keys, and traffic
+then moves to the new session as described below.
 
 The initiator switches first, at its next tick once it has read msg2, and
 at once sends a heartbeat under the new session, repeated 1 s and 3 s

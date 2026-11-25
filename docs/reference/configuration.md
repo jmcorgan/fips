@@ -1228,11 +1228,15 @@ is full, a new link evicts an unverified link that has had
 preferring a node's duplicate links and then the oldest; when no link may
 be evicted, the new link is refused.
 
-An unverified link is not closed on a timer, and the pool evicts only when
-it is full. Set `max_connections` no higher than the number of connections
-the Bluetooth adapter can hold, less any the host keeps for other devices:
-if the adapter runs out of connections first, links that never complete a
-handshake can hold the rest and no eviction makes room.
+An unverified link on which no handshake has completed is closed once
+`node.rate_limit.handshake_timeout_secs` has passed since it was admitted,
+or since the node last held a handshake or link on it. A link on which a
+handshake once completed leaves only by eviction or link loss, and the pool
+evicts only when it is full. Set `max_connections` no higher than the number
+of connections the Bluetooth adapter can hold, less any the host keeps for
+other devices: if the adapter runs out of connections first, links still
+waiting on a handshake can hold the rest until they time out, and no
+eviction makes room.
 
 ### BLE Example
 
