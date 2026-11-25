@@ -12,8 +12,10 @@
 //! frames still authenticate afterwards.
 //!
 //! In each test B is the node under test and A its peer. Silence is
-//! modelled by stamping B's last authenticated frame from A 16 s back, which
-//! is the state the receiver's liveness check reads.
+//! modelled by stamping B's last authenticated frame from A back, which is
+//! the state the receiver's liveness check reads: 16 s back for a same-epoch
+//! silence, and 31 s back for a silence a restarted A dials into, past the
+//! restart floor.
 
 use super::establish_chartests::craft_msg1_wire;
 use super::rekey_parity::{
@@ -31,6 +33,10 @@ use crate::proto::fmp::{Msg1Digest, RekeyRole};
 /// How far back a silent peer's last authenticated frame is stamped: past
 /// the 15 s liveness interval.
 const SILENT_MS: u64 = 16_000;
+
+/// How far back a restarted peer's last authenticated frame is stamped: past
+/// the restart heard floor at default config, the 30 s link-dead timeout.
+const LAPSED_MS: u64 = 31_000;
 
 /// How far back a live but slow peer's last frame is stamped: under the
 /// 15 s interval, over a 2 s grace.
@@ -459,7 +465,7 @@ async fn a_same_epoch_replacement_stamps_the_shared_dampener_so_a_second_replace
         epoch,
         "precondition: the restarted A has a new epoch"
     );
-    last_heard(&mut nodes[b], &a_addr, SILENT_MS);
+    last_heard(&mut nodes[b], &a_addr, LAPSED_MS);
     initiate_handshake(&mut nodes, a, b).await;
     one_exchange(&mut nodes, a, b).await;
     let p = nodes[b].node.get_peer(&a_addr).unwrap();
@@ -1051,4 +1057,58 @@ async fn an_off_link_msg1_from_a_peer_silent_for_16_s_12_s_after_our_cutover_on_
         }
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+/// A restarted A dials B 16 s after B last heard from it: past the 15 s
+/// same-epoch floor but inside B's 30 s link-dead timeout. A msg1 from A's
+/// new run is indistinguishable from a replayed one, so B keeps its link and
+/// its stored epoch for A.
+#[tokio::test]
+async fn a_restarted_peer_dialling_16_s_into_a_silence_leaves_the_heard_peering_and_its_epoch() {
+    let (a, b) = (0, 1);
+    let mut nodes = linked_pair(rekey_config(60), rekey_config(60)).await;
+    let a_addr = addr(&nodes, a);
+    let (link, epoch) = {
+        let p = nodes[b].node.get_peer(&a_addr).unwrap();
+        (p.link_id(), p.remote_epoch())
+    };
+    let restarted = restarted_node(&nodes[a], rekey_config(60));
+    drop(std::mem::replace(&mut nodes[a], restarted));
+    assert_ne!(
+        Some(nodes[a].node.startup_epoch()),
+        epoch,
+        "precondition: the restarted A has a new epoch"
+    );
+    last_heard(&mut nodes[b], &a_addr, SILENT_MS);
+    initiate_handshake(&mut nodes, a, b).await;
+    one_exchange(&mut nodes, a, b).await;
+    let p = nodes[b]
+        .node
+        .get_peer(&a_addr)
+        .expect("B must keep its peering with A");
+    assert_eq!(p.link_id(), link, "B's peering must keep its link");
+    assert_eq!(
+        p.remote_epoch(),
+        epoch,
+        "B's stored epoch for A must not move to the restarted epoch"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The same restart once B has not heard from A for 31 s, past the link-dead
+/// timeout, re-peers in one exchange and both ends authenticate afterwards.
+#[tokio::test]
+async fn a_restarted_peer_dialling_31_s_into_a_silence_re_peers_in_one_exchange() {
+    let (a, b) = (0, 1);
+    let mut nodes = linked_pair(rekey_config(60), rekey_config(60)).await;
+    let a_addr = addr(&nodes, a);
+    let old_link = nodes[b].node.get_peer(&a_addr).unwrap().link_id();
+    let restarted = restarted_node(&nodes[a], rekey_config(60));
+    drop(std::mem::replace(&mut nodes[a], restarted));
+    last_heard(&mut nodes[b], &a_addr, LAPSED_MS);
+    initiate_handshake(&mut nodes, a, b).await;
+    one_exchange(&mut nodes, a, b).await;
+
+    assert_replaced(&mut nodes, a, b, old_link).await;
+    cleanup_nodes(&mut nodes).await;
 }

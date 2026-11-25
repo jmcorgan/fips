@@ -3250,3 +3250,164 @@ mod heard {
         two_msg1s_in_one_tick_leave_a_working_peering(false).await;
     }
 }
+
+// ===== A restart msg1 against a peering that is still heard =====
+//
+// A peer's msg1 from an earlier run carries nothing time-based, so a copy of
+// it can be replayed from any address long after it was sent. While the held
+// peering is still heard inside its link-dead timeout it must not be torn
+// down by one; once the peer has been silent that long, a restart replaces it.
+
+/// What an earlier-epoch msg1 left of a heard peering.
+struct RestartOutcome {
+    /// The link the held peering was bound to before the msg1.
+    before: LinkId,
+    /// The peering's link after the msg1, if one is still held.
+    after: Option<LinkId>,
+    /// The stored epoch after the msg1.
+    epoch: Option<[u8; 8]>,
+    /// The epoch the msg1 carried.
+    msg1_epoch: [u8; 8],
+    /// Whether the msg1 stamped the restart dampener.
+    stamped: bool,
+    /// The node's `link_dead_timeout_secs`.
+    link_dead_secs: u64,
+}
+
+/// Deliver an earlier-epoch msg1 of a held, heard peer from an address that is
+/// not the peer's, the peer last heard `idle_secs` ago, on a node built from
+/// `config`.
+async fn restart_replay_after_silence(config: Config, idle_secs: u64) -> RestartOutcome {
+    let transport_id = TransportId::new(1);
+    let mut node = make_node_with(config);
+    let initiator = make_node();
+    let initiator_addr = node_addr_of(&initiator);
+    let peer_addr = TransportAddr::from_string("127.0.0.1:41077");
+    let other_addr = TransportAddr::from_string("203.0.113.9:4444");
+    let before = install_peering_at_a_different_epoch(
+        &mut node,
+        &initiator,
+        transport_id,
+        &peer_addr,
+        idle_secs,
+    );
+    assert!(
+        node.get_peer(&initiator_addr).unwrap().is_heard(),
+        "precondition: the held peering is heard"
+    );
+    node.handle_msg1(ReceivedPacket::with_timestamp(
+        transport_id,
+        other_addr,
+        genuine_msg1(&initiator, &node),
+        Node::now_ms(),
+    ))
+    .await;
+    let held = node.get_peer(&initiator_addr);
+    RestartOutcome {
+        before,
+        after: held.map(|p| p.link_id()),
+        epoch: held.and_then(|p| p.remote_epoch()),
+        msg1_epoch: initiator.startup_epoch(),
+        stamped: node.restart_dampener_stamp(&initiator_addr).is_some(),
+        link_dead_secs: node.config().node.link_dead_timeout_secs,
+    }
+}
+
+/// A node config with `link_dead_timeout_secs` set to `secs`.
+fn link_dead_config(secs: u64) -> Config {
+    let mut config = Config::new();
+    config.node.link_dead_timeout_secs = secs;
+    config
+}
+
+#[tokio::test]
+async fn an_earlier_epoch_msg1_from_another_address_16_s_into_a_silence_leaves_the_live_peering() {
+    let out = restart_replay_after_silence(Config::new(), 16).await;
+    assert!(
+        16 < out.link_dead_secs,
+        "precondition: the peering is inside its link-dead timeout"
+    );
+    assert_eq!(
+        out.after,
+        Some(out.before),
+        "an earlier-epoch msg1 16 s into a silence (link-dead timeout {} s) must \
+         leave the live peering: link before {:?} after {:?}",
+        out.link_dead_secs,
+        out.before,
+        out.after
+    );
+    assert_eq!(out.epoch, Some([0xAA; 8]), "the stored epoch must not move");
+}
+
+#[tokio::test]
+async fn with_a_45_s_link_dead_timeout_an_earlier_epoch_msg1_31_s_into_a_silence_leaves_the_live_peering()
+ {
+    let out = restart_replay_after_silence(link_dead_config(45), 31).await;
+    assert!(
+        31 < out.link_dead_secs,
+        "precondition: the peering is inside its link-dead timeout"
+    );
+    assert_eq!(
+        out.after,
+        Some(out.before),
+        "the restart floor must follow link_dead_timeout_secs ({} s): link before {:?} \
+         after {:?}",
+        out.link_dead_secs,
+        out.before,
+        out.after
+    );
+}
+
+#[tokio::test]
+async fn the_same_msg1_14_s_into_a_silence_leaves_the_peering() {
+    let out = restart_replay_after_silence(Config::new(), 14).await;
+    assert!(
+        14 < out.link_dead_secs,
+        "precondition: the peering is inside its link-dead timeout"
+    );
+    assert_eq!(
+        out.after,
+        Some(out.before),
+        "a restart msg1 inside the 15 s floor must leave the peering"
+    );
+}
+
+#[tokio::test]
+async fn with_a_10_s_link_dead_timeout_a_restart_msg1_is_refused_at_12_s_of_silence_and_accepted_at_16_s()
+ {
+    let early = restart_replay_after_silence(link_dead_config(10), 12).await;
+    assert_eq!(
+        early.after,
+        Some(early.before),
+        "the restart floor must never fall below 15 s: refused at 12 s of silence"
+    );
+    let late = restart_replay_after_silence(link_dead_config(10), 16).await;
+    assert!(
+        late.after.is_some_and(|l| l != late.before),
+        "past both the 15 s floor and the link-dead timeout the restart must replace \
+         the peering: link before {:?} after {:?}",
+        late.before,
+        late.after
+    );
+}
+
+#[tokio::test]
+async fn at_default_config_an_earlier_epoch_msg1_31_s_into_a_silence_restarts_the_peering() {
+    let out = restart_replay_after_silence(Config::new(), 31).await;
+    assert!(
+        out.after.is_some_and(|l| l != out.before),
+        "past the link-dead timeout the restart must replace the peering: link \
+         before {:?} after {:?}",
+        out.before,
+        out.after
+    );
+    assert_eq!(
+        out.epoch,
+        Some(out.msg1_epoch),
+        "the stored epoch must move to the one the msg1 carried"
+    );
+    assert!(
+        out.stamped,
+        "an accepted restart of a heard peering must stamp the dampener"
+    );
+}

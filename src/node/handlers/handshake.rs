@@ -23,33 +23,56 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 /// Minimum interval between accepted epoch changes for one peer identity,
-/// and the recency threshold at which the peering an epoch change would
-/// destroy still counts as live.
+/// the silence after which a same-epoch msg1 may replace a peering that has
+/// been heard from, and the window of the replay memory.
 ///
 /// An epoch-mismatch msg1 is authentic but replayable: a captured one stays
-/// valid indefinitely, and accepting it tears down a working peering. Both
-/// conditions are receiver-local. The liveness half is the one that closes
-/// the replay, since a peering under attack is by construction still
-/// heartbeating; the interval half bounds the churn a peer can drive on its
-/// own.
+/// valid indefinitely, since it carries nothing time-based, and accepting it
+/// tears down a working peering. Two receiver-local conditions gate that
+/// teardown. The liveness half is the one that closes the replay, since a
+/// peering under attack is by construction still heartbeating; the interval
+/// half (the dampener) bounds the churn a peer can drive on its own.
+///
+/// For a restart the liveness half does not use this constant alone: its
+/// floor is [`heard_floor`], the larger of this and `link_dead_timeout_secs`.
+/// A peering the node would still keep, because the peer was heard inside
+/// its link-dead timeout, is never ended by a captured earlier-epoch msg1.
+/// The cost is that a genuine restart against a peering still held is
+/// recovered after the link-dead timeout, about 30 to 40 s at defaults,
+/// rather than inside its first handshake window.
 ///
 /// Sized against the peer's own recovery rather than against a round number:
-/// a genuinely restarting peer's msg1 resends fire at roughly t+1, t+3, t+7
+/// a genuinely redialling peer's msg1 resends fire at roughly t+1, t+3, t+7
 /// and t+15 seconds and its attempt is reaped at `handshake_timeout_secs`
-/// (30), so 15 is the largest value at which a real restart still re-peers
-/// inside its first handshake window with no reconnect backoff. It also sits
-/// below `link_dead_timeout_secs` (30), so the liveness gate can never
-/// outlive the reaper that would have removed the peering anyway.
+/// (30), so 15 is the largest value at which a same-epoch replacement still
+/// completes inside its first handshake window with no reconnect backoff.
 ///
-/// Raising it lengthens the outage an attacker's accepted replay causes,
-/// because the genuine peer's recovery msg1 hits the same arm. Lowering it
-/// weakens both halves and, below the resend ladder, buys nothing.
+/// Raising it lengthens the outage an accepted same-epoch replay causes,
+/// because the genuine peer's recovery msg1 hits the same arm, and lengthens
+/// the dampener for both arms. Lowering it weakens both halves and, below the
+/// resend ladder, buys nothing.
 ///
 /// The same two conditions gate replacing a peering on a same-epoch msg1
 /// that is not a resend of its link-setup msg1, which is just as replayable.
 /// The dampener is per peer and shared by both, so a restart and a
 /// replacement of one peer inside the interval count as two teardowns.
 const EPOCH_RESTART_MIN_INTERVAL_SECS: u64 = 15;
+
+/// How long a peering that has been heard from must have been silent before
+/// a msg1 may tear it down, in ms.
+///
+/// A same-epoch replacement waits out [`EPOCH_RESTART_MIN_INTERVAL_SECS`]. A
+/// restart waits out the larger of that and the link-dead timeout, so a
+/// captured msg1 from the peer's earlier run cannot end a peering the node
+/// would still keep.
+fn heard_floor(node: &crate::config::NodeConfig, replacing: bool) -> u64 {
+    let secs = if replacing {
+        EPOCH_RESTART_MIN_INTERVAL_SECS
+    } else {
+        EPOCH_RESTART_MIN_INTERVAL_SECS.max(node.link_dead_timeout_secs)
+    };
+    secs.saturating_mul(1000)
+}
 
 /// How long a peering promoted on a received msg1 is kept against another
 /// msg1 from the same peer while nothing has been heard on it.
@@ -1087,15 +1110,17 @@ impl Node {
                 // (`ambient.verified_identity.node_addr()`) targets the same addr
                 // as the pre-refactor `remove_active_peer(&peer)`.
                 // The epoch travels inside the AEAD, so this msg1 is
-                // authentic — but it stays authentic after capture, and
-                // replaying one destroys a working peering and the FSP session
-                // state it carries, from off the path. Two receiver-local
-                // conditions gate the teardown. The peering's last
-                // authenticated inbound frame is the evidence it is still
-                // alive, and nothing an unauthenticated sender emits can
+                // authentic — but it stays authentic after capture, and could
+                // be replayed from off the path to tear down a working
+                // peering and the FSP session state it carries. Two
+                // receiver-local conditions gate the teardown. The peering's
+                // last authenticated inbound frame is the evidence it is
+                // still alive, and nothing an unauthenticated sender emits can
                 // refresh it, so a peer that genuinely restarted clears this by
-                // having stopped sending. The interval half bounds the churn
-                // one peer can drive on its own.
+                // having stopped sending. For a restart the liveness half
+                // waits out the link-dead window (`heard_floor`), so a replay
+                // cannot end a peering the node would still keep. The
+                // interval half bounds the churn one peer can drive on its own.
                 //
                 // A same-epoch replacement is the same teardown and just as
                 // replayable: a captured msg1 of an earlier peering at the same
@@ -1140,12 +1165,13 @@ impl Node {
                         return;
                     }
                 }
+                let floor_ms = heard_floor(&self.config().node, replacing);
                 let (peering_idle_ms, min_idle_ms) = self
                     .peers
                     .get(&peer)
                     .map(|p| {
                         if p.is_heard() {
-                            (p.idle_time(now_ms), EPOCH_RESTART_MIN_INTERVAL_SECS * 1000)
+                            (p.idle_time(now_ms), floor_ms)
                         } else {
                             (
                                 packet.timestamp_ms.saturating_sub(p.authenticated_at()),
