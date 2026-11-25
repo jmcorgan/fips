@@ -434,8 +434,11 @@ its peer's rekey whatever its own settings (the configuration tree is
 documented in
 [../reference/configuration.md](../reference/configuration.md)). A node
 starts no rekey of its own before the link is one tick past 30 s old and
-one tick past 30 s since its last cutover, below which a peer takes a msg1
-for a fresh dial rather than a rekey.
+one tick past 30 s since its last cutover. The link-age floor serves every
+peer, since a current responder takes a msg1 on a link younger than 30 s
+for a fresh dial rather than a rekey. Only the session floor, on the time
+since the last cutover, serves a 0.5.0 to 0.5.2 peer, which takes a msg1
+on a session younger than 30 s for a fresh dial.
 
 A rekey msg1 carries nothing fresh, so a copy of one still authenticates
 after its cycle has ended. Each link remembers the ephemeral key of every
@@ -452,13 +455,20 @@ A rekey reuses the Noise IK pattern of the initial handshake, and its two
 messages are the same cleartext handshake packets a first handshake uses:
 msg1 (phase 0x1) and msg2 (phase 0x2), sent to the link's current
 transport address rather than through the session. The responder treats a
-msg1 as a rekey only when it arrives on the link of a peer it already
-holds at the same epoch, and only once the link is 30 s old and its
-current session 10 s old. Before then, a msg1 from that peer draws
-the msg2 stored at link setup if it resends the setup msg1, and is
-otherwise handled as a fresh dial; a msg1 at a different epoch is a
-restart. The initiator builds a fresh `HandshakeState` and sends msg1; the
-responder consumes it, builds msg2 and replies. The old session keeps
+msg1 as a rekey when it comes from a peer it already holds at the same
+epoch and arrives on that peer's link, once the link is 30 s old and its
+current session 10 s old. A msg1 that arrives off the link is still judged
+as a rekey when the established link cannot carry a reply now (its
+connection-oriented transport no longer holds a connection to the link's
+address). While the link can carry one, an off-link msg1 is refused,
+except that a fresh one of a peering this node has heard from is answered
+as a redial, which replaces the peering only at the peer's first frame
+under it. Before the link and session ages are reached, a msg1 from that
+peer draws the msg2 stored at link setup if it resends the setup msg1; a
+fresh one off the link of a heard peering is answered as a redial; and any
+other fresh one is handled as a fresh dial. A msg1 at a different epoch is
+a restart. The initiator builds a fresh `HandshakeState` and sends msg1;
+the responder consumes it, builds msg2 and replies. The old session keeps
 carrying traffic until both sides have finalised the new keys, and traffic
 then moves to the new session as described below.
 
