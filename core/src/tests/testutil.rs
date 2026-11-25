@@ -98,7 +98,6 @@ fn explorer_only_finds_the_gate_on_a_test_on_a_module_and_on_a_test_in_an_inline
         "proto::settle::tests::joint::runs::the_sweep_of_start_10_keeps_the_properties_off_with_off",
         // The module's declaration in its parent.
         "proto::settle::tests::legacy::explore::a_model_of_the_node_on_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
-        "proto::rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals",
         // A test in `mod checks { .. }` inside its file.
         "proto::settle::tests::oracle::checks::model_parties_settle_on_every_start",
     ] {

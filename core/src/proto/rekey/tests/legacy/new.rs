@@ -550,7 +550,6 @@ impl End for NewFmp {
         self.label.clone()
     }
 
-    #[cfg(feature = "slow-explorers")]
     fn check(&self) -> Result<(), String> {
         self.conserved()
     }

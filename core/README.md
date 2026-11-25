@@ -301,22 +301,23 @@ The first lints the library with only the features its
 in doing so gives the library the dev-dependencies' features, so code
 that needs `secp256k1`'s `rand` or `std` passes it; the first does
 not. The third lints the slow test suites the `slow-tests` feature
-gates (the rekey models of the deployed releases and the guard-switch
-meta-test, and the path module's day with a deployed peer and hour of
-the two-node simulator). Every platform's ordinary test run skips them;
+gates (the rekey interleaving explorer, the rekey models of the
+deployed releases with their explorer and the guard-switch meta-test,
+and the path module's day with a deployed peer and hour of the two-node
+simulator). Every platform's ordinary test run skips them;
 GitHub CI's Linux job runs them on every push, and local CI with
 `--slow-tests`. Run all four before sending a change here. The
 repository guards in `testing/` (atomics, comment references, log
 strings) scan `core/src/` as well as `src/`.
 
-The explorers, every test that walks a state space (the rekey
-interleaving explorers, and settlement's model reach, joint-world reaches
-and sweeps, explored runs against the deployed models and the candidate
-rules), are gated by a second feature, `slow-explorers`, which turns
-`slow-tests` on too. No CI run started by a push runs them: local CI runs
-them only with `--explorers`, and the root's `--all-features` clippy pass
-lints them. After a change to the rekey machine, the settlement core or
-their explorers, run `cargo test -p fips-core --features slow-explorers`.
+The settlement explorers, every settlement test that walks a state space
+(the model reach, joint-world reaches and sweeps, explored runs against
+the deployed models and the candidate rules), are gated by a second
+feature, `slow-explorers`, which turns `slow-tests` on too. No CI run
+started by a push runs them: local CI runs them only with `--explorers`,
+and the root's `--all-features` clippy pass lints them. After a change to
+the settlement core or its explorers, run
+`cargo test -p fips-core --features slow-explorers`.
 
 These checks run on the host, where `std` exists, so they cannot catch
 a dependency that links it. A separate build of the library for two

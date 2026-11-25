@@ -26,7 +26,6 @@ use crate::proto::fmp::rekey::ik::FmpIk;
 use crate::proto::fsp::rekey::xk::FspXk;
 use crate::testutil::{SeededEntropy, SplitMix64};
 
-#[cfg(feature = "slow-explorers")]
 mod explore;
 mod fmp;
 mod fsp;
@@ -167,7 +166,6 @@ pub(crate) trait End {
     }
     /// What the end can check about its own resources at any instant (a
     /// new link node's index map against its machine and pool).
-    #[cfg(feature = "slow-explorers")]
     fn check(&self) -> Result<(), String> {
         Ok(())
     }
@@ -481,7 +479,6 @@ impl Duo {
     /// Hold every packet, those in flight now included, until it is
     /// delivered by [`Duo::deliver_now`], and stop the periodic data: from
     /// here on an explorer chooses every event.
-    #[cfg(feature = "slow-explorers")]
     pub(crate) fn hold(&mut self) {
         self.held = true;
         self.period = [None, None];
@@ -492,7 +489,6 @@ impl Duo {
 
     /// End holding: whatever is still in flight is lost, and both ends send
     /// data every second again.
-    #[cfg(feature = "slow-explorers")]
     pub(crate) fn release(&mut self) {
         self.held = false;
         self.flight.clear();
@@ -501,7 +497,6 @@ impl Duo {
     }
 
     /// The packets in flight: id, sender and class.
-    #[cfg(feature = "slow-explorers")]
     pub(crate) fn in_flight(&self) -> Vec<(u64, usize, Class)> {
         self.flight
             .iter()
@@ -510,7 +505,6 @@ impl Duo {
     }
 
     /// Deliver the packet `id` now, if it is in flight.
-    #[cfg(feature = "slow-explorers")]
     pub(crate) fn deliver_now(&mut self, id: u64) {
         if let Some(i) = self.flight.iter().position(|f| f.id == id) {
             let f = self.flight.remove(i);
@@ -519,7 +513,6 @@ impl Duo {
     }
 
     /// Put a second copy of packet `id` in flight.
-    #[cfg(feature = "slow-explorers")]
     pub(crate) fn copy(&mut self, id: u64) {
         if let Some(f) = self.flight.iter().find(|f| f.id == id).cloned() {
             let id = self.next_id;
@@ -530,7 +523,6 @@ impl Duo {
 
     /// Advance to the next instant either end ticks or wakes, and run it;
     /// held packets stay in flight.
-    #[cfg(feature = "slow-explorers")]
     pub(crate) fn advance(&mut self) {
         if let Some(t) = self.next_event(u64::MAX) {
             self.run_until(t + 1);
@@ -538,7 +530,6 @@ impl Duo {
     }
 
     /// End `x` seals a data frame now, if it can.
-    #[cfg(feature = "slow-explorers")]
     pub(crate) fn send_data(&mut self, x: usize) {
         self.seq += 1;
         let seq = self.seq;

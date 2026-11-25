@@ -138,7 +138,6 @@ impl End for ShipFmp {
         format!("shipped {}", self.n.name())
     }
 
-    #[cfg(feature = "slow-explorers")]
     fn check(&self) -> Result<(), String> {
         self.n.check()
     }

@@ -813,14 +813,12 @@ fn keys(seed: u64, new_smaller: bool) -> (NodeKeys, NodeKeys) {
 
 /// A link between a new node and a deployed one, set up at time 0 by a
 /// link handshake the new node initiated.
-#[cfg(feature = "slow-explorers")]
 pub(crate) fn link(s: &Setup, seed: u64) -> (super::Duo, usize) {
     link_with(s, seed, false)
 }
 
 /// A link between the link node this release ships and a deployed one, set
 /// up at time 0 by a link handshake the shipped node initiated.
-#[cfg(feature = "slow-explorers")]
 pub(crate) fn shipped_link(s: &Setup, seed: u64) -> (super::Duo, usize) {
     link_with(s, seed, true)
 }
@@ -917,14 +915,12 @@ fn link_with(s: &Setup, seed: u64, shipped: bool) -> (super::Duo, usize) {
 
 /// A link between two new nodes, set up at time 0 by a link handshake the
 /// first initiated: the production profile against itself.
-#[cfg(feature = "slow-explorers")]
 pub(crate) fn new_link(seed: u64, jitter: [u16; 2]) -> super::Duo {
     pair_with(seed, jitter, false)
 }
 
 /// A link between two of the link nodes this release ships, set up at time
 /// 0 by a link handshake the first initiated.
-#[cfg(feature = "slow-explorers")]
 pub(crate) fn shipped_pair(seed: u64, jitter: [u16; 2]) -> super::Duo {
     pair_with(seed, jitter, true)
 }

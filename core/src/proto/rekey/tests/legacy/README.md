@@ -62,10 +62,9 @@ feature: GitHub CI's Linux job runs it on every push, local CI with
   the session traces.
 - `explore.rs`: the bounded exhaustive explorer over a `Duo`, against
   every release and between two new nodes, the link and session rekeys and
-  the first handshakes also with the shipped nodes. Compiled only with the
-  crate's `slow-explorers` feature, as are the harness's hold and delivery
-  steps and the link setups only it uses; no CI run started by a push runs
-  it, and local CI runs it with `--explorers`.
+  the first handshakes also with the shipped nodes. Compiled, with the
+  harness's hold and delivery steps and the link setups only it uses,
+  whenever this directory is: with the crate's `slow-tests` feature.
 
 ## The models
 

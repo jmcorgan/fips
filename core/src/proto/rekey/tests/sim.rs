@@ -621,13 +621,13 @@ impl<P: Stub> World<P> {
     }
 
     /// Drop the datagram `id`.
-    #[cfg(feature = "slow-explorers")]
+    #[cfg(feature = "slow-tests")]
     pub(crate) fn lose(&mut self, id: u64) {
         self.flight.retain(|f| f.id != id);
     }
 
     /// Put a copy of datagram `id` in flight, arriving at `at`.
-    #[cfg(feature = "slow-explorers")]
+    #[cfg(feature = "slow-tests")]
     pub(crate) fn copy(&mut self, id: u64, at: u64) {
         if let Some(f) = self.flight.iter().find(|f| f.id == id).cloned() {
             let root = f.root();
@@ -1266,7 +1266,7 @@ impl<P: Stub> World<P> {
     }
 
     /// The earliest instant either node's timer shell polls.
-    #[cfg(feature = "slow-explorers")]
+    #[cfg(feature = "slow-tests")]
     pub(crate) fn wake(&self) -> Option<u64> {
         let a = self.n[0].m.as_ref().and(self.n[0].wake);
         let b = self.n[1].m.as_ref().and(self.n[1].wake);
@@ -1279,7 +1279,7 @@ impl<P: Stub> World<P> {
     /// A key that tells two explored states apart: both machines, the
     /// datagrams in flight, the worker and leg tables, and the clock,
     /// formatted straight into a hasher.
-    #[cfg(feature = "slow-explorers")]
+    #[cfg(feature = "slow-tests")]
     pub(crate) fn key(&self) -> u64 {
         use core::fmt::Write as _;
         use core::hash::Hasher as _;
