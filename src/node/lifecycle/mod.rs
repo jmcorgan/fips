@@ -2069,9 +2069,7 @@ impl Node {
                                 warn!(error = %err, "Failed to publish initial Nostr overlay advert");
                             }
                             self.supervisor.nostr_rendezvous.set_engine(runtime);
-                            self.supervisor
-                                .nostr_rendezvous
-                                .set_started_at_ms(Self::now_ms());
+                            self.supervisor.nostr_rendezvous.mark_started();
                             info!("Nostr overlay discovery enabled");
                             Event::SubstrateUp { child }
                         }
@@ -3078,7 +3076,7 @@ impl Node {
     ///
     /// Gated identically to [`run_open_discovery_sweep`]: requires
     /// `node.rendezvous.nostr.enabled` and `policy == open`.
-    async fn maybe_run_startup_open_discovery_sweep(
+    pub(in crate::node) async fn maybe_run_startup_open_discovery_sweep(
         &mut self,
         bootstrap: &std::sync::Arc<NostrRendezvous>,
     ) {
@@ -3096,7 +3094,10 @@ impl Node {
         let Some(started_at_ms) = self.supervisor.nostr_rendezvous.started_at_ms() else {
             return;
         };
-        let now_ms = Self::now_ms();
+        // The delay is measured on the monotonic clock the start was
+        // stamped on; the advert-age filter in the sweep stays on the wall
+        // clock, because advert timestamps are wall time.
+        let now_ms = crate::time::mono_ms();
         let delay_ms = self
             .config()
             .node

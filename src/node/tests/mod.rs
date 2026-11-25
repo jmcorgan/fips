@@ -96,6 +96,7 @@ mod short_plaintext;
 mod silent_backoff;
 mod silent_replay;
 mod spanning_tree;
+mod startup_sweep_clock;
 #[cfg(unix)]
 mod status;
 mod stored_msg2;

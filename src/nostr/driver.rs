@@ -81,8 +81,10 @@ fn canonical_socket(addr: SocketAddr) -> SocketAddr {
 pub struct RendezvousDriver {
     /// Optional Nostr/STUN overlay discovery coordinator for `udp:nat` peers.
     engine: Option<Arc<NostrRendezvous>>,
-    /// Wall-clock ms when Nostr discovery successfully started, used to
-    /// schedule the one-shot startup advert sweep after a settle delay.
+    /// Monotonic ms ([`crate::time::mono_ms`]) when Nostr discovery
+    /// successfully started, used to schedule the one-shot startup advert
+    /// sweep after a settle delay. A wall-clock step neither hastens nor
+    /// holds the sweep.
     /// `None` until discovery comes up; remains `None` if discovery is
     /// disabled or failed to start.
     started_at_ms: Option<u64>,
@@ -131,12 +133,15 @@ impl RendezvousDriver {
         self.engine.take()
     }
 
-    /// Record the wall-clock ms at which discovery successfully started.
-    pub fn set_started_at_ms(&mut self, now_ms: u64) {
-        self.started_at_ms = Some(now_ms);
+    /// Record that discovery successfully started, now on the monotonic
+    /// clock. The stamp takes no time from its caller, so it cannot be
+    /// read on a different clock from the one the sweep's check reads.
+    pub fn mark_started(&mut self) {
+        self.started_at_ms = Some(crate::time::mono_ms());
     }
 
-    /// Wall-clock ms when discovery started, if it has.
+    /// Monotonic ms ([`crate::time::mono_ms`]) when discovery started, if
+    /// it has.
     pub fn started_at_ms(&self) -> Option<u64> {
         self.started_at_ms
     }
