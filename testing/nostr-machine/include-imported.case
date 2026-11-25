@@ -1,0 +1,6 @@
+# include! imported under another name, then called by that name.
+expect exit 1
+expect extra.rs:1: include imported by a use item
+=== extra.rs
+use core::include as inc;
+inc!("../runtime.rs");

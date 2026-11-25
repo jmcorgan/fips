@@ -1688,7 +1688,7 @@ mod tests {
     }
 
     /// Pins the publisher/parser contract for Tor overlay adverts.
-    /// `build_overlay_advert` formats Tor endpoints as `<onion>:<port>`;
+    /// The advert assembly formats Tor endpoints as `<onion>:<port>`;
     /// `parse_tor_addr` must accept that exact form back. A bare onion
     /// (no port) was the production bug — assert it does not parse.
     #[test]

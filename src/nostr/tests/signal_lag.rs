@@ -7,26 +7,27 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nostr::ToBech32;
+use nostr::event::FinalizeEvent;
+use nostr::nips::nip19::ToBech32;
 use nostr::prelude::{
-    Event, EventBuilder, FromBech32, Keys, Kind, PublicKey, RelayUrl, SubscriptionId, Timestamp,
+    Event, EventBuilder, FromBech32, Keys, Kind, PublicKey, RelayUrl, SecretKey, SubscriptionId,
+    Timestamp,
 };
-use nostr_sdk::prelude::{
-    DEFAULT_NOTIFICATION_CHANNEL_SIZE as POOL_CHANNEL, RelayPoolNotification,
-};
-use tokio::sync::broadcast;
+use nostr_sdk::client::ClientNotification;
 
 use super::super::ADVERT_KIND;
+use super::super::machine::NodeSigner;
+use super::super::relay::POOL_CHANNEL;
 use super::super::runtime::NostrRendezvous;
-use super::super::signal::{build_signal_event, create_traversal_answer};
+use super::super::signal::{build_signal_event, create_traversal_answer, rumor};
 use super::super::traversal::now_ms;
 
 /// How long the test waits for an answer the loop should hand over.
 const HANDOFF_WAIT: Duration = Duration::from_secs(5);
 
 /// `event` as the pool delivers it from a relay.
-fn delivered(event: Event) -> RelayPoolNotification {
-    RelayPoolNotification::Event {
+fn delivered(event: Event) -> ClientNotification {
+    ClientNotification::Event {
         relay_url: RelayUrl::parse("ws://127.0.0.1:1").expect("relay url"),
         subscription_id: SubscriptionId::new("signals"),
         event: Box::new(event),
@@ -35,7 +36,7 @@ fn delivered(event: Event) -> RelayPoolNotification {
 
 /// A refusing answer from `from` to `to`, replying to our offer `nonce`,
 /// wrapped as a traversal signal.
-async fn answer_wrap(from: &Keys, to_npub: &str, nonce: &str) -> Event {
+async fn answer_wrap(from: &NodeSigner, to_npub: &str, nonce: &str) -> Event {
     let to = PublicKey::from_bech32(to_npub).expect("our npub");
     let answer = create_traversal_answer(
         format!("session-{nonce}"),
@@ -53,61 +54,55 @@ async fn answer_wrap(from: &Keys, to_npub: &str, nonce: &str) -> Event {
         Some("busy".to_string()),
         None,
     );
-    let rumor = EventBuilder::private_msg_rumor(to, serde_json::to_string(&answer).unwrap())
-        .build(from.public_key());
+    let rumor = rumor(
+        from.public_key(),
+        to,
+        serde_json::to_string(&answer).unwrap(),
+        now_ms(),
+    );
     build_signal_event(from, to, rumor, Timestamp::from(now_ms() / 1000 + 120))
-        .await
         .expect("signal event should build")
 }
 
 /// An advertisement-kind event from a stranger, as an advert flood delivers.
 fn advert_event() -> Event {
     EventBuilder::new(Kind::Custom(ADVERT_KIND), "{}")
-        .sign_with_keys(&Keys::generate())
+        .finalize(&Keys::generate())
         .expect("sign advert")
 }
 
 /// Deliver our peer's answer to `first`, then `flood` advertisements, through
-/// the runtime's relay client before the notify loop reads any of them, as
-/// when a burst arrives while the loop is busy. `pool` stands in for the relay
-/// pool's notification channel, `POOL_CHANNEL` deep as the pool makes it. Then
-/// start the loop, wait for that answer, deliver a second answer, to `second`,
-/// and report whether each answer reached its waiting traversal, and how many
-/// notifications were waiting unread on `pool` when the loop started.
+/// the runtime's relay client, as when a burst arrives. The advertisements go
+/// to the runtime's stand-in for the relay pool's notification channel,
+/// `POOL_CHANNEL` deep as the pool makes it; the answer goes to the signal
+/// router's own channel, which the pump reads as well. Wait for that answer,
+/// deliver a second answer, to `second`, and report whether each answer
+/// reached its waiting traversal, and how many notifications a reader of the
+/// stand-in that read none would have had waiting after the flood.
 async fn answers_handed_over_after_a_flood(flood: usize) -> (bool, bool, usize) {
     let runtime = Arc::new(NostrRendezvous::new_for_test());
     let our_npub = runtime.npub_for_test().to_string();
-    let peer = Keys::generate();
+    let peer = NodeSigner::new(SecretKey::generate());
     let first = runtime.await_answer_for_test("first").await;
     let second = runtime.await_answer_for_test("second").await;
 
-    let (pool, rx) = broadcast::channel(POOL_CHANNEL);
+    let rx = runtime.pool_receiver_for_test();
     runtime
-        .deliver_for_test(
-            &pool,
-            delivered(answer_wrap(&peer, &our_npub, "first").await),
-        )
+        .deliver_for_test(delivered(answer_wrap(&peer, &our_npub, "first").await))
         .await;
     let advert = advert_event();
     for _ in 0..flood {
-        runtime
-            .deliver_for_test(&pool, delivered(advert.clone()))
-            .await;
+        runtime.deliver_for_test(delivered(advert.clone())).await;
     }
     let backlog = rx.len();
-    let notify = runtime.clone().spawn_notify_loop_for_test(rx);
     let first = tokio::time::timeout(HANDOFF_WAIT, first).await;
 
-    // Delivered only once the loop has read the queue, so it overwrites
+    // Delivered only once the task has read the queue, so it overwrites
     // nothing.
     runtime
-        .deliver_for_test(
-            &pool,
-            delivered(answer_wrap(&peer, &our_npub, "second").await),
-        )
+        .deliver_for_test(delivered(answer_wrap(&peer, &our_npub, "second").await))
         .await;
     let second = tokio::time::timeout(HANDOFF_WAIT, second).await;
-    notify.abort();
     (
         matches!(first, Ok(Ok(_))),
         matches!(second, Ok(Ok(_))),

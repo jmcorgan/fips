@@ -1,0 +1,5 @@
+# libc.
+expect exit 1
+expect mod.rs:1: libc at the root of a use tree
+=== mod.rs
+use libc::c_int;

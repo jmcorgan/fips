@@ -632,6 +632,7 @@ GUARDS=(
     "run_ignored_tests ignored-tests"
     "run_carried carried"
     "run_portable_atomics portable-atomics"
+    "run_nostr_machine nostr-machine"
     "run_mount_tmpdir mount-tmpdir"
     "run_ci_labels ci-labels"
     "run_shellcheck shellcheck"
@@ -704,7 +705,7 @@ print_plan() {
     for g in "${GUARDS[@]}"; do echo "${g#* }"; done
     echo nft-syntax
     deb_early && echo deb-build
-    printf '%s\n' fmt clippy clippy-default-features \
+    printf '%s\n' fmt clippy clippy-default-features nostr-ban \
         core-fence-lib core-fence core-fence-slow core-doc
     [[ "$BAREMETAL" == true ]] && echo core-baremetal
     if [[ "$CROSS_CHECK" == true ]]; then
@@ -1288,6 +1289,19 @@ run_build() {
         record "clippy-default-features" 0
     else
         record "clippy-default-features" 1
+        return 1
+    fi
+
+    # The ban in clippy.toml on the nostr items that read the clock or the OS
+    # random source, against a fixture that uses each of them: an entry clippy
+    # cannot resolve draws only a warning, so the ban could break with clippy
+    # still green. Mirrored in .github/workflows/ci.yml; check-ci-parity.sh
+    # holds each such step to its counterpart.
+    info "testing/nostr-ban/test.sh (the nostr ban in clippy.toml against its fixture)"
+    if bash "$SCRIPT_DIR/nostr-ban/test.sh" 2>&1; then
+        record "nostr-ban" 0
+    else
+        record "nostr-ban" 1
         return 1
     fi
 
@@ -3349,6 +3363,23 @@ run_portable_atomics() {
     info "[portable-atomics] Checking that no non-test code uses std 64-bit atomics"
     python3 "$SCRIPT_DIR/check-portable-atomics.py" || rc=$?
     record "portable-atomics" "$rc"
+}
+
+# The Nostr machine (src/nostr/machine/) names no std, tokio, tracing or
+# nostr_sdk path and nothing in the root crate outside itself. Nothing builds it without
+# std, so this text check is what holds that fence. Its fixtures run first, so
+# a check that stopped seeing a banned path fails here rather than passing the
+# tree. Static, about a second, and needs nothing built. Mirrored in ci.yml's
+# ci-parity job by hand.
+run_nostr_machine() {
+    local rc=0
+    info "[nostr-machine] Checking that the Nostr machine stays inside its fence"
+    bash "$SCRIPT_DIR/nostr-machine/test.sh" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        python3 "$SCRIPT_DIR/check-nostr-machine.py" || rc=$?
+    fi
+    record "nostr-machine" "$rc"
+    return 0
 }
 
 # No bare mktemp result may become a docker bind-mount source. Under a private

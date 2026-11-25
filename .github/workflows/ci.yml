@@ -146,6 +146,12 @@ jobs:
         run: python3 testing/check-ignored-tests.py
       - name: Check no non-test code uses std 64-bit atomics
         run: python3 testing/check-portable-atomics.py
+      # The Nostr machine's fence: the guard's fixtures, then the guard on
+      # this tree. Kept in step with ci-local.sh's run_nostr_machine by hand.
+      - name: Check the Nostr machine guard against its fixtures
+        run: bash testing/nostr-machine/test.sh
+      - name: Check the Nostr machine names nothing outside its fence
+        run: python3 testing/check-nostr-machine.py
       - name: Check no bind-mount source comes from a bare mktemp
         run: python3 testing/check-mount-tmpdir.py
       - name: Check every CI container, network and volume carries the run label
@@ -280,6 +286,13 @@ jobs:
       # step to its counterpart.
       - name: Clippy (default features)
         run: cargo clippy --all-targets -- -D warnings
+      # The ban in clippy.toml on the nostr items that read the clock or the
+      # OS random source, checked against a fixture that uses each of them:
+      # an entry clippy cannot resolve draws only a warning, so the ban could
+      # break with clippy still green. Mirrored in testing/ci-local.sh;
+      # check-ci-parity.sh holds each such step to its counterpart.
+      - name: Check the nostr clock and randomness ban against its fixture
+        run: bash testing/nostr-ban/test.sh
       # The no_std core fence. A workspace build unifies dependency features
       # across members, so a feature the root crate enables can hide one the
       # core needs and does not ask for. Linting the core alone resolves only

@@ -917,19 +917,13 @@ impl Node {
             if let MismatchEvidence::Traversed(npub) = evidence
                 && let Some(handle) = self.nostr_rendezvous_handle()
             {
-                let now_ms = Self::now_ms();
-                let cooldown_secs = handle.protocol_mismatch_cooldown_secs();
-                if handle.record_protocol_mismatch(npub, now_ms) {
-                    warn!(
-                        peer_npub = %npub,
-                        transport_id = %packet.transport_id,
-                        remote_addr = %packet.remote_addr,
-                        peer_version = prefix.version,
-                        our_version = FMP_VERSION,
-                        cooldown_secs,
-                        "Datagram from the traversed peer's address carried another FMP version; suppressing re-traversal"
-                    );
-                }
+                handle.note_version_mismatch(
+                    npub,
+                    packet.transport_id,
+                    &packet.remote_addr,
+                    prefix.version,
+                    FMP_VERSION,
+                );
             }
             return;
         }

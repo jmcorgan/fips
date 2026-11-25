@@ -11,16 +11,16 @@ use super::peering::lan::{
     KnownLabels, LanOffer, MAX_PENDING_LAN_CANDIDATES, PendingLan, PendingPair, lan_target_on_link,
 };
 use super::peering::reconcile::{
-    Budget, Candidate, DiscoveryPools, Gate, Observed, PeeringAction, Policy,
+    Budget, Candidate, DiscoveryPools, Gate, Observed, OverlayRow, PeeringAction, Policy,
 };
 use super::peering::retry::MAX_RETRY_CONNECTIONS_PER_TICK;
 
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
 use crate::node::AddrKey;
 use crate::node::acl::PeerAclContext;
+use crate::node::handoff::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::node::settle::exec::Removed;
-use crate::nostr::{BootstrapEvent, NostrRendezvous};
-use crate::nostr::{BootstrapHandoffResult, EstablishedTraversal};
+use crate::nostr::{BootstrapEvent, NostrRendezvous, RendezvousDriver};
 use crate::peer::handshake::{DialOrigin, Handshake, HandshakeCrypto};
 use crate::peer::{Match, PathState};
 use crate::proto::fmp::wire::build_msg1;
@@ -1405,14 +1405,15 @@ impl Node {
             return;
         };
 
-        // Refresh the runtime's outbound-admission view once per tick.
-        // The runtime task lives in a separate tokio context with no Node
-        // reference, so we publish current capacity state through a
-        // cheap atomic store. One-tick lag is acceptable: the inbound
-        // msg1 gate in handshake.rs remains the authoritative cap.
-        bootstrap.set_outbound_admission(self.outbound_admission_check());
+        // The engine has no Node reference, so it is told whether the node
+        // has room for another peer, when that changes. One-tick lag is
+        // acceptable: the inbound msg1 gate in handshake.rs remains the
+        // authoritative cap.
+        let capacity = self.outbound_admission_check();
+        self.supervisor
+            .nostr_rendezvous
+            .send_capacity(&bootstrap, capacity);
         self.push_advert_protection();
-        bootstrap.maintain_advert_cache();
         let peers = &self.peers;
         self.supervisor
             .nostr_rendezvous
@@ -1538,9 +1539,11 @@ impl Node {
                         continue;
                     }
 
-                    let now_ms = Self::now_ms();
                     let peering_now = Self::peering_now();
-                    let decision = bootstrap.record_traversal_failure(&peer_config.npub, now_ms);
+                    let reply = bootstrap.record_traversal_failure(&peer_config.npub).await;
+                    // The cooldown is measured from the time the decision
+                    // was computed at.
+                    let (decision, now_ms) = (reply.decision, reply.at_ms);
                     if decision.should_warn {
                         warn!(
                             npub = %peer_config.npub,
@@ -2364,7 +2367,7 @@ impl Node {
                             // adverts, which a full cache would refuse for
                             // configured peers it did not know were protected.
                             self.install_advert_protection(&runtime);
-                            if let Err(err) = self.refresh_overlay_advert(&runtime).await {
+                            if let Err(err) = self.publish_initial_advert(&runtime).await {
                                 warn!(error = %err, "Failed to publish initial Nostr overlay advert");
                             }
                             self.supervisor.nostr_rendezvous.set_engine(runtime);
@@ -3262,7 +3265,13 @@ impl Node {
             if bootstrap.cooldown_until(&npub, now_ms).is_some() {
                 overlay_cooldown.insert(npub.clone());
             }
-            overlay.push((npub, endpoints, created_at_secs));
+            // Mapped here, on the sweep's clock, which the reconciler's
+            // `wall_ms` reads too.
+            overlay.push(OverlayRow {
+                addresses: RendezvousDriver::overlay_addresses(&endpoints, now_ms),
+                npub,
+                created_at_secs,
+            });
         }
 
         let pools = DiscoveryPools {
@@ -3597,13 +3606,28 @@ impl Node {
     }
 
     async fn refresh_overlay_advert(
-        &self,
+        &mut self,
         bootstrap: &std::sync::Arc<NostrRendezvous>,
     ) -> Result<(), crate::nostr::BootstrapError> {
         let snapshot = self.advert_transport_snapshot();
+        let config = std::sync::Arc::clone(&self.context.config);
         self.supervisor
             .nostr_rendezvous
-            .refresh_overlay_advert(bootstrap, snapshot, &self.config().node.rendezvous.nostr)
+            .refresh_overlay_advert(bootstrap, snapshot, &config.node.rendezvous.nostr)
+            .await
+    }
+
+    /// Assemble and publish the first advert, waiting until it has been
+    /// assembled, which is after any public address it needs is learned.
+    async fn publish_initial_advert(
+        &mut self,
+        bootstrap: &std::sync::Arc<NostrRendezvous>,
+    ) -> Result<(), crate::nostr::BootstrapError> {
+        let snapshot = self.advert_transport_snapshot();
+        let config = std::sync::Arc::clone(&self.context.config);
+        self.supervisor
+            .nostr_rendezvous
+            .publish_initial_advert(bootstrap, snapshot, &config.node.rendezvous.nostr)
             .await
     }
 

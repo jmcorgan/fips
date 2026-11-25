@@ -60,6 +60,9 @@ The event content is a JSON document shaped as `OverlayAdvert`:
 }
 ```
 
+The `xxxxx.onion` above is shortened: a real Tor endpoint names a version 3
+onion, 56 characters before `.onion`, and a node refuses any other form.
+
 Field semantics:
 
 | Field | Type | Description |
@@ -76,6 +79,61 @@ The Nostr event signature covers the standard Nostr event ID
 (serialized `[0, pubkey, created_at, kind, tags, content]`), so the
 content JSON, tags, kind, and timestamp are all bound to the signing
 identity.
+
+### Receiving an advert
+
+A node checks each peer advert itself, whichever path brought it (the
+subscription, a lookup for a dial or traversal, or a stale-advert
+refetch), and refuses it at the first check it fails:
+
+1. It must still be inside its validity horizon: not past its NIP-40
+   expiration, and not older than twice `advert_ttl_secs`.
+2. It must carry the node's `protocol` tag, and its content must be at
+   most 8 KiB.
+3. Its event id must be the hash of what it carries, and its signature
+   must be its `pubkey`'s over that id. The node checks this itself rather
+   than relying on the Nostr client library. It also checks the id and
+   signature of a peer's kind 10050 inbox relay list before using it.
+4. Its content must decode as the JSON above, with at most 32 entries in
+   each list, our `identifier` and `version`, and at least one usable
+   endpoint once the unusable ones are dropped.
+5. A `created_at` more than 60 seconds ahead of the node's clock is
+   clamped to that.
+
+A refused advert is dropped silently, as if no relay had sent it. An
+event refused for its id or signature is also counted and logged at debug
+on `fips::nostr::runtime`, as `nostr event refused: signature does not
+verify` with the fields `kind`, `claimed` (the key the event claims),
+`event` and `total`, and the count is logged at warn, as `nostr events
+refused for a signature that does not verify` with the field `forged`,
+each time it reaches a power of two.
+
+An endpoint is usable when it is one of these:
+
+- `udp` with the address `nat`, carrying `signalRelays` and
+  `stunServers`.
+- `udp` or `tcp` with an IP address and a port of 1 to 65535. The address
+  is judged by the address it names: an IPv4-mapped IPv6 address
+  (`[::ffff:10.0.0.1]`) is judged as its IPv4 address, and an IPv6 address
+  with a zone index (`[fe80::1%3]`) is refused. Loopback, unspecified,
+  multicast, broadcast, link-local, shared (`100.64.0.0/10`), private and
+  unique-local, documentation (`192.0.2.0/24`, `198.51.100.0/24`,
+  `203.0.113.0/24`, `2001:db8::/32`) and reserved (`0.0.0.0/8`,
+  `240.0.0.0/4`) addresses are refused. `198.18.0.0/15` is accepted.
+- `udp` or `tcp` with a host name and a port. The name is ASCII letters,
+  digits, `-` and `_`, in labels of 1 to 63 bytes, 253 bytes in all, with
+  one trailing dot allowed. It must not be `localhost` or a name under it,
+  and its last label must not be a number (all digits, or `0x` followed by
+  hex digits): `127.1`, `2130706433`, `0x7f000001` and `010.0.0.1` are IPv4
+  addresses in other spellings and are refused. A bracketed host must be an
+  IPv6 address, and an IPv6 address must be bracketed.
+- `tor` with a version 3 onion and a port: 56 characters of `a` to `z` and
+  `2` to `7`, in either case, then `.onion`, then a port of 1 to 65535.
+  Only the form is checked. An IP address or a DNS name is not accepted
+  for `tor`.
+
+A host name is not checked for what it resolves to: a name that resolves
+to a private or loopback address is still accepted and dialed.
 
 ### Replacement and deletion
 

@@ -9,6 +9,16 @@ use crate::utils::index::IndexAllocator;
 use std::collections::HashMap;
 use tokio::time::{Duration, timeout, timeout_at};
 
+/// The hand-over types live in the node and keep both public paths a
+/// library user names them by: the crate root's and `fips::nostr`'s, each
+/// the same type. Removing either re-export fails to compile here.
+#[test]
+fn the_handoff_types_keep_their_crate_root_and_nostr_paths() {
+    let traversal: fn(crate::EstablishedTraversal) -> crate::nostr::EstablishedTraversal = |t| t;
+    let result: fn(crate::BootstrapHandoffResult) -> crate::nostr::BootstrapHandoffResult = |r| r;
+    let _ = (traversal, result);
+}
+
 #[tokio::test]
 async fn test_adopted_udp_traversal_completes_handshake() {
     let mut node_a = make_node();
@@ -583,7 +593,7 @@ async fn the_peering_tick_pushes_configured_and_linked_npubs_to_the_advert_cache
     node.supervisor.nostr_rendezvous.set_engine(engine.clone());
 
     node.poll_nostr_rendezvous().await;
-    let protected = engine.advert_protection_for_test();
+    let protected = engine.advert_protection_for_test().await;
     assert!(protected.contains(&linked.npub()), "linked peer protected");
     assert!(
         protected.contains(&configured.npub()),
@@ -593,7 +603,10 @@ async fn the_peering_tick_pushes_configured_and_linked_npubs_to_the_advert_cache
     node.remove_peer(linked.node_addr());
     node.poll_nostr_rendezvous().await;
     assert!(
-        !engine.advert_protection_for_test().contains(&linked.npub()),
+        !engine
+            .advert_protection_for_test()
+            .await
+            .contains(&linked.npub()),
         "a dropped link loses protection on the next tick"
     );
 
@@ -602,7 +615,7 @@ async fn the_peering_tick_pushes_configured_and_linked_npubs_to_the_advert_cache
         .await
         .unwrap();
     node.poll_nostr_rendezvous().await;
-    let protected = engine.advert_protection_for_test();
+    let protected = engine.advert_protection_for_test().await;
     assert!(
         !protected.contains(&configured.npub()),
         "removed peer dropped"
@@ -636,8 +649,87 @@ async fn a_restarted_nostr_engine_receives_the_configured_set_before_any_tick() 
     assert!(
         engine_b
             .advert_protection_for_test()
+            .await
             .contains(&configured.npub())
     );
+}
+
+/// The node tick hands its transports to the engine only when they have
+/// changed since it last did: not on a tick that sees the same ones, and
+/// not on the first tick after start-up, which handed them over already.
+#[tokio::test]
+async fn the_tick_sends_the_transports_only_when_they_change() {
+    let mut node = make_node_with(Config::new());
+    let engine = std::sync::Arc::new(crate::nostr::NostrRendezvous::new_for_test());
+    let nostr_cfg = node.config().node.rendezvous.nostr.clone();
+    node.supervisor
+        .nostr_rendezvous
+        .publish_initial_advert(&engine, Vec::new(), &nostr_cfg)
+        .await
+        .expect("assembled");
+    node.supervisor.nostr_rendezvous.set_engine(engine.clone());
+    assert_eq!(engine.transports_received_for_test().await, 1, "start-up");
+
+    node.poll_nostr_rendezvous().await;
+    node.poll_nostr_rendezvous().await;
+    assert_eq!(
+        engine.transports_received_for_test().await,
+        1,
+        "ticks with the same transports send nothing"
+    );
+
+    let changed = vec![crate::nostr::AdvertTransportSnapshot::Tor {
+        advertise: true,
+        onion_addr: None,
+        advertised_port: 443,
+    }];
+    let nostr_cfg = crate::config::NostrRendezvousConfig {
+        enabled: true,
+        ..nostr_cfg
+    };
+    node.supervisor
+        .nostr_rendezvous
+        .refresh_overlay_advert(&engine, changed.clone(), &nostr_cfg)
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.transports_received_for_test().await,
+        2,
+        "a change is sent"
+    );
+    node.supervisor
+        .nostr_rendezvous
+        .refresh_overlay_advert(&engine, changed, &nostr_cfg)
+        .await
+        .unwrap();
+    assert_eq!(engine.transports_received_for_test().await, 2);
+}
+
+#[tokio::test]
+async fn the_capacity_is_sent_only_when_it_changes() {
+    let mut node = make_node_with(Config::new());
+    let engine = std::sync::Arc::new(crate::nostr::NostrRendezvous::new_for_test());
+    node.supervisor.nostr_rendezvous.set_engine(engine.clone());
+
+    node.poll_nostr_rendezvous().await;
+    node.poll_nostr_rendezvous().await;
+    assert_eq!(
+        engine.capacity_received_for_test().await,
+        1,
+        "the first tick sends the capacity and the next, unchanged, sends nothing"
+    );
+
+    let driver = &mut node.supervisor.nostr_rendezvous;
+    driver.send_capacity(&engine, false);
+    assert_eq!(
+        engine.capacity_received_for_test().await,
+        2,
+        "a change is sent"
+    );
+    driver.send_capacity(&engine, false);
+    assert_eq!(engine.capacity_received_for_test().await, 2);
+    driver.send_capacity(&engine, true);
+    assert_eq!(engine.capacity_received_for_test().await, 3);
 }
 
 /// A running node with one started UDP transport on loopback, for driving
@@ -1006,6 +1098,7 @@ async fn a_foreign_source_on_an_adopted_transport_cannot_set_a_mismatch_cooldown
         "203.0.113.99:5000",
     ))
     .await;
+    engine.settled_for_test().await;
     assert_eq!(engine.cooldown_until(&peer.npub(), Node::now_ms()), None);
 
     // Control: the same datagram from the traversed address sets it.
@@ -1014,6 +1107,7 @@ async fn a_foreign_source_on_an_adopted_transport_cannot_set_a_mismatch_cooldown
         "198.51.100.7:4000",
     ))
     .await;
+    engine.settled_for_test().await;
     assert!(
         engine
             .cooldown_until(&peer.npub(), Node::now_ms())
@@ -1044,6 +1138,7 @@ async fn a_mismatch_from_the_traversed_address_after_the_link_is_up_sets_no_cool
         "198.51.100.7:4000",
     ))
     .await;
+    engine.settled_for_test().await;
     assert_eq!(engine.cooldown_until(&peer.npub(), Node::now_ms()), None);
 
     node.poll_nostr_rendezvous().await;
@@ -1053,6 +1148,7 @@ async fn a_mismatch_from_the_traversed_address_after_the_link_is_up_sets_no_cool
         "198.51.100.7:4000",
     ))
     .await;
+    engine.settled_for_test().await;
     assert_eq!(
         engine.cooldown_until(&peer.npub(), Node::now_ms()),
         None,
@@ -1073,6 +1169,7 @@ async fn an_unknown_version_from_the_traversed_address_before_any_link_sets_the_
         "198.51.100.7:4000",
     ))
     .await;
+    engine.settled_for_test().await;
     let first = engine.cooldown_until(&peer.npub(), Node::now_ms());
     assert!(first.is_some());
 
@@ -1082,6 +1179,7 @@ async fn an_unknown_version_from_the_traversed_address_before_any_link_sets_the_
         "198.51.100.7:4000",
     ))
     .await;
+    engine.settled_for_test().await;
     assert_eq!(engine.cooldown_until(&peer.npub(), Node::now_ms()), first);
 }
 
@@ -1115,6 +1213,7 @@ async fn an_unknown_version_datagram_on_a_real_adopted_socket_sets_the_cooldown(
         }
         _ = tokio::time::sleep(Duration::from_millis(300)) => {}
     }
+    engine.settled_for_test().await;
 
     assert!(
         engine

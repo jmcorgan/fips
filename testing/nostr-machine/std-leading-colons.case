@@ -1,0 +1,5 @@
+# std written with leading colons.
+expect exit 1
+expect mod.rs:1: std at the root of a use tree
+=== mod.rs
+use ::std::fmt;

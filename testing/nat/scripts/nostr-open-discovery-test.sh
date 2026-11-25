@@ -11,8 +11,9 @@
 # its log must show "advert: peer cached" for every seeded key, and it must
 # not panic.
 #
-# This guards the order in NostrRendezvous::start (src/nostr/runtime.rs): the
-# relay pool's notification receiver is taken before the advert REQ is sent.
+# This guards the order in which NostrRendezvous::start (src/nostr/runtime.rs)
+# starts the pump, the task that owns the advert cache: the relay pool's
+# notification receiver is taken before the pump can send the advert REQ.
 # Taken after it, the replay is dropped, and with no configured peers nothing
 # else puts those adverts in the cache until their authors publish again.
 
@@ -57,12 +58,12 @@ RELAY_CONTAINER="fips-nat-relay${FIPS_CI_NAME_SUFFIX:-}"
 SEED_COUNT=8
 WINDOW_SECS=10
 
-# The advert identifier is ADVERT_IDENTIFIER in src/nostr/types.rs, duplicated
+# The advert identifier is ADVERT_IDENTIFIER in src/nostr/machine/types.rs, duplicated
 # here rather than derived: the node subscribes by it and refuses an advert
 # whose content carries another. `next` uses `fips-overlay-v1-next`, which is
 # the one line that differs between the branches' copies of this script.
 ADVERT_IDENTIFIER="fips-overlay-v1-next"
-# The kind is ADVERT_KIND in src/nostr/types.rs.
+# The kind is ADVERT_KIND in src/nostr/machine/types.rs.
 ADVERT_KIND=37195
 # The `app` generate-configs.sh gives the lab's nodes; a seeded advert's
 # `protocol` tag must equal it.

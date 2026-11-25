@@ -1,0 +1,5 @@
+# Three supers from depth 2 climb out.
+expect exit 1
+expect adverts/extra.rs:1: super chain of 3 at depth 2
+=== adverts/extra.rs
+use super::super::super::runtime::X;

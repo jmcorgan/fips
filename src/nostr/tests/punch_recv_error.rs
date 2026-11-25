@@ -10,8 +10,13 @@
 //! socket with `IP_RECVERR` set, so the Linux tests set that option to
 //! produce the same receive error.
 //!
+//! Each attempt is the machine's punch attempt (`machine/punch/attempt.rs`)
+//! run on a real socket as the pump runs it: its sends go out on the
+//! socket, and what the socket receives, a receive error included, comes
+//! back to it.
+//!
 //! - On every platform, an attempt whose only target is a closed port runs
-//!   to its timeout on the socket as the runtime makes it.
+//!   to its timeout on the socket as the machine's sockets are made.
 //! - On Linux, the same attempt runs to its timeout when the
 //!   port-unreachable is reported, and a peer's probe arriving after the
 //!   reports is still adopted.
@@ -22,8 +27,12 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use super::super::PunchHint;
-use super::super::traversal::{bind_traversal, run_punch_attempt};
-use super::super::types::BootstrapError;
+use super::super::machine::punch::attempt::{Attempt, PunchOut};
+use super::super::machine::punch::build_punch_packet;
+use super::super::sockets::bind_on;
+use super::super::traversal::now_ms;
+use super::super::types::{BootstrapError, PunchPacketKind};
+use crate::time::HostInstant;
 
 /// How long each attempt here is given before it may end.
 const ATTEMPT: Duration = Duration::from_secs(2);
@@ -32,10 +41,68 @@ const ATTEMPT: Duration = Duration::from_secs(2);
 /// timeout, for timer and scheduling slack.
 const SLACK: Duration = Duration::from_millis(150);
 
-/// A traversal socket on 127.0.0.1, made by the runtime's own
-/// `bind_traversal`, so the tests run on the socket production makes.
+/// A traversal socket on 127.0.0.1, made by the machine's sockets' own
+/// `bind_on`, so the tests run on the socket production makes.
 fn traversal_socket() -> std::net::UdpSocket {
-    bind_traversal("127.0.0.1:0".parse().unwrap()).expect("bind a loopback traversal socket")
+    bind_on("127.0.0.1:0".parse().unwrap())
+        .map_err(|(_, e)| e)
+        .expect("bind a loopback traversal socket")
+}
+
+/// Send one punch probe for `session_id` from `from` to `to`.
+#[cfg(target_os = "linux")]
+fn send_probe(from: &std::net::UdpSocket, to: SocketAddr, session_id: &str) {
+    let probe = build_punch_packet(PunchPacketKind::Probe, 0, session_id);
+    from.send_to(&probe, to).expect("send a probe");
+}
+
+/// The machine's punch attempt for `session_id`, run on `socket` as the
+/// pump runs it, with its deadlines on tokio's clock: the address it
+/// adopts, or the timeout.
+async fn run_punch_attempt(
+    socket: &std::net::UdpSocket,
+    session_id: &str,
+    targets: &[SocketAddr],
+    punch: PunchHint,
+    timeout: Duration,
+) -> Result<SocketAddr, BootstrapError> {
+    let now = || HostInstant::from(tokio::time::Instant::now().into_std());
+    let mut attempt = Attempt::new(
+        session_id,
+        targets.to_vec(),
+        &punch,
+        timeout,
+        now(),
+        now_ms(),
+    )?;
+    let udp = tokio::net::UdpSocket::from_std(socket.try_clone()?)?;
+    let mut buf = [0u8; 2048];
+    let mut out = attempt.timeout(now());
+    loop {
+        for step in std::mem::take(&mut out) {
+            match step {
+                PunchOut::Send { dst, bytes } => {
+                    let _ = udp.send_to(&bytes, dst).await;
+                }
+                PunchOut::Adopt(remote) => return Ok(remote),
+                PunchOut::TimedOut => {
+                    return Err(BootstrapError::PunchTimeout(session_id.to_string()));
+                }
+            }
+        }
+        let Some(wake) = attempt.deadline() else {
+            return Err(BootstrapError::PunchTimeout(session_id.to_string()));
+        };
+        let wake = tokio::time::Instant::from_std(wake.into());
+        out = match tokio::time::timeout_at(wake, udp.recv_from(&mut buf)).await {
+            Ok(Ok((len, src))) => attempt.datagram(src, &buf[..len], now()),
+            Ok(Err(e)) => {
+                attempt.recv_error(format!("{e:?}"));
+                Vec::new()
+            }
+            Err(_) => attempt.timeout(now()),
+        };
+    }
 }
 
 /// A loopback address with no socket bound to it: bind one, note its
@@ -159,7 +226,7 @@ async fn a_peer_probe_after_a_reported_port_unreachable_is_still_adopted() {
 
     let sender = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        super::send_probe(&peer, local, SESSION);
+        send_probe(&peer, local, SESSION);
         peer
     });
 

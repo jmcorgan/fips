@@ -1,0 +1,5 @@
+# The same back-import written self::super::.
+expect exit 1
+expect mod.rs:1: super chain of 1 at depth 0
+=== mod.rs
+use self::super::runtime::NostrRendezvous;

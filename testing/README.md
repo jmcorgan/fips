@@ -299,6 +299,16 @@ same check as its own `ci-parity` job.
 and [`lib/ci-parity-test.sh`](lib/ci-parity-test.sh), another guard, plants
 each kind of divergence in a scratch copy to show the check fails on it.
 
+Both runners also run the static guards (`run_guards` here, the `ci-parity`
+job on GitHub). One of them,
+[check-nostr-machine.py](check-nostr-machine.py), holds the Nostr machine
+(`src/nostr/machine/`) to its fence: no `std`, `tokio`, `tracing` or
+`nostr_sdk` path and nothing in the root crate outside the module. Its
+fixtures are in [nostr-machine/](nostr-machine/). The root `clippy.toml` bans
+the `nostr` items that read the clock or the OS random source, and
+[nostr-ban/](nostr-ban/) checks, after the clippy stages of both runners,
+that every entry of that ban still draws an error.
+
 ### Tiers (`--tier`, `--plan`)
 
 `--tier 1|2|3` (or `FIPS_CI_TIER`) runs one fixed set of stages, the set the

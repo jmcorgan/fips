@@ -1,0 +1,5 @@
+# A std item with no core counterpart, imported.
+expect exit 1
+expect extra.rs:1: std at the root of a use tree
+=== extra.rs
+use std::time::Instant;

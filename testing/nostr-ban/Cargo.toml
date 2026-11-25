@@ -1,0 +1,16 @@
+# The fixture testing/nostr-ban/test.sh lints against the root clippy.toml.
+# Its own workspace, so the root's does not take it in. nostr is built with
+# the features the root package enables, so every entry resolves.
+[package]
+name = "nostr-ban-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+nostr = { version = "0.45", default-features = false, features = ["std", "nip44", "rand", "os-rng"] }

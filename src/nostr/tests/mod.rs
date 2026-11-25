@@ -1,28 +1,36 @@
+// These tests build events with nostr's own keys, clock and signing helpers.
+// The ban in the root clippy.toml is on non-test code using them.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-#[cfg(target_os = "linux")]
-use std::time::Duration;
 
+use nostr::event::FinalizeEvent;
 use nostr::prelude::{EventBuilder, Kind, RelayUrl, Tag, Timestamp};
 
+use super::machine::NodeSigner;
+use super::machine::adverts::{is_reserved_ip, is_unroutable_direct_advert_ip};
+use super::machine::error::Error as MachineError;
+use super::machine::params::Params;
+use super::machine::punch::parse_punch_packet;
+use super::machine::punch::plan::{
+    PunchStrategy, is_doc_ip, is_never_punchable_ip, is_private_ip, plan_punch_targets,
+};
+use super::machine::tests::TestInstant;
+use super::machine::traversal::election::suppress_responder_for_own_initiator;
 use super::runtime::{
-    INBOX_LOOKBACK, NostrRendezvous, adversarial_offer_reject, inbox_relays,
-    is_unroutable_direct_advert_ip, short_id, signal_relays,
+    NostrRendezvous, adversarial_offer_reject, inbox_relays, short_id, signal_relays,
 };
 use super::signal::{
     FreshnessOutcome, build_signal_event, create_traversal_answer, create_traversal_offer,
-    estimate_clock_skew, unwrap_signal_event, validate_offer_freshness,
+    estimate_clock_skew, rumor, unwrap_signal_event, validate_offer_freshness,
     validate_traversal_answer_for_offer,
 };
 use super::stun::{parse_stun_binding_success, parse_stun_url};
-#[cfg(target_os = "linux")]
-use super::traversal::run_punch_attempt;
 use super::traversal::{
-    PunchStrategy, RefusalWarnGate, SourceRank, build_punch_packet, is_doc_ip,
-    is_never_punchable_ip, is_private_ip, now_ms, parse_punch_packet, plan_punch_targets,
-    planned_remote_endpoints, rank_punch_source, session_hash,
+    RefusalWarnGate, SourceRank, build_punch_packet, now_ms, planned_remote_endpoints,
+    rank_punch_source, session_hash,
 };
-use super::traversal_machine::suppress_responder_for_own_initiator;
 use super::types::BootstrapError;
 use super::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, OverlayAdvert, OverlayEndpointAdvert,
@@ -53,32 +61,46 @@ fn can_reach(local_nat: NatType, remote_nat: NatType) -> bool {
     !(local_nat == NatType::PortRestricted && remote_nat == NatType::PortRestricted)
 }
 
-fn signed_overlay_advert_event(created_at_secs: u64, expiration_secs: Option<u64>) -> nostr::Event {
-    signed_overlay_advert_event_from(&nostr::Keys::generate(), created_at_secs, expiration_secs)
+fn signed_overlay_advert_event(
+    created_at_secs: u64,
+    expiration_secs: Option<u64>,
+) -> nostr::event::Event {
+    signed_overlay_advert_event_from(
+        &nostr::key::Keys::generate(),
+        created_at_secs,
+        expiration_secs,
+    )
 }
 
 /// The author-bound variant 0156's tests need: the caller chooses the signing
 /// key, so an event signed by somebody other than the requested peer can be
 /// constructed. The advert content keeps `next`'s own identifier and address.
 fn signed_overlay_advert_event_from(
-    keys: &nostr::Keys,
+    keys: &nostr::key::Keys,
     created_at_secs: u64,
     expiration_secs: Option<u64>,
-) -> nostr::Event {
+) -> nostr::event::Event {
     let content = r#"{"identifier":"fips-overlay-v1-next","version":1,"endpoints":[{"transport":"tcp","addr":"203.0.113.10:443"}]}"#;
     let mut builder = EventBuilder::new(Kind::Custom(ADVERT_KIND), content)
         .custom_created_at(Timestamp::from(created_at_secs));
     if let Some(expiration_secs) = expiration_secs {
         builder = builder.tags([Tag::expiration(Timestamp::from(expiration_secs))]);
     }
-    builder.sign_with_keys(keys).unwrap()
+    builder.finalize(keys).unwrap()
 }
 
-fn signed_inbox_relay_event(keys: &nostr::Keys, created_at_secs: u64, relay: &str) -> nostr::Event {
+fn signed_inbox_relay_event(
+    keys: &nostr::key::Keys,
+    created_at_secs: u64,
+    relay: &str,
+) -> nostr::event::Event {
     EventBuilder::new(Kind::InboxRelays, "")
-        .tags([Tag::relay(RelayUrl::parse(relay).unwrap())])
+        .tags([Tag::custom(
+            "relay",
+            [RelayUrl::parse(relay).unwrap().to_string()],
+        )])
         .custom_created_at(Timestamp::from(created_at_secs))
-        .sign_with_keys(keys)
+        .finalize(keys)
         .unwrap()
 }
 
@@ -228,8 +250,8 @@ fn advert_freshness_rejects_stale_created_at_without_expiration() {
 #[test]
 fn advert_selection_ignores_events_not_signed_by_the_target_peer() {
     let now_secs = Timestamp::now().as_secs();
-    let peer_keys = nostr::Keys::generate();
-    let hostile_keys = nostr::Keys::generate();
+    let peer_keys = nostr::key::Keys::generate();
+    let hostile_keys = nostr::key::Keys::generate();
 
     let hostile = signed_overlay_advert_event_from(&hostile_keys, now_secs + 3_600, None);
     let genuine = signed_overlay_advert_event_from(&peer_keys, now_secs.saturating_sub(10), None);
@@ -245,8 +267,8 @@ fn advert_selection_ignores_events_not_signed_by_the_target_peer() {
 #[test]
 fn advert_selection_returns_nothing_when_every_event_is_foreign() {
     let now_secs = Timestamp::now().as_secs();
-    let peer_keys = nostr::Keys::generate();
-    let hostile_keys = nostr::Keys::generate();
+    let peer_keys = nostr::key::Keys::generate();
+    let hostile_keys = nostr::key::Keys::generate();
 
     let events = [signed_overlay_advert_event_from(
         &hostile_keys,
@@ -264,8 +286,8 @@ fn advert_selection_returns_nothing_when_every_event_is_foreign() {
 #[test]
 fn inbox_relay_selection_ignores_relay_lists_not_signed_by_the_target() {
     let now_secs = Timestamp::now().as_secs();
-    let peer_keys = nostr::Keys::generate();
-    let hostile_keys = nostr::Keys::generate();
+    let peer_keys = nostr::key::Keys::generate();
+    let hostile_keys = nostr::key::Keys::generate();
 
     let events = [
         signed_inbox_relay_event(&hostile_keys, now_secs + 3_600, "wss://hostile.example/"),
@@ -482,7 +504,7 @@ fn an_answer_whose_in_reply_to_is_the_offer_event_id_rather_than_its_nonce_is_re
         "npub1server",
         "npub1client",
     ) {
-        Err(BootstrapError::Protocol(reason)) => assert_eq!(reason, "session-mismatch"),
+        Err(MachineError::Protocol(reason)) => assert_eq!(reason, "session-mismatch"),
         other => panic!("expected a session-mismatch refusal, got {other:?}"),
     }
 }
@@ -492,10 +514,14 @@ fn an_answer_whose_in_reply_to_is_the_offer_event_id_rather_than_its_nonce_is_re
 /// the receiver recovers on unwrapping.
 #[tokio::test]
 async fn the_signal_wrap_is_signed_by_a_one_time_key_and_the_seal_by_the_identity_key() {
-    let identity = nostr::Keys::generate();
-    let receiver = nostr::Keys::generate();
-    let rumor = EventBuilder::private_msg_rumor(receiver.public_key(), "hello".to_string())
-        .build(identity.public_key());
+    let identity = NodeSigner::new(nostr::key::SecretKey::generate());
+    let receiver = NodeSigner::new(nostr::key::SecretKey::generate());
+    let rumor = rumor(
+        identity.public_key(),
+        receiver.public_key(),
+        "hello".to_string(),
+        now_ms(),
+    );
 
     let event = build_signal_event(
         &identity,
@@ -503,7 +529,6 @@ async fn the_signal_wrap_is_signed_by_a_one_time_key_and_the_seal_by_the_identit
         rumor,
         Timestamp::from(Timestamp::now().as_secs() + 30),
     )
-    .await
     .expect("signal event should build");
 
     assert_ne!(
@@ -1013,10 +1038,10 @@ fn a_suspicious_offer_that_logs_nothing_does_not_use_up_the_next_ones_warning() 
     assert!(loud.suspicious());
 
     let mut gate = RefusalWarnGate::default();
-    let t = std::time::Instant::now();
+    let t = TestInstant(0);
     assert_eq!(gate.decide(&quiet, t), None);
     assert_eq!(
-        gate.decide(&loud, t + std::time::Duration::from_millis(1)),
+        gate.decide(&loud, TestInstant(1)),
         Some(0),
         "the warning went to an offer that logged nothing"
     );
@@ -1343,45 +1368,52 @@ fn note_linked_bootstraps_keeps_refusing_after_the_link_drops() {
     );
 }
 
+/// The advert predicate is the three punch predicates plus the advert's own
+/// reserved term. Each row gives the three punch predicates' verdict, taken
+/// from the single disjunction the advert filter used before the split, and
+/// the reserved term's.
 #[test]
-fn split_address_predicates_match_the_old_advert_predicate() {
-    // Expected values are hand-derived from the single disjunction the advert
-    // filter used before the split, which is the spec for this refactor.
+fn split_address_predicates_and_the_reserved_term_make_the_advert_predicate() {
     let cases = [
-        ("127.0.0.1", true),
-        ("::1", true),
-        ("0.0.0.0", true),
-        ("::", true),
-        ("224.0.0.1", true),
-        ("ff02::1", true),
-        ("255.255.255.255", true),
-        ("169.254.1.1", true),
-        ("fe80::1", true),
-        ("192.0.2.1", true),
-        ("198.51.100.1", true),
-        ("203.0.113.1", true),
-        ("100.64.0.1", true),
-        ("100.127.255.255", true),
-        ("100.128.0.1", false),
-        ("10.0.0.1", true),
-        ("192.168.1.1", true),
-        ("172.16.0.1", true),
-        ("fd00::1", true),
-        ("8.8.8.8", false),
-        ("2001:4860:4860::8888", false),
+        ("127.0.0.1", true, false),
+        ("::1", true, false),
+        ("0.0.0.0", true, true),
+        ("::", true, false),
+        ("224.0.0.1", true, false),
+        ("ff02::1", true, false),
+        ("255.255.255.255", true, true),
+        ("169.254.1.1", true, false),
+        ("fe80::1", true, false),
+        ("192.0.2.1", true, false),
+        ("198.51.100.1", true, false),
+        ("203.0.113.1", true, false),
+        ("100.64.0.1", true, false),
+        ("100.127.255.255", true, false),
+        ("100.128.0.1", false, false),
+        ("10.0.0.1", true, false),
+        ("192.168.1.1", true, false),
+        ("172.16.0.1", true, false),
+        ("fd00::1", true, false),
+        ("8.8.8.8", false, false),
+        ("2001:4860:4860::8888", false, false),
+        ("0.1.2.3", false, true),
+        ("240.0.0.1", false, true),
+        ("2001:db8::1", false, true),
+        ("198.18.0.1", false, false),
     ];
 
-    for (text, expected) in cases {
+    for (text, punch, reserved) in cases {
         let ip = text.parse::<IpAddr>().unwrap();
         assert_eq!(
-            is_unroutable_direct_advert_ip(ip),
-            expected,
-            "unexpected advert verdict for {text}"
-        );
-        assert_eq!(
             is_never_punchable_ip(ip) || is_private_ip(ip) || is_doc_ip(ip),
-            expected,
-            "the split predicates disagree with the advert filter for {text}"
+            punch,
+            "the split predicates disagree with the old advert filter for {text}"
+        );
+        assert_eq!(is_reserved_ip(ip), reserved, "reserved term for {text}");
+        assert_eq!(
+            is_unroutable_direct_advert_ip(ip),
+            punch || reserved,
+            "unexpected advert verdict for {text}"
         );
     }
 }
@@ -1800,10 +1832,14 @@ fn estimate_clock_skew_returns_none_without_responder_timestamp() {
 
 #[tokio::test]
 async fn signal_events_use_current_timestamps() {
-    let sender = nostr::Keys::generate();
-    let receiver = nostr::Keys::generate();
-    let rumor = EventBuilder::private_msg_rumor(receiver.public_key(), "hello".to_string())
-        .build(sender.public_key());
+    let sender = NodeSigner::new(nostr::key::SecretKey::generate());
+    let receiver = NodeSigner::new(nostr::key::SecretKey::generate());
+    let rumor = rumor(
+        sender.public_key(),
+        receiver.public_key(),
+        "hello".to_string(),
+        now_ms(),
+    );
     let before = Timestamp::now().as_secs();
 
     let event = build_signal_event(
@@ -1812,7 +1848,6 @@ async fn signal_events_use_current_timestamps() {
         rumor,
         Timestamp::from(before + 30),
     )
-    .await
     .expect("signal event should build");
 
     let after = Timestamp::now().as_secs();
@@ -1820,64 +1855,6 @@ async fn signal_events_use_current_timestamps() {
 
     assert!(created_at >= before);
     assert!(created_at <= after);
-}
-
-/// These punch tests distinguish a spoofer from a planned target by source
-/// **IP**, so each needs its own loopback address. Only Linux treats the whole
-/// of 127/8 as local; macOS and Windows bind 127.0.0.1 alone unless an alias is
-/// added, so the bind panics there. They are gated to Linux rather than
-/// rewritten onto one address, because collapsing them onto 127.0.0.1 would
-/// make every source rank `RemappedPort` and the tests would stop testing what
-/// they are for.
-///
-/// **Coverage gap**: on macOS and Windows the only end-to-end exercise of
-/// `run_punch_attempt` is the closed-target test in
-/// `tests/punch_recv_error.rs`; the source-ranking paths are covered there
-/// only by the `rank_punch_source_*` unit tests above, which take no sockets.
-/// A loopback socket bound on `host`, non-blocking as both production call
-/// sites leave it, since `run_punch_attempt` hands it straight to
-/// `UdpSocket::from_std`.
-#[cfg(target_os = "linux")]
-fn punch_socket(host: &str) -> std::net::UdpSocket {
-    let socket = std::net::UdpSocket::bind(format!("{host}:0")).expect("bind a loopback socket");
-    socket
-        .set_nonblocking(true)
-        .expect("the punch socket must be non-blocking");
-    socket
-}
-
-/// A hint that starts punching immediately. `start_at_ms` is absolute wall
-/// clock, so anything plausible-looking in the future would sleep out the test.
-#[cfg(target_os = "linux")]
-fn immediate_punch_hint(duration_ms: u64) -> PunchHint {
-    PunchHint {
-        start_at_ms: 0,
-        interval_ms: 20,
-        duration_ms,
-    }
-}
-
-/// Send one well-formed probe carrying `session_id`'s hash from `from` to
-/// `to`, which is what a replay of captured punch bytes looks like.
-#[cfg(target_os = "linux")]
-fn send_probe(from: &std::net::UdpSocket, to: SocketAddr, session_id: &str) {
-    let packet = build_punch_packet(PunchPacketKind::Probe, 1, session_id);
-    from.send_to(&packet, to).expect("probe should send");
-}
-
-/// Whether anything readable on `socket` is a punch ack.
-#[cfg(target_os = "linux")]
-fn received_an_ack(socket: &std::net::UdpSocket) -> bool {
-    let mut buf = [0u8; 2048];
-    while let Ok((len, _)) = socket.recv_from(&mut buf) {
-        if parse_punch_packet(&buf[..len])
-            .map(|packet| packet.kind == PunchPacketKind::Ack)
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    false
 }
 
 #[test]
@@ -1903,156 +1880,6 @@ fn rank_punch_source_rejects_an_address_we_never_planned_to_probe() {
     assert_eq!(
         rank_punch_source(stranger, &[target]),
         SourceRank::Unplanned
-    );
-}
-
-/// The regression test for the defect. The punch packet's discriminator is a
-/// digest of a value both peers already know and it travels in the clear in
-/// every probe, so anyone who has seen one can replay it. Acceptance is now
-/// constrained to the targets this node planned; the spoofer is neither
-/// adopted nor acked, and an ack would be a reflection we control.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn a_matching_punch_packet_from_an_unplanned_source_is_neither_adopted_nor_acked() {
-    let victim = punch_socket("127.0.0.3");
-    let peer = punch_socket("127.0.0.1");
-    let spoofer = punch_socket("127.0.0.2");
-    let victim_addr = victim.local_addr().expect("victim address");
-    let targets = vec![peer.local_addr().expect("peer address")];
-
-    send_probe(&spoofer, victim_addr, "session-unplanned");
-    let result = run_punch_attempt(
-        &victim,
-        "session-unplanned",
-        &targets,
-        immediate_punch_hint(400),
-        Duration::from_millis(700),
-    )
-    .await;
-
-    assert!(
-        matches!(result, Err(BootstrapError::PunchTimeout(_))),
-        "a spoofed source must not be adopted, got {result:?}"
-    );
-    assert!(
-        !received_an_ack(&spoofer),
-        "an unplanned source must not be acked"
-    );
-}
-
-/// The spoofer wins the race on arrival order and still loses on address.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn a_planned_source_is_adopted_even_when_a_spoofer_replies_first() {
-    let victim = punch_socket("127.0.0.3");
-    let peer = punch_socket("127.0.0.1");
-    let spoofer = punch_socket("127.0.0.2");
-    let victim_addr = victim.local_addr().expect("victim address");
-    let peer_addr = peer.local_addr().expect("peer address");
-
-    send_probe(&spoofer, victim_addr, "session-race");
-    send_probe(&peer, victim_addr, "session-race");
-    let result = run_punch_attempt(
-        &victim,
-        "session-race",
-        &[peer_addr],
-        immediate_punch_hint(400),
-        Duration::from_millis(700),
-    )
-    .await;
-
-    assert_eq!(
-        result.expect("the planned peer should be adopted"),
-        peer_addr
-    );
-}
-
-/// The healthy path, which is the check that the source constraint does not
-/// red a legitimately clean run: one probe from the single planned target is
-/// adopted immediately and acked.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn the_ordinary_probe_from_a_planned_target_is_still_adopted_and_acked() {
-    let victim = punch_socket("127.0.0.3");
-    let peer = punch_socket("127.0.0.1");
-    let victim_addr = victim.local_addr().expect("victim address");
-    let peer_addr = peer.local_addr().expect("peer address");
-
-    send_probe(&peer, victim_addr, "session-healthy");
-    let result = run_punch_attempt(
-        &victim,
-        "session-healthy",
-        &[peer_addr],
-        immediate_punch_hint(400),
-        Duration::from_millis(700),
-    )
-    .await;
-
-    assert_eq!(
-        result.expect("the planned peer should be adopted"),
-        peer_addr
-    );
-    assert!(received_an_ack(&peer), "a planned probe should be acked");
-}
-
-/// Peer-reflexive discovery: a symmetric NAT allocates a fresh port toward us,
-/// so the peer's probe arrives from an address that is not in the plan but
-/// shares a planned target's IP. Adopting it is the main class of NAT pairing
-/// punching exists to rescue, and this test reds if the rule is ever tightened
-/// to exact matching without that being reopened deliberately.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn a_planned_targets_remapped_port_is_adopted_when_that_is_all_that_arrives() {
-    let victim = punch_socket("127.0.0.3");
-    let peer = punch_socket("127.0.0.1");
-    let victim_addr = victim.local_addr().expect("victim address");
-    let peer_addr = peer.local_addr().expect("peer address");
-    // The address the peer's own STUN observation named, before its NAT
-    // remapped the port: same host, a port nothing is bound to.
-    let stale_target = SocketAddr::new(peer_addr.ip(), peer_addr.port().wrapping_add(1).max(1));
-
-    send_probe(&peer, victim_addr, "session-remapped");
-    let result = run_punch_attempt(
-        &victim,
-        "session-remapped",
-        &[stale_target],
-        immediate_punch_hint(400),
-        Duration::from_millis(2000),
-    )
-    .await;
-
-    assert_eq!(
-        result.expect("a remapped port on a planned target should be adopted"),
-        peer_addr
-    );
-}
-
-/// An exact match inside the settle window supersedes a remapped one that
-/// arrived first, which is what the window is for.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn an_exact_target_supersedes_a_remapped_port_inside_the_settle_window() {
-    let victim = punch_socket("127.0.0.3");
-    let peer = punch_socket("127.0.0.1");
-    let neighbour = punch_socket("127.0.0.1");
-    let victim_addr = victim.local_addr().expect("victim address");
-    let peer_addr = peer.local_addr().expect("peer address");
-
-    send_probe(&neighbour, victim_addr, "session-settle");
-    send_probe(&peer, victim_addr, "session-settle");
-    let result = run_punch_attempt(
-        &victim,
-        "session-settle",
-        &[peer_addr],
-        immediate_punch_hint(400),
-        Duration::from_millis(2000),
-    )
-    .await;
-
-    assert_eq!(
-        result.expect("the exact target should win"),
-        peer_addr,
-        "an exact match must supersede a source that only shares the IP"
     );
 }
 
@@ -2297,87 +2124,26 @@ fn live_handle() -> tokio::task::JoinHandle<()> {
     tokio::spawn(std::future::pending::<()>())
 }
 
-/// The regression case: `connect_task` returns by design (`Client::connect()`
-/// only kicks off per-relay connection tasks), and `relay_startup_task` is
-/// unwatched because a failed inbox relay list publish is not a loss of
-/// liveness, so a node with both handles finished must still report live.
 #[tokio::test]
-async fn nostr_liveness_ignores_the_connect_and_relay_startup_tasks() {
+async fn nostr_liveness_fires_when_the_pump_dies() {
     let runtime = NostrRendezvous::new_for_test();
     runtime
-        .install_tasks_for_test(
-            finished_handle().await,
-            finished_handle().await,
-            live_handle(),
-            live_handle(),
-            live_handle(),
-        )
-        .await;
-    assert!(
-        !runtime.is_finished(),
-        "a node whose connect/relay-startup tasks have returned normally is healthy"
-    );
-}
-
-#[tokio::test]
-async fn nostr_liveness_fires_when_the_notify_loop_dies() {
-    let runtime = NostrRendezvous::new_for_test();
-    runtime
-        .install_tasks_for_test(
-            live_handle(),
-            live_handle(),
-            finished_handle().await,
-            live_handle(),
-            live_handle(),
-        )
+        .install_task_handle_for_test(finished_handle().await)
         .await;
     assert!(
         runtime.is_finished(),
-        "a dead inbound notify loop means no advert or signal is ever received again"
+        "a dead pump means no advert or traversal signal is ever handled again"
     );
 }
 
-#[tokio::test]
-async fn nostr_liveness_fires_when_the_publish_loop_dies() {
-    let runtime = NostrRendezvous::new_for_test();
-    runtime
-        .install_tasks_for_test(
-            live_handle(),
-            live_handle(),
-            live_handle(),
-            finished_handle().await,
-            live_handle(),
-        )
-        .await;
-    assert!(
-        runtime.is_finished(),
-        "a dead publish loop means this node stops being discoverable"
-    );
-}
-
-#[tokio::test]
-async fn nostr_liveness_fires_when_the_advertise_loop_dies() {
-    let runtime = NostrRendezvous::new_for_test();
-    runtime
-        .install_tasks_for_test(
-            live_handle(),
-            live_handle(),
-            live_handle(),
-            live_handle(),
-            finished_handle().await,
-        )
-        .await;
-    assert!(
-        runtime.is_finished(),
-        "a dead advertise ticker means the advert is never refreshed"
-    );
-}
-
-/// `shutdown` takes every handle, leaving `None`. That must read as finished so
+/// `shutdown` takes the handle, leaving `None`. That must read as finished so
 /// the 2s liveness poll monitor terminates instead of spinning after a stop.
 #[tokio::test]
 async fn nostr_liveness_reports_finished_once_the_handles_are_taken() {
     let runtime = NostrRendezvous::new_for_test();
+    runtime.install_task_handle_for_test(live_handle()).await;
+    assert!(!runtime.is_finished(), "control: a live pump reads as live");
+    runtime.take_task_handle_for_test().await;
     assert!(
         runtime.is_finished(),
         "no installed handles (post-shutdown) reads as finished"
@@ -2394,6 +2160,126 @@ fn short_id_truncates_a_multibyte_session_id_on_a_character_boundary_without_pan
     assert_eq!(short_id("abcdefghij"), "abcdefgh");
     assert_eq!(short_id("abc"), "abc");
     assert_eq!(short_id(""), "");
+}
+
+/// A stale-advert refetch that finds a newer, valid advert by the peer on
+/// the advert relays caches it in place of the older one: the only refetch
+/// outcome that runs the full ingest check.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refetch_that_finds_a_newer_advert_refreshes_the_cached_entry() {
+    use nostr::key::SecretKey;
+    use nostr::nips::nip19::ToBech32;
+    use nostr_sdk::local_relay::LocalRelay;
+
+    let relay = LocalRelay::builder().build();
+    relay.run().await.expect("the in-process relay starts");
+    let url = relay.url().await.to_string();
+
+    let peer = NodeSigner::new(
+        SecretKey::from_hex("b7e151628aed2a6abf7158809cf4f3c762e7160f38b4da56a784d9045190cfef")
+            .unwrap(),
+    );
+    let peer_npub = peer.public_key().to_bech32().unwrap();
+    let now_secs = now_ms() / 1_000;
+    let runtime = NostrRendezvous::new_for_test();
+    let config = crate::config::NostrRendezvousConfig::default();
+    let body = OverlayAdvert {
+        identifier: ADVERT_IDENTIFIER.to_string(),
+        version: ADVERT_VERSION,
+        endpoints: vec![OverlayEndpointAdvert {
+            transport: OverlayTransportKind::Tcp,
+            addr: "8.8.8.8:443".to_string(),
+        }],
+        signal_relays: None,
+        stun_servers: None,
+    };
+    let newer = super::machine::event::advert::advert_event(
+        &peer,
+        serde_json::to_string(&body).unwrap(),
+        ADVERT_IDENTIFIER,
+        &config.app,
+        config.advert_ttl_secs,
+        now_secs * 1_000,
+        [0u8; 32],
+    )
+    .unwrap();
+    let publisher = nostr_sdk::client::ClientBuilder::new().build();
+    publisher.add_relay(url.as_str()).await.unwrap();
+    publisher.connect().await;
+    publisher
+        .send_event(&newer)
+        .await
+        .expect("the relay stores the advert");
+
+    runtime.set_advert_relays_for_test(vec![url]).await;
+    let older = NostrRendezvous::cached_advert_for_test(
+        peer_npub.clone(),
+        OverlayEndpointAdvert {
+            transport: OverlayTransportKind::Tcp,
+            addr: "203.0.113.11:443".to_string(),
+        },
+        now_secs - 100,
+    );
+    runtime
+        .insert_advert_for_test(peer_npub.clone(), older)
+        .await;
+
+    let outcome = runtime.refetch_advert_for_stale_check(&peer_npub).await;
+    assert_eq!(outcome, crate::nostr::NostrRefetchOutcome::Refreshed);
+    assert_eq!(
+        runtime.cached_created_at_for_test(&peer_npub).await,
+        Some(now_secs),
+        "the newer advert did not replace the cached one"
+    );
+}
+
+/// The cache read path intake uses parses a peer's npub as it always has,
+/// which differs from every other advert entry point: it finds an advert
+/// from the lower-case npub and from the key in hex, and not from the npub
+/// in upper case, where the dial path finds it from either case and refuses
+/// hex as not a NIP-19 npub.
+#[tokio::test]
+async fn cached_endpoints_parses_the_npub_as_the_cache_read_did() {
+    use nostr::nips::nip19::ToBech32;
+    let runtime = NostrRendezvous::new_for_test();
+    let keys = nostr::key::Keys::generate();
+    let npub = keys.public_key().to_bech32().unwrap();
+    let hex = keys.public_key().to_hex();
+    let endpoint = OverlayEndpointAdvert {
+        transport: OverlayTransportKind::Udp,
+        addr: "203.0.113.7:2121".to_string(),
+    };
+    let advert =
+        NostrRendezvous::cached_advert_for_test(npub.clone(), endpoint.clone(), now_ms() / 1_000);
+    runtime.insert_advert_for_test(npub.clone(), advert).await;
+
+    assert_eq!(
+        runtime.cached_endpoints(&npub).await,
+        Some(vec![endpoint.clone()])
+    );
+    assert_eq!(
+        runtime.cached_endpoints(&hex).await,
+        Some(vec![endpoint.clone()]),
+        "the cache read takes the key in hex"
+    );
+    assert_eq!(
+        runtime.cached_endpoints(&npub.to_uppercase()).await,
+        None,
+        "the cache read does not take an upper-case npub"
+    );
+
+    assert!(matches!(
+        runtime.advert_endpoints_for_peer(&npub).await,
+        Ok(found) if found == vec![endpoint.clone()]
+    ));
+    assert!(matches!(
+        runtime.advert_endpoints_for_peer(&npub.to_uppercase()).await,
+        Ok(found) if found == vec![endpoint.clone()]
+    ));
+    assert!(matches!(
+        runtime.advert_endpoints_for_peer(&hex).await,
+        Err(BootstrapError::InvalidPeerNpub { .. })
+    ));
 }
 
 /// The advert cache holds adverts under the canonical lower-case npub, and
@@ -2429,22 +2315,6 @@ async fn an_upper_case_configured_npub_resolves_its_cached_advert() {
     assert_eq!(endpoints, vec![endpoint]);
 }
 
-/// A peer key whose NodeAddr sorts after (`larger`) or before our own.
-fn peer_keys_ordered(our_npub: &str, larger: bool) -> nostr::Keys {
-    use nostr::ToBech32;
-    let ours = *crate::PeerIdentity::from_npub(our_npub)
-        .unwrap()
-        .node_addr();
-    loop {
-        let keys = nostr::Keys::generate();
-        let npub = keys.public_key().to_bech32().unwrap();
-        let theirs = *crate::PeerIdentity::from_npub(&npub).unwrap().node_addr();
-        if (theirs > ours) == larger {
-            return keys;
-        }
-    }
-}
-
 fn offer_between(session: &str, from: &str, to: &str) -> super::TraversalOffer {
     create_traversal_offer(
         session.to_string(),
@@ -2459,173 +2329,47 @@ fn offer_between(session: &str, from: &str, to: &str) -> super::TraversalOffer {
     )
 }
 
-/// A relay URL the test runtime adds to its pool without connecting. A send
-/// naming it succeeds at the pool and reaches no network.
-const UNCONNECTED_RELAY: &str = "ws://127.0.0.1:1";
-
-/// Dual init where our NodeAddr is smaller: the peer's offer is suppressed in
-/// favour of ours. If the peer never received ours, neither side answers until
-/// `signal_ttl_secs` runs out, so the suppression re-sends ours, once.
-#[tokio::test]
-async fn suppressing_a_peers_offer_resends_ours_once() {
-    use nostr::ToBech32;
-    let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test());
-    runtime
-        .add_unconnected_relay_for_test(UNCONNECTED_RELAY)
-        .await;
-    let our_npub = runtime.npub_for_test().to_string();
-    let peer = peer_keys_ordered(&our_npub, true);
-    let peer_npub = peer.public_key().to_bech32().unwrap();
-
-    let ours = offer_between("our-session", &our_npub, &peer_npub);
-    runtime
-        .insert_inflight_offer_for_test(
-            &peer_npub,
-            ours.clone(),
-            peer.public_key(),
-            vec![UNCONNECTED_RELAY.to_string()],
-        )
-        .await;
-
-    for session in ["their-session-1", "their-session-2"] {
-        let theirs = offer_between(session, &peer_npub, &our_npub);
-        runtime
-            .clone()
-            .handle_incoming_offer_for_test(theirs, peer.public_key(), peer_npub.clone())
-            .await
-            .expect("a suppressed offer is not an error");
-        assert_eq!(
-            runtime.sent_offers_for_test(),
-            vec![ours.clone()],
-            "our offer, with its session id, should be re-sent exactly once ({session})"
-        );
-        assert_eq!(
-            runtime.inflight_offer_resent_for_test(&peer_npub).await,
-            Some(true),
-            "a published re-send should be marked done ({session})"
-        );
-    }
+/// A NIP-42 authenticator that answers a relay's challenge with an
+/// authentication event signed directly by `signer`, created now, with fresh
+/// randomness for its signature: the node's answer, without the pump.
+#[derive(Debug)]
+pub(super) struct SignerAuthenticator {
+    pub(super) signer: std::sync::Arc<NodeSigner>,
 }
 
-/// A re-send whose publish fails is not marked done, so the next suppression
-/// tries again; once one publish succeeds, no further re-send follows.
-#[tokio::test]
-async fn a_failed_resend_is_tried_again_on_the_next_suppression() {
-    use nostr::ToBech32;
-    let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test());
-    let our_npub = runtime.npub_for_test().to_string();
-    let peer = peer_keys_ordered(&our_npub, true);
-    let peer_npub = peer.public_key().to_bech32().unwrap();
-
-    // The offer names a relay the pool does not hold yet, so publishing fails.
-    let ours = offer_between("our-session", &our_npub, &peer_npub);
-    runtime
-        .insert_inflight_offer_for_test(
-            &peer_npub,
-            ours.clone(),
-            peer.public_key(),
-            vec![UNCONNECTED_RELAY.to_string()],
-        )
-        .await;
-
-    let suppress = |session: &'static str| {
-        let runtime = runtime.clone();
-        let theirs = offer_between(session, &peer_npub, &our_npub);
-        let (sender, sender_npub) = (peer.public_key(), peer_npub.clone());
-        async move {
-            runtime
-                .handle_incoming_offer_for_test(theirs, sender, sender_npub)
-                .await
-                .expect("a suppressed offer is not an error");
-        }
-    };
-
-    suppress("their-session-1").await;
-    assert!(
-        runtime.sent_offers_for_test().is_empty(),
-        "a failed publish sends nothing"
-    );
-    assert_eq!(
-        runtime.inflight_offer_resent_for_test(&peer_npub).await,
-        Some(false),
-        "a failed publish must leave the re-send available"
-    );
-
-    runtime
-        .add_unconnected_relay_for_test(UNCONNECTED_RELAY)
-        .await;
-    for session in ["their-session-2", "their-session-3"] {
-        suppress(session).await;
-        assert_eq!(
-            runtime.sent_offers_for_test(),
-            vec![ours.clone()],
-            "the retried re-send should publish our offer exactly once ({session})"
-        );
-        assert_eq!(
-            runtime.inflight_offer_resent_for_test(&peer_npub).await,
-            Some(true),
-            "the published re-send should be marked done ({session})"
-        );
+impl nostr_sdk::authenticator::Authenticator for SignerAuthenticator {
+    fn make_auth_event<'a>(
+        &'a self,
+        relay_url: &'a nostr::types::RelayUrl,
+        challenge: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<nostr::event::Event, nostr_sdk::error::Error>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            super::machine::event::auth::auth_event(
+                &self.signer,
+                relay_url,
+                challenge,
+                now_ms(),
+                super::relay::aux(),
+            )
+            .map_err(|e| nostr_sdk::error::Error::other(e.to_string()))
+        })
     }
-}
-
-/// Dual init where the peer's NodeAddr is smaller: we answer its offer and
-/// leave ours alone.
-#[tokio::test]
-async fn answering_a_peers_offer_does_not_resend_ours() {
-    use nostr::ToBech32;
-    let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test());
-    // Our offer's relay is in the pool, so a wrongful re-send would publish and
-    // be seen below.
-    runtime
-        .add_unconnected_relay_for_test(UNCONNECTED_RELAY)
-        .await;
-    let our_npub = runtime.npub_for_test().to_string();
-    let peer = peer_keys_ordered(&our_npub, false);
-    let peer_npub = peer.public_key().to_bech32().unwrap();
-
-    let ours = offer_between("our-session", &our_npub, &peer_npub);
-    runtime
-        .insert_inflight_offer_for_test(
-            &peer_npub,
-            ours,
-            peer.public_key(),
-            vec![UNCONNECTED_RELAY.to_string()],
-        )
-        .await;
-
-    let theirs = offer_between("their-session", &peer_npub, &our_npub);
-    let r = runtime
-        .clone()
-        .handle_incoming_offer_for_test(theirs, peer.public_key(), peer_npub.clone())
-        .await;
-    // The test runtime shares no signal relay with the peer, so answering fails
-    // after the election. That failure shows the offer got past it rather than
-    // being rejected earlier.
-    assert!(
-        matches!(r, Err(BootstrapError::MissingRelays(_))),
-        "expected to reach the answer step, got {r:?}"
-    );
-    assert!(
-        runtime.sent_offers_for_test().is_empty(),
-        "an offer we answer must not trigger a re-send"
-    );
-    assert_eq!(
-        runtime.inflight_offer_resent_for_test(&peer_npub).await,
-        Some(false),
-        "an offer we answer must not trigger a re-send"
-    );
 }
 
 // --- advert cache: an entry past its horizon keeps its slot for a grace ---
 
 mod advert_lapse {
-    use std::collections::HashSet;
+    use fips_core::utils::hash::KeyedHasher;
 
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
-
-    use super::super::advert::{AdvertAdmission, AdvertMachine};
+    use super::super::machine::adverts::cache::{AdvertAdmission, Cache};
+    use super::super::machine::params::Params;
+    use super::super::machine::tests::{SeededEntropy, TestInstant, ZeroEntropy};
     use super::{ADVERT_IDENTIFIER, ADVERT_VERSION, OverlayAdvert, OverlayEndpointAdvert};
     use super::{OverlayTransportKind, nostr_config_with_refresh};
 
@@ -2650,13 +2394,17 @@ mod advert_lapse {
 
     /// A cache of `cap` entries with one republish interval of grace, as the
     /// runtime builds it.
-    fn cache(cap: usize) -> AdvertMachine {
-        AdvertMachine::new("npub1self".to_string(), true, 2 * HORIZON, cap)
-            .with_lapse_grace(REFRESH)
+    fn cache(cap: usize) -> Cache<TestInstant> {
+        Cache::new(
+            "npub1self".to_string(),
+            cap,
+            KeyedHasher::new::<ZeroEntropy>(),
+        )
+        .with_lapse_grace(REFRESH)
     }
 
     fn offer(
-        m: &AdvertMachine,
+        m: &mut Cache<TestInstant>,
         npub: &str,
         created_at: u64,
         valid_until_ms: u64,
@@ -2667,16 +2415,16 @@ mod advert_lapse {
 
     /// A cache held full by a flood, with the honest author admitted first.
     /// Flood adverts omit the expiration tag, so they carry twice the horizon.
-    fn flooded(cap: usize) -> AdvertMachine {
-        let m = cache(cap);
+    fn flooded(cap: usize) -> Cache<TestInstant> {
+        let mut m = cache(cap);
         assert_eq!(
-            offer(&m, "npub1honest", 1, T0 + HORIZON, T0),
+            offer(&mut m, "npub1honest", 1, T0 + HORIZON, T0),
             AdvertAdmission::Admitted
         );
         for i in 1..cap {
             let key = format!("npub1flood{i}");
             assert_eq!(
-                offer(&m, &key, 1, T0 + 2 * HORIZON, T0),
+                offer(&mut m, &key, 1, T0 + 2 * HORIZON, T0),
                 AdvertAdmission::Admitted
             );
         }
@@ -2688,15 +2436,15 @@ mod advert_lapse {
     /// its slot back rather than be refused as a newcomer's.
     #[test]
     fn an_honest_author_that_misses_one_republish_during_a_flood_keeps_its_slot() {
-        let m = flooded(4);
+        let mut m = flooded(4);
         let lapsed = T0 + HORIZON + 1;
         let _ = m.prune(lapsed);
-        let late = offer(&m, "npub1flood-late", 1, lapsed + 2 * HORIZON, lapsed);
+        let late = offer(&mut m, "npub1flood-late", 1, lapsed + 2 * HORIZON, lapsed);
 
         let republished = T0 + HORIZON + REFRESH / 2;
         let _ = m.prune(republished);
         assert_eq!(
-            offer(&m, "npub1honest", 2, republished + HORIZON, republished),
+            offer(&mut m, "npub1honest", 2, republished + HORIZON, republished),
             AdvertAdmission::Updated,
             "the honest author's next advert takes its slot back"
         );
@@ -2712,16 +2460,22 @@ mod advert_lapse {
     /// rather than the returning author.
     #[test]
     fn a_returning_author_keeps_its_admission_order() {
-        let m = flooded(4);
+        let mut m = flooded(4);
         let republished = T0 + HORIZON + 1;
         let _ = m.prune(republished);
         assert_eq!(
-            offer(&m, "npub1honest", 2, republished + HORIZON, republished),
+            offer(&mut m, "npub1honest", 2, republished + HORIZON, republished),
             AdvertAdmission::Updated
         );
-        m.set_protected(["npub1configured".to_string()].into_iter().collect());
+        m.set_protected(["npub1configured".to_string()]);
         assert_eq!(
-            offer(&m, "npub1configured", 1, republished + HORIZON, republished),
+            offer(
+                &mut m,
+                "npub1configured",
+                1,
+                republished + HORIZON,
+                republished
+            ),
             AdvertAdmission::Admitted
         );
         assert!(m.cached_created_at("npub1honest").is_some());
@@ -2735,14 +2489,14 @@ mod advert_lapse {
     /// dial path's cache lookup nor open discovery sees it.
     #[test]
     fn a_lapsed_advert_is_served_to_neither_the_dial_path_nor_open_discovery() {
-        let m = flooded(4);
+        let mut m = flooded(4);
         let lapsed = T0 + HORIZON + 1;
         let _ = m.prune(lapsed);
 
         assert!(m.cached_created_at("npub1honest").is_some(), "slot kept");
         assert!(m.cached_advert("npub1honest", lapsed).is_none());
-        let window =
-            m.open_discovery_candidates(64, lapsed, &HashSet::new(), &mut StdRng::seed_from_u64(3));
+        SeededEntropy::seed(3);
+        let window = m.open_discovery_candidates::<SeededEntropy>(64, lapsed, |_| false);
         assert!(
             window.iter().all(|(npub, _, _)| npub != "npub1honest"),
             "a lapsed entry was offered to open discovery"
@@ -2750,9 +2504,9 @@ mod advert_lapse {
         assert_eq!(window.len(), 3, "the live entries are still offered");
 
         // A protected author's lapsed entry is not served either.
-        m.set_protected(["npub1honest".to_string()].into_iter().collect());
-        let window =
-            m.open_discovery_candidates(64, lapsed, &HashSet::new(), &mut StdRng::seed_from_u64(3));
+        m.set_protected(["npub1honest".to_string()]);
+        SeededEntropy::seed(3);
+        let window = m.open_discovery_candidates::<SeededEntropy>(64, lapsed, |_| false);
         assert!(window.iter().all(|(npub, _, _)| npub != "npub1honest"));
     }
 
@@ -2760,7 +2514,7 @@ mod advert_lapse {
     /// did before, and a newcomer is admitted.
     #[test]
     fn a_lapsed_slot_frees_once_one_republish_interval_has_passed() {
-        let m = flooded(4);
+        let mut m = flooded(4);
         let still_lapsed = T0 + HORIZON + REFRESH - 1;
         let report = m.prune(still_lapsed);
         assert_eq!(report.expired, 0);
@@ -2771,7 +2525,7 @@ mod advert_lapse {
         assert_eq!(report.expired, 1);
         assert!(m.cached_created_at("npub1honest").is_none());
         assert_eq!(
-            offer(&m, "npub1newcomer", 1, gone + HORIZON, gone),
+            offer(&mut m, "npub1newcomer", 1, gone + HORIZON, gone),
             AdvertAdmission::Admitted
         );
     }
@@ -2780,12 +2534,12 @@ mod advert_lapse {
     /// is admitted as before, taking the newest unprotected entry's slot.
     #[test]
     fn a_protected_author_still_makes_room_while_an_entry_is_lapsed() {
-        let m = flooded(4);
+        let mut m = flooded(4);
         let lapsed = T0 + HORIZON + 1;
         let _ = m.prune(lapsed);
-        m.set_protected(["npub1configured".to_string()].into_iter().collect());
+        m.set_protected(["npub1configured".to_string()]);
         assert_eq!(
-            offer(&m, "npub1configured", 1, lapsed + HORIZON, lapsed),
+            offer(&mut m, "npub1configured", 1, lapsed + HORIZON, lapsed),
             AdvertAdmission::Admitted
         );
         assert!(m.cached_created_at("npub1configured").is_some());
@@ -2800,9 +2554,12 @@ mod advert_lapse {
     /// from this node's own `advert_refresh_secs`.
     #[test]
     fn the_runtime_takes_the_grace_from_the_advert_refresh_interval() {
-        let m = super::super::runtime::advert_machine(
+        let m = super::super::machine::rendezvous::advert_cache::<
+            crate::time::HostInstant,
+            crate::identity::OsEntropy,
+        >(
             "npub1self".to_string(),
-            &nostr_config_with_refresh(1_200),
+            &Params::from(&nostr_config_with_refresh(1_200)),
         );
         assert_eq!(m.lapse_grace_ms(), 1_200_000);
     }
@@ -2817,10 +2574,10 @@ fn nostr_config_with_refresh(secs: u64) -> crate::config::NostrRendezvousConfig 
 }
 
 /// A kind 10050 inbox relay list carrying `tags`, signed by a fresh key.
-fn inbox_list_with_tags(tags: Vec<Tag>) -> nostr::Event {
+fn inbox_list_with_tags(tags: Vec<Tag>) -> nostr::event::Event {
     EventBuilder::new(Kind::InboxRelays, "")
         .tags(tags)
-        .sign_with_keys(&nostr::Keys::generate())
+        .finalize(&nostr::key::Keys::generate())
         .unwrap()
 }
 
@@ -2829,95 +2586,11 @@ fn normalized(url: &str) -> String {
     RelayUrl::parse(url).unwrap().to_string()
 }
 
-/// The inbox relay list this node publishes must be readable by the lookup
-/// every other node runs on it, or a peer's list never takes part in choosing
-/// the relays a traversal signal goes to.
-#[tokio::test]
-async fn the_inbox_relay_list_this_node_publishes_is_read_back_as_its_dm_relays() {
-    let relays = vec![
-        UNCONNECTED_RELAY.to_string(),
-        "ws://127.0.0.1:2".to_string(),
-    ];
-    let runtime = NostrRendezvous::new_for_test_with_config(crate::config::NostrRendezvousConfig {
-        dm_relays: relays.clone(),
-        ..Default::default()
-    });
-    for relay in &relays {
-        runtime.add_unconnected_relay_for_test(relay).await;
-    }
-
-    runtime
-        .publish_inbox_relays_for_test()
-        .await
-        .expect("a send to pooled relays succeeds");
-    let sent = runtime.inbox_sent_for_test();
-    assert_eq!(sent.len(), 1, "one list should have been published");
-    let event = &sent[0].1;
-    assert_eq!(event.kind, Kind::InboxRelays);
-    assert_eq!(event.tags.len(), 2, "the list should name both DM relays");
-
-    let expected = relays.iter().map(|r| normalized(r)).collect::<Vec<_>>();
-    assert_eq!(inbox_relays(event), expected);
-}
-
-/// Peers look up inbox relay lists no older than `INBOX_LOOKBACK`, so a node
-/// that publishes its list only at startup drops out of their lookup once it
-/// has run that long. No gap between publishes may reach the window.
-#[tokio::test(start_paused = true)]
-async fn the_inbox_relay_list_is_republished_before_it_ages_out_of_the_lookup_window() {
-    use std::time::Duration;
-    let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test_with_config(
-        crate::config::NostrRendezvousConfig {
-            dm_relays: vec![UNCONNECTED_RELAY.to_string()],
-            advert_relays: vec![UNCONNECTED_RELAY.to_string()],
-            ..Default::default()
-        },
-    ));
-    runtime
-        .add_unconnected_relay_for_test(UNCONNECTED_RELAY)
-        .await;
-    let start = tokio::time::Instant::now();
-    let task = runtime.clone().spawn_relay_startup_loop_for_test();
-
-    tokio::time::sleep(Duration::from_secs(120)).await;
-    assert_eq!(
-        runtime.inbox_sent_for_test().len(),
-        1,
-        "setup: the first subscribe succeeds, so startup publishes exactly once"
-    );
-
-    for _ in 0..31 {
-        tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
-    }
-    let now = tokio::time::Instant::now();
-    let sent = runtime.inbox_sent_for_test();
-    task.abort();
-
-    assert!(sent.len() >= 2, "the list should have been published again");
-    let mut last = start;
-    for (at, _) in &sent {
-        assert!(
-            at.duration_since(last) < INBOX_LOOKBACK,
-            "a gap between publishes reached the lookup window"
-        );
-        last = *at;
-    }
-    assert!(
-        now.duration_since(last) < INBOX_LOOKBACK,
-        "the newest list has aged out of the lookup window"
-    );
-    assert_eq!(
-        sent.len(),
-        32,
-        "one startup publish and one a day for 31 days"
-    );
-}
-
 /// The NIP-17 `relay` tag form is read.
 #[test]
 fn an_inbox_relay_list_in_the_nip17_relay_form_is_still_read() {
     let event = signed_inbox_relay_event(
-        &nostr::Keys::generate(),
+        &nostr::key::Keys::generate(),
         Timestamp::now().as_secs(),
         "wss://relay.example",
     );
@@ -2932,7 +2605,7 @@ fn an_inbox_relay_list_in_the_nip17_relay_form_is_still_read() {
 fn an_inbox_relay_list_naming_one_relay_in_both_tag_forms_lists_it_once() {
     let url = "wss://relay.example";
     let event = inbox_list_with_tags(vec![
-        Tag::relay(RelayUrl::parse(url).unwrap()),
+        Tag::custom("relay", [RelayUrl::parse(url).unwrap().to_string()]),
         Tag::parse(["r", url]).unwrap(),
     ]);
     assert_eq!(inbox_relays(&event), vec![normalized(url)]);
@@ -2955,13 +2628,79 @@ fn an_r_tag_carrying_a_marker_is_not_read_as_an_inbox_relay() {
 fn an_event_of_another_kind_is_not_read_as_an_inbox_relay_list() {
     let event = EventBuilder::new(Kind::RelayList, "")
         .tags(vec![Tag::parse(["r", "wss://relay.example"]).unwrap()])
-        .sign_with_keys(&nostr::Keys::generate())
+        .finalize(&nostr::key::Keys::generate())
         .unwrap();
     assert!(inbox_relays(&event).is_empty());
 }
 
+/// Each machine setting is copied from its own configuration key: every key
+/// gets a distinct value, so two fields swapped in the conversion cannot both
+/// read right.
+#[test]
+fn the_machine_params_copy_each_value_from_its_own_config_key() {
+    let config = crate::config::NostrRendezvousConfig {
+        failure_streak_threshold: 7,
+        extended_cooldown_secs: 11,
+        warn_log_interval_secs: 13,
+        failure_state_max_entries: 17,
+        replay_window_secs: 19,
+        seen_sessions_max_entries: 23,
+        advertise: false,
+        advert_cache_max_entries: 29,
+        advert_refresh_secs: 31,
+        app: "app-37".to_string(),
+        advert_relays: vec!["wss://adverts-41.example".to_string()],
+        dm_relays: vec!["wss://dm-43.example".to_string()],
+        stun_servers: vec!["stun:stun-47.example:3478".to_string()],
+        advert_ttl_secs: 53,
+        signal_ttl_secs: 59,
+        attempt_timeout_secs: 61,
+        punch_start_delay_ms: 67,
+        punch_interval_ms: 71,
+        punch_duration_ms: 73,
+        share_local_candidates: true,
+        protocol_mismatch_cooldown_secs: 79,
+        max_concurrent_incoming_offers: 83,
+        max_concurrent_offers_per_npub: 89,
+        ..Default::default()
+    };
+    let params = Params::from(&config);
+    assert_eq!(params.failure_streak_threshold, 7);
+    assert_eq!(params.extended_cooldown_secs, 11);
+    assert_eq!(params.warn_log_interval_secs, 13);
+    assert_eq!(params.failure_state_max_entries, 17);
+    assert_eq!(params.replay_window_secs, 19);
+    assert_eq!(params.seen_sessions_max_entries, 23);
+    assert!(!params.advertise);
+    assert_eq!(params.advert_cache_max_entries, 29);
+    assert_eq!(params.advert_refresh_secs, 31);
+    assert_eq!(params.app, "app-37");
+    assert_eq!(params.advert_relays, vec!["wss://adverts-41.example"]);
+    assert_eq!(params.dm_relays, vec!["wss://dm-43.example"]);
+    assert_eq!(params.stun_servers, vec!["stun:stun-47.example:3478"]);
+    assert_eq!(params.advert_ttl_secs, 53);
+    assert_eq!(params.signal_ttl_secs, 59);
+    assert_eq!(params.attempt_timeout_secs, 61);
+    assert_eq!(params.punch_start_delay_ms, 67);
+    assert_eq!(params.punch_interval_ms, 71);
+    assert_eq!(params.punch_duration_ms, 73);
+    assert!(params.share_local_candidates);
+    assert_eq!(params.protocol_mismatch_cooldown_secs, 79);
+    assert_eq!(params.max_concurrent_incoming_offers, 83);
+    assert_eq!(params.max_concurrent_offers_per_npub, 89);
+    // The flags' other values too, so a conversion that ignores one fails.
+    let config = crate::config::NostrRendezvousConfig {
+        advertise: true,
+        share_local_candidates: false,
+        ..config
+    };
+    assert!(Params::from(&config).advertise);
+    assert!(!Params::from(&config).share_local_candidates);
+}
+
 mod clock_skew;
 mod fixtures;
+mod inbox_read;
 mod notify_channels;
 mod npub_spelling;
 mod punch_recv_error;
@@ -2970,3 +2709,36 @@ mod seen_session_floor;
 mod signal_bounds;
 mod signal_lag;
 mod unknown_transport;
+
+/// The failure reply carries the Unix time the decision was computed at,
+/// and its cooldown is measured from that time, so the node's reported
+/// cooldown and retry schedule start where the cooldown does.
+#[tokio::test]
+async fn the_failure_reply_carries_the_time_it_was_computed_at() {
+    let config = crate::config::NostrRendezvousConfig {
+        failure_streak_threshold: 1,
+        extended_cooldown_secs: 600,
+        ..Default::default()
+    };
+    let runtime = NostrRendezvous::new_for_test_with_config(config);
+    let peer_npub = crate::Identity::generate().npub();
+    let before = now_ms();
+    let reply = runtime.record_traversal_failure(&peer_npub).await;
+    let after = now_ms();
+    assert!(
+        (before..=after).contains(&reply.at_ms),
+        "the reply's time {} is not when it was computed ({before}..={after})",
+        reply.at_ms
+    );
+    assert_eq!(reply.decision.consecutive_failures, 1);
+    assert_eq!(
+        reply.decision.cooldown_until_ms,
+        Some(reply.at_ms + 600_000),
+        "the cooldown is not measured from the reply's time"
+    );
+    assert_eq!(
+        runtime.cooldown_until(&peer_npub, reply.at_ms),
+        Some(reply.at_ms + 600_000),
+        "the status the node reads does not hold the cooldown"
+    );
+}

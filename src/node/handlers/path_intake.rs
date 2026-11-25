@@ -562,12 +562,16 @@ impl Node {
                     .into_iter()
                     .cloned()
                     .collect();
-                let advertised = self.supervisor.nostr_rendezvous.cached_addresses(
-                    config,
-                    &configured,
-                    &self.config().node.rendezvous.nostr,
-                    Self::now_ms(),
-                );
+                let advertised = self
+                    .supervisor
+                    .nostr_rendezvous
+                    .cached_addresses(
+                        config,
+                        &configured,
+                        &self.config().node.rendezvous.nostr,
+                        Self::now_ms(),
+                    )
+                    .await;
                 (self.pairs_of(&configured), self.pairs_of(&advertised))
             }
             None => (Vec::new(), Vec::new()),

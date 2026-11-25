@@ -45,7 +45,7 @@ YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::fsp::late_first_handshak
 YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::sim::crossing_runs_converge_with_only_the_tie_break_outcomes	reported FinalNoAttempt
 YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::sim::clean_runs_rotate_on_cadence_with_no_reject_abandon_revert_or_assumed_cutover	reported FinalNoAttempt
 YieldKeepsOwnAttempt	red	fips-mesh	node::tests::session::simultaneous_initiation_converges_with_no_rekey_armed	no setup may reach an established end
-ClampEntryKept	red	fips-mesh	node::tests::probe::probe_teardown_releases_the_clamp_entry_the_probes_session_tightened	must not outlive the session
+ClampEntryKept	red	fips-mesh	node::tests::probe::removing_an_unfinished_probe_session_releases_its_clamp_entry
 ClampEntryKept	red	fips-mesh	node::tests::peer_restart::restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions	the clamp entry the ended session tightened goes with it
 ClampEntryKept	red	fips-mesh	node::tests::settle::table::rekey::a_restart_found_at_a_rekey_does_what_its_cells_say
 ClampEntryKept	red	fips-mesh	node::tests::settle::table::rekey::a_restart_found_at_a_rekey_does_what_its_cells_say_with_multipath_on

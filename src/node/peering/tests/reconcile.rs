@@ -253,14 +253,13 @@ fn the_overlay_enqueues_an_advertised_node_while_claims_of_it_are_in_flight() {
     let mut policy = policy();
     policy.open_discovery_enabled = true;
     let pools = DiscoveryPools {
-        overlay: vec![(
+        overlay: vec![OverlayRow {
             npub,
-            vec![OverlayEndpointAdvert {
-                transport: crate::nostr::OverlayTransportKind::Udp,
-                addr: "203.0.113.7:2121".to_string(),
-            }],
-            0,
-        )],
+            addresses: vec![
+                PeerAddress::with_priority("udp", "203.0.113.7:2121", 120).with_seen_at_ms(10_000),
+            ],
+            created_at_secs: 0,
+        }],
         ..DiscoveryPools::default()
     };
     let mut reconciler = PeeringReconciler::default();
@@ -286,7 +285,11 @@ fn the_overlay_expedites_a_configured_peers_retry_while_claims_of_it_are_in_flig
     let mut policy = policy();
     policy.open_discovery_enabled = true;
     let pools = DiscoveryPools {
-        overlay: vec![(npub.clone(), Vec::new(), 0)],
+        overlay: vec![OverlayRow {
+            npub: npub.clone(),
+            addresses: Vec::new(),
+            created_at_secs: 0,
+        }],
         configured_npubs: [npub.clone()].into_iter().collect(),
         ..DiscoveryPools::default()
     };

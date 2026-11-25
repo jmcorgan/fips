@@ -12,42 +12,15 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::NodeAddr;
 use crate::config::{NostrRendezvousConfig, NostrRendezvousPolicy, PeerAddress, PeerConfig};
 use crate::transport::TransportId;
 
-use super::{
-    ADVERT_IDENTIFIER, ADVERT_VERSION, BootstrapError, NostrRendezvous, OverlayAdvert,
-    OverlayEndpointAdvert, OverlayTransportKind,
-};
+use super::{BootstrapError, NostrRendezvous, OverlayEndpointAdvert, OverlayTransportKind};
 
-/// Snapshot of a single operational transport's advertisable endpoint
-/// inputs, captured on `Node` at advert-build time so the driver can
-/// assemble the overlay advert without borrowing the transport table.
-/// Only transports whose type matched a configured listener are included;
-/// the `advertise` gate is carried verbatim so the driver reproduces the
-/// original per-transport branch logic exactly.
-pub enum AdvertTransportSnapshot {
-    Udp {
-        advertise: bool,
-        is_public: bool,
-        external_addr: Option<SocketAddr>,
-        local_addr: Option<SocketAddr>,
-        transport_key: u32,
-    },
-    Tcp {
-        advertise: bool,
-        external_addr: Option<SocketAddr>,
-        local_addr: Option<SocketAddr>,
-    },
-    Tor {
-        advertise: bool,
-        onion_addr: Option<String>,
-        advertised_port: u16,
-    },
-}
+pub use super::machine::adverts::assemble::AdvertTransportSnapshot;
 
 /// The peer a bootstrap transport was adopted for: who it is and the address
 /// the traversal reached it at.
@@ -126,6 +99,12 @@ pub struct RendezvousDriver {
     /// route fatal-protocol-mismatch observations back to the
     /// Nostr-discovery `failure_state` for long cooldown application.
     bootstrap_peers: HashMap<TransportId, BootstrapPeer>,
+    /// The transports last handed to the engine, so the tick sends them
+    /// again only when they change.
+    sent_transports: Option<Vec<AdvertTransportSnapshot>>,
+    /// The capacity last sent to the engine, so the tick sends it again
+    /// only when it changes.
+    sent_capacity: Option<bool>,
 }
 
 impl RendezvousDriver {
@@ -144,8 +123,11 @@ impl RendezvousDriver {
         self.engine = Some(engine);
     }
 
-    /// Take the engine handle for shutdown, clearing it.
+    /// Take the engine handle for shutdown, clearing it and what was last
+    /// handed to it.
     pub fn take_engine(&mut self) -> Option<Arc<NostrRendezvous>> {
+        self.sent_transports = None;
+        self.sent_capacity = None;
         self.engine.take()
     }
 
@@ -309,9 +291,9 @@ impl RendezvousDriver {
 
     /// [`Self::nostr_peer_fallback_addresses`] from the advert cache alone:
     /// a peer whose advert is not cached, or no longer current, gives none.
-    /// Never waits on a relay, so the node's event loop may call it on
-    /// every tick.
-    pub fn cached_addresses(
+    /// Never waits on a relay, only on the engine's queue, so the node's
+    /// event loop may call it on every tick.
+    pub async fn cached_addresses(
         &self,
         peer_config: &PeerConfig,
         existing: &[PeerAddress],
@@ -321,10 +303,10 @@ impl RendezvousDriver {
         if !Self::nostr_wanted(peer_config, nostr_cfg) {
             return Vec::new();
         }
-        let Some(endpoints) = self
-            .engine_arc()
-            .and_then(|bootstrap| bootstrap.cached_endpoints(&peer_config.npub))
-        else {
+        let Some(bootstrap) = self.engine_arc() else {
+            return Vec::new();
+        };
+        let Some(endpoints) = bootstrap.cached_endpoints(&peer_config.npub).await else {
             return Vec::new();
         };
         Self::fallback_from(endpoints, existing, now_ms)
@@ -346,203 +328,117 @@ impl RendezvousDriver {
         existing: &[PeerAddress],
         now_ms: u64,
     ) -> Vec<PeerAddress> {
-        let mut fallback = Vec::new();
-        let mut next_priority = existing
+        let first_priority = existing
             .iter()
             .map(|addr| addr.priority)
             .max()
             .unwrap_or(100)
             .saturating_add(1);
-        let seen_at_ms = now_ms;
+        Self::addresses_from(&endpoints, existing, first_priority, now_ms)
+    }
+
+    /// The addresses an open-discovery candidate's advert `endpoints` give:
+    /// in advert order, from priority 120, each seen at `seen_at_ms`.
+    pub(crate) fn overlay_addresses(
+        endpoints: &[OverlayEndpointAdvert],
+        seen_at_ms: u64,
+    ) -> Vec<PeerAddress> {
+        Self::addresses_from(endpoints, &[], 120, seen_at_ms)
+    }
+
+    /// The dial candidates `endpoints` give: one per endpoint of a kind this
+    /// node knows whose (transport, address) pair is neither in `existing`
+    /// nor already taken, in advert order, the first at `first_priority`
+    /// and each one after it a step later (held at 255), all seen at
+    /// `seen_at_ms`.
+    fn addresses_from(
+        endpoints: &[OverlayEndpointAdvert],
+        existing: &[PeerAddress],
+        first_priority: u8,
+        seen_at_ms: u64,
+    ) -> Vec<PeerAddress> {
+        let mut taken: Vec<PeerAddress> = Vec::new();
+        let mut priority = first_priority;
         for endpoint in endpoints {
             let Some(candidate) =
-                Self::overlay_endpoint_to_peer_address(&endpoint, next_priority, seen_at_ms)
+                Self::overlay_endpoint_to_peer_address(endpoint, priority, seen_at_ms)
             else {
                 continue;
             };
-            if existing
-                .iter()
-                .any(|addr| addr.transport == candidate.transport && addr.addr == candidate.addr)
-                || fallback.iter().any(|addr: &PeerAddress| {
-                    addr.transport == candidate.transport && addr.addr == candidate.addr
-                })
-            {
+            let same = |addr: &PeerAddress| {
+                addr.transport == candidate.transport && addr.addr == candidate.addr
+            };
+            if existing.iter().any(same) || taken.iter().any(same) {
                 continue;
             }
-            fallback.push(candidate);
-            next_priority = next_priority.saturating_add(1);
+            taken.push(candidate);
+            priority = priority.saturating_add(1);
         }
-        fallback
+        taken
     }
 
-    /// Publish the local overlay advert built from `snapshot`. When no advert
-    /// results, publishing stops; the advert already on relays is not
-    /// withdrawn and ages out by its NIP-40 expiration.
+    /// Hand the transports in `snapshot` to the engine when they differ from
+    /// those last handed over; the engine assembles the local overlay advert
+    /// from them and publishes it, once any public address it needs has been
+    /// learned, and observes that address again when it ages out. Does not
+    /// wait. When discovery is disabled no transport is advertised, so no
+    /// advert results; publishing then stops, and the advert already on
+    /// relays is not withdrawn but ages out by its NIP-40 expiration.
     /// `bootstrap` is passed explicitly because the startup path refreshes the
     /// advert before the engine handle is installed on the driver.
     pub async fn refresh_overlay_advert(
-        &self,
+        &mut self,
         bootstrap: &Arc<NostrRendezvous>,
         snapshot: Vec<AdvertTransportSnapshot>,
         nostr_cfg: &NostrRendezvousConfig,
     ) -> Result<(), BootstrapError> {
-        let advert = self
-            .build_overlay_advert(bootstrap, snapshot, nostr_cfg)
-            .await;
-        bootstrap.update_local_advert(advert).await
+        let advertised = Self::advertised(snapshot, nostr_cfg);
+        if self.sent_transports.as_ref() == Some(&advertised) {
+            return Ok(());
+        }
+        bootstrap.set_transports(advertised.clone());
+        self.sent_transports = Some(advertised);
+        Ok(())
     }
 
-    /// Assemble the local `OverlayAdvert` from the per-transport `snapshot`.
-    /// The STUN `learn_public_udp_addr` await for wildcard-bound public UDP
-    /// sockets is reached through the `bootstrap` handle.
-    async fn build_overlay_advert(
-        &self,
+    /// Tell `bootstrap` whether the node has room for another peer, when
+    /// `capacity` differs from what it was last told.
+    pub fn send_capacity(&mut self, bootstrap: &NostrRendezvous, capacity: bool) {
+        if self.sent_capacity == Some(capacity) {
+            return;
+        }
+        bootstrap.set_capacity(capacity);
+        self.sent_capacity = Some(capacity);
+    }
+
+    /// As [`Self::refresh_overlay_advert`], waiting until the advert has
+    /// been assembled from `snapshot`, so start-up reports the node running
+    /// only once its first advert exists.
+    pub async fn publish_initial_advert(
+        &mut self,
         bootstrap: &Arc<NostrRendezvous>,
         snapshot: Vec<AdvertTransportSnapshot>,
         nostr_cfg: &NostrRendezvousConfig,
-    ) -> Option<OverlayAdvert> {
-        if !nostr_cfg.enabled {
-            return None;
+    ) -> Result<(), BootstrapError> {
+        let advertised = Self::advertised(snapshot, nostr_cfg);
+        self.sent_transports = Some(advertised.clone());
+        bootstrap.assemble_advert(advertised).await
+    }
+
+    /// The transports to advertise: `snapshot`, or none when discovery is
+    /// disabled.
+    fn advertised(
+        snapshot: Vec<AdvertTransportSnapshot>,
+        nostr_cfg: &NostrRendezvousConfig,
+    ) -> Vec<AdvertTransportSnapshot> {
+        if nostr_cfg.enabled {
+            snapshot
+        } else {
+            Vec::new()
         }
-
-        let mut endpoints = Vec::new();
-        let mut has_udp_nat = false;
-
-        for entry in snapshot {
-            match entry {
-                AdvertTransportSnapshot::Udp {
-                    advertise,
-                    is_public,
-                    external_addr,
-                    local_addr,
-                    transport_key,
-                } => {
-                    if !advertise {
-                        continue;
-                    }
-                    if is_public {
-                        // Precedence:
-                        // 1. operator-supplied `external_addr` (skips STUN)
-                        // 2. non-wildcard `local_addr` (operator bound to
-                        //    a specific public IP directly)
-                        // 3. STUN auto-discovery against ephemeral socket
-                        // 4. loud warn + omit endpoint
-                        if let Some(explicit) = external_addr {
-                            endpoints.push(OverlayEndpointAdvert {
-                                transport: OverlayTransportKind::Udp,
-                                addr: explicit.to_string(),
-                            });
-                        } else {
-                            match local_addr {
-                                Some(addr) if !addr.ip().is_unspecified() => {
-                                    endpoints.push(OverlayEndpointAdvert {
-                                        transport: OverlayTransportKind::Udp,
-                                        addr: addr.to_string(),
-                                    });
-                                }
-                                Some(addr) => {
-                                    let key = transport_key;
-                                    let port = addr.port();
-                                    if let Some(public) =
-                                        bootstrap.learn_public_udp_addr(key, port).await
-                                    {
-                                        endpoints.push(OverlayEndpointAdvert {
-                                            transport: OverlayTransportKind::Udp,
-                                            addr: public.to_string(),
-                                        });
-                                    } else {
-                                        warn!(
-                                            transport_id = key,
-                                            bind_addr = %addr,
-                                            "advert: udp public=true bound to wildcard but \
-                                            STUN observation failed; advertising no UDP \
-                                            endpoint. Either set transports.udp.external_addr, \
-                                            bind to a specific public IP, or ensure \
-                                            node.rendezvous.nostr.stun_servers is reachable"
-                                        );
-                                    }
-                                }
-                                None => {}
-                            }
-                        }
-                    } else {
-                        endpoints.push(OverlayEndpointAdvert {
-                            transport: OverlayTransportKind::Udp,
-                            addr: "nat".to_string(),
-                        });
-                        has_udp_nat = true;
-                    }
-                }
-                AdvertTransportSnapshot::Tcp {
-                    advertise,
-                    external_addr,
-                    local_addr,
-                } => {
-                    if !advertise {
-                        continue;
-                    }
-                    // Precedence:
-                    // 1. operator-supplied `external_addr` (only path that
-                    //    works on cloud-NAT setups where the public IP is
-                    //    not on a host interface).
-                    // 2. non-wildcard `local_addr` (operator bound to a
-                    //    specific public IP directly).
-                    // 3. loud warn + omit endpoint (no TCP STUN equivalent).
-                    if let Some(explicit) = external_addr {
-                        endpoints.push(OverlayEndpointAdvert {
-                            transport: OverlayTransportKind::Tcp,
-                            addr: explicit.to_string(),
-                        });
-                    } else {
-                        match local_addr {
-                            Some(addr) if !addr.ip().is_unspecified() => {
-                                endpoints.push(OverlayEndpointAdvert {
-                                    transport: OverlayTransportKind::Tcp,
-                                    addr: addr.to_string(),
-                                });
-                            }
-                            Some(addr) => {
-                                warn!(
-                                    bind_addr = %addr,
-                                    "advert: tcp advertise_on_nostr=true bound to wildcard \
-                                    and no transports.tcp.external_addr set; advertising no \
-                                    TCP endpoint. Either set external_addr to the public \
-                                    IP (recommended for cloud 1:1-NAT setups) or bind \
-                                    explicitly to the public IP"
-                                );
-                            }
-                            None => {}
-                        }
-                    }
-                }
-                AdvertTransportSnapshot::Tor {
-                    advertise,
-                    onion_addr,
-                    advertised_port,
-                } => {
-                    if !advertise {
-                        continue;
-                    }
-                    if let Some(addr) = onion_addr {
-                        endpoints.push(OverlayEndpointAdvert {
-                            transport: OverlayTransportKind::Tor,
-                            addr: format!("{}:{}", addr, advertised_port),
-                        });
-                    }
-                }
-            }
-        }
-
-        if endpoints.is_empty() {
-            return None;
-        }
-
-        Some(OverlayAdvert {
-            identifier: ADVERT_IDENTIFIER.to_string(),
-            version: ADVERT_VERSION,
-            endpoints,
-            signal_relays: has_udp_nat.then(|| nostr_cfg.dm_relays.clone()),
-            stun_servers: has_udp_nat.then(|| nostr_cfg.stun_servers.clone()),
-        })
     }
 }
+
+#[cfg(test)]
+#[path = "tests/driver.rs"]
+mod tests;

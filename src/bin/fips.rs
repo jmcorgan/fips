@@ -227,9 +227,8 @@ async fn run_daemon(
     } else {
         "info"
     };
-    let default_directive = format!(
-        "{log_level},nostr_relay_pool={nostr_directive},nostr_sdk={nostr_directive},nostr={nostr_directive}"
-    );
+    let default_directive =
+        format!("{log_level},nostr_sdk={nostr_directive},nostr={nostr_directive}");
     let filter = EnvFilter::builder()
         .with_default_directive(log_level.into())
         .parse_lossy(default_directive);

@@ -25,12 +25,16 @@ The tests run with `cargo test -p fips-mesh --bins`.
   also sends, so the client and the daemon are checked against one source.
   It opens no socket, so unlike `fipsctl.rs` it runs on every platform.
 - `fipsctl_probe.rs` tests `../fipsctl.rs` as module `probe_tests`: the
-  probe client's ceiling (`probe_ceiling_ms`). The client waits for the
-  daemon's reported budget plus five seconds, or for an explicit `--timeout`
-  instead. A saturated budget, which a daemon reports for a lookup retry
-  ladder with a huge entry, and a huge `--timeout` both give a ceiling of
-  `u64::MAX` rather than overflowing. It opens no socket, so it runs on every
-  platform.
+  probe client's ceiling (`probe_ceiling_ms`) and its cleanup lines
+  (`probe_cleanup_lines`). The client waits for the daemon's reported budget
+  plus five seconds, or for an explicit `--timeout` instead. A saturated
+  budget, which a daemon reports for a lookup retry ladder with a huge
+  entry, and a huge `--timeout` both give a ceiling of `u64::MAX` rather
+  than overflowing. The cleanup lines describe a session the probe opened
+  and left to the idle timeout as its own, with no note about warmups on a
+  session it does not own; a preexisting session with warmups gets that
+  note, and a removed session is described as torn down. It opens no
+  socket, so it runs on every platform.
 - `fipsctl_npub.rs` tests `../fipsctl.rs` as module `npub_tests`: an npub
   given in any letter case. An argument in upper or mixed case is read as an
   npub rather than looked up as a host name (`resolve_peer`), its mesh

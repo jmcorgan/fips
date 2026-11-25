@@ -1,354 +1,40 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::Duration;
+//! The host reads a traversal's local candidates need: the interface list,
+//! and the local address of each probe and wildcard bind. The STUN exchange
+//! and the selection are the machine's (`machine/stun/`).
 
-use tokio::net::{UdpSocket, lookup_host};
-use tracing::debug;
+use std::net::IpAddr;
 
-use super::types::{BootstrapError, TraversalAddress};
+use super::machine::rendezvous::Interfaces;
+#[cfg(test)]
+use super::machine::stun::candidates::offerable;
+use super::machine::stun::candidates::{self, InterfaceAddr};
+#[cfg(test)]
+use super::machine::stun::client::pick_family;
+#[cfg(test)]
+pub(super) use super::machine::stun::{parse_stun_binding_success, parse_stun_url};
 
-// Current STUN parsing is intentionally minimal and only supports
-// MAPPED-ADDRESS / XOR-MAPPED-ADDRESS for IPv4 and IPv6.
-// Local interface discovery remains best-effort and may still be incomplete
-// on dual-stack, NAT64, or heavily firewalled hosts.
-
-/// Default per-server STUN response wait used by the per-traversal flow.
-/// Latency-sensitive: keep tight so a misbehaving STUN server doesn't
-/// stretch every traversal attempt.
-pub(super) const TRAVERSAL_STUN_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Per-server STUN response wait used by the advert-publish path's
-/// public-IP discovery. Longer than `TRAVERSAL_STUN_TIMEOUT` because
-/// it's a one-shot at startup (cached afterward) and we'd rather block
-/// the first advert build by a few seconds than skip UDP advertising
-/// over a slow first response. Returns immediately on success.
-pub(super) const ADVERT_STUN_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// First retransmission interval for a binding request, doubled after each
-/// retransmission (RFC 8489 Section 6.2.1). Within the 2 s traversal
-/// deadline the request goes out at 0, 0.5 and 1.5 s; within the 5 s advert
-/// deadline also at 3.5 s.
-const STUN_INITIAL_RTO: Duration = Duration::from_millis(500);
-
-pub(super) async fn observe_traversal_addresses(
-    socket: &std::net::UdpSocket,
-    stun_servers: &[String],
-    share_local_candidates: bool,
-    per_server_timeout: Duration,
-) -> Result<
-    (
-        Option<TraversalAddress>,
-        Vec<TraversalAddress>,
-        Option<String>,
-    ),
-    BootstrapError,
-> {
-    let local_addr = socket.local_addr()?;
-    let local_port = local_addr.port();
-    let local_addresses = if share_local_candidates {
-        offerable(local_addresses_from_port(local_port), local_addr.is_ipv4())
-            .into_iter()
-            .map(|ip| TraversalAddress {
-                protocol: "udp".to_string(),
-                ip,
-                port: local_port,
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    let mut last_error = None;
-    for stun_server in stun_servers {
-        match perform_stun(socket, stun_server, per_server_timeout).await {
-            Ok(mapped) => {
-                debug!(
-                    stun_server = %stun_server,
-                    reflexive = ?mapped,
-                    "STUN observation succeeded"
-                );
-                return Ok((
-                    mapped.map(|addr| TraversalAddress {
-                        protocol: "udp".to_string(),
-                        ip: addr.ip().to_string(),
-                        port: addr.port(),
-                    }),
-                    local_addresses.clone(),
-                    Some(stun_server.clone()),
-                ));
-            }
-            Err(err) => last_error = Some(err),
-        }
+/// This host's raw reads for a traversal socket bound on `port`: every
+/// interface address with its flags, and the local address of each probe
+/// and of each wildcard bind on `port`. The machine selects the candidates
+/// to offer from them (`machine/stun/candidates.rs`).
+pub(super) fn read_candidates(port: u16) -> Interfaces {
+    let mut observed = Vec::new();
+    for (bind_addr, connect_addr) in candidates::PROBES {
+        observed.push(local_probe(bind_addr, connect_addr));
     }
-
-    if let Some(err) = last_error {
-        debug!(error = %err, "stun observation failed, falling back to LAN-only addresses");
+    for host in candidates::WILDCARDS {
+        observed.push(bound_addr((host, port)));
     }
-
-    Ok((None, local_addresses, None))
-}
-
-/// Send a STUN binding request on `socket` and return the reflexive address
-/// the server reports.
-///
-/// Only a datagram whose source is exactly the resolved server address is
-/// parsed; anything else is consumed and discarded, so an on-path attacker
-/// who has seen the transaction id cannot substitute a mapped address by
-/// injecting a reply. The comparison is exact because every socket handed to
-/// this function is bound to the IPv4 wildcard, so a source can never arrive
-/// in v4-mapped IPv6 form. A dual-stack bind would require normalising both
-/// sides with `IpAddr::to_canonical()` before comparing.
-///
-/// The request is retransmitted, with the same transaction id, from 500 ms
-/// and doubling until the deadline, so one lost datagram does not lose the
-/// server (RFC 8489 Section 6.2.1). It goes to the first resolved address of
-/// the socket's family; a server with none is skipped.
-///
-/// Caller requirement: this drains and discards every datagram arriving on
-/// `socket` until the deadline, so it must not be entered on a socket that
-/// may concurrently carry other traffic the caller cares about.
-async fn perform_stun(
-    socket: &std::net::UdpSocket,
-    stun_server: &str,
-    response_timeout: Duration,
-) -> Result<Option<SocketAddr>, BootstrapError> {
-    let endpoint = parse_stun_url(stun_server)?;
-    let txn_id = random_txn_id();
-    let request = create_stun_binding_request(txn_id);
-    let want_v4 = socket.local_addr()?.is_ipv4();
-    let addr = resolve_udp_target(&endpoint.host, endpoint.port, want_v4)
-        .await?
-        .ok_or_else(|| BootstrapError::Stun(format!("no address for {}", stun_server)))?;
-    let udp = UdpSocket::from_std(socket.try_clone()?)?;
-    udp.send_to(&request, addr).await?;
-    let mut buf = [0u8; 2048];
-    let deadline = tokio::time::Instant::now() + response_timeout;
-    let mut rto = STUN_INITIAL_RTO;
-    let mut resend_at = tokio::time::Instant::now() + rto;
-    let mut rejected = 0u64;
-    let mut last_unexpected = None;
-    loop {
-        let wake = resend_at.min(deadline);
-        let (len, remote) = match tokio::time::timeout_at(wake, udp.recv_from(&mut buf)).await {
-            Ok(Ok(received)) => received,
-            Ok(Err(_)) => break,
-            Err(_) if wake < deadline => {
-                // A failed retransmission leaves the earlier sends in flight.
-                let _ = udp.send_to(&request, addr).await;
-                rto *= 2;
-                resend_at = tokio::time::Instant::now() + rto;
-                continue;
-            }
-            Err(_) => break,
-        };
-        if remote != addr {
-            rejected += 1;
-            last_unexpected = Some(remote);
-            continue;
-        }
-        if let Some(mapped) = parse_stun_binding_success(&buf[..len], &txn_id) {
-            return Ok(Some(mapped));
-        }
-    }
-    // One line per call rather than per datagram: a flooder controls the rate.
-    if rejected > 0 {
-        debug!(
-            stun_server = %stun_server,
-            expected = %addr,
-            rejected,
-            last_unexpected = ?last_unexpected,
-            "discarded STUN datagrams from unexpected sources"
-        );
-    }
-    Err(BootstrapError::Stun(format!(
-        "timed out waiting for {}",
-        stun_server
-    )))
-}
-
-pub(super) fn parse_stun_url(input: &str) -> Result<StunEndpoint, BootstrapError> {
-    let raw = input.strip_prefix("stun:").unwrap_or(input);
-    let Some((host, port)) = raw.rsplit_once(':') else {
-        return Err(BootstrapError::Stun(format!("invalid STUN URL: {}", input)));
-    };
-    let port = port
-        .parse::<u16>()
-        .map_err(|_| BootstrapError::Stun(format!("invalid STUN URL: {}", input)))?;
-    if host.is_empty() {
-        return Err(BootstrapError::Stun(format!("invalid STUN URL: {}", input)));
-    }
-    Ok(StunEndpoint {
-        host: host.to_string(),
-        port,
-    })
-}
-
-pub(super) struct StunEndpoint {
-    pub(super) host: String,
-    pub(super) port: u16,
-}
-
-fn create_stun_binding_request(txn_id: [u8; 12]) -> [u8; 20] {
-    const STUN_BINDING_REQUEST: u16 = 0x0001;
-    const STUN_MAGIC_COOKIE: u32 = 0x2112_a442;
-    let mut packet = [0u8; 20];
-    packet[..2].copy_from_slice(&STUN_BINDING_REQUEST.to_be_bytes());
-    packet[2..4].copy_from_slice(&0u16.to_be_bytes());
-    packet[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
-    packet[8..20].copy_from_slice(&txn_id);
-    packet
-}
-
-pub(super) fn parse_stun_binding_success(packet: &[u8], txn_id: &[u8; 12]) -> Option<SocketAddr> {
-    const STUN_BINDING_SUCCESS: u16 = 0x0101;
-    const STUN_MAGIC_COOKIE: u32 = 0x2112_a442;
-    const STUN_ATTR_MAPPED_ADDRESS: u16 = 0x0001;
-    const STUN_ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
-
-    if packet.len() < 20 {
-        return None;
-    }
-    if u16::from_be_bytes(packet[..2].try_into().ok()?) != STUN_BINDING_SUCCESS {
-        return None;
-    }
-    if u32::from_be_bytes(packet[4..8].try_into().ok()?) != STUN_MAGIC_COOKIE {
-        return None;
-    }
-    if &packet[8..20] != txn_id {
-        return None;
-    }
-
-    let message_length = u16::from_be_bytes(packet[2..4].try_into().ok()?) as usize;
-    let mut offset = 20usize;
-    let max_offset = packet.len().min(20 + message_length);
-    while offset + 4 <= max_offset {
-        let attr_type = u16::from_be_bytes(packet[offset..offset + 2].try_into().ok()?);
-        let attr_len = u16::from_be_bytes(packet[offset + 2..offset + 4].try_into().ok()?) as usize;
-        let value_start = offset + 4;
-        let value_end = value_start + attr_len;
-        if value_end > packet.len() {
-            break;
-        }
-        let value = &packet[value_start..value_end];
-        let parsed = match attr_type {
-            STUN_ATTR_XOR_MAPPED_ADDRESS => parse_xor_mapped_address(value, txn_id),
-            STUN_ATTR_MAPPED_ADDRESS => parse_mapped_address(value),
-            _ => None,
-        };
-        if parsed.is_some() {
-            return parsed;
-        }
-        offset = value_end + ((4 - (attr_len % 4)) % 4);
-    }
-    None
-}
-
-fn parse_mapped_address(value: &[u8]) -> Option<SocketAddr> {
-    match value.get(1).copied()? {
-        0x01 if value.len() >= 8 => Some(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(value[4], value[5], value[6], value[7])),
-            u16::from_be_bytes([value[2], value[3]]),
-        )),
-        0x02 if value.len() >= 20 => {
-            let ip = Ipv6Addr::from(<[u8; 16]>::try_from(&value[4..20]).ok()?);
-            Some(SocketAddr::new(
-                IpAddr::V6(ip),
-                u16::from_be_bytes([value[2], value[3]]),
-            ))
-        }
-        _ => None,
+    Interfaces::Candidates {
+        entries: interface_addrs(),
+        observed,
     }
 }
 
-fn parse_xor_mapped_address(value: &[u8], txn_id: &[u8; 12]) -> Option<SocketAddr> {
-    const STUN_MAGIC_COOKIE: u32 = 0x2112_a442;
-    let xored_port = u16::from_be_bytes([value.get(2).copied()?, value.get(3).copied()?])
-        ^ ((STUN_MAGIC_COOKIE >> 16) as u16);
-    let cookie = STUN_MAGIC_COOKIE.to_be_bytes();
-
-    match value.get(1).copied()? {
-        0x01 if value.len() >= 8 => {
-            let ip = Ipv4Addr::new(
-                value[4] ^ cookie[0],
-                value[5] ^ cookie[1],
-                value[6] ^ cookie[2],
-                value[7] ^ cookie[3],
-            );
-            Some(SocketAddr::new(IpAddr::V4(ip), xored_port))
-        }
-        0x02 if value.len() >= 20 => {
-            let mut ip = [0u8; 16];
-            for (index, byte) in ip.iter_mut().enumerate() {
-                let mask = if index < 4 {
-                    cookie[index]
-                } else {
-                    txn_id[index - 4]
-                };
-                *byte = value[4 + index] ^ mask;
-            }
-            Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::from(ip)), xored_port))
-        }
-        _ => None,
-    }
-}
-
-async fn resolve_udp_target(
-    host: &str,
-    port: u16,
-    want_v4: bool,
-) -> Result<Option<SocketAddr>, BootstrapError> {
-    let normalized_host = host
-        .strip_prefix('[')
-        .and_then(|trimmed| trimmed.strip_suffix(']'))
-        .unwrap_or(host);
-
-    if let Ok(ip) = normalized_host.parse::<IpAddr>() {
-        return Ok(pick_family(
-            std::iter::once(SocketAddr::new(ip, port)),
-            want_v4,
-        ));
-    }
-    let results = lookup_host((normalized_host, port)).await?;
-    Ok(pick_family(results, want_v4))
-}
-
-/// The server address to send a binding request to, from those resolved:
-/// the first of the socket's family. A socket cannot send to the other
-/// family, so a server with no address of this one is skipped.
-fn pick_family(addrs: impl IntoIterator<Item = SocketAddr>, want_v4: bool) -> Option<SocketAddr> {
-    addrs.into_iter().find(|addr| addr.is_ipv4() == want_v4)
-}
-
-/// The local candidate addresses to offer for a socket: those of its family.
-/// The socket's port is offered on each, and no peer can reach an address of
-/// the other family on it.
-fn offerable(addresses: Vec<String>, socket_v4: bool) -> Vec<String> {
-    addresses
-        .into_iter()
-        .filter(|ip| {
-            ip.parse::<IpAddr>()
-                .is_ok_and(|ip| ip.is_ipv4() == socket_v4)
-        })
-        .collect()
-}
-
-fn local_addresses_from_port(port: u16) -> Vec<String> {
-    let mut addresses = Vec::new();
-    push_private_interface_ips(&mut addresses);
-    push_local_probe(&mut addresses, "0.0.0.0:0", "8.8.8.8:80");
-    push_local_probe(&mut addresses, "[::]:0", "[2001:4860:4860::8888]:80");
-    push_bound_addr(&mut addresses, ("0.0.0.0", port));
-    push_bound_addr(&mut addresses, ("::", port));
-    addresses
-}
-
-fn push_private_interface_ips(addresses: &mut Vec<String>) {
-    for ip in private_interface_ips() {
-        push_ip(addresses, ip);
-    }
-}
-
+/// Every IPv4 and IPv6 address in the host's interface list, in listing
+/// order, with its interface's up and loopback flags.
 #[cfg(unix)]
-fn private_interface_ips() -> Vec<IpAddr> {
+fn interface_addrs() -> Vec<InterfaceAddr> {
     let mut output = Vec::new();
     let mut ifaddrs: *mut libc::ifaddrs = std::ptr::null_mut();
 
@@ -364,32 +50,34 @@ fn private_interface_ips() -> Vec<IpAddr> {
         // SAFETY: `cursor` points at a valid node from the `getifaddrs` list.
         let entry = unsafe { &*cursor };
         let flags = entry.ifa_flags as i32;
-        let is_up = (flags & libc::IFF_UP) != 0;
-        let is_loopback = (flags & libc::IFF_LOOPBACK) != 0;
 
-        if is_up && !is_loopback && !entry.ifa_addr.is_null() {
+        if !entry.ifa_addr.is_null() {
             // SAFETY: `ifa_addr` is non-null and its concrete type matches
             // `sa_family` for this entry.
             let maybe_ip = unsafe {
                 match (*entry.ifa_addr).sa_family as i32 {
                     libc::AF_INET => {
                         let sockaddr = &*(entry.ifa_addr as *const libc::sockaddr_in);
-                        Some(IpAddr::V4(Ipv4Addr::from(
+                        Some(IpAddr::V4(std::net::Ipv4Addr::from(
                             sockaddr.sin_addr.s_addr.to_ne_bytes(),
                         )))
                     }
                     libc::AF_INET6 => {
                         let sockaddr = &*(entry.ifa_addr as *const libc::sockaddr_in6);
-                        Some(IpAddr::V6(Ipv6Addr::from(sockaddr.sin6_addr.s6_addr)))
+                        Some(IpAddr::V6(std::net::Ipv6Addr::from(
+                            sockaddr.sin6_addr.s6_addr,
+                        )))
                     }
                     _ => None,
                 }
             };
 
-            if let Some(ip) = maybe_ip
-                && is_private_overlay_candidate_ip(ip)
-            {
-                output.push(ip);
+            if let Some(ip) = maybe_ip {
+                output.push(InterfaceAddr {
+                    ip,
+                    up: (flags & libc::IFF_UP) != 0,
+                    loopback: (flags & libc::IFF_LOOPBACK) != 0,
+                });
             }
         }
 
@@ -402,50 +90,25 @@ fn private_interface_ips() -> Vec<IpAddr> {
 }
 
 #[cfg(not(unix))]
-fn private_interface_ips() -> Vec<IpAddr> {
+fn interface_addrs() -> Vec<InterfaceAddr> {
     Vec::new()
 }
 
-fn is_private_overlay_candidate_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_private(),
-        IpAddr::V6(v6) => v6.is_unique_local(),
-    }
+/// The local address the host picks for a UDP socket bound to `bind_addr`
+/// and connected to `connect_addr`, if both steps succeed.
+fn local_probe(bind_addr: &str, connect_addr: &str) -> Option<IpAddr> {
+    let socket = std::net::UdpSocket::bind(bind_addr).ok()?;
+    socket.connect(connect_addr).ok()?;
+    socket.local_addr().ok().map(|local_addr| local_addr.ip())
 }
 
-fn push_local_probe(addresses: &mut Vec<String>, bind_addr: &str, connect_addr: &str) {
-    if let Ok(socket) = std::net::UdpSocket::bind(bind_addr)
-        && socket.connect(connect_addr).is_ok()
-        && let Ok(local_addr) = socket.local_addr()
-    {
-        push_ip(addresses, local_addr.ip());
-    }
-}
-
-fn push_bound_addr<A: std::net::ToSocketAddrs>(addresses: &mut Vec<String>, bind_addr: A) {
-    if let Ok(local_addr) =
-        std::net::UdpSocket::bind(bind_addr).and_then(|socket| socket.local_addr())
-    {
-        push_ip(addresses, local_addr.ip());
-    }
-}
-
-fn push_ip(addresses: &mut Vec<String>, ip: IpAddr) {
-    if ip.is_unspecified() {
-        return;
-    }
-    let ip = ip.to_string();
-    if !addresses.contains(&ip) {
-        addresses.push(ip);
-    }
-}
-
-fn random_txn_id() -> [u8; 12] {
-    let mut txn_id = [0u8; 12];
-    for byte in &mut txn_id {
-        *byte = rand::random::<u8>();
-    }
-    txn_id
+/// The local address of a UDP socket bound to `bind_addr`, if the bind
+/// succeeds.
+fn bound_addr<A: std::net::ToSocketAddrs>(bind_addr: A) -> Option<IpAddr> {
+    std::net::UdpSocket::bind(bind_addr)
+        .and_then(|socket| socket.local_addr())
+        .ok()
+        .map(|local_addr| local_addr.ip())
 }
 
 #[cfg(test)]

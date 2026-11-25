@@ -75,7 +75,6 @@ use crate::PeerIdentity;
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
 use crate::identity::NodeAddr;
 use crate::node::NodeState;
-use crate::nostr::{OverlayEndpointAdvert, RendezvousDriver};
 use crate::proto::fmp::backoff_ms;
 use crate::time::deadline;
 use crate::transport::{TransportAddr, TransportId};
@@ -231,15 +230,25 @@ impl Candidate {
     }
 }
 
+/// One open-discovery candidate: an advert's author, the addresses its
+/// endpoints give (in advert order, from priority 120, each seen at the
+/// sweep's time), and when the advert was created.
+#[derive(Clone, Debug)]
+pub(crate) struct OverlayRow {
+    pub npub: String,
+    pub addresses: Vec<PeerAddress>,
+    pub created_at_secs: u64,
+}
+
 /// Read-only candidate pools the driver drained this tick. Plain
 /// data, no runtime handles.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DiscoveryPools {
-    /// `bootstrap.cached_open_discovery_candidates(64, &skip)`:
-    /// `(npub, endpoints, created_at_secs)`. The configured authors without
-    /// an established link, plus a random draw of up to 64 unconfigured
-    /// authors that are neither linked nor already queued.
-    pub overlay: Vec<(String, Vec<OverlayEndpointAdvert>, u64)>,
+    /// `bootstrap.cached_open_discovery_candidates(64, &skip)`, one row per
+    /// advert with its endpoints mapped to addresses. The configured
+    /// authors without an established link, plus a random draw of up to 64
+    /// unconfigured authors that are neither linked nor already queued.
+    pub overlay: Vec<OverlayRow>,
     /// `transport.discover()` beacons (auto-connect transports), pre-resolved.
     pub transport_neighbors: Vec<Candidate>,
     /// Held mDNS candidates, pre-resolved, configured ones first.
@@ -644,7 +653,12 @@ impl PeeringReconciler {
             return;
         }
 
-        for (npub, endpoints, created_at_secs) in &pools.overlay {
+        for OverlayRow {
+            npub,
+            addresses,
+            created_at_secs,
+        } in &pools.overlay
+        {
             if enqueue_budget == 0 {
                 break;
             }
@@ -698,23 +712,8 @@ impl PeeringReconciler {
                 continue; // skipped_connecting (lifecycle:2206)
             }
 
-            // Build the address list from the advert endpoints (lifecycle:2216).
-            let mut addresses = Vec::new();
-            let mut priority = 120u8;
-            for endpoint in endpoints {
-                let Some(candidate) =
-                    RendezvousDriver::overlay_endpoint_to_peer_address(endpoint, priority, wall_ms)
-                else {
-                    continue;
-                };
-                if addresses.iter().any(|existing: &PeerAddress| {
-                    existing.transport == candidate.transport && existing.addr == candidate.addr
-                }) {
-                    continue;
-                }
-                addresses.push(candidate);
-                priority = priority.saturating_add(1);
-            }
+            // The address list the advert endpoints gave (lifecycle:2216).
+            let addresses = addresses.clone();
             if addresses.is_empty() {
                 tally.skipped_no_endpoints = tally.skipped_no_endpoints.saturating_add(1);
                 continue; // skipped_no_endpoints (lifecycle:2235)
@@ -1179,14 +1178,13 @@ mod tests {
             r.insert_retry_for_test(retry_addr, st);
         };
         let pools = || DiscoveryPools {
-            overlay: vec![(
-                overlay_npub.clone(),
-                vec![OverlayEndpointAdvert {
-                    transport: crate::nostr::OverlayTransportKind::Udp,
-                    addr: "203.0.113.9:2121".to_string(),
-                }],
-                0,
-            )],
+            overlay: vec![OverlayRow {
+                npub: overlay_npub.clone(),
+                addresses: vec![
+                    PeerAddress::with_priority("udp", "203.0.113.9:2121", 120).with_seen_at_ms(0),
+                ],
+                created_at_secs: 0,
+            }],
             transport_neighbors: vec![Candidate {
                 transport_id: TransportId::new(1),
                 remote_addr: TransportAddr::from_string("203.0.113.5:2121"),
@@ -1394,14 +1392,13 @@ mod tests {
         policy.open_discovery_enabled = true;
 
         let pools = DiscoveryPools {
-            overlay: vec![(
-                npub.clone(),
-                vec![OverlayEndpointAdvert {
-                    transport: crate::nostr::OverlayTransportKind::Udp,
-                    addr: "203.0.113.7:2121".to_string(),
-                }],
-                0,
-            )],
+            overlay: vec![OverlayRow {
+                npub: npub.clone(),
+                addresses: vec![
+                    PeerAddress::with_priority("udp", "203.0.113.7:2121", 120).with_seen_at_ms(0),
+                ],
+                created_at_secs: 0,
+            }],
             ..DiscoveryPools::default()
         };
 

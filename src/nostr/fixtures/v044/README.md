@@ -2,7 +2,9 @@
 
 Four events as the deployed nostr 0.44 code emits them, captured together on
 2026-11-12 from commit `fe43c61d` (the event builders factored out of the
-publish paths) by the generator in `src/nostr/tests/fixtures.rs`. The keys
+publish paths) by a generator then in `src/nostr/tests/fixtures.rs`. The
+files are frozen: the code now builds its events on nostr 0.45, so nothing
+here can capture them again. The keys
 are those of FRC-1601 Appendix C.1: node A's secret key is `…0003` (test
 vector 0 of BIP-340), node B's is `b7e15162…` (test vector 1).
 
@@ -32,17 +34,11 @@ recipient's key to the sender and the body above, the advert parses through
 today's builders, run again at the capture time, still emit the same kinds,
 tags, authors, contents and signal bodies.
 
-To recapture, run the ignored generator and update the commit above:
-
-```sh
-cargo test -p fips-mesh --lib \
-    nostr::tests::fixtures::capture_the_v044_fixtures -- --ignored --exact
-```
-
 The advert carries its branch's `ADVERT_IDENTIFIER`, signed. A branch with
-another identifier recaptures the advert there and records that commit here;
-the advert test says so when the identifier differs. The other three files
-carry no identifier.
+another identifier carries its own nostr 0.44 capture of the advert, made on
+that branch while it still ran nostr 0.44, and records that commit here; the
+advert test says so when the identifier differs. The other three files carry
+no identifier.
 
 On `next`, whose identifier is `fips-overlay-v1-next`, the four were
 recaptured together on 2026-11-13 from the merge of master `2f7053a2` into
