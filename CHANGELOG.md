@@ -376,6 +376,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or broadcast address, counting them in a new `group_drops` counter, and
   refuses to send to such an address. Before, a forged beacon from one could
   make a node with `auto_connect` send its handshake to the group address.
+- A BLE channel whose key exchange completed but that never carries a
+  handshake is now closed once the handshake timeout
+  (`node.rate_limit.handshake_timeout_secs`, 30 s by default) has passed
+  since it was admitted, or since the node last had a handshake or link on
+  it. Before, it kept its pool slot and adapter connection until the radio
+  link dropped or a newcomer evicted it, so with
+  `transports.ble.max_connections` above what the adapter can hold, devices
+  in range that never handshake could keep honest peers off BLE. A link on
+  which a handshake has completed is kept, as before.
 
 #### TUN
 
@@ -414,12 +423,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reference and design documents that disagreed with the code are
   corrected: wire sizes, traversal signaling, advert withdrawal, the
-  spanning tree, bloom filters, forwarding, path MTU and FSP restart
-  handling. Three corrections change what an operator should expect: a
-  declared UDP instance listens on `0.0.0.0:2121` by default unless
-  `outbound_only` is set, the debug `inject` command can write into any
-  flow on the node, and Tor `control_port` mode runs no inbound onion
-  service.
+  spanning tree, bloom filters, forwarding, path MTU, FSP restart handling
+  and how link rekey messages are sent. Three corrections change what an
+  operator should expect: a declared UDP instance listens on
+  `0.0.0.0:2121` by default unless `outbound_only` is set, the debug
+  `inject` command can write into any flow on the node, and Tor
+  `control_port` mode runs no inbound onion service.
 - The Nostr relay examples no longer advise `FIPS_UDP_MTU=1280`, which loses
   IPv6 packets of 1204 to 1280 bytes; they name 1357. Also corrected: the
   address in `fips-dns-setup`'s header, the `dns.ttl` advice, the hostname
@@ -476,6 +485,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was refused. A monitoring connection that fails part-way through a reply
   is dropped, and the next monitoring round connects and authenticates
   again.
+- A captured msg1 from a peer's earlier run no longer ends the live peering
+  when it is replayed during a short silence. A handshake from a restarted
+  peer now replaces a peering that is still heard from only once the peer
+  has been silent for `node.link_dead_timeout_secs` (30 s by default), and
+  never less than 15 s. Before, once the peer had been silent for 15 s, as
+  when one or two heartbeats are lost, anyone holding such a msg1 could
+  replay it from any address: the node tore the peering down and moved it
+  to the replayer's address, and the genuine peer was cut off until the two
+  re-peered. A peer that really restarted is now re-peered after the
+  link-dead timeout, about 30 to 40 s by default, instead of about 15 s.
 
 #### Routing and discovery
 
