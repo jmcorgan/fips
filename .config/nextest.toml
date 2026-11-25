@@ -109,7 +109,9 @@ test-group = 'node-synthetic'
 # node-large group; test_discovery_100_nodes is ignored by default and takes
 # about two minutes), the routing map bound, and in fips-core the rekey
 # interleaving explorer and the rekey guard-switch meta-test. The meta-test
-# reruns the rekey explorer in its children and took 94 s on core-vm. The
+# reruns the rekey explorer in its children: on master, which also reruns
+# the deployed releases' explorer, it took 94 s on core-vm, and on next 54 s
+# alone (2026-11-25). The
 # two compile with fips-core's slow-tests feature (core/Cargo.toml), which no
 # nextest run in CI builds; they stay listed for a hand run with it. The
 # restart test that crosses two dials in 32 orders was here while draining
