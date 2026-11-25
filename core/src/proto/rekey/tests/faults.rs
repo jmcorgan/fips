@@ -7,16 +7,11 @@
 //! that fails anyway. A child runs one test by its exact path, so it never
 //! runs this meta-test again.
 //!
-//! A row's explorers, the tests only the `slow-explorers` feature compiles,
-//! are left out without that feature, and a row whose every test is an
-//! explorer is left whole to the explorers' build; the meta-test prints the
-//! rows it left. A named test is accepted as an explorer only where the
-//! sources show it behind that feature's `cfg`
-//! (`crate::testutil::explorer_only`), so a misspelled or renamed name
-//! fails every build; in the explorers' build every named test must be
-//! compiled. Which tests this build compiles is read from the binary's own
-//! list (`crate::testutil::compiled_tests`). `testing/ci-local.sh
-//! --explorers` runs this meta-test in the explorers' build too.
+//! The meta-test and every test a row names, the explorers included, are
+//! compiled by the same `slow-tests` build, so every named test must be
+//! compiled: a misspelled or renamed name fails it. Which tests this build
+//! compiles is read from the binary's own list
+//! (`crate::testutil::compiled_tests`).
 
 use alloc::format;
 use alloc::string::String;
@@ -636,40 +631,20 @@ fn every_guard_switch_turns_each_test_it_names_red_and_each_passes_with_none() {
         );
     }
     let compiled = crate::testutil::compiled_tests();
-    let explorers = cfg!(feature = "slow-explorers");
     let mut jobs = Vec::new();
     let mut wrong = Vec::new();
-    let mut left = 0;
-    let mut rows_left = Vec::new();
     for (faults, tests) in ROWS {
         let names: Vec<String> = faults.iter().map(|f| format!("{f:?}")).collect();
         let row = names.join(",");
-        if !tests
-            .iter()
-            .any(|(prefix, test)| compiled.contains(&format!("{prefix}{test}")))
-        {
-            if explorers || tests.is_empty() {
-                wrong.push(format!("{row} names no test this build compiles"));
-            } else if tests
-                .iter()
-                .all(|(prefix, test)| crate::testutil::explorer_only(&format!("{prefix}{test}")))
-            {
-                rows_left.push(row.clone());
-            }
+        if tests.is_empty() {
+            wrong.push(format!("{row} names no test"));
         }
         for (prefix, test) in *tests {
             let path = format!("{prefix}{test}");
             if !compiled.contains(&path) {
-                if explorers {
-                    wrong.push(format!(
-                        "{row} names {path}, which the explorers' build does not compile"
-                    ));
-                } else if !crate::testutil::explorer_only(&path) {
-                    wrong.push(format!(
-                        "{row} names {path}, which this build does not compile and the sources show behind no slow-explorers gate"
-                    ));
-                }
-                left += 1;
+                wrong.push(format!(
+                    "{row} names {path}, which this build does not compile"
+                ));
                 continue;
             }
             if !named.contains(&path) {
@@ -685,12 +660,7 @@ fn every_guard_switch_turns_each_test_it_names_red_and_each_passes_with_none() {
         let (passed, text) = child(path, faults);
         (faults.clone(), path.clone(), passed, text)
     });
-    std::eprintln!(
-        "{} rows, {} tests; {left} row entries and {} whole rows left to the explorers' build: {rows_left:?}",
-        ROWS.len(),
-        named.len(),
-        rows_left.len()
-    );
+    std::eprintln!("{} rows, {} tests", ROWS.len(), named.len());
     for (faults, path, passed, text) in results {
         let ran = text.contains("running 1 test");
         if faults.is_empty() {

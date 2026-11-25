@@ -167,12 +167,6 @@ expect_red "the known-defect lane's run line replaced by true" \
     "test-core: mapped step 'Run the known-defect lane' does not run 'testing/known-defect-lane.sh'"
 
 fresh && plant .github/workflows/ci.yml \
-    "          cargo test -p fips-core --features slow-tests" \
-    "          cargo test -p fips-core --features slow-explorers"
-expect_red "the core's slow suites changed to the explorers" \
-    "test-core: step 'Run the no_std core's tests on their own, with its slow suites' runs fips-core's slow-explorers feature"
-
-fresh && plant .github/workflows/ci.yml \
     "          cargo test -p fips-mesh --lib --features profiling,test-overrides" \
     "          cargo test -p fips-mesh --lib --features profiling,test-overrides,explorers"
 expect_red "the root crate's explorers feature added to a test run" \
@@ -280,10 +274,10 @@ fresh && plant .github/workflows/ci.yml \
     "  test-core:
     strategy:
       matrix:
-        extra: [slow-explorers]
+        extra: [explorers]
     name:"
-expect_red "the core's explorers supplied by a matrix value" \
-    "test-core: step 'Run the no_std core's tests on their own, with its slow suites' runs fips-core's slow-explorers feature"
+expect_red "the explorers feature supplied by a matrix value" \
+    "test-core: step 'Run the no_std core's tests on their own, with its slow suites' runs the root crate's explorers feature"
 
 cp "$ROOT/.github/workflows/package-freebsd.yml" "$SCRATCH/freebsd.yml"
 fresh && cp "$SCRATCH/freebsd.yml" "$SCRATCH/tree/.github/workflows/package-freebsd.yml" \

@@ -37,20 +37,12 @@ can rebuild any state by replaying the path that reached it.
   for the second, each must fail, and once with none, each must pass (an
   ignored test does not); its children report a failing seeded run
   unshrunk. Which tests the build compiles it reads from the test
-  binary's own list (`crate::testutil::compiled_tests`): without
-  `slow-explorers` it leaves out a row's explorers, and leaves a row whose
-  every test is an explorer whole to the explorers' build, printing both
-  counts and those rows; with it, every named test must be compiled and
-  every row runs. A named test it does not compile counts as an explorer
-  only where the sources show it behind `slow-explorers`
-  (`crate::testutil::explorer_only`), so a misspelled or renamed name
-  fails in every build. `testing/ci-local.sh --explorers` runs it in the
-  explorers' build too. A row
-  names the cheapest tests its switch reds; the core explorer appears only
-  in the rows where it is the closest observation of the defect. A row
-  whose switch the joint world reaches names a joint test or scripted
-  start it reds there; a row whose switch no joint test, scripted start
-  or sweep reds says why in a comment above it.
+  binary's own list (`crate::testutil::compiled_tests`), and every test a
+  row names must be compiled, so a misspelled or renamed name fails it. A
+  row names the cheapest tests its switch reds. A row whose switch the
+  joint world reaches names a joint test or scripted start it reds there;
+  a row whose switch no joint test or scripted start reds says why in a
+  comment above it.
 - `world.rs`: the world. Three transport models (connectionless;
   connection-oriented with a connect window, replies on the arrival
   connection and an end-of-stream to the far end; BLE-like, one
@@ -82,7 +74,7 @@ can rebuild any state by replaying the path that reached it.
   bundles' wakes up to the next of those, delivering the frames each
   sends, since a probing bundle wakes every fraction of a second. A party
   with path bundles also names the pairs they hold acknowledged and not
-  Live (`Party::lapsed`), which the joint sweeps' exemption reads, and a
+  Live (`Party::lapsed`), which the joint world's exemption reads, and a
   joint node gives what the joint world's oracles read of its core, its
   machines and its shell (`Party::joint`), and its rekey machine for a
   peer, for the convergence of a pair's machines (`Party::rekey`). A
@@ -99,25 +91,18 @@ can rebuild any state by replaying the path that reached it.
   announces itself with one frame after each peer change that leaves it a
   session, as the node's tree announce does.
 - `starts.rs`: the named starts, each with the scripted schedule that
-  reaches its target state, the depth it is explored to and the most
-  states that depth may reach (the start with two paths is written here
+  reaches its target state (the start with two paths is written here
   with no paths, for the model, and rebuilt on real bundles in
   `joint/starts.rs`); `flipped` builds a thread's two-node
   starts with their identities exchanged, for the other address order.
   Start 26 is a late second dial on another transport after the
   responder has heard the dialer: node 0 dials node 1 on UDP, the pair
   settles, and node 0 dials node 1's TCP address, as a deployed release
-  dials a peer on each of its transports. Its caps, here and in
-  `joint/starts.rs`, are its reach at depth 5 at each pairing (2,084 to
-  2,107 states) times 1.5, rounded up to a hundred; depth 6 reaches about
-  6,000.
+  dials a peer on each of its transports.
 - `explore.rs`: the breadth-first explorer, its events (the leap over the
-  bundles' wakes offered only where a bundle wakes first, and a node's
-  dial, offered only on a start marked `cold`, once per node) and budgets,
-  the search to a time limit a measurement of depth runs
-  (`explore_within`), the reach check every start's reach test shares
-  (`reached`), which ends a start's search once it passes its cap, and
-  the reach test over the model.
+  bundles' wakes offered only where a bundle wakes first) and budgets,
+  which the replay test here and the joint world's digest and key checks
+  run to a few events. No test explores a start exhaustively.
 - `oracle.rs`: the seven settlement properties (`OneSession`,
   `RightLink`, `MapsAgree`, `ConnectionsInUse`, `Fresh`, `Classified`,
   `Bounded`), and at a joint node the joint world's own, read from what
@@ -127,16 +112,16 @@ can rebuild any state by replaying the path that reached it.
   (`Delivered`), attribution (`Attributed`) and the machines' own
   (`Machine`), among them, once healed, each pair's two rekey machines
   converged, which the exemptions by shape take as they take a split, with
-  the clauses pinned there counted per explored state by `sweep`; a split
+  the clauses pinned there counted; a split
   a joint node's liveness timer ended within the heal, by removing a peer
   that still held it, is a split all the same (`World.ended`); the second
   clause of `ConnectionsInUse` alone (`needs_open`), for a test that reads
   it at a step it names; the heal (every connect window opened, everything delivered,
-  then 60 s wake by wake, below the 120 s pending hold), and `sweep`, which
-  checks every explored state and every healed leaf. Its tests plant the
-  two states only one clause sees, show that a replacement closes the
-  replaced link's connection, and run the model as both ends of every start
-  but 7 and 12.
+  then 60 s wake by wake, below the 120 s pending hold). Its tests plant
+  the two states only one clause sees, and show that a replacement closes
+  the replaced link's connection. The `RightLink` clause does not accept a
+  redial the node adopts at the frame that proves it; no kept test reaches
+  that state.
 - `shadow.rs`: a party's log replayed through one model `Judge` per peer,
   the first difference per peer reported as `Classified` or `Fresh`, with
   the named differences and their resyncs (the late second dial's
@@ -307,35 +292,16 @@ can rebuild any state by replaying the path that reached it.
 - `joint/`: the joint world, whose nodes run the core, a real rekey
   machine and a real path bundle per held peer on the stub IK profile.
   See its README.
-- `candidates.rs` (under `slow-tests`, its explored runs under
-  `slow-explorers`): the candidate rules for the two cases left for
-  later, explored on joint nodes at multipath off, which keep a session
-  the core holds as the peer's machines left receive-only beside the ones
-  built for its next session. Each candidate runs on the start it
-  addresses (6 for the two late-dial rules, 7 for the aged-link rule) and
-  every named start the core's own rules pass, the start with two paths
-  on real bundles, at both ends and at either end against the core's own
-  rules, the model and both deployed models, in both address orders;
-  only the dialer's rule is compared with the model step by step. The
-  splits of the shapes a candidate addresses are not exempt. Every breach found is recorded in `candidates.txt` as new, or
-  kept when the same pairing with the core's own rules in the
-  candidate's place shows it too, and every pairing in
-  `legacy/not-converging.txt` the candidate no longer breaks as gone; the
-  tests fail at any difference from the file. Two scripted tests run the
-  pins' schedules under each candidate.
-- `candidates.txt`: that record, one breach per line.
+- `candidates.rs` (under `slow-tests`): the candidate rules for the two
+  cases left for later, run on joint nodes at multipath off, which keep a
+  session the core holds as the peer's machines left receive-only beside
+  the ones built for its next session. Two scripted tests run the pins'
+  schedules under each candidate. Comparing a candidate with the core's
+  own rules across the starts, which the retired explorers did, is left
+  to a later decision.
 
 ## Rules for changing it
 
-- A start's depth is its script's length plus two, but for the cold
-  start's (`joint/starts.rs`), which is the depth its measurement reaches
-  within the reach budget and holds more than its script. Its cap is the state
-  count measured at that depth with about half again as headroom; one
-  depth more reaches several times as many states, so a start whose reach
-  grew fails the reach test. Remeasure (`--nocapture` prints each start's
-  depth, states, frontier per depth and time; `FIPS_SETTLE_EXPLORE_TRACE=1`
-  prints the frontier as it grows) and record the run when a change moves
-  the counts.
 - A test whose doc line says it records current behaviour asserts an
   incidental rule of `../rules.txt` and is listed in `../current.txt`;
   rename, move or delete it only with its line there, and change what it
@@ -391,12 +357,9 @@ can rebuild any state by replaying the path that reached it.
   exempt: a split of other sessions, a pending, a configured peer not
   held. The two late-dial shapes, `LaterDialFirst` (the accepted split
   that the link-dead timer and the redial end) and `DialAsRekey` (the
-  aged-link defect left for a later fix) (`Shape::pinned`), only the runs
-  against the models of deployed nodes
-  exempt (`oracle::by_any_shape`), where a dial on an aged link also
-  spares a pending, or a split, that names the pending it left: the
-  model's convergence with itself and the core explorer exclude the
-  starts that carry them instead. Switch
+  aged-link defect left for a later fix) (`Shape::pinned`), no exemption
+  spares: the tests that reach one (`shapes.rs`, `joint/party.rs`) assert
+  the breach it leaves instead. Switch
   `ExemptByPath` puts back the old rule, any breach of convergence on a
   shaped path. Every shape and what it left is part of the world's
   digest, so a shaped path is never folded into an unshaped one, nor two
@@ -406,15 +369,6 @@ can rebuild any state by replaying the path that reached it.
   restart drops what is addressed to the restarting node.
 - The `slow-tests` feature gates the candidate rules' two scripted tests
   (`candidates.rs`) and the switches' meta-test (`faults.rs`); GitHub CI's
-  Linux job runs them. The `slow-explorers` feature, which turns
-  `slow-tests` on too, gates every explorer: the model's reach
-  (`explore.rs`), the model parties over every start (`oracle.rs`), a
-  joint node explored against the models of `master` and `maint`
-  (`legacy/explore.rs`), the model of `master` explored against itself
-  (`legacy/findings.rs`), the candidate rules explored (`candidates.rs`),
-  and in the joint world every reach and sweep (`joint/explore.rs`,
-  `joint/runs.rs`). No CI run started by a push runs them; local CI runs
-  them only with `--explorers`. Every other test here runs in every build,
-  on every platform. A new test that walks a state space goes behind
-  `slow-explorers`, and `core/Cargo.toml`'s comment on the two features
-  names it.
+  Linux job runs them. Every other test here runs in every build, on every
+  platform. No test here explores a start exhaustively: the settlement
+  explorers were retired, and whether one returns is an open decision.

@@ -1,20 +1,14 @@
 //! The joint world's starts: the stand-in's named starts with joint nodes
-//! at both ends, at each pairing of the two multipath settings, each with
-//! a state cap measured on the joint world at that pairing; the start with
-//! two paths rebuilt on real bundles; and the starts only joint nodes run,
+//! at both ends, at Off with Off and at On with On; the start with two
+//! paths rebuilt on real bundles; and the starts only joint nodes run,
 //! each built mid-history on real bundles, with the tests that show each.
 //!
-//! A stand-in start keeps its script and depth; only its nodes and its cap
-//! change. A start on real bundles runs the capability exchange in its
-//! build, so at On with On its link holds two Live paths and both ends are
-//! capable, and at any other pairing the link keeps its one path; it is
-//! explored to its script plus two, as every start is. The stand-in's caps are not reused: a real machine sends what
-//! the stand-in does not (prompts) and keys on more than the stand-in's
-//! names (counters, indices, the bundle), so a depth reaches another
-//! number of states. Each cap is the count the depth was measured to reach
-//! at the pairing, times 1.5, rounded up to a hundred. A mixed pairing names
-//! node 0's setting first; every other node has the second, so start 11's
-//! third node is at the second setting.
+//! A stand-in start keeps its script; only its nodes change. A start on
+//! real bundles runs the capability exchange in its build, so at On with
+//! On its link holds two Live paths and both ends are capable, and at any
+//! other pairing the link keeps its one path. A mixed pairing names node
+//! 0's setting first; every other node has the second, so start 11's third
+//! node is at the second setting.
 
 use alloc::vec::Vec;
 
@@ -30,215 +24,26 @@ use super::super::starts::{
 };
 use super::super::world::{Input, Ms, PathEv, Pkt, State, World};
 
-/// Each start's cap at Off with Off, by its name.
-const OFF: &[(&str, usize)] = &[
-    ("crossing, connectionless", 16_000),
-    ("crossing, two transports", 76_200),
-    ("crossing, connection-oriented", 118_400),
-    ("crossing, BLE", 25_800),
-    ("late second dial in order, larger dialer", 1_000),
-    ("late second dial in order, smaller dialer", 1_000),
-    ("late second dial, second msg2 first, larger dialer", 14_200),
-    (
-        "late second dial, second msg2 first, smaller dialer",
-        14_200,
-    ),
-    ("dial on the peer's aged link, then own rekey", 23_700),
-    ("restart at each point", 1_600),
-    ("crossing during a rekey", 45_600),
-    ("crossing during a rekey's drain", 1_600),
-    ("stored msg2 whose send failed, then a resend", 1_500),
-    ("three nodes", 66_500),
-    ("two paths", 500),
-    ("replayed msg1", 1_700),
-    ("forged msg2 spray against a pending dial", 31_000),
-    ("wall step inside the heard floor", 900),
-    ("late second dial on another transport, heard", 3_200),
-    ("crossing while capability probes are out", 13_200),
-    ("restart on a two-path link", 1_200),
-    ("late second dial at a capable peer", 300),
-    ("carrier loss of the active path", 300),
-    ("the only path's transport removed", 200),
-    ("a NAT rebound of the second path", 200),
-    ("a NAT rebound of the active path", 200),
-    ("a path removed at the peer", 200),
-    (
-        "a dial's leg reaped beside a dial sharing its BLE connection",
-        100,
-    ),
-];
-
-/// Each start's cap at On with On, by its name.
-const ON: &[(&str, usize)] = &[
-    ("crossing, connectionless", 16_000),
-    ("crossing, two transports", 112_900),
-    ("crossing, connection-oriented", 147_500),
-    ("crossing, BLE", 25_800),
-    ("late second dial in order, larger dialer", 1_000),
-    ("late second dial in order, smaller dialer", 1_000),
-    ("late second dial, second msg2 first, larger dialer", 14_200),
-    (
-        "late second dial, second msg2 first, smaller dialer",
-        14_200,
-    ),
-    ("dial on the peer's aged link, then own rekey", 23_700),
-    ("restart at each point", 1_600),
-    ("crossing during a rekey", 46_100),
-    ("crossing during a rekey's drain", 1_600),
-    ("stored msg2 whose send failed, then a resend", 1_500),
-    ("three nodes", 66_500),
-    ("two paths", 800),
-    ("replayed msg1", 1_700),
-    ("forged msg2 spray against a pending dial", 31_000),
-    ("wall step inside the heard floor", 900),
-    ("late second dial on another transport, heard", 3_200),
-    ("crossing while capability probes are out", 18_000),
-    ("restart on a two-path link", 4_200),
-    ("late second dial at a capable peer", 700),
-    ("carrier loss of the active path", 1_100),
-    ("the only path's transport removed", 800),
-    ("a NAT rebound of the second path", 400),
-    ("a NAT rebound of the active path", 400),
-    ("a path removed at the peer", 900),
-    (
-        "a dial's leg reaped beside a dial sharing its BLE connection",
-        100,
-    ),
-];
-
-/// Each start's cap with node 0 at On and the others at Off, by its name.
-#[cfg(feature = "slow-explorers")]
-const ON_OFF: &[(&str, usize)] = &[
-    ("crossing, connectionless", 16_000),
-    ("crossing, two transports", 80_200),
-    ("crossing, connection-oriented", 126_100),
-    ("crossing, BLE", 25_800),
-    ("late second dial in order, larger dialer", 1_000),
-    ("late second dial in order, smaller dialer", 1_000),
-    ("late second dial, second msg2 first, larger dialer", 14_200),
-    (
-        "late second dial, second msg2 first, smaller dialer",
-        14_200,
-    ),
-    ("dial on the peer's aged link, then own rekey", 23_700),
-    ("restart at each point", 1_600),
-    ("crossing during a rekey", 46_100),
-    ("crossing during a rekey's drain", 1_600),
-    ("stored msg2 whose send failed, then a resend", 1_500),
-    ("three nodes", 66_500),
-    ("two paths", 500),
-    ("replayed msg1", 1_700),
-    ("forged msg2 spray against a pending dial", 31_000),
-    ("wall step inside the heard floor", 900),
-    ("late second dial on another transport, heard", 3_200),
-    ("crossing while capability probes are out", 15_300),
-    ("restart on a two-path link", 1_400),
-    ("late second dial at a capable peer", 300),
-    ("carrier loss of the active path", 300),
-    ("the only path's transport removed", 300),
-    ("a NAT rebound of the second path", 200),
-    ("a NAT rebound of the active path", 200),
-    ("a path removed at the peer", 300),
-    (
-        "a dial's leg reaped beside a dial sharing its BLE connection",
-        100,
-    ),
-];
-
-/// Each start's cap with node 0 at Off and the others at On, by its name.
-#[cfg(feature = "slow-explorers")]
-const OFF_ON: &[(&str, usize)] = &[
-    ("crossing, connectionless", 16_000),
-    ("crossing, two transports", 104_200),
-    ("crossing, connection-oriented", 138_000),
-    ("crossing, BLE", 25_800),
-    ("late second dial in order, larger dialer", 1_000),
-    ("late second dial in order, smaller dialer", 1_000),
-    ("late second dial, second msg2 first, larger dialer", 14_200),
-    (
-        "late second dial, second msg2 first, smaller dialer",
-        14_200,
-    ),
-    ("dial on the peer's aged link, then own rekey", 23_700),
-    ("restart at each point", 1_600),
-    ("crossing during a rekey", 45_600),
-    ("crossing during a rekey's drain", 1_600),
-    ("stored msg2 whose send failed, then a resend", 1_500),
-    ("three nodes", 66_500),
-    ("two paths", 500),
-    ("replayed msg1", 1_700),
-    ("forged msg2 spray against a pending dial", 31_000),
-    ("wall step inside the heard floor", 900),
-    ("late second dial on another transport, heard", 3_200),
-    ("crossing while capability probes are out", 15_900),
-    ("restart on a two-path link", 1_400),
-    ("late second dial at a capable peer", 300),
-    ("carrier loss of the active path", 300),
-    ("the only path's transport removed", 200),
-    ("a NAT rebound of the second path", 200),
-    ("a NAT rebound of the active path", 200),
-    ("a path removed at the peer", 200),
-    (
-        "a dial's leg reaped beside a dial sharing its BLE connection",
-        100,
-    ),
-];
-
-/// Every named start with joint nodes at Off at both ends, each with its
-/// cap at that pairing.
+/// Every named start with joint nodes at Off at both ends.
 pub fn off() -> Vec<Start> {
-    with(super::off, OFF, "off with off")
+    with(super::off)
 }
 
-/// Every named start with joint nodes at On at both ends, each with its
-/// cap at that pairing.
+/// Every named start with joint nodes at On at both ends.
 pub fn on() -> Vec<Start> {
-    with(super::on, ON, "on with on")
+    with(super::on)
 }
 
-/// Every named start with node 0 at On and the other nodes at Off, each
-/// with its cap at that pairing.
-#[cfg(feature = "slow-explorers")]
-pub fn on_off() -> Vec<Start> {
-    with(super::on_off, ON_OFF, "on with off")
-}
-
-/// Every named start with node 0 at Off and the other nodes at On, each
-/// with its cap at that pairing.
-#[cfg(feature = "slow-explorers")]
-pub fn off_on() -> Vec<Start> {
-    with(super::off_on, OFF_ON, "off with on")
-}
-
-/// Every named start with nodes made by `maker`, each with its cap from
-/// `caps`, the table of the pairing `pairing`: the stand-in's starts, the
-/// start with two paths rebuilt on real bundles, and the starts only
+/// Every named start with nodes made by `maker`: the stand-in's starts,
+/// the start with two paths rebuilt on real bundles, and the starts only
 /// joint nodes run.
-fn with(maker: Maker, caps: &[(&str, usize)], pairing: &str) -> Vec<Start> {
-    uncapped(maker)
-        .into_iter()
-        .map(|mut st| {
-            st.cap = caps
-                .iter()
-                .find(|(n, _)| *n == st.name)
-                .map(|(_, c)| *c)
-                .unwrap_or_else(|| panic!("{} has a cap at {pairing}", st.name));
-            st
-        })
-        .collect()
-}
-
-/// Every named start with nodes made by `maker` and no cap, as a sweep
-/// takes it: the runs against the models of deployed nodes are not reach
-/// tests, and are measured by the lines they print.
-pub fn uncapped(maker: Maker) -> Vec<Start> {
+fn with(maker: Maker) -> Vec<Start> {
     named()
         .into_iter()
         .map(|mut st| {
             if st.number == 12 {
                 st.build = two;
                 st.script = two_script;
-                st.depth = 3;
             }
             st
         })
@@ -251,143 +56,64 @@ pub fn uncapped(maker: Maker) -> Vec<Start> {
 }
 
 /// The starts only joint nodes run, each built on real bundles: their
-/// nodes and caps are set per pairing.
+/// nodes are set per pairing.
 fn added() -> Vec<Start> {
-    let s = |number, name, build: Build, script: Script, depth| Start {
+    let s = |number, name, build: Build, script: Script| Start {
         number,
         name,
         build,
         script,
-        depth,
-        cap: 0,
         maker: super::off,
         budget: SMALL,
         wall: false,
         forged: false,
-        cold: false,
     };
     alloc::vec![
         s(
             15,
             "crossing while capability probes are out",
             probing,
-            probing_script,
-            5
+            probing_script
         ),
         s(
             16,
             "restart on a two-path link",
             restarted,
-            restarted_script,
-            4
+            restarted_script
         ),
-        s(
-            17,
-            "late second dial at a capable peer",
-            late,
-            late_script,
-            3
-        ),
+        s(17, "late second dial at a capable peer", late, late_script),
         s(
             18,
             "a dial's leg reaped beside a dial sharing its BLE connection",
             shared,
-            shared_script,
-            3
+            shared_script
         ),
         s(
             20,
             "carrier loss of the active path",
             carrier,
-            carrier_script,
-            3
+            carrier_script
         ),
         s(
             21,
             "the only path's transport removed",
             removed,
-            removed_script,
-            3
+            removed_script
         ),
         s(
             22,
             "a NAT rebound of the second path",
             rebound,
-            rebound_script,
-            3
+            rebound_script
         ),
-        s(
-            23,
-            "a path removed at the peer",
-            released,
-            released_script,
-            3
-        ),
+        s(23, "a path removed at the peer", released, released_script),
         s(
             25,
             "a NAT rebound of the active path",
             rehomed,
-            rebound_script,
-            3
+            rebound_script
         ),
     ]
-}
-
-/// The cold start's number, which no named start takes.
-pub const COLD: u8 = 24;
-
-/// The depth a cold start is explored to, dials included.
-const COLD_DEPTH: usize = 7;
-
-/// The cold start with joint nodes at Off at both ends, and its cap at
-/// that pairing.
-pub fn cold_off() -> Start {
-    cold(super::off, 70_100)
-}
-
-/// The cold start with joint nodes at On at both ends, and its cap at
-/// that pairing.
-pub fn cold_on() -> Start {
-    cold(super::on, 70_100)
-}
-
-/// The cold start, with nodes made by `maker` and the cap `cap`: two
-/// nodes, each configured with the other's home on UDP, that have dialed,
-/// sent and connected nothing. Each node may dial the other once
-/// ([`Act::Dial`]), so the depth counts the dials. It is the one start
-/// that offers a dial, and none of the named starts' lists holds it.
-pub fn cold(maker: Maker, cap: usize) -> Start {
-    Start {
-        number: COLD,
-        name: "cold, nothing connected",
-        build: unconnected,
-        script: unconnected_script,
-        depth: COLD_DEPTH,
-        cap,
-        maker,
-        budget: SMALL,
-        wall: false,
-        forged: false,
-        cold: true,
-    }
-}
-
-/// Nodes 0 and 1 made by `mk`, each configured with the other's home on
-/// UDP, and nothing else.
-fn unconnected(mk: Maker) -> World {
-    pair(mk, A, &[&[(1, UDP)], &[(0, UDP)]])
-}
-
-/// Node 0 dials node 1, which answers: the two hold one link.
-fn unconnected_script(w: &mut World) -> Vec<Act> {
-    run(
-        w,
-        &[
-            Do::Then(Act::Dial(0, 1)),
-            Do::Get(1, Want::Msg1, None),
-            Do::Get(0, Want::Msg2, None),
-        ],
-    )
 }
 
 /// A start's script.
@@ -756,7 +482,7 @@ fn shell(w: &World, x: usize) -> super::oracle::Shell {
 /// Run `st`'s script from its build, checking every step; then heal and
 /// check again. Returns the world after the script, before the heal, and
 /// every breach found on the way and after the heal, but the pinned
-/// breach of a lapsed path, which the sweeps exempt too.
+/// breach of a lapsed path ([`super::explore::lapsed`]).
 fn scripted(st: &Start) -> (World, Vec<Breach>) {
     let mut scratch = replay(st, &[]);
     let script = (st.script)(&mut scratch);
@@ -770,8 +496,8 @@ fn scripted(st: &Start) -> (World, Vec<Breach>) {
     heal(&mut w);
     found.extend(every_step(&w));
     found.extend(healed(&w));
-    // The sweeps' exemption of the pinned finding: a pair a bundle holds
-    // acknowledged and not Live, counted in use with its connection gone.
+    // The pinned finding, exempt: a pair a bundle holds acknowledged and
+    // not Live, counted in use with its connection gone.
     found.retain(|b| !super::explore::lapsed(&w, b));
     (after, found)
 }

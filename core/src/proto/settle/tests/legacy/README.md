@@ -22,26 +22,6 @@ properties can be checked on it.
   rekey machine. It has no path bundle either, so it tells the model of
   each frame on no paths, and the model moves the peer to every frame's
   source, as that node does.
-- `explore.rs` (under `slow-explorers`): a joint node (`../joint/party.rs`)
-  explored against each model, on every start, the two-path starts
-  included, at each pairing: a setting at the joint node with `master.rs`
-  at each setting and with `maint.rs`, which has none. And `master.rs` at
-  each setting explored against `maint.rs`: the node decides as `master.rs`
-  transcribes until the core takes its decisions, so this pairing is the
-  gate a change to the node's own rules (the crossed-dial fix, below) is
-  held to against a deployed peer. The run's own node, the joint node or
-  `master.rs`, runs at node 0 and at node 1, in both address orders. One
-  session must hold at every node except for what a known shape left
-  (`oracle::by_any_shape`): a split sharing a session with it, or the
-  pending a dial left; every other property must hold at the run's own
-  node, a proven path left with no connection aside, which
-  `../joint/pins.rs` holds; the other nodes' other breaches are counted by
-  property and printed.
-- `not-converging.txt`: the runs found not to converge, one per line (run,
-  property, node), read by `explore.rs`. A run's name holds its pairing.
-  Each is a finding reported with its schedule, not fixed here; the runs
-  fail on a breach the file does not list and on a listed one that no
-  longer shows.
 - `findings.rs`: the two defects of the current node the properties must
   find in `MasterParty`, each test at both multipath settings (a late
   second dial answered in the other order splits the session; a dial on the
@@ -49,9 +29,7 @@ properties can be checked on it.
   crossed dials now leave the smaller node on the link it dialed, on a
   connectionless and on a connection-oriented transport, and that a
   forward wall step no longer lets a msg1 replace a peering heard just now,
-  since the gates read the peer clock, and, under `slow-explorers`,
-  `MasterParty` explored against itself at each setting on every start but
-  12 with every breach printed, the crossings showing no wrong link.
+  since the gates read the peer clock.
 
 ## What `master.rs` transcribes
 
@@ -112,7 +90,7 @@ they are not `db946033`'s:
 | The close rule, `carried` | a peer on another link sends or is proven there | a live link other than the one closed uses the pair: a link a peer holds at each pair its bundle holds proven, a link no peer holds, a handshake's, at the address it was set up at |
 | The index, `indexed` | written at each link's setup and moved, switched or released by the bundle's reports | derived from the records: each live link's setup address unless a release there took it out, and each held peer's proven paths; where several links use a pair, the newest |
 | A move's heard (FRC-1201 Section 5.5) | the peering keeps the heard it had, so one promoted on the peer's msg1 is unheard until the peer's first frame | the move counts the peering heard, and forgets the msg1s remembered against replay for it if it was unheard, as that first frame would. `MoveLeavesUnheard` puts back the old heard, and with it the memory |
-| The drain and a connect that finishes | `drain` closes its queue as filled; `connects` steps a `Connected` the bundle may no longer hold a path for | the same: the node's fix reads the close rule again at the drain and closes a connect with no path, and neither is modelled. Neither shape is reached against `maint.rs`, which never turns capable, so the runs against the deployed node are not affected. The sites left as they are: `release` and `drain`, `State::closing`, and `sends`' `Send::Connect` arm |
+| The drain and a connect that finishes | `drain` closes its queue as filled; `connects` steps a `Connected` the bundle may no longer hold a path for | the same: the node's fix reads the close rule again at the drain and closes a connect with no path, and neither is modelled. Neither shape is reached against `maint.rs`, which never turns capable, so no test against the deployed node's model is affected. The sites left as they are: `release` and `drain`, `State::closing`, and `sends`' `Send::Connect` arm |
 
 ## What `maint.rs` transcribes
 
@@ -250,8 +228,19 @@ places where the joint world and the node differ, both outside this model:
 
 - `master.rs` is the current node, not the FRC: where the two differ, it
   keeps the node's behaviour, and the comparison names the difference
-  (`../shadow.rs`) or the finding tests show it. A fix to the node changes
-  it in the same work, and the fix's rules are listed above.
+  (`../shadow.rs`) or the finding tests show it. What ties it to the node
+  now is a chain: `../joint/parity.rs` holds `master.rs` to
+  `../../parity.txt`, and the root crate's real-node parity run holds
+  `parity.txt` to the node. Until a decision on keeping `master.rs` is
+  made, it changes only when that chain reds. The explorers that once ran
+  it against the deployed model on every start were retired with this
+  rule's older form, under which a change to the node changed `master.rs`
+  in the same work.
+- The chain cannot see one known gap: `master.rs` does not transcribe the
+  node's adoption of a redial at the frame that proves it; it still takes
+  the swap branch, and no kept schedule reaches a redial's proof. A second
+  stays open in code kept here: `unredial` and `wipe` can both free one
+  redial's index, which no kept test reaches.
 - Neither model's rekey or paths are its own to change here: `master.rs`
   runs the machines, and `maint.rs` keeps its transcription of `maint`.
 - `maint.rs` knows no paths, and a path message is a frame to it: it never

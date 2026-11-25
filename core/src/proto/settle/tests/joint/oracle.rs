@@ -67,11 +67,11 @@
 //!
 //! Two clauses are pinned, not asserted, because the core was known to
 //! part there from the bundle or the node: each is counted ([`Pin`],
-//! [`pinned_in`]) and printed by a sweep, and a test in `pins.rs` holds
-//! it. (c) of the mirror, where the core's record of where the peer is
-//! followed every frame's source and no switch, and now moves only where
-//! the bundle moves the peer, at a roam of its one path or a switch; and
-//! in attribution, the three shapes where the core's rule was wider than
+//! [`pinned_in`]), and a test in `pins.rs` holds it. (c) of the mirror,
+//! where the core's record of where the peer is followed every frame's
+//! source and no switch, and now moves only where the bundle moves the
+//! peer, at a roam of its one path or a switch; and in attribution, the
+//! three shapes where the core's rule was wider than
 //! the node's (a capable peer's setup pair with no path; a pair no index
 //! entry holds and no path proves; and a setup pair whose path is still
 //! probing). (a) is asserted whole: a switch records the path in the state
@@ -227,8 +227,8 @@ pub struct Shell {
 }
 
 /// The start of the message of the rekey simulator's convergence rule,
-/// which a sweep exempts as it exempts a split, on a path that showed a
-/// known shape.
+/// which the shape exemption (`oracle::by_shape`) exempts as it exempts a
+/// split, on a path that showed a known shape.
 pub const CONVERGED: &str = "O1:";
 
 /// The rekey machine's deadlines that its checks read, in ms.

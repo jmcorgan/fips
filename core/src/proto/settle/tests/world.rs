@@ -477,10 +477,9 @@ pub enum Shape {
 }
 
 impl Shape {
-    /// Whether this shape is one of the two late-dial shapes, which
-    /// only the runs against the models of deployed nodes exempt; the
-    /// model's convergence with itself and the core explorer exclude the
-    /// starts that carry them instead.
+    /// Whether this shape is one of the two late-dial shapes, which no
+    /// exemption spares: the tests that reach one (`shapes.rs`,
+    /// `joint/party.rs`) assert the breach it leaves instead.
     pub fn pinned(self) -> bool {
         match self {
             Self::LaterDialFirst | Self::DialAsRekey => true,

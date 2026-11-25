@@ -42,8 +42,8 @@ path = "src/lib.rs"
 members = [".", "core"]
 default-members = [".", "core"]
 
-# fips-core's rekey simulations, explorer and model runs are CPU-bound and run
-# more than twice as fast optimized. Only the core is optimized; overflow
+# fips-core's rekey simulations and model runs are CPU-bound and run more than
+# twice as fast optimized. Only the core is optimized; overflow
 # checks and debug assertions stay on, as in every dev and test build.
 [profile.dev.package.fips-core]
 opt-level = 2
@@ -83,8 +83,7 @@ test-overrides = []
 # turns it on at tiers 2 and 3, the internal builder's trunk-tip, landing
 # and nightly runs, and with `--explorers`, as does any `cargo test
 # --features explorers`.
-# The --all-features clippy pass lints the code it gates. fips-core's
-# explorers are behind its own `slow-explorers` feature. Next builds no
+# The --all-features clippy pass lints the code it gates. Next builds no
 # real-node explorer (the module is under `#[cfg(any())]` in
 # `src/node/tests/settle/mod.rs`), so on next this feature compiles no test
 # and no tier of `testing/ci-local.sh` turns it on.

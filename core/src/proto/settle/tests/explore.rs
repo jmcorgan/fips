@@ -1,17 +1,17 @@
 //! Bounded exhaustive exploration of the settlement world.
 //!
-//! From each named start, every sequence of up to the start's depth of
-//! events from a finite alphabet is enumerated breadth first: deliver any
-//! packet a connection lets through, duplicate a handshake message,
-//! resolve a connect window either way, fail an open connection at one
-//! end, restart a node, advance to the next wake, leap over the path
-//! bundles' wakes to the next other wake (where a bundle wakes first),
-//! start an own rekey, send a frame now, step the wall clock (where the start allows it), replay a
-//! captured msg1, inject a third identity's msg1 or a forged msg2, the
-//! start's path events, and, on the cold start alone, a node's dial. Loss is non-delivery: whatever is never delivered
-//! was lost. States are de-duplicated on a canonical key of the world and
-//! the budgeted events the path spent, so a state found is found by a
-//! shortest path.
+//! From a named start, every sequence of events up to a given depth, from
+//! a finite alphabet, is enumerated breadth first: deliver any packet a
+//! connection lets through, duplicate a handshake message, resolve a
+//! connect window either way, fail an open connection at one end, restart
+//! a node, advance to the next wake, leap over the path bundles' wakes to
+//! the next other wake (where a bundle wakes first), start an own rekey,
+//! send a frame now, step the wall clock (where the start allows it),
+//! replay a captured msg1, inject a third identity's msg1 or a forged
+//! msg2, and the start's path events. Loss is non-delivery: whatever is
+//! never delivered was lost. States are de-duplicated on a canonical key
+//! of the world and the budgeted events the path spent, so a state found
+//! is found by a shortest path.
 //!
 //! The settlement core holds linear index leases and is not `Clone`, so
 //! each state is rebuilt by replaying its path from the start, as the
@@ -23,7 +23,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::super::model::history::{Addr, Bytes, Epoch, Hs, Node};
-use super::starts::{Start, UDP, home};
+use super::starts::Start;
 use super::world::{PathEv, Pkt, State, World};
 
 /// The identity a third party's msg1 and a forged msg2 claim.
@@ -62,9 +62,6 @@ pub enum Act {
     Garbage(usize),
     /// The start's path event `i`.
     Path(usize),
-    /// Node `x` dials the node at index `y` at its home on UDP: offered
-    /// only on a cold start, once per node.
-    Dial(usize, usize),
 }
 
 /// How many of each budgeted event one path may hold.
@@ -100,10 +97,9 @@ pub const SMALL: Budget = Budget {
     paths: 2,
 };
 
-/// The budgeted events a path spent, in [`Budget`]'s field order, and
-/// last the nodes that dialed, one bit each.
-pub fn spent(path: &[Act]) -> [usize; 9] {
-    let mut s = [0; 9];
+/// The budgeted events a path spent, in [`Budget`]'s field order.
+pub fn spent(path: &[Act]) -> [usize; 8] {
+    let mut s = [0; 8];
     for a in path {
         match a {
             Act::Dup(_) => s[0] += 1,
@@ -114,7 +110,6 @@ pub fn spent(path: &[Act]) -> [usize; 9] {
             Act::Connect(_, false) | Act::Fail(..) => s[5] += 1,
             Act::Rekey(..) => s[6] += 1,
             Act::Path(_) => s[7] += 1,
-            Act::Dial(x, _) => s[8] |= 1 << x,
             Act::Deliver(_) | Act::Connect(_, true) | Act::Advance | Act::Leap => {}
         }
     }
@@ -152,7 +147,6 @@ pub fn apply(w: &mut World, a: Act) {
                 }
             }
         }
-        Act::Dial(x, y) => super::starts::dial(w, x, y, home(y, UDP), None),
     }
 }
 
@@ -271,15 +265,6 @@ pub fn options(w: &World, path: &[Act], st: &Start) -> Vec<Act> {
             out.push(Act::Path(i));
         }
     }
-    if st.cold {
-        for x in (0..w.parties.len()).filter(|x| s[8] & (1 << x) == 0) {
-            out.extend(
-                (0..w.parties.len())
-                    .filter(|y| *y != x)
-                    .map(|y| Act::Dial(x, y)),
-            );
-        }
-    }
     out
 }
 
@@ -287,7 +272,7 @@ pub fn options(w: &World, path: &[Act], st: &Start) -> Vec<Act> {
 /// hash and the budget the path spent. A state reached with more budget
 /// left has successors one reached with less cannot, so the two are not
 /// one node of the search.
-pub fn key(w: &World, path: &[Act]) -> (u64, [usize; 9]) {
+pub fn key(w: &World, path: &[Act]) -> (u64, [usize; 8]) {
     (w.key(), spent(path))
 }
 
@@ -318,7 +303,7 @@ pub struct Stats {
     /// The paths left at the deepest level, and every dead end.
     pub leaves: Vec<Vec<Act>>,
     /// The keys seen, a depth a time limit ended included.
-    pub seen: BTreeSet<(u64, [usize; 9])>,
+    pub seen: BTreeSet<(u64, [usize; 8])>,
     /// The time from the start's first replay to the end of each depth,
     /// in milliseconds.
     pub ms: Vec<u128>,
@@ -336,19 +321,6 @@ pub type Check<'a> = &'a (dyn Fn(&World, &[Act]) -> Result<(), String> + Sync);
 /// and panic with the shortest path that fails it.
 pub fn explore(st: &Start, depth: usize, check: Check<'_>) -> Stats {
     search(st, depth, None, None, check)
-}
-
-/// As [`explore`], to `depth` or until `limit` has passed, whichever
-/// comes first. A depth the limit ends part way is not counted: the
-/// statistics are those of the deepest depth explored whole within the
-/// limit, and [`Stats::cut`] says how far into the next the search got.
-pub fn explore_within(
-    st: &Start,
-    depth: usize,
-    limit: std::time::Duration,
-    check: Check<'_>,
-) -> Stats {
-    search(st, depth, Some(limit), None, check)
 }
 
 /// Breadth-first search of `st` to `depth`, stopping once `limit` has
@@ -425,95 +397,6 @@ fn search(
 /// No check: every state passes.
 pub fn none(_: &World, _: &[Act]) -> Result<(), String> {
     Ok(())
-}
-
-/// Explore every start on a thread of its own, a few at a time
-/// ([`crate::testutil::bounded`]), each until its depth or until it has
-/// seen more states than its cap, returning each start's statistics and
-/// wall time in milliseconds, in the order of `starts`.
-#[cfg(feature = "slow-explorers")]
-pub fn explore_all(
-    starts: &[Start],
-    depth: impl Fn(&Start) -> usize + Sync,
-    check: Check<'_>,
-) -> Vec<(Stats, u128)> {
-    crate::testutil::bounded(starts, |st| {
-        let t = std::time::Instant::now();
-        let stats = search(st, depth(st), None, Some(st.cap), check);
-        (stats, t.elapsed().as_millis())
-    })
-}
-
-/// Explore every start of `starts` to its depth, one more with
-/// `ReachOneMore`, and return what is wrong with its reach: a depth short
-/// of its script plus two, a target state not explored, or more states
-/// than its cap. Each start's script runs first, so a start that no longer
-/// reaches its target state fails before the long exploration, and its
-/// exploration ends as soon as it passes its cap, so a start that grew
-/// fails without exploring the whole of the depth it grew into. Each
-/// start's line is printed with `label` after its name.
-#[cfg(feature = "slow-explorers")]
-pub fn reached(starts: &[Start], label: &str) -> Vec<String> {
-    let targets: Vec<_> = starts
-        .iter()
-        .map(|st| {
-            let mut w = (st.build)(st.maker);
-            let script = (st.script)(&mut w);
-            (key(&w, &script), script.len())
-        })
-        .collect();
-    let more = usize::from(fault!(ReachOneMore));
-    let report = explore_all(starts, |st| st.depth + more, &none);
-    let mut wrong = Vec::new();
-    for ((st, (stats, ms)), (target, len)) in starts.iter().zip(&report).zip(&targets) {
-        std::eprintln!(
-            "reach {:>2} {}{label}: depth {} states {} frontier {:?} in {ms} ms{}",
-            st.number,
-            st.name,
-            stats.depth,
-            stats.states,
-            stats.frontier,
-            match stats.cut {
-                Some((i, n)) => alloc::format!(
-                    ", ended at its cap {} paths of {n} into depth {}",
-                    i,
-                    stats.depth + 1
-                ),
-                None => String::new(),
-            }
-        );
-        let (target, len) = (*target, *len);
-        if len + 2 > st.depth {
-            wrong.push(alloc::format!(
-                "{}{label}: depth {} is less than its script ({}) plus two",
-                st.name,
-                st.depth,
-                len
-            ));
-        }
-        if !stats.seen.contains(&target) {
-            wrong.push(alloc::format!(
-                "{}{label}: the target state was not explored",
-                st.name
-            ));
-        }
-        if stats.seen.len() > st.cap {
-            wrong.push(alloc::format!(
-                "{}{label}: {} states, over its cap of {}",
-                st.name,
-                stats.seen.len(),
-                st.cap
-            ));
-        }
-    }
-    wrong
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn every_named_start_reaches_its_target_depth_over_the_model() {
-    let wrong = reached(&super::starts::starts(), "");
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 #[test]

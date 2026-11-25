@@ -301,21 +301,17 @@ The first lints the library with only the features its
 in doing so gives the library the dev-dependencies' features, so code
 that needs `secp256k1`'s `rand` or `std` passes it; the first does
 not. The third lints the slow test suites the `slow-tests` feature
-gates (the rekey guard-switch meta-test, and the path module's day with
-a deployed peer and hour of the two-node simulator). Every platform's
-ordinary test run skips them; GitHub CI's Linux job runs them on every
-push, and local CI with `--slow-tests`. Run all four before sending a
-change here. The repository guards in `testing/` (atomics, comment
-references, log strings) scan `core/src/` as well as `src/`.
+gates (the rekey interleaving explorer and guard-switch meta-test, and
+the path module's day with a deployed peer and hour of the two-node
+simulator). Every platform's ordinary test run skips them; GitHub CI's
+Linux job runs them on every push, and local CI with `--slow-tests`.
+Run all four before sending a change here. The repository guards in
+`testing/` (atomics, comment references, log strings) scan `core/src/`
+as well as `src/`.
 
-The explorers, every test that walks a state space (the rekey
-interleaving explorer, and settlement's model reach, joint-world reaches
-and sweeps, explored runs against the deployed models and the candidate
-rules), are gated by a second feature, `slow-explorers`, which turns
-`slow-tests` on too. No CI run started by a push runs them: local CI runs
-them only with `--explorers`, and the root's `--all-features` clippy pass
-lints them. After a change to the rekey machine, the settlement core or
-their explorers, run `cargo test -p fips-core --features slow-explorers`.
+Settlement has no explorer: its exhaustive searches of the named
+starts were retired, and no test, here or in the root crate, runs one.
+Whether such a search returns is an open decision.
 
 These checks run on the host, where `std` exists, so they cannot catch
 a dependency that links it. A separate build of the library for two

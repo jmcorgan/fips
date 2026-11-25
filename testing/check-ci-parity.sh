@@ -145,14 +145,13 @@
 # a `continue-on-error:` on the step or its job.
 #
 # No step of any workflow started by a push or a pull request may run the
-# explorers: fips-core's slow-explorers feature, the root crate's explorers
-# feature (in any form of --features list), a test run with --all-features,
-# or FIPS_MUTATION_EXPLORERS. That covers ci.yml and the package workflows;
-# a step's matrix values are put in place before the match, so a feature
+# real-node walks: the root crate's explorers feature (in any form of
+# --features list), a test run with --all-features, or
+# FIPS_MUTATION_EXPLORERS. That covers ci.yml and the package workflows; a
+# step's matrix values are put in place before the match, so a feature
 # supplied from a matrix is caught too. The root crate's real-node walks
 # and the mutation lane's explorer lines run at the internal builder's tier
-# 2 (ci-local.sh --tier 2), and fips-core's explorers only in its nightly
-# run (--tier 3).
+# 2 only (ci-local.sh --tier 2).
 #
 # Matching by fragment has limits this check does not close: a command can
 # keep every fragment and still be made to run nothing by shell this check
@@ -730,12 +729,11 @@ SUITE_CMDS = {
 }
 # What no step may run, in any job of any workflow a push or a pull request
 # starts, mapped or not: the root crate's real-node walks run at the
-# internal builder's tier 2 (ci-local.sh --tier 2) on a tree that builds
-# them, which next does not, and fips-core's explorers in its nightly run
-# (--tier 3), never on GitHub. Matched against the step's env, run lines
-# and action inputs, with each matrix leg's values put in place.
+# internal builder's tier 2 only (ci-local.sh --tier 2) on a tree that
+# builds them, which next does not, never on GitHub. Matched against the
+# step's env, run lines and action inputs, with each matrix leg's values put
+# in place.
 FORBIDDEN = [
-    (re.compile(r"slow-explorers"), "fips-core's slow-explorers feature"),
     (re.compile(r"\bcargo\s+(\+\S+\s+)?(test|nextest\s+run)\b.*--all-features"),
      "a test run with every feature, the explorers among them"),
     (re.compile(r"FIPS_MUTATION_EXPLORERS"), "the mutation lane's explorer lines"),

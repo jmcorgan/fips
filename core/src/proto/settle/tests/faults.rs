@@ -10,26 +10,16 @@
 //!
 //! The tables are compiled in every test build so that the coverage scan,
 //! which is cheap, runs everywhere; only the meta-test, which runs each row
-//! in a child, waits for the `slow-tests` feature. A row's explorers, the
-//! tests only `slow-explorers` compiles, are left out of the meta-test
-//! without that feature, and a row whose every test is an explorer is left
-//! whole to the explorers' build; the meta-test prints both counts and the
-//! rows it left. A named test is accepted as an explorer only where the
-//! sources show it behind that feature's `cfg`
-//! (`crate::testutil::explorer_only`), so a misspelled or renamed name
-//! fails every build. In the explorers' build every named test must be
-//! compiled and every row runs; `testing/ci-local.sh --explorers` runs it
-//! there. Which tests this build compiles is
-//! read from the binary's own list (`crate::testutil::compiled_tests`), so
-//! no list here has to follow the features' gates.
+//! in a child, waits for the `slow-tests` feature. Every test a row names
+//! must be compiled by that build, so a misspelled or renamed name fails
+//! it. Which tests this build compiles is read from the binary's own list
+//! (`crate::testutil::compiled_tests`).
 //!
-//! A row names the cheapest tests its switch was shown to red. The core
-//! explorer reds most of the core's switches, at 20 to 50 s a run, so it is
-//! named only where it is the closest observation of the defect a switch
-//! stands for; the commit records list every test each switch reds. A row
-//! whose switch the joint world reaches names a joint test or scripted
-//! start it reds there, and a row whose switch no joint test, scripted
-//! start or sweep reds says why in a comment above it.
+//! A row names the cheapest tests its switch was shown to red; the commit
+//! records list every test each switch reds. A row whose switch the joint
+//! world reaches names a joint test or scripted start it reds there, and a
+//! row whose switch no joint test or scripted start reds says why in a
+//! comment above it.
 //!
 //! A second table, [`REKEY`], names switches of the rekey machine
 //! (`../../rekey/faults.rs`) by their variants' names, with the settlement
@@ -54,7 +44,6 @@ const CANDIDATES: &str = "proto::settle::tests::candidates::";
 const CMP: &str = "proto::settle::tests::cmp::";
 const EXPLORE: &str = "proto::settle::tests::explore::";
 const FINDINGS: &str = "proto::settle::tests::legacy::findings::";
-const LEGACY: &str = "proto::settle::tests::legacy::explore::";
 const ORACLE: &str = "proto::settle::tests::oracle::checks::";
 const REGRESS: &str = "proto::settle::tests::regress::";
 const SHADOW: &str = "proto::settle::tests::shadow::checks::";
@@ -74,8 +63,6 @@ const JOINT_STARTS: &str = "proto::settle::tests::joint::starts::";
 /// One test, by the prefix of its file and its name.
 type Test = (&'static str, &'static str);
 
-/// The model explored as both ends of every start.
-const MODEL_SETTLES: Test = (ORACLE, "model_parties_settle_on_every_start");
 /// The model's histories through the core.
 const AGREES: Test = (
     CMP,
@@ -221,13 +208,6 @@ const SCRIPTED_OFF: Test = (JOINT_PARTY, "every_start_settles_scripted_off_with_
 /// Every start's script with its heal, joint nodes at On at both ends.
 const SCRIPTED_ON: Test = (JOINT_RUNS, "every_start_settles_scripted_on_with_on");
 
-/// The joint party explored on the wall step start alone, at Off with
-/// Off.
-const SWEPT_WALL: Test = (
-    JOINT_RUNS,
-    "the_sweep_of_start_14_keeps_the_properties_off_with_off",
-);
-
 /// One row: a switch, and the tests that must each fail with it on.
 pub type Row = (Fault, &'static [Test]);
 
@@ -336,10 +316,6 @@ pub const ROWS: &[Row] = &[
                 "the_heard_floor_counts_from_installation_when_no_frame_has_arrived",
             ),
             GATE_HISTORIES,
-            (
-                JOINT_RUNS,
-                "the_sweep_of_the_drain_start_keeps_the_properties_off_with_off",
-            ),
         ],
     ),
     (
@@ -366,7 +342,6 @@ pub const ROWS: &[Row] = &[
                 REGRESS,
                 "an_own_dial_answered_from_a_restarted_peer_replaces_the_stale_session",
             ),
-            SWEPT_WALL,
         ],
     ),
     (
@@ -470,7 +445,6 @@ pub const ROWS: &[Row] = &[
                 REGRESS,
                 "a_second_restart_inside_the_dampener_interval_is_refused",
             ),
-            SWEPT_WALL,
         ],
     ),
     (
@@ -538,10 +512,7 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::LeaseKept,
-        &[
-            (LEGS, "close_returns_every_lease_and_retires_every_link"),
-            SWEPT_WALL,
-        ],
+        &[(LEGS, "close_returns_every_lease_and_retires_every_link")],
     ),
     // Not in the joint world, nor the two switches below: a world's send is
     // never refused, so the joint party reports every msg1 resend as sent
@@ -632,14 +603,6 @@ pub const ROWS: &[Row] = &[
                 "against_a_model_of_the_node_crossed_dials_on_a_connection_oriented_transport_leave_the_smaller_node_on_the_link_it_dialed_larger_first",
             ),
             PARITY_MODEL,
-            (
-                LEGACY,
-                "a_model_of_the_node_off_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
-            ),
-            (
-                LEGACY,
-                "a_model_of_the_node_on_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
-            ),
         ],
     ),
     (
@@ -749,10 +712,6 @@ pub const ROWS: &[Row] = &[
             ),
             AGREES,
             IN_ORDER_LARGER,
-            (
-                LEGACY,
-                "a_joint_node_off_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
-            ),
             SCRIPTED_OFF,
             SCRIPTED_ON,
         ],
@@ -1046,10 +1005,6 @@ pub const ROWS: &[Row] = &[
             MIRROR,
             JOINT_MIRRORED,
             (
-                JOINT_RUNS,
-                "the_sweep_of_start_12_keeps_the_properties_on_with_on",
-            ),
-            (
                 JOINT_STARTS,
                 "a_carrier_loss_and_a_mandatory_switch_keep_both_ends_mirrored",
             ),
@@ -1219,31 +1174,6 @@ pub const ROWS: &[Row] = &[
         ],
     ),
     (
-        Fault::ReachOneMore,
-        &[
-            (
-                EXPLORE,
-                "every_named_start_reaches_its_target_depth_over_the_model",
-            ),
-            (
-                JOINT_RUNS,
-                "the_reach_of_start_14_stays_within_its_cap_off_with_off",
-            ),
-            (
-                JOINT_RUNS,
-                "the_reach_of_start_14_stays_within_its_cap_on_with_on",
-            ),
-            (
-                JOINT_RUNS,
-                "the_reach_of_start_14_stays_within_its_cap_on_with_off",
-            ),
-            (
-                JOINT_RUNS,
-                "the_reach_of_start_14_stays_within_its_cap_off_with_on",
-            ),
-        ],
-    ),
-    (
         Fault::FlightByHash,
         &[
             (EXPLORE, "a_replayed_path_rebuilds_the_same_world"),
@@ -1315,13 +1245,10 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::ReplacedConnKept,
-        &[
-            (
-                WORLD,
-                "a_replacement_of_an_unheard_peering_over_another_connection_closes_the_replaced_links_connection",
-            ),
-            MODEL_SETTLES,
-        ],
+        &[(
+            WORLD,
+            "a_replacement_of_an_unheard_peering_over_another_connection_closes_the_replaced_links_connection",
+        )],
     ),
     (
         Fault::ShapeBlind,
@@ -1346,7 +1273,6 @@ pub const ROWS: &[Row] = &[
                 SHAPES,
                 "the_two_defects_left_for_later_show_their_shapes_in_the_current_and_deployed_node",
             ),
-            MODEL_SETTLES,
         ],
     ),
     (
@@ -1402,7 +1328,6 @@ pub const ROWS: &[Row] = &[
             "the_late_dial_resync_closes_what_the_model_closes_when_its_fallback_is_dropped",
         )],
     ),
-    (Fault::ModelDropsFallback, &[MODEL_SETTLES]),
     (
         Fault::PacketStamp,
         &[(
@@ -1412,16 +1337,10 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::StoredByBytes,
-        &[
-            (
-                TABLE,
-                "a_msg1_from_the_address_of_an_unsent_answer_draws_that_answer_whatever_its_bytes",
-            ),
-            (
-                JOINT_RUNS,
-                "the_sweep_of_start_10_keeps_the_properties_off_with_off",
-            ),
-        ],
+        &[(
+            TABLE,
+            "a_msg1_from_the_address_of_an_unsent_answer_draws_that_answer_whatever_its_bytes",
+        )],
     ),
     (
         Fault::StoredAnswersAny,
@@ -1719,16 +1638,6 @@ pub const SELF_CHECKED: &[&str] = &[
     "a_core_line_names_a_listed_cause",
 ];
 
-/// Why a sweep that only the slow explorers' build runs is characterisation.
-const SWEPT_SLOW: &str = "a sweep of the joint party with the oracles of the sweep at On with On, whose rows show they can fail; it runs only in the slow explorers' build, and a row would rerun some minutes of exploration per child";
-
-/// Why a whole sweep or reach test of the joint party in the default build
-/// is characterisation.
-const WHOLE: &str = "a whole sweep or reach of the joint party at one pairing, whose body and checks the one-start runs' rows show can fail; a row would rerun minutes of exploration per child, which takes the meta-test past nextest's limit";
-
-/// Why the cold start's reach tests are characterisation.
-const COLD: &str = "the cold start's reach at its stated depth, through the reach check whose failing `ReachOneMore`'s row shows on start 14 at each pairing; with that switch on, a child explores past the stated depth and is the meta-test's longest, so the break is run by hand and logged with the commit";
-
 /// Why a test whose guard needs no switch of its own is characterisation.
 const HAND: &str =
     "its break is a scratch edit with no switch of its own, run by hand and logged with the commit";
@@ -1749,10 +1658,6 @@ const FRAME_BREAKS: &str = "its break shows only together with HeardMovesPeer, t
 /// Why a test of the join function, whose break no switch makes, is
 /// characterisation; its doc comment names its break.
 const JOIN_HAND: &str = "its break is a scratch edit of the join function where no switch sits; run by hand and logged with the commit";
-
-/// Why a run of a joint node against a model of a deployed node beside the
-/// one on `IgnoreOwnDial`'s row is characterisation.
-const LEGACY_RUN: &str = "the same oracles and list as the run on `IgnoreOwnDial`'s row, a whole set of sweeps past a row's cost; the list's own check is run by hand and logged";
 
 /// Why a guard of the unpin a move reports is characterisation.
 const UNPIN_HAND: &str = "a guard of the pin a move ends where `UnpinOwnOnly` changes nothing, the link left being this node's dial or the dial made before the peer was held; its breaks, `unpin` true at every move and `unpin` without the link left being this node's dial, are scratch edits run by hand and logged with the commit";
@@ -1854,34 +1759,8 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     ),
     ("a_stop_files_what_the_rekey_machine_carried", JOIN_HAND),
     (
-        "every_explored_interleaving_of_the_core_keeps_the_properties_and_heals",
-        "a whole sweep of joint nodes at multipath off and against the model on every start, minutes a child on two cores and past the meta-test's limit; each of its switches reds a cheaper test of its row",
-    ),
-    (
         "against_a_model_of_master_a_forward_wall_step_does_not_let_a_msg1_replace_a_peering_heard_just_now",
         HAND,
-    ),
-    ("the_cold_start_reaches_its_stated_depth_off_with_off", COLD),
-    ("the_cold_start_reaches_its_stated_depth_on_with_on", COLD),
-    (
-        "the_cold_start_is_explored_as_deep_as_the_reach_budget_allows_at_off_and_at_on",
-        "a measurement run by hand and ignored, which asserts nothing: it prints how deep the cold start is explored within a time limit, and the depth it gives is asserted by the cold start's reach tests",
-    ),
-    (
-        "the_model_of_master_against_itself_on_every_start_shows_the_two_defects_and_no_wrong_link",
-        "a whole sweep of the model on machines at each setting, past a row's cost; the crossing tests carry `MoveKeepsInboundLink`, and the late-dial and aged-link tests `OneSessionNoSplit` and `OneSessionNoPending`",
-    ),
-    (
-        "the_model_of_master_with_multipath_on_against_itself_on_a_crossing_of_two_transports",
-        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `MoveKeepsInboundLink`",
-    ),
-    (
-        "the_model_of_master_with_multipath_on_holds_the_dialed_link_on_a_connection_oriented_crossing",
-        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `MoveKeepsInboundLink`",
-    ),
-    (
-        "the_model_of_master_with_multipath_on_against_itself_on_a_crossing_during_a_rekey",
-        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `MoveKeepsInboundLink`",
     ),
     (
         "an_abstract_far_ends_frame_opens_at_the_machine_holding_its_session",
@@ -1902,42 +1781,6 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     (
         "a_copy_of_the_models_msg2_to_a_dial_is_no_reply_to_an_own_rekey",
         HAND,
-    ),
-    (
-        "a_joint_node_on_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
-        LEGACY_RUN,
-    ),
-    (
-        "a_joint_node_off_against_a_model_of_master_off_converges_on_every_start_in_both_address_orders",
-        LEGACY_RUN,
-    ),
-    (
-        "a_joint_node_off_against_a_model_of_master_on_converges_on_every_start_in_both_address_orders",
-        LEGACY_RUN,
-    ),
-    (
-        "a_joint_node_on_against_a_model_of_master_off_converges_on_every_start_in_both_address_orders",
-        LEGACY_RUN,
-    ),
-    (
-        "a_joint_node_on_against_a_model_of_master_on_converges_on_the_quicker_starts",
-        LEGACY_RUN,
-    ),
-    (
-        "a_joint_node_on_against_a_model_of_master_on_converges_on_a_crossing_of_two_transports",
-        LEGACY_RUN,
-    ),
-    (
-        "a_joint_node_on_against_a_model_of_master_on_converges_on_a_connection_oriented_crossing",
-        LEGACY_RUN,
-    ),
-    (
-        "a_joint_node_on_against_a_model_of_master_on_converges_on_a_crossing_during_a_rekey",
-        LEGACY_RUN,
-    ),
-    (
-        "a_joint_node_on_against_a_model_of_master_on_converges_on_the_starts_on_real_bundles",
-        LEGACY_RUN,
     ),
     (
         "a_held_peers_reachability_reads_the_bundles_active_path_not_the_cores_record",
@@ -1970,54 +1813,6 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     ),
     ("two_worlds_on_one_path_have_one_digest", HAND),
     (
-        "every_named_start_reaches_its_target_depth_with_the_machines_off",
-        WHOLE,
-    ),
-    (
-        "every_named_start_reaches_its_target_depth_with_the_machines_on",
-        WHOLE,
-    ),
-    (
-        "every_named_start_reaches_its_target_depth_with_the_machines_on_against_off",
-        WHOLE,
-    ),
-    (
-        "every_named_start_reaches_its_target_depth_with_the_machines_off_against_on",
-        WHOLE,
-    ),
-    (
-        "every_explored_interleaving_of_the_joint_party_keeps_the_properties_off",
-        WHOLE,
-    ),
-    (
-        "every_explored_interleaving_of_the_joint_party_keeps_the_properties_on",
-        WHOLE,
-    ),
-    (
-        "the_sweep_of_start_2_keeps_the_properties_on_with_on",
-        SWEPT_SLOW,
-    ),
-    (
-        "the_sweep_of_start_3_keeps_the_properties_on_with_on",
-        SWEPT_SLOW,
-    ),
-    (
-        "the_sweep_of_start_9_keeps_the_properties_on_with_on",
-        SWEPT_SLOW,
-    ),
-    (
-        "the_sweeps_of_the_two_path_starts_keep_the_properties_on_with_on",
-        SWEPT_SLOW,
-    ),
-    (
-        "every_explored_interleaving_of_the_joint_party_keeps_the_properties_on_against_off",
-        SWEPT_SLOW,
-    ),
-    (
-        "every_explored_interleaving_of_the_joint_party_keeps_the_properties_off_against_on",
-        SWEPT_SLOW,
-    ),
-    (
         "a_capable_live_peer_is_not_dialled_and_a_stale_or_not_capable_one_is",
         HAND,
     ),
@@ -2036,18 +1831,6 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     (
         "a_proven_path_whose_connection_failed_is_not_counted_in_use_without_a_connection",
         "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
-    ),
-    (
-        "the_dialer_settle_candidate_explored_shows_exactly_the_breaches_recorded_for_it",
-        "the record of a candidate rule's explored outcome, every breach and convergence in candidates.txt, which reds at any change to it either way; no switch is a defect of the candidate, and a row would rerun some minutes of exploration per child, so the breaks a row would name are run by hand and logged with the commit",
-    ),
-    (
-        "the_responder_hold_candidate_explored_shows_exactly_the_breaches_recorded_for_it",
-        "the record of a candidate rule's explored outcome, every breach and convergence in candidates.txt, which reds at any change to it either way; no switch is a defect of the candidate, and a row would rerun some minutes of exploration per child, so the breaks a row would name are run by hand and logged with the commit",
-    ),
-    (
-        "the_aged_move_candidate_explored_shows_exactly_the_breaches_recorded_for_it",
-        "the record of a candidate rule's explored outcome, every breach and convergence in candidates.txt, which reds at any change to it either way; no switch is a defect of the candidate, and a row would rerun some minutes of exploration per child, so the breaks a row would name are run by hand and logged with the commit",
     ),
     (
         "the_named_start_numbers_are_the_settlement_tests_starts",
@@ -2158,35 +1941,19 @@ mod run {
             .collect();
         let compiled = crate::testutil::compiled_tests();
         let built = |prefix: &str, test: &str| compiled.contains(&format!("{prefix}{test}"));
-        let explorers = cfg!(feature = "slow-explorers");
         let mut named: Vec<String> = Vec::new();
         let mut jobs = Vec::new();
         let mut wrong = Vec::new();
-        let mut left = 0;
-        let mut rows_left: Vec<&str> = Vec::new();
         for (var, fault, tests) in &tables {
-            if !tests.iter().any(|(prefix, test)| built(prefix, test)) {
-                if explorers || tests.is_empty() {
-                    wrong.push(format!("{fault} names no test this build compiles"));
-                } else if tests.iter().all(|(prefix, test)| {
-                    crate::testutil::explorer_only(&format!("{prefix}{test}"))
-                }) {
-                    rows_left.push(fault.as_str());
-                }
+            if tests.is_empty() {
+                wrong.push(format!("{fault} names no test"));
             }
             for (prefix, test) in *tests {
                 let path = format!("{prefix}{test}");
                 if !built(prefix, test) {
-                    if explorers {
-                        wrong.push(format!(
-                            "{fault} names {path}, which the explorers' build does not compile"
-                        ));
-                    } else if !crate::testutil::explorer_only(&path) {
-                        wrong.push(format!(
-                            "{fault} names {path}, which this build does not compile and the sources show behind no slow-explorers gate"
-                        ));
-                    }
-                    left += 1;
+                    wrong.push(format!(
+                        "{fault} names {path}, which this build does not compile"
+                    ));
                     continue;
                 }
                 if !named.contains(&path) {
@@ -2217,12 +1984,11 @@ mod run {
             }
         }
         std::eprintln!(
-            "{} rows and {} rekey rows, {} tests, {} s; {left} row entries and {} whole rows left to the explorers' build: {rows_left:?}",
+            "{} rows and {} rekey rows, {} tests, {} s",
             ROWS.len(),
             REKEY.len(),
             named.len(),
-            started.elapsed().as_secs(),
-            rows_left.len()
+            started.elapsed().as_secs()
         );
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }

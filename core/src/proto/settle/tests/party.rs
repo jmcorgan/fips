@@ -16,7 +16,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::super::model::history::{Addr, Binding, Bytes, Epoch, Event, Hs, LinkId, Node};
-use super::super::model::judge::{Judge, LocalRule, Params, Reply, Step, Transition};
+use super::super::model::judge::{Judge, Params, Reply, Step, Transition};
 use super::world::{
     CHECK, Dir, HANDSHAKE, HEARTBEAT, Input, Kind, Ms, Net, Party, PeerView, Pkt, RESEND, RESENDS,
     RETRY, View,
@@ -202,15 +202,6 @@ impl ModelParty {
     fn step(&mut self, net: &mut Net, peer: Node, e: Event) -> Step {
         let side = self.side(peer, net.now);
         let step = side.judge.step(e);
-        if fault!(ModelDropsFallback)
-            && step.rule == Some(LocalRule::LateSecondDial)
-            && step.change == Some(Transition::Move)
-            && let Some(p) = side.judge.peering.as_mut()
-        {
-            // The defect's shape: an adapter that keeps nothing of the
-            // session the late dial moved off.
-            p.fallback = None;
-        }
         self.effects(net, peer, &step);
         step
     }

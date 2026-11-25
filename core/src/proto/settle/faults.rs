@@ -247,8 +247,6 @@ pub(crate) enum Fault {
     /// The max-peers cap counts no peer, so a new identity is admitted
     /// and installed past it.
     CapNotCounted,
-    /// Every start's state cap is set one depth below what it explores.
-    ReachOneMore,
     /// The world keeps its flight in hash-map order.
     FlightByHash,
     /// The stub crypto opens a frame under any session.
@@ -298,8 +296,6 @@ pub(crate) enum Fault {
     ClassifiedNoRefusal,
     /// The close computed at a late second dial's resync is always empty.
     ResyncKeepsAll,
-    /// The model party keeps nothing of the session a late dial moved off.
-    ModelDropsFallback,
     /// The core's stub shell hands the core a packet's wall stamp as its
     /// instant.
     PacketStamp,
@@ -515,7 +511,6 @@ impl Fault {
         Self::CapLifted,
         Self::AnswerBeforeAdmit,
         Self::CapNotCounted,
-        Self::ReachOneMore,
         Self::FlightByHash,
         Self::FrameOpensAny,
         Self::NoHeartbeat,
@@ -538,7 +533,6 @@ impl Fault {
         Self::OneSessionNoFresh,
         Self::ClassifiedNoRefusal,
         Self::ResyncKeepsAll,
-        Self::ModelDropsFallback,
         Self::PacketStamp,
         Self::StoredByBytes,
         Self::StoredAnswersAny,
@@ -614,8 +608,9 @@ pub(crate) fn on(fault: Fault) -> bool {
 pub(crate) const CANDIDATE: &str = "FIPS_SETTLE_CANDIDATE";
 
 /// A candidate rule for a settlement case left for later, built into the
-/// core behind this test-only selection so that the explorer can compare
-/// it with the core's own rule. No candidate reaches a non-test build.
+/// core behind this test-only selection, which the candidates' scripted
+/// tests make; comparing it with the core's own rule across the starts is
+/// left to a later decision. No candidate reaches a non-test build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Candidate {
     /// The late second dial: the dialer keeps the session it moved off

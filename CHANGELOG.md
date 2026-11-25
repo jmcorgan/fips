@@ -2482,12 +2482,12 @@ with v0.5.x or earlier peers.
 
 - Reference and design documents that disagreed with the code are
   corrected: wire sizes, traversal signaling, advert withdrawal, the
-  spanning tree, bloom filters, forwarding, path MTU and FSP restart
-  handling. Three corrections change what an operator should expect: a
-  declared UDP instance listens on `0.0.0.0:2121` by default unless
-  `outbound_only` is set, the debug `inject` command can write into any
-  flow on the node, and Tor `control_port` mode runs no inbound onion
-  service.
+  spanning tree, bloom filters, forwarding, path MTU, FSP restart handling
+  and how link rekey messages are sent. Three corrections change what an
+  operator should expect: a declared UDP instance listens on
+  `0.0.0.0:2121` by default unless `outbound_only` is set, the debug
+  `inject` command can write into any flow on the node, and Tor
+  `control_port` mode runs no inbound onion service.
 - The Nostr relay examples no longer advise `FIPS_UDP_MTU=1280`, which loses
   IPv6 packets of 1204 to 1280 bytes; they name 1357. Also corrected: the
   address in `fips-dns-setup`'s header, the `dns.ttl` advice, the hostname

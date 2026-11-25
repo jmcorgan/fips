@@ -121,9 +121,9 @@ written for master's IK, so the module is under `#[cfg(any())]`
 (`src/node/tests/settle/explore/README.md`). Its manifest therefore has no
 line whose test is a root explorer, the lane skips nothing, and no switch
 is left without a line to run (`WorldSkipsWorkerWait` does not exist
-here). `--explorers` and `--tier 3` run the core half alone and `--tier 2`
-none (`ROOT_EXPLORER` in `testing/ci-local.sh`), so there is no
-`mutations-explorers` stage on next. `FIPS_MUTATION_EXPLORERS=only`
+here). `--explorers` is refused and no tier runs the walks (`ROOT_EXPLORER`
+in `testing/ci-local.sh`), so there is no `mutations-explorers` stage on
+next. `FIPS_MUTATION_EXPLORERS=only`
 run by hand here exits 1 before building, since no line is an explorer
 walk.
 

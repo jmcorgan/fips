@@ -279,10 +279,10 @@ tests 103 and 93, every other test here no more than 85 either way, and
 each took about as long as before (the reach test 10 s, a TCP or BLE
 properties test 22 to 24 s), since a walk spends most of its time waiting.
 
-Not covered by this design: an exhaustive search (a joint start explores
-562 to 78,926 states, `fips-core`'s `proto::settle::tests::joint`), two
-variations on one path, a variation of time or of an established frame, and
-the starts `NOT_RUN` lists.
+Not covered by this design: an exhaustive search, which no test runs
+since `fips-core`'s settlement explorers were retired (whether one returns
+is an open decision), two variations on one path, a variation of time or of
+an established frame, and the starts `NOT_RUN` lists.
 
 ## Each leaf: the heal and the oracles
 

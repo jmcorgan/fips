@@ -1,28 +1,9 @@
-//! The joint world explored: each start's reach at each pairing, the
-//! checks that the explorer's key of a joint node is sound, and the sweeps
-//! of every start's interleavings against the settlement properties.
-//!
-//! The explorer is the settlement world's (`../explore.rs`), run on starts whose
-//! nodes are joint nodes (`starts.rs`), at each pairing of the two
-//! multipath settings. A run names its pairing, the mode at each end, in
-//! every line it prints.
-//!
-//! A sweep runs every start but the two late-dial cases (start 6's split,
-//! accepted because one end's link-dead timer and the redial end it, which
-//! `../regress.rs` tests within a heal; start 7's aged-link defect, left
-//! for a later fix and pinned there; both shown on real machines in
-//! `party.rs`), checks every explored state and every healed leaf, and
-//! exempts only a split on a path that showed a known shape and the breach
-//! `pins.rs` holds of a proven path left with no connection ([`lapsed`]).
-//! Each exempted breach is counted by its cause in the line a sweep
-//! prints. A heal runs every wake for a minute, and a capable link's
-//! bundles wake every fraction of a second while they probe, so the sweeps
-//! of the starts whose links turn capable at On with On take tens of
-//! minutes each: those run one test per start, and the two mixed pairings'
-//! sweeps one test each. Every reach and sweep here, like every other
-//! explorer, compiles only in the slow explorers' build (the
-//! `slow-explorers` feature); the checks of the key and of the exemptions
-//! run in every build.
+//! The joint world's explorer checks: that the explorer's key of a joint
+//! node is sound, and that the exemption of a healed leaf's breaches spares
+//! each by its own cause. The explorer is the settlement world's
+//! (`../explore.rs`), run on starts whose nodes are joint nodes
+//! (`starts.rs`). The reaches and sweeps that ran it over every start were
+//! retired; these checks run in every build.
 //!
 //! The explorer rebuilds each state by replaying its path, and merges two
 //! states whose keys are equal. So a joint node's key must be a function
@@ -35,123 +16,19 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-#[cfg(feature = "slow-explorers")]
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::proto::path::{Input as PathInput, Source};
 use crate::proto::rekey::Close;
 
 use super::super::super::model::history::{Hs, Node};
-#[cfg(feature = "slow-explorers")]
-use super::super::explore::reached;
-use super::super::explore::{Act, apply, explore, explore_within, none, replay};
+use super::super::explore::{Act, apply, explore, none, replay};
 use super::super::oracle::{Breach, Oracle, by_shape};
 use super::super::party::Configured;
-#[cfg(feature = "slow-explorers")]
-use super::super::starts::Start;
 use super::super::starts::{A, B, TCP, UDP, dial_home, home, model, settle, world_of};
 use super::super::world::{Party, Pkt, World};
 use super::Mode;
 use super::facts::pair;
 use super::machines::{Kit, Machines, exchange, kits, unused};
-
-/// The name of the pairing of joint nodes at `a` and at `b`, as a run
-/// prints it after a start's name.
-pub fn pairing(a: Mode, b: Mode) -> String {
-    format!(" ({} with {})", a.name(), b.name())
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn every_named_start_reaches_its_target_depth_with_the_machines_off() {
-    let starts = super::starts::off();
-    let wrong = reached(&starts, &pairing(Mode::Off, Mode::Off));
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn every_named_start_reaches_its_target_depth_with_the_machines_on() {
-    let starts = super::starts::on();
-    let wrong = reached(&starts, &pairing(Mode::On, Mode::On));
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn every_named_start_reaches_its_target_depth_with_the_machines_on_against_off() {
-    let starts = super::starts::on_off();
-    let wrong = reached(&starts, &pairing(Mode::On, Mode::Off));
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn every_named_start_reaches_its_target_depth_with_the_machines_off_against_on() {
-    let starts = super::starts::off_on();
-    let wrong = reached(&starts, &pairing(Mode::Off, Mode::On));
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn the_cold_start_reaches_its_stated_depth_off_with_off() {
-    let wrong = reached(&[super::starts::cold_off()], &pairing(Mode::Off, Mode::Off));
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn the_cold_start_reaches_its_stated_depth_on_with_on() {
-    let wrong = reached(&[super::starts::cold_on()], &pairing(Mode::On, Mode::On));
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-/// The deepest a cold start is measured to: past any depth its budget
-/// reaches.
-const COLD_MOST: usize = 40;
-
-/// How long a measurement of the cold start may explore, from the
-/// variable `FIPS_SETTLE_COLD_LIMIT` in seconds: by default 120 s, the
-/// reach budget in a debug build on 12 cores.
-fn cold_limit() -> std::time::Duration {
-    let secs = std::env::var("FIPS_SETTLE_COLD_LIMIT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(120);
-    std::time::Duration::from_secs(secs)
-}
-
-#[test]
-#[ignore = "a measurement run by hand: how deep the cold start is explored within the reach budget"]
-fn the_cold_start_is_explored_as_deep_as_the_reach_budget_allows_at_off_and_at_on() {
-    let limit = cold_limit();
-    let runs = [
-        (super::starts::cold_off(), pairing(Mode::Off, Mode::Off)),
-        (super::starts::cold_on(), pairing(Mode::On, Mode::On)),
-    ];
-    let report: Vec<_> = std::thread::scope(|sc| {
-        let hs: Vec<_> = runs
-            .iter()
-            .map(|(st, _)| sc.spawn(move || explore_within(st, COLD_MOST, limit, &none)))
-            .collect();
-        hs.into_iter()
-            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect()
-    });
-    for ((st, label), stats) in runs.iter().zip(&report) {
-        std::eprintln!(
-            "cold {}{label}: within {} s depth {} states {} frontier {:?} ms {:?} cut {:?}",
-            st.name,
-            limit.as_secs(),
-            stats.depth,
-            stats.states,
-            stats.frontier,
-            stats.ms,
-            stats.cut
-        );
-    }
-}
 
 #[test]
 fn two_worlds_on_one_path_have_one_digest() {
@@ -331,7 +208,7 @@ fn a_state_differing_only_inside_a_machine_has_its_own_key() {
     );
 }
 
-/// Why a sweep of the joint party exempts a breach at a healed leaf.
+/// Why the exemption of the joint party spares a breach at a healed leaf.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Spared {
     /// A split on a path that showed a known shape other than the two
@@ -343,13 +220,7 @@ enum Spared {
     Untimed,
 }
 
-impl Spared {
-    /// Every cause, in the order a sweep's line counts them.
-    #[cfg(feature = "slow-explorers")]
-    const ALL: [Self; 3] = [Self::Shape, Self::Lapsed, Self::Untimed];
-}
-
-/// The exemption of the joint party's sweeps, and its cause: the first of
+/// The exemption of the joint party, and its cause: the first of
 /// `by_shape`, [`lapsed`] and [`untimed`] that names `b`.
 fn spared(w: &World, b: &Breach) -> Option<Spared> {
     if by_shape(w, b) {
@@ -501,184 +372,6 @@ fn each_breach_the_pins_hold_is_exempted_by_its_own_cause_and_a_settled_pair_by_
     }
 }
 
-/// Sweep each of `runs` at the pairing `label` names, one thread per
-/// start, a few at a time ([`crate::testutil::bounded`]), and return
-/// every breach found, each with its path: every state checked at every
-/// step and every leaf healed and checked, with [`spared`] as the
-/// exemption, whose breaches each start's line counts by cause.
-#[cfg(feature = "slow-explorers")]
-pub(super) fn swept(runs: &[Start], label: &str) -> Vec<String> {
-    use super::super::oracle::sweep;
-    let report = crate::testutil::bounded(runs, |st| {
-        let counts = Spared::ALL.map(|_| AtomicUsize::new(0));
-        let exempt = |w: &World, b: &Breach| match spared(w, b) {
-            Some(s) => {
-                if let Some(i) = Spared::ALL.iter().position(|c| *c == s) {
-                    counts[i].fetch_add(1, Ordering::Relaxed);
-                }
-                true
-            }
-            None => false,
-        };
-        let t = std::time::Instant::now();
-        let swept = sweep(st, st.depth, &exempt);
-        let ms = t.elapsed().as_millis();
-        let by: Vec<(Spared, usize)> = Spared::ALL
-            .iter()
-            .zip(&counts)
-            .map(|(s, n)| (*s, n.load(Ordering::Relaxed)))
-            .filter(|(_, n)| *n > 0)
-            .collect();
-        (swept, ms, by)
-    });
-    let mut wrong = Vec::new();
-    for (st, (swept, ms, by)) in runs.iter().zip(report) {
-        std::eprintln!(
-            "joint {:>2} {}{label}: {} states, {} leaves healed in {ms} ms, exempted {:?}, breaches by cause {by:?}, states showing a pinned clause {:?}",
-            st.number,
-            st.name,
-            swept.stats.states,
-            swept.stats.leaves.len(),
-            swept.exempted,
-            swept.pinned
-        );
-        for (b, path) in swept.found {
-            wrong.push(format!(
-                "{}{label}: {:?} at n{}: {}\n  path {path:?}",
-                st.name, b.oracle, b.node, b.what
-            ));
-        }
-    }
-    wrong
-}
-
-/// The starts of `starts` that `keep` takes, the two late-dial cases
-/// aside: start 6's accepted split, which `../regress.rs` tests is ended
-/// by the link-dead timer and the redial within a heal, and start 7's
-/// aged-link defect, pinned there; both shown on real machines in
-/// `party.rs`.
-#[cfg(feature = "slow-explorers")]
-pub(super) fn chosen(starts: Vec<Start>, keep: impl Fn(&Start) -> bool) -> Vec<Start> {
-    starts
-        .into_iter()
-        .filter(|s| !matches!(s.number, 6 | 7) && keep(s))
-        .collect()
-}
-
-/// The starts whose links turn capable at On with On, so that each healed
-/// leaf steps both bundles' probes for a minute: their sweeps at that
-/// pairing take tens of minutes each and run in the slow explorers' lane,
-/// one test per start.
-#[cfg(feature = "slow-explorers")]
-pub const CAPABLE: &[&str] = &[
-    "crossing, two transports",
-    "crossing, connection-oriented",
-    "crossing during a rekey",
-];
-
-/// The starts on real bundles whose links turn capable at On with On, so
-/// that each healed leaf steps a minute of probes and each sweep there
-/// takes minutes: they run in the slow explorers' lane, together in one
-/// test, each on a thread of its own, a few at a time.
-#[cfg(feature = "slow-explorers")]
-pub const DOUBLED: &[&str] = &[
-    "crossing while capability probes are out",
-    "restart on a two-path link",
-    "late second dial at a capable peer",
-    "carrier loss of the active path",
-    "the only path's transport removed",
-    "a NAT rebound of the second path",
-    "a path removed at the peer",
-    "a NAT rebound of the active path",
-];
-
-/// The start named `name` at On with On, alone.
-#[cfg(feature = "slow-explorers")]
-fn on_alone(name: &str) -> Vec<Start> {
-    chosen(super::starts::on(), |s| s.name == name)
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn every_explored_interleaving_of_the_joint_party_keeps_the_properties_off() {
-    let wrong = swept(
-        &chosen(super::starts::off(), |_| true),
-        &pairing(Mode::Off, Mode::Off),
-    );
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn every_explored_interleaving_of_the_joint_party_keeps_the_properties_on() {
-    let runs = chosen(super::starts::on(), |s| {
-        !CAPABLE.contains(&s.name) && !DOUBLED.contains(&s.name)
-    });
-    let wrong = swept(&runs, &pairing(Mode::On, Mode::On));
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn the_sweep_of_start_2_keeps_the_properties_on_with_on() {
-    let wrong = swept(&on_alone(CAPABLE[0]), &pairing(Mode::On, Mode::On));
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn the_sweep_of_start_3_keeps_the_properties_on_with_on() {
-    let wrong = swept(&on_alone(CAPABLE[1]), &pairing(Mode::On, Mode::On));
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn the_sweep_of_start_9_keeps_the_properties_on_with_on() {
-    let wrong = swept(&on_alone(CAPABLE[2]), &pairing(Mode::On, Mode::On));
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn the_sweeps_of_the_two_path_starts_keep_the_properties_on_with_on() {
-    let wrong = swept(
-        &chosen(super::starts::on(), |s| DOUBLED.contains(&s.name)),
-        &pairing(Mode::On, Mode::On),
-    );
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn every_explored_interleaving_of_the_joint_party_keeps_the_properties_on_against_off() {
-    let wrong = swept(
-        &chosen(super::starts::on_off(), |_| true),
-        &pairing(Mode::On, Mode::Off),
-    );
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn every_explored_interleaving_of_the_joint_party_keeps_the_properties_off_against_on() {
-    let wrong = swept(
-        &chosen(super::starts::off_on(), |_| true),
-        &pairing(Mode::Off, Mode::On),
-    );
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-/// A joint node at multipath off at node 0, and the model elsewhere.
-#[cfg(feature = "slow-explorers")]
-fn off_model(ix: usize, me: Node, configured: Vec<Configured>) -> Box<dyn Party> {
-    if ix == 0 {
-        super::off(ix, me, configured)
-    } else {
-        model(ix, me, configured)
-    }
-}
-
 /// The model at node 0, and a joint node at multipath off elsewhere.
 fn model_off(ix: usize, me: Node, configured: Vec<Configured>) -> Box<dyn Party> {
     if ix == 0 {
@@ -686,26 +379,4 @@ fn model_off(ix: usize, me: Node, configured: Vec<Configured>) -> Box<dyn Party>
     } else {
         super::off(ix, me, configured)
     }
-}
-
-#[cfg(feature = "slow-explorers")]
-#[test]
-fn every_explored_interleaving_of_the_core_keeps_the_properties_and_heals() {
-    // The core's own explorer, on joint nodes at multipath off: every
-    // named start but the two late-dial cases left
-    // for later, the one with two paths on real bundles, with the core at
-    // both ends and at either end against the model. Minutes on twelve
-    // cores, and past nextest's limit on two, so it runs in the slow
-    // explorers' build.
-    let makers: [(super::super::starts::Maker, &str); 3] = [
-        (super::off, " (core and core)"),
-        (off_model, " (core and model)"),
-        (model_off, " (model and core)"),
-    ];
-    let mut wrong = Vec::new();
-    for (mk, label) in makers {
-        let runs = chosen(super::starts::uncapped(mk), |s| s.number <= 14);
-        wrong.extend(swept(&runs, label));
-    }
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

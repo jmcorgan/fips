@@ -1,8 +1,8 @@
 //! Tests of peer settlement in a deterministic world: the world and its
 //! transports, the reference model as a node of it, the named starts, the
-//! bounded explorer, the settlement properties, the rekey machine's
-//! decisions, and a model of the current node. See this directory's
-//! README.
+//! bounded search its replay and digest checks use, the settlement
+//! properties, the rekey machine's decisions, and a model of the current
+//! node. See this directory's README.
 //!
 //! The scans below read the settlement sources through the rekey
 //! machine's code reader, so comments and string literals never count.
