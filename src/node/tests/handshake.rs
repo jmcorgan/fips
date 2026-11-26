@@ -1734,10 +1734,36 @@ struct HsNode {
     addr: TransportAddr,
 }
 
+/// The most UDP transports one test may bind through `make_hs_node`. The
+/// largest test here builds three nodes. A loop that rebuilds one side until
+/// its node address compares the right way binds a socket per try, and a run
+/// of such tries can exhaust the test process's descriptors; this cap catches
+/// most of those runs as a named failure instead.
+const BIND_CAP: usize = 8;
+
+thread_local! {
+    /// UDP transports `make_hs_node` has bound on this thread. That is one
+    /// test's count: libtest runs each test on a thread of its own and nextest
+    /// in a process of its own, and `#[tokio::test]`'s current-thread runtime
+    /// keeps the builder on the test's thread.
+    static BINDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Build an `HsNode` on an ephemeral localhost UDP port from an explicit config.
 async fn make_hs_node(config: Config) -> HsNode {
     use crate::config::UdpConfig;
     use crate::transport::udp::UdpTransport;
+
+    let binds = BINDS.with(|b| {
+        b.set(b.get() + 1);
+        b.get()
+    });
+    assert!(
+        binds <= BIND_CAP,
+        "this test asked make_hs_node for {binds} UDP transports, more than {BIND_CAP}; \
+         build a pair with a set address order through ordered_pair instead of \
+         rebuilding one side until it compares the right way"
+    );
 
     let mut node = make_node_with(config);
     let transport_id = TransportId::new(1);
@@ -1804,6 +1830,16 @@ async fn ordered_pair(smaller: Config, larger: Config) -> (HsNode, HsNode) {
         "precondition: the responder's node address is the larger"
     );
     (initiator, responder)
+}
+
+/// The bind cap fires on the ninth transport one test asks for.
+#[tokio::test]
+#[should_panic(expected = "more than 8")]
+async fn make_hs_node_refuses_a_ninth_udp_transport_in_one_test() {
+    let mut nodes = Vec::new();
+    for _ in 0..=BIND_CAP {
+        nodes.push(make_hs_node(Config::new()).await);
+    }
 }
 
 async fn stop_hs(n: &mut HsNode) {
