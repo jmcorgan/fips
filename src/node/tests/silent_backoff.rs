@@ -276,10 +276,25 @@ async fn a_new_epoch_msg1_from_a_peer_idle_15_s_restarts_it_during_the_back_off(
         "precondition: the back-off is running"
     );
 
+    // The restart is held as a leg beside the silent peering, and its first
+    // frame replaces it.
     rig.idle(15_000);
-    rig.promote(NEW_EPOCH).await;
+    let before = rig.link();
+    let peer = rig.peer();
+    let data = rig.msg1(NEW_EPOCH);
+    rig.deliver(data).await;
+    assert_eq!(rig.link(), before, "the restart is held as a leg");
+    assert!(
+        prove_leg(&mut rig.node, &peer).await,
+        "the restart is answered into a leg during the back-off"
+    );
+    assert_ne!(
+        rig.link(),
+        before,
+        "the restart's first frame promoted a new session"
+    );
     assert_eq!(
-        rig.node.get_peer(&rig.peer()).unwrap().remote_epoch(),
+        rig.node.get_peer(&peer).unwrap().remote_epoch(),
         Some(NEW_EPOCH)
     );
 }

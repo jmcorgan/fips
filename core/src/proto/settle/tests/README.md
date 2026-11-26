@@ -139,7 +139,9 @@ can rebuild any state by replaying the path that reached it.
 - `shapes.rs`: the shapes the model's convergence with itself exempts,
   each shown once on the schedule that found it, with the model of
   `master` converging on the same schedule, which stay on those models,
-  since the shape is the model's; a control that each start's own script
+  since the shape is the model's; the previous-life shape, which the
+  model's restart held as a leg no longer reaches, is asserted absent on
+  the two schedules that showed it; a control that each start's own script
   shows only the shape it carries by design, with the model and with joint
   nodes (none, except the late second dial answered in the other order and
   the dial on the peer's aged link); and a test that those two show their shapes with the

@@ -148,6 +148,9 @@ struct Answered {
     /// It answers a redial: a frame under it, not its send, replaces the
     /// held peer.
     redial: bool,
+    /// It answers a restart held as a leg: the frame that replaces the held
+    /// peer under it does so as a restart.
+    restart: bool,
 }
 
 /// An admitted msg1 waiting for the answer the shell builds: what its leg
@@ -410,6 +413,7 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
                         replaces: false,
                         sent: false,
                         redial: false,
+                        restart: false,
                     };
                     self.answered.insert(link, answered);
                 }
@@ -788,7 +792,7 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         if fault!(AnswerBeforeAdmit) || node_fault!(AnswerBeforeAdmit) {
             // The defect's shape: the answer asked for before the msg1 is
             // classified, so a refused or rekey msg1 costs one too.
-            self.ask(read.clone(), false, out);
+            self.ask(read.clone(), false, false, out);
         }
         if self.capped(&read.peer) {
             out.push(Output::Reject {
@@ -854,6 +858,13 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         } else {
             source
         };
+        if let Some(live) = held
+            && source == Source::Restart
+            && !(fault!(RestartTearsDownAtMsg1) || node_fault!(RestartTearsDownAtMsg1))
+        {
+            self.restart(read, live, now, out);
+            return;
+        }
         let refused = if self.full() {
             Some(Denial::Full)
         } else if source == Source::Replacement && fault!(ReplacementUngated) {
@@ -891,20 +902,57 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
             self.hold_replaced(peer, source, now, out);
             self.remove(peer, why, now, out);
         }
-        self.ask(read, held.is_some(), out);
+        self.ask(read, held.is_some(), false, out);
+    }
+
+    /// Rule 2 for a held peer: the restart is held beside the peering as a
+    /// leg, which the peer's first frame under it swaps in. Through the
+    /// admission cap, the slot rule and the gate's floors, dampener and
+    /// redial memory, none of which stamps: the swap stamps the dampener.
+    fn restart(&mut self, read: Read, held: Liveness<I>, now: I, out: &mut Vec<Outs<I, F>>) {
+        let peer = read.peer;
+        let refused = if self.full() {
+            Some(Denial::Full)
+        } else if self.slotted(&peer, now) {
+            Some(Denial::Held)
+        } else {
+            let ask = Ask {
+                source: Source::Restart,
+                held: Some(held),
+                ephemeral: Some(read.ephemeral),
+                epoch: Some(read.epoch),
+                memory: None,
+            };
+            self.gates
+                .admit_leg(peer, ask, now, &self.params)
+                .map(Denial::Gate)
+        };
+        if let Some(why) = refused {
+            out.push(Output::Reject {
+                peer: Some(peer),
+                source: Some(Source::Restart),
+                why,
+            });
+            return;
+        }
+        let link = self.ask(read, false, true, out);
+        if let Some(a) = self.asked.get_mut(&link) {
+            a.answered.restart = true;
+        }
     }
 
     /// Open the link an admitted msg1 arrived on and ask the shell for its
     /// answer; `replaces` says the msg1 tore a held peer down. The link
     /// opened.
-    fn ask(&mut self, read: Read, replaces: bool, out: &mut Vec<Outs<I, F>>) -> LinkNo {
+    fn ask(&mut self, read: Read, replaces: bool, leg: bool, out: &mut Vec<Outs<I, F>>) -> LinkNo {
         let link = self.links.open(read.from, Dir::Inbound, Holder::Leg);
         let answered = Answered {
             ephemeral: read.ephemeral,
             epoch: read.epoch,
             replaces,
             sent: false,
-            redial: false,
+            redial: leg,
+            restart: false,
         };
         let asked = Asked {
             peer: read.peer,
@@ -915,6 +963,7 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         out.push(Output::Ask {
             link,
             peer: read.peer,
+            leg,
         });
         link
     }
@@ -941,10 +990,12 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
             out,
         );
         let redial = asked.answered.redial;
+        let restart = asked.answered.restart;
         self.answered.insert(link, asked.answered);
         if redial {
             self.redials.insert(asked.peer, (link, now));
-            if self.inside(asked.peer, now) {
+            // A peer that restarted holds no session on this node's dial.
+            if !restart && self.inside(asked.peer, now) {
                 self.crossed.insert(asked.peer, link);
             }
             // The defect's shape: the redial's leg is never reaped.
@@ -959,8 +1010,11 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
             msg2: hello.msg2,
             stored: false,
         });
-        if redial && (fault!(RedialTearsDownAtMsg1) || node_fault!(RedialTearsDownAtMsg1)) {
-            self.swap(asked.peer, link, None, now, out);
+        if redial
+            && !restart
+            && (fault!(RedialTearsDownAtMsg1) || node_fault!(RedialTearsDownAtMsg1))
+        {
+            self.swap(asked.peer, link, None, Why::Redial, now, out);
         }
     }
 
@@ -1031,7 +1085,12 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         };
         let redial = self.answered.get(&link).is_some_and(|a| a.redial);
         if self.held.contains_key(&peer) && redial && fault!(RedialInstallsAtSent) {
-            self.swap(peer, link, None, now, out);
+            let why = if self.restart_leg(link) {
+                Why::Restart
+            } else {
+                Why::Redial
+            };
+            self.swap(peer, link, None, why, now, out);
             return;
         }
         if self.held.contains_key(&peer) {
@@ -1261,7 +1320,6 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
             self.admit(Source::NotHeld, read, now, out);
             return;
         };
-        let pending = self.redials.get(&peer).copied();
         let forgets = fault!(RedialMemoryIgnored) || node_fault!(RedialMemoryIgnored);
         let refused = if self.full() {
             Some(Denial::Full)
@@ -1271,10 +1329,7 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
             // The defect's shape: no slot, memory or dampener holds the
             // redial back, and its answer replaces the peering at once.
             None
-        } else if pending
-            .is_some_and(|(_, at)| now.saturating_duration_since(at) < self.params.unheard)
-            && !(fault!(RedialSlotIgnored) || node_fault!(RedialSlotIgnored))
-        {
+        } else if self.slotted(&peer, now) {
             Some(Denial::Held)
         } else {
             let ask = Ask {
@@ -1301,10 +1356,22 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
             });
             return;
         }
-        let link = self.ask(read, false, out);
-        if let Some(a) = self.asked.get_mut(&link) {
-            a.answered.redial = true;
-        }
+        self.ask(read, false, true, out);
+    }
+
+    /// The slot rule: another leg of `peer`, a redial or a restart, is
+    /// pending and younger than the unheard floor at `now`, so a later one
+    /// is held back.
+    fn slotted(&self, peer: &NodeAddr, now: I) -> bool {
+        self.redials
+            .get(peer)
+            .is_some_and(|(_, at)| now.saturating_duration_since(*at) < self.params.unheard)
+            && !(fault!(RedialSlotIgnored) || node_fault!(RedialSlotIgnored))
+    }
+
+    /// Whether the leg on `link` answers a restart held as a leg.
+    fn restart_leg(&self, link: LinkNo) -> bool {
+        self.answered.get(&link).is_some_and(|a| a.restart)
     }
 
     /// The answer to a redial's ask is coming: the identity's older pending
@@ -1384,11 +1451,19 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
             self.yield_leg(peer, link, out);
             return;
         }
+        // A restart's leg is swapped in at its first frame: the peer that
+        // restarted holds no session of the peering's, so no adoption on the
+        // held link applies. It is in `crossed` only when this node's own
+        // dial's msg2 proved the restart and won the tie-break over it.
+        if self.restart_leg(link) {
+            self.swap(peer, link, Some(from), Why::Restart, now, out);
+            return;
+        }
         if self.proven_off(peer, link, &from) {
             self.hold_redial(peer, link, now, out);
             return;
         }
-        self.swap(peer, link, Some(from), now, out);
+        self.swap(peer, link, Some(from), Why::Redial, now, out);
     }
 
     /// Give up `peer`'s redial leg on `link`, which crossed this node's own
@@ -1492,6 +1567,7 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         peer: NodeAddr,
         link: LinkNo,
         from: Option<Pair>,
+        why: Why,
         now: I,
         out: &mut Vec<Outs<I, F>>,
     ) {
@@ -1508,7 +1584,7 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         self.moved.remove(&peer);
         let heard = self.held.get(&peer).map(|h| h.heard);
         if heard.is_some() {
-            self.remove(peer, Why::Redial, now, out);
+            self.remove(peer, why, now, out);
         }
         self.gates.swapped(peer, heard == Some(true), now);
         self.links.hold(link, Holder::Peer(peer));
@@ -1623,8 +1699,23 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
                 self.abandon(link, out);
                 return;
             }
+            // A restart leg of the peer's at the epoch this msg2 proves
+            // crossed this dial: the dial tie-break decides between the two
+            // (FRC-1201 Section 5.6), so both ends take the same session.
+            let leg = self.restart_crossing(peer, epoch);
+            if let Some(leg) = leg
+                && !crossed_dial_wins(self.me, peer)
+            {
+                // The restart leg won the tie-break over this dial.
+                self.drop_dial(link, out);
+                self.swap(peer, leg, None, Why::Restart, now, out);
+                return;
+            }
             self.remove(peer, Why::OwnRestart, now, out);
             self.dialed(peer, link, epoch, from, Transition::Replace, now, out);
+            if let Some(leg) = leg {
+                self.crossed.insert(peer, leg);
+            }
             return;
         }
         let own = !(fault!(IgnoreOwnDial) || node_fault!(IgnoreOwnDial))
@@ -1647,20 +1738,42 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         self.keep(peer, link, out);
     }
 
-    /// The held `peer` stays where it is, and this node's own completed
-    /// dial on `link` is given up: its lease returns and its link is
-    /// retired by the close rule.
-    fn keep(&mut self, peer: NodeAddr, link: LinkNo, out: &mut Vec<Outs<I, F>>) {
+    /// The restart leg of `peer` that this node's own dial, whose msg2 at
+    /// `epoch` proves the peer restarted, crossed: a restart leg pending
+    /// for the peer, its msg2 sent, answering a msg1 at that same epoch.
+    fn restart_crossing(&self, peer: NodeAddr, epoch: Epoch) -> Option<LinkNo> {
+        if fault!(RestartLegUncrossed) || node_fault!(RestartLegUncrossed) {
+            return None;
+        }
+        let (leg, _) = self.redials.get(&peer)?;
+        self.answered
+            .get(leg)
+            .is_some_and(|a| a.restart && a.sent && a.epoch == epoch)
+            .then_some(*leg)
+    }
+
+    /// This node's own completed dial on `link` is given up: its lease
+    /// returns and its link is retired by the close rule. Whether the dial
+    /// was there to give up.
+    fn drop_dial(&mut self, link: LinkNo, out: &mut Vec<Outs<I, F>>) -> bool {
         let Some(leg) = self.legs.take(link) else {
-            return;
+            return false;
         };
         out.push(Output::Free { lease: leg.lease() });
         let closes = self.links.retire(link);
         out.push(Output::Retire { link, closes });
-        out.push(Output::Reset {
-            peer,
-            transition: Transition::Keep,
-        });
+        true
+    }
+
+    /// The held `peer` stays where it is, and this node's own completed
+    /// dial on `link` is given up ([`Table::drop_dial`]).
+    fn keep(&mut self, peer: NodeAddr, link: LinkNo, out: &mut Vec<Outs<I, F>>) {
+        if self.drop_dial(link, out) {
+            out.push(Output::Reset {
+                peer,
+                transition: Transition::Keep,
+            });
+        }
     }
 
     /// Install the peer from this node's own completed dial on `link`.
@@ -1727,7 +1840,11 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         now: I,
         out: &mut Vec<Outs<I, F>>,
     ) {
-        let pending = self.redials.get(&peer).map(|(leg, _)| *leg);
+        let pending = self
+            .redials
+            .get(&peer)
+            .map(|(leg, _)| *leg)
+            .filter(|leg| !self.restart_leg(*leg));
         let (Some(leg), Some(h)) = (self.legs.take(link), self.held.get_mut(&peer)) else {
             return;
         };
@@ -2331,7 +2448,7 @@ impl<I: Instant, F: Flow<I>> Ops<'_, I, F> {
         now: I,
         out: &mut Vec<Outs<I, F>>,
     ) {
-        self.t.swap(peer, link, from, now, out);
+        self.t.swap(peer, link, from, Why::Redial, now, out);
     }
 
     /// Add to `closes` the pair `link` was set up at when no live link uses

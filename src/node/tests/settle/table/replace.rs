@@ -5,8 +5,10 @@
 //!
 //! The peer's state is dirtied through [`dirty`] before the site, so a row
 //! the replacement keeps is held to a value it could have changed, and each
-//! test reads the node at the site alone, before any frame of the new
-//! peering. The restart siblings run on a capable link of two paths
+//! test reads the node at the site alone. The site of a restart is the
+//! peer's first frame under the leg its msg1 is held in, as the node takes
+//! it once authenticated, read with the msg1 before it; the other sites come
+//! before any frame of the new peering. The restart siblings run on a capable link of two paths
 //! (`two_transports`), where the replaced peer's unkept path is queued to
 //! close; the plain tests run where no link is capable and every link keeps.
 //! The replacement sibling cannot be capable: a same-epoch msg1 replaces only
@@ -191,9 +193,11 @@ fn common(on: bool) -> Vec<(Row, Outcome)> {
 }
 
 /// A restarted node 1 dials node 0, which last heard node 1 a minute ago,
-/// with multipath set as `on`: node 0 replaces its peering with node 1 on the
-/// msg1 at a new epoch. On a capable link node 0's second path, the one the
-/// peer was not active on, is queued to close.
+/// with multipath set as `on`: node 0 holds the msg1 at a new epoch as a leg
+/// beside its peering with node 1, and replaces the peering at node 1's
+/// first frame under the leg, as the node takes it once authenticated
+/// ([`prove_leg`]), with nothing of the frame's own content. On a capable link node 0's second path, the
+/// one the peer was not active on, is queued to close.
 async fn restart(on: bool) {
     let (mut nodes, mut pairs) = pair(on).await;
     let b = *nodes[1].node.node_addr();
@@ -211,14 +215,20 @@ async fn restart(on: bool) {
         .expect("precondition: the restarted node's msg1 is queued at node 0");
     let before = Seen::of(&nodes[0].node, &b, &pairs).await;
     nodes[0].node.handle_msg1(msg1).await;
+    let held = nodes[0].node.get_peer(&b).map(|p| p.link_id());
+    let framed = prove_leg(&mut nodes[0].node, &b).await;
     let after = Seen::of(&nodes[0].node, &b, &pairs).await;
     let new = nodes[0].node.get_peer(&b).map(|p| p.link_id());
     let carried = reading_kept(&nodes[0].node, old);
     let unkept = unkept_closed(&mut nodes, on, &pairs).await;
     cleanup_nodes(&mut nodes).await;
+    assert!(
+        held == old && framed,
+        "precondition: node 0 held the restart as a leg beside node 1's peering"
+    );
     let link = match (old, new) {
         (Some(o), Some(n)) if o != n => n,
-        _ => panic!("precondition: node 0 replaced node 1's peering on the restart msg1"),
+        _ => panic!("precondition: node 0 replaced node 1's peering at the restart's first frame"),
     };
     let t = Transition::Replace {
         link,
@@ -248,7 +258,6 @@ async fn restart(on: bool) {
         (Row::Session, Outcome::Changed),
         (Row::Dampener, Outcome::Changed),
         (Row::Silent, Outcome::Kept),
-        // The new peering is not yet heard, so the msg1's ephemeral is noted.
         (Row::Replayed, Outcome::Changed),
         (Row::Reconnect, Outcome::Changed),
         (Row::Records, Outcome::Changed),
@@ -292,8 +301,9 @@ fn changed_if(c: bool) -> Outcome {
     if c { Outcome::Changed } else { Outcome::Kept }
 }
 
-/// A restart's msg1 replaces the peering as the table says, with multipath
-/// off, where no link is capable and every link keeps its connection.
+/// A restart's msg1, held as a leg, replaces the peering at the leg's first
+/// frame as the table says, with multipath off, where no link is capable
+/// and every link keeps its connection.
 #[tokio::test]
 async fn a_restart_msg1_replaces_the_peer_as_the_table_says() {
     restart(false).await;
@@ -495,9 +505,10 @@ async fn a_restart_seen_in_our_msg2_replaces_the_peer_as_the_table_says_with_mul
 
 /// Two nodes peered with multipath set as `on`, node 0 having last heard
 /// node 1 a minute ago. Node 1 restarts and dials node 0, which by then
-/// denies node 1 in its ACL. A replacement removes the held peer before the
-/// ACL check, so the msg1 costs node 0 its peering with node 1: the removal
-/// stands and nothing is promoted in its place.
+/// denies node 1 in its ACL. A restart is held as a leg beside the peering
+/// and removes nothing before the ACL check, so the refused msg1 opens no
+/// leg and costs node 0 nothing: the peering with node 1 and its link stand,
+/// to be ended by its own timers or a frame-proven restart the ACL passes.
 async fn refused(on: bool) {
     let mut nodes = super::peered(on).await;
     let b = *nodes[1].node.node_addr();
@@ -527,28 +538,34 @@ async fn refused(on: bool) {
     nodes[0].node.handle_msg1(msg1).await;
     let held = nodes[0].node.get_peer(&b).map(|p| p.link_id());
     let old_open = nodes[0].node.get_link(&old).is_some();
+    let leg = nodes[0].node.redials.of(&b);
     cleanup_nodes(&mut nodes).await;
     assert_eq!(
-        held, None,
-        "defect: node 0 still holds node 1 after a restart's msg1 the ACL refused"
+        held,
+        Some(old),
+        "defect: a restart's msg1 the ACL refused cost node 0 its peering with node 1"
     );
     assert!(
-        !old_open,
-        "defect: the refused replacement left the old peering's link open"
+        old_open,
+        "defect: a restart's msg1 the ACL refused closed the peering's link"
+    );
+    assert!(
+        leg.is_none(),
+        "defect: the refused restart left a leg pending"
     );
 }
 
-/// A replacement the ACL refuses after its removal keeps the removal, with
+/// A restart the ACL refuses leaves the peering and its link, with
 /// multipath off.
 #[tokio::test]
-async fn a_replacement_refused_by_the_acl_after_its_removal_keeps_the_removal() {
+async fn a_restart_refused_by_the_acl_leaves_the_peering_and_its_link() {
     refused(false).await;
 }
 
-/// [`a_replacement_refused_by_the_acl_after_its_removal_keeps_the_removal`]
-/// with multipath on.
+/// [`a_restart_refused_by_the_acl_leaves_the_peering_and_its_link`] with
+/// multipath on.
 #[tokio::test]
-async fn a_replacement_refused_by_the_acl_after_its_removal_keeps_the_removal_with_multipath_on() {
+async fn a_restart_refused_by_the_acl_leaves_the_peering_and_its_link_with_multipath_on() {
     refused(true).await;
 }
 
@@ -571,8 +588,10 @@ fn genuine_msg1(initiator: &Node, responder: &Node) -> Vec<u8> {
 /// On the BLE pair with multipath set as `on`, node 1 holds node 0 at an
 /// epoch other than node 0's own and last heard it a minute ago, its state
 /// dirtied and its link marked. Node 0's msg1 at its own epoch reads as a
-/// restart: node 1 replaces the peering, which clears the link's mark, and
-/// node 0's first frame on the new peering marks it again.
+/// restart, held as a leg beside the peering: at the leg's first frame, as
+/// the node takes it once it has authenticated ([`prove_leg`]), node 1
+/// replaces the peering, which clears the link's mark, and node 0's next
+/// frame on the new peering marks it again.
 #[cfg(ble_available)]
 async fn ble_restart(on: bool) {
     use super::ble_pair;
@@ -616,6 +635,8 @@ async fn ble_restart(on: bool) {
             2_000,
         ))
         .await;
+    let held = nodes[1].node.get_peer(&a).map(|p| p.link_id());
+    let proved = prove_leg(&mut nodes[1].node, &a).await;
     let after = Seen::of(&nodes[1].node, &a, &pairs).await;
     let cleared = mark_at(&nodes[1], &link).await;
     let new = nodes[1].node.get_peer(&a).map(|p| p.link_id());
@@ -644,9 +665,13 @@ async fn ble_restart(on: bool) {
         Some(true),
         "precondition: node 1's link is marked before the restart"
     );
+    assert!(
+        held == old && proved,
+        "precondition: node 1 held the restart as a leg beside node 0's peering"
+    );
     let link_id = match (old, new) {
         (Some(o), Some(n)) if o != n => n,
-        _ => panic!("precondition: node 1 replaced node 0's peering on the restart msg1"),
+        _ => panic!("precondition: node 1 replaced node 0's peering at the restart's first frame"),
     };
     let t = Transition::Replace {
         link: link_id,
@@ -684,9 +709,9 @@ async fn ble_restart(on: bool) {
     );
 }
 
-/// On a BLE link, with multipath off, a restart's msg1 clears the old
-/// peering's mark, the new peering's first frame marks it, and every other
-/// row is as the table says.
+/// On a BLE link, with multipath off, a restart's replacement at its leg's
+/// first frame clears the old peering's mark, the new peering's next frame
+/// marks it, and every other row is as the table says.
 #[cfg(ble_available)]
 #[tokio::test]
 async fn a_restart_on_a_ble_link_clears_the_old_mark_and_marks_the_new_peering() {

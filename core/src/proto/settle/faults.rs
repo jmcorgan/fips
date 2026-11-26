@@ -170,6 +170,11 @@ pub(crate) enum Fault {
     /// A redial passes no slot, memory or dampener, and its answer
     /// replaces the held peer at once.
     RedialTearsDownAtMsg1,
+    /// A restart of a held peer tears it down at the msg1, as before a
+    /// restart was held as a leg.
+    RestartTearsDownAtMsg1,
+    /// A restart held as a leg stamps the dampener at its admission.
+    RestartStampsAtOpen,
     /// A redial's leg is never reaped.
     RedialNeverExpires,
     /// A redial the ACL passed and no session index could be drawn for
@@ -192,6 +197,9 @@ pub(crate) enum Fault {
     /// A redial leg answered after the move onto this node's own dial is
     /// never recorded as crossing it.
     LateLegUncrossed,
+    /// An own dial's msg2 that proves a restart ignores the restart leg it
+    /// crossed.
+    RestartLegUncrossed,
     /// The crossing window after a move onto an own dial outlives a frame
     /// of the peer.
     CrossingWindowOutlivesFrame,
@@ -500,12 +508,15 @@ impl Fault {
         Self::RedialMemoryIgnored,
         Self::RedialSkipsDampener,
         Self::RedialTearsDownAtMsg1,
+        Self::RestartTearsDownAtMsg1,
+        Self::RestartStampsAtOpen,
         Self::RedialNeverExpires,
         Self::AuthorizedRedialUnnoted,
         Self::RedialMemoryLapses,
         Self::RedialSwapHeard,
         Self::CrossedLegSwaps,
         Self::LateLegUncrossed,
+        Self::RestartLegUncrossed,
         Self::CrossingWindowOutlivesFrame,
         Self::CrossingWindowOutlivesTimeout,
         Self::AdoptedRedialCountsOwn,

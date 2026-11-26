@@ -59,8 +59,9 @@ files run off, which is what they test.
   not asserted.
 - `carry.rs`: per-peer state across a change of the peer's link or
   session: a new or restart-replaced peer is sent a TreeAnnounce at once, a
-  redial answered as a rekey resends the filter (both orders), a restart's
-  msg1 releases the clamp entry of the session it clears, and, over the BLE
+  redial answered as a rekey resends the filter (both orders), a restart,
+  at the first frame of the leg its msg1 is held in, releases the clamp
+  entry of the session it clears, and, over the BLE
   mock, the initiator's link is verified when it promotes on its msg2.
 - `cells.rs`: five per-peer cells a settlement change has to decide:
   characterisation tests (`chartest_`) of three, each asserting what master
@@ -144,13 +145,16 @@ files run off, which is what they test.
   outside the peer's record. A connect still out when a move releases its
   path is closed as it opens, unless another live link uses the pair, and a
   connect the bundle still holds a path for is stepped into it as before. A
-  close queued at a restart's teardown is spared by the drain at the pair the
-  new link runs on, and still made where nothing uses the pair, with the
-  control that with multipath off the teardown queues none. A no-carrier
-  reading stays across a move and goes with the peer. A characterisation
-  test (`chartest_`, as in `cells.rs`) holds what a restart found at a rekey
-  keeps of the bundle, and that the pin ends. Its `own_dial` and
-  `restart_dial` also serve the replay tests of `decrypt_replay.rs`.
+  restart's teardown leaves open the pair the new link runs on, since the
+  restart is held as a leg and queues no close there, and still closes a pair
+  nothing uses, with the control that with multipath off the teardown queues
+  no close. A no-carrier reading stays across a move and goes with the peer.
+  A characterisation test (`chartest_`, as in `cells.rs`) holds what a
+  restart found at a rekey keeps of the bundle, and that the pin ends. Its
+  `own_dial` and `restart_dial` also serve the replay tests of
+  `decrypt_replay.rs`; `restart_dial` carries the restart through the
+  restarted node's first frame, which replaces the peering the msg1 was
+  held beside.
 - `redialed.rs`: crossed TCP dials, then the larger node alone drops the
   smaller, as link-dead does at the end that stops hearing first after a
   flap, and dials it again once the connection the smaller node's link ran

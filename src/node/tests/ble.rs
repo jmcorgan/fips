@@ -1165,8 +1165,11 @@ async fn an_authenticated_frame_from_the_decrypt_worker_moves_the_verification_t
     cleanup_nodes(&mut nodes).await;
 }
 
-/// A restart over the same link withdraws the verification; the responder's
-/// promotion does not set it again, the initiator's first frame does.
+/// A restart over the same link, held as a leg until its first frame as the
+/// node takes it once authenticated ([`prove_leg`]), withdraws the
+/// verification when that frame replaces the peering; the responder's
+/// promotion does not set it again, the initiator's frame on the new
+/// peering does.
 #[tokio::test]
 async fn a_restart_over_the_same_ble_link_is_verified_by_the_initiators_first_frame() {
     let mut nodes = peered_pair().await;
@@ -1193,10 +1196,19 @@ async fn a_restart_over_the_same_ble_link_is_verified_by_the_initiators_first_fr
             2_000,
         ))
         .await;
+    assert_eq!(
+        nodes[1].node.get_peer(&n0).map(|p| p.link_id()),
+        Some(before),
+        "node 1 holds the restart as a leg beside the peering"
+    );
+    assert!(
+        prove_leg(&mut nodes[1].node, &n0).await,
+        "node 1 holds a leg for the restart (a restart, not a decline)"
+    );
     let after = nodes[1].node.get_peer(&n0).map(|p| p.link_id());
     assert!(
         after.is_some_and(|l| l != before),
-        "node 1 re-peered with node 0 (a restart, not a decline)"
+        "node 1 re-peered with node 0 at the leg's first frame"
     );
     assert!(pooled_at(&nodes[1], &link), "the link is still pooled");
     assert_eq!(

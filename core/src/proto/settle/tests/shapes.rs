@@ -20,10 +20,13 @@
 //!   the responder's earlier frame then moves the dialer back to the
 //!   session the responder dropped. The comparison of the two candidate
 //!   late-dial rules decides whether the rule is built.
-//! - [`Shape::OldLife`]: an observation against FRC-1201, a msg1 from the
-//!   peer's previous life accepted as a restart past the unheard floor,
-//!   reached by a delay longer than the world allows (shown here with the
-//!   bound lifted for one world) and by replay.
+//! - [`Shape::OldLife`]: once an observation against FRC-1201, a msg1 from
+//!   the peer's previous life accepted as a restart past the unheard floor,
+//!   reached by a delay longer than the world allows (with the bound lifted
+//!   for one world) and by replay. The model now holds a restart as a leg
+//!   beside the peering until a frame under it, which a previous life never
+//!   sends, so the two schedules that showed it show neither the shape nor
+//!   a split: those two tests assert its absence.
 //! - [`Shape::RekeyInstall`]: an observation against FRC-1201, a restarted
 //!   node installed from the peer's rekey msg1 and then parted from it by
 //!   the peer's late crossing dial.
@@ -99,8 +102,24 @@ fn a_stale_frame_moves_a_late_dialer_back_onto_the_session_its_peer_dropped() {
     }
 }
 
+/// Asserts that `path` shows neither `shape` nor a split with the model at
+/// both ends.
+fn unobserved(number: u8, name: &str, path: &[Act], unbounded: bool, shape: Shape) {
+    let w = after(number, name, model, path, unbounded);
+    assert!(
+        !w.kinds().contains(&shape),
+        "defect: start {number} {name}: the model still shows {shape:?}: {:?}",
+        w.kinds()
+    );
+    assert!(
+        splits(&w).is_empty(),
+        "defect: start {number} {name}: the model splits: {:?}",
+        splits(&w)
+    );
+}
+
 #[test]
-fn observed_a_late_msg1_from_the_peers_previous_life_is_accepted_as_a_restart() {
+fn a_late_msg1_from_the_peers_previous_life_is_held_as_a_leg_and_parts_nothing() {
     let path = [
         Act::Deliver(0),
         Act::Advance,
@@ -108,11 +127,11 @@ fn observed_a_late_msg1_from_the_peers_previous_life_is_accepted_as_a_restart() 
         Act::Deliver(4),
         Act::Advance,
     ];
-    observe(8, "restart", &path, true, Shape::OldLife);
+    unobserved(8, "restart", &path, true, Shape::OldLife);
 }
 
 #[test]
-fn observed_a_replayed_msg1_from_the_peers_previous_life_is_accepted_as_a_restart() {
+fn a_replayed_msg1_from_the_peers_previous_life_is_held_as_a_leg_and_parts_nothing() {
     let path = [
         Act::Deliver(0),
         Act::Advance,
@@ -121,7 +140,7 @@ fn observed_a_replayed_msg1_from_the_peers_previous_life_is_accepted_as_a_restar
         Act::Advance,
         Act::Replay(0),
     ];
-    observe(13, "spray", &path, false, Shape::OldLife);
+    unobserved(13, "spray", &path, false, Shape::OldLife);
 }
 
 #[test]

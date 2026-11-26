@@ -801,9 +801,9 @@ fn an_orphaned_bundles_peer_is_retried() {
 }
 
 /// A peer held at epoch 1 torn down, past the unheard floor, in each of
-/// the three ways a new session replaces it: a msg1 at a new epoch, the
-/// rekey machine's replacement request, and this node's own dial answered
-/// at a new epoch. The node notes each loss for a reconnect before the new
+/// the three ways a new session replaces it: a msg1 at a new epoch, at the
+/// first frame of the leg it is held in, the rekey machine's replacement
+/// request, and this node's own dial answered at a new epoch. The node notes each loss for a reconnect before the new
 /// session is promoted, as at a dead link.
 ///
 /// Records current behaviour (rule S-09: the reconnect after each new session): open to change
@@ -811,13 +811,12 @@ fn an_orphaned_bundles_peer_is_retried() {
 #[test]
 fn a_restarted_or_replaced_peer_is_retried_in_each_of_the_three_ways() {
     const LATER: Epoch = [2; 8];
+    // The restart is held as a leg beside the peering, and its first
+    // frame replaces the peering.
     let restart = || {
         let (mut table, _) = responder(small(), 10, 9);
-        let msg1 = Input::Msg1 {
-            read: read(large(), 11, 9, LATER),
-            reachable: true,
-        };
-        go(&mut table, msg1, 2_000)
+        let leg = restart_leg(&mut table, 11, pair(9), 2_000);
+        leg_frame(&mut table, leg, pair(9), 2_100)
     };
     let replacement = || {
         let (mut table, _) = responder(small(), 10, 9);
@@ -1803,23 +1802,37 @@ fn an_abandoned_answer_frees_its_link_and_takes_no_lease() {
 }
 
 #[test]
-fn a_restarts_teardown_comes_before_its_answer_is_asked_for() {
-    // The current node removes the restarted peer, notes it lost, and only
-    // then authorizes the msg1 and builds its answer.
+fn a_restarts_teardown_comes_at_its_legs_first_frame_after_its_answer_is_asked_for() {
+    // The restart is classified and admitted before its answer is asked
+    // for, once, as a leg beside the held peer; the teardown, and the note
+    // that the peer was lost, come only at the leg's first frame.
     let (mut table, _) = responder(small(), 10, 9);
     let out = go(&mut table, restart(11, 9), 2_000);
     let order = kinds(&out);
-    let removed = order
-        .iter()
-        .position(|k| *k == "Remove")
-        .expect("precondition: the restart tears the held peer down");
-    let ask = order
-        .iter()
-        .position(|k| *k == "Ask")
-        .expect("precondition: the restart is admitted");
+    assert_eq!(
+        order,
+        ["Ask"],
+        "defect: the restart's msg1 did more than ask for its answer once: {out:?}"
+    );
     assert!(
-        removed < ask,
-        "defect: the answer is asked for before the teardown: {order:?}"
+        out.iter()
+            .any(|o| matches!(o, Output::Ask { leg: true, .. })),
+        "precondition: the answer opens a leg beside the held peer: {out:?}"
+    );
+    let link = asked(&out).expect("an ask");
+    go(&mut table, reply(link, 11), 2_000);
+    go(&mut table, Input::Sent { link }, 2_000);
+    assert!(
+        table.held(&large()).is_some_and(|h| h.link != link),
+        "precondition: the held peer stays until the leg's first frame"
+    );
+    let out = leg_frame(&mut table, link, pair(9), 2_100);
+    let order = kinds(&out);
+    let removed = order.iter().position(|k| *k == "Remove");
+    let retry = order.iter().position(|k| *k == "Retry");
+    assert!(
+        removed.is_some() && retry.is_some(),
+        "defect: the leg's first frame did not tear the held peer down and note it lost: {order:?}"
     );
 }
 
@@ -1892,8 +1905,9 @@ fn a_replacement_for_an_identity_not_held_at_the_peer_cap_is_refused_before_any_
 
 #[test]
 fn a_held_identity_at_the_peer_cap_restarts_as_before() {
-    // The cap counts identities not held: a held peer's restart replaces it
-    // at the cap as it would below it.
+    // The cap counts identities not held: a held peer's restart is held as
+    // a leg, and replaces it at the leg's first frame, at the cap as it
+    // would below it.
     let mut table = capped(2, 2);
     let peer = NodeAddr::from_bytes([10; 16]);
     let restart = Input::Msg1 {
@@ -1906,15 +1920,25 @@ fn a_held_identity_at_the_peer_cap_restarts_as_before() {
         "a held identity is not refused for the cap: {out:?}"
     );
     assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::Ask { leg: true, .. })),
+        "the restart is held as a leg: {out:?}"
+    );
+    let link = answered(&out);
+    let out = go(&mut table, Input::Sent { link }, 2_000);
+    assert!(!cap(&out), "its answer's send is not refused: {out:?}");
+    let out = leg_frame(&mut table, link, pair(10), 2_100);
+    assert!(
+        !cap(&out),
+        "and its first frame installs it at the cap: {out:?}"
+    );
+    assert!(
         out.contains(&Output::Remove {
             peer,
             why: Why::Restart,
         }),
-        "the restart tears the held peer down: {out:?}"
+        "the leg's first frame tears the held peer down: {out:?}"
     );
-    let link = answered(&out);
-    let out = go(&mut table, Input::Sent { link }, 2_000);
-    assert!(!cap(&out), "and its answer installs at the cap: {out:?}");
     assert_eq!(table.held(&peer).map(|h| h.link), Some(link));
 }
 
@@ -3769,4 +3793,491 @@ fn a_redial_answered_after_the_smaller_moved_where_the_larger_adopts_its_leg_bef
         l_dial,
     };
     settle_adopted(&mut s, &mut l, &ends, other(7));
+}
+
+/// The larger node's restart msg1 `n`, at epoch 2 from `from`, answered at
+/// `at` and sent: it is held as a leg beside the peering. The leg's link.
+fn restart_leg(table: &mut Table<TestInstant>, n: u32, from: Pair, at: u64) -> LinkNo {
+    restart_leg_of(table, large(), n, from, at)
+}
+
+/// A restart leg answered inside the crossing window the smaller node's
+/// move onto its own dial opened is never taken as a crossing: at its first
+/// frame it replaces the peering as a restart.
+#[test]
+fn a_restart_leg_answered_inside_the_crossing_window_is_installed_at_its_first_frame() {
+    let mut s = held_heard();
+    let s_dial = second_dial(&mut s, large(), 10, 40_100);
+    moved(&mut s, s_dial, 40_200);
+    assert_eq!(s.held(&large()).map(|h| h.link), Some(s_dial));
+    // Past the heard floor of the last frame at 40 s, inside the window
+    // the move at 40.2 s opened.
+    let leg = restart_leg(&mut s, 30, other(7), 56_000);
+    let out = leg_frame(&mut s, leg, other(7), 56_100);
+    assert!(
+        out.iter().any(|o| matches!(
+            o,
+            Output::Remove {
+                why: Why::Restart,
+                ..
+            }
+        )) && s
+            .held(&large())
+            .is_some_and(|h| h.link == leg && h.epoch == E2),
+        "defect: the restart leg was not installed at its first frame: {out:?}"
+    );
+}
+
+/// A restart leg pending when the smaller node moves onto its own dial is
+/// never recorded as a crossing: at its first frame it replaces the
+/// peering as a restart.
+#[test]
+fn a_restart_leg_pending_at_the_move_is_installed_at_its_first_frame() {
+    let mut s = held_heard();
+    let s_dial = second_dial(&mut s, large(), 10, 40_100);
+    let leg = restart_leg(&mut s, 30, other(7), 56_000);
+    moved(&mut s, s_dial, 56_100);
+    assert_eq!(s.held(&large()).map(|h| h.link), Some(s_dial));
+    let out = leg_frame(&mut s, leg, other(7), 56_200);
+    assert!(
+        out.iter().any(|o| matches!(
+            o,
+            Output::Remove {
+                why: Why::Restart,
+                ..
+            }
+        )) && s
+            .held(&large())
+            .is_some_and(|h| h.link == leg && h.epoch == E2),
+        "defect: the restart leg was not installed at its first frame: {out:?}"
+    );
+}
+
+/// A node that kept running (D) and a peer that restarted (R) dial each
+/// other: D's tables and R's after R's restart msg1, at epoch 2, is held as
+/// a leg at D, D's own dial is answered by R, and R reads its own dial's
+/// msg2. D's own dial's msg2 is not yet read.
+struct Restarted {
+    d: Table<TestInstant>,
+    r: Table<TestInstant>,
+    d_addr: NodeAddr,
+    r_addr: NodeAddr,
+    /// D's own dial, msg1 20.
+    d_dial: LinkNo,
+    /// D's leg answering R's restart msg1 10.
+    d_leg: LinkNo,
+    /// R's own dial, msg1 10.
+    r_dial: LinkNo,
+}
+
+/// `peer`'s restart msg1 `n`, at epoch 2 from `from`, answered and sent at
+/// `at`: held as a leg beside the peering. The leg's link.
+fn restart_leg_of(
+    table: &mut Table<TestInstant>,
+    peer: NodeAddr,
+    n: u32,
+    from: Pair,
+    at: u64,
+) -> LinkNo {
+    let mut read = read(peer, n, 0, E2);
+    read.from = from;
+    let out = greet(
+        table,
+        Input::Msg1 {
+            read,
+            reachable: true,
+        },
+        n,
+        at,
+    );
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::Ask { leg: true, .. }))
+            && !out.iter().any(|o| matches!(o, Output::Remove { .. })),
+        "precondition: the restart is held as a leg, the peering left: {out:?}"
+    );
+    let link = answered(&out);
+    go(table, Input::Sent { link }, at);
+    assert_eq!(
+        table.redialing(&peer),
+        Some(link),
+        "precondition: the leg is pending"
+    );
+    link
+}
+
+/// [`Restarted`], with D the smaller address when `d_smaller`, and D's own
+/// dial opened before R's restart msg1 reaches it when `dial_first`. D
+/// dialed R's previous run and last heard it 16 s before the dials, past
+/// the heard floor.
+fn restarted(d_smaller: bool, dial_first: bool) -> Restarted {
+    let (d_addr, r_addr) = if d_smaller {
+        (small(), large())
+    } else {
+        (large(), small())
+    };
+    let mut d = Table::new(d_addr, Params::default());
+    let first = opened(&go(&mut d, Input::Dial(dial(r_addr, 1, 9)), 0));
+    let msg2 = Input::Msg2 {
+        link: first,
+        epoch: E1,
+        from: pair(9),
+    };
+    go(&mut d, msg2, 0);
+    go(
+        &mut d,
+        Input::Heard {
+            peer: r_addr,
+            from: pair(9),
+            kind: heartbeat(),
+        },
+        40_000,
+    );
+    let mut r = Table::new(r_addr, Params::default());
+    let at = 56_000;
+    let r_dial = opened(&go(&mut r, Input::Dial(dial(d_addr, 10, 9)), at));
+    let early = dial_first.then(|| second_dial(&mut d, r_addr, 20, at));
+    let d_leg = restart_leg_of(&mut d, r_addr, 10, pair(9), at);
+    let d_dial = early.unwrap_or_else(|| second_dial(&mut d, r_addr, 20, at));
+    // D's msg1 20 reaches R, which holds nothing: answered, and installed
+    // at its send.
+    let r_answer = answered(&hi(&mut r, d_addr, 20, 8, at + 100));
+    go(&mut r, Input::Sent { link: r_answer }, at + 100);
+    // R reads its own dial's msg2, D's answer on the leg: R moves onto its
+    // dial when it is the smaller, and keeps D's dial when the larger.
+    let msg2 = Input::Msg2 {
+        link: r_dial,
+        epoch: E1,
+        from: pair(9),
+    };
+    go(&mut r, msg2, at + 200);
+    let on = r.held(&d_addr).map(|h| h.link);
+    assert_eq!(
+        on,
+        Some(if d_smaller { r_answer } else { r_dial }),
+        "precondition: R holds the smaller node's dial"
+    );
+    Restarted {
+        d,
+        r,
+        d_addr,
+        r_addr,
+        d_dial,
+        d_leg,
+        r_dial,
+    }
+}
+
+/// D's own dial's msg2, at R's new epoch, at 56.3 s.
+fn restart_msg2(x: &mut Restarted) -> Vec<Output> {
+    let msg2 = Input::Msg2 {
+        link: x.d_dial,
+        epoch: E2,
+        from: other(8),
+    };
+    go(&mut x.d, msg2, 56_300)
+}
+
+/// D, the larger node, holds R's restart leg when its own dial's msg2
+/// proves the restart. The leg crossed the dial, and the dial tie-break
+/// (FRC-1201 Section 5.6) gives it to the smaller R's dial: D gives up its
+/// own dial and replaces the peering by the leg at the msg2, with no frame
+/// under the leg, so both ends hold R's dial at once, and the swap stamps
+/// the restart dampener there, R's previous run having been heard. In both
+/// orders of D's dial and R's restart msg1.
+///
+/// The stamp's break, the swap at the msg2 stamping nothing (`swapped`
+/// told the peering was heard only when a frame proved the leg), has no
+/// switch: it is a scratch edit run by hand and logged with the commit.
+#[test]
+fn a_restart_leg_crossing_the_larger_nodes_own_dial_replaces_the_peering_at_the_dials_msg2() {
+    for dial_first in [true, false] {
+        let mut x = restarted(false, dial_first);
+        assert_eq!(
+            x.d.gates().stamp(&x.r_addr),
+            None,
+            "precondition: nothing stamped D's dampener before the msg2"
+        );
+        let out = restart_msg2(&mut x);
+        assert!(
+            out.iter().any(|o| matches!(
+                o,
+                Output::Remove {
+                    why: Why::Restart,
+                    ..
+                }
+            )) && out
+                .iter()
+                .any(|o| matches!(o, Output::Retire { link, .. } if *link == x.d_dial)),
+            "defect: D did not give up its dial for R's restart leg (dial first {dial_first}): {out:?}"
+        );
+        let held = x.d.held(&x.r_addr).map(|h| (h.link, h.epoch, h.setup));
+        assert_eq!(
+            held,
+            Some((x.d_leg, E2, Some(eph(10)))),
+            "defect: D does not hold R's dial at the msg2, with no frame (dial first {dial_first})"
+        );
+        assert_eq!(
+            (
+                x.d.redialing(&x.r_addr),
+                x.d.links().get(x.d_dial).is_some(),
+                x.r.held(&x.d_addr).map(|h| h.link),
+            ),
+            (None, false, Some(x.r_dial)),
+            "defect: the leg is still pending, D's dial is still open, or R left its dial"
+        );
+        assert_eq!(
+            x.d.gates().stamp(&x.r_addr),
+            Some(t(56_300)),
+            "defect: the swap at D's msg2 did not stamp the dampener (dial first {dial_first})"
+        );
+    }
+}
+
+/// D, the smaller node, holds R's restart leg when its own dial's msg2
+/// proves the restart: D's dial wins the tie-break, so D moves onto it as
+/// a restart and R, the larger, keeps it. The crossed leg is given up at
+/// its first frame, should one come, and D stays on its dial. In both
+/// orders of D's dial and R's restart msg1.
+///
+/// Records current behaviour (rules S-05 and S-25: the own dial's msg2
+/// that replaces the peering stamps no dampener): open to change by
+/// decision. Its other assertions are not.
+#[test]
+fn a_restart_leg_crossing_the_smaller_nodes_own_dial_is_given_up_and_the_dial_kept() {
+    for dial_first in [true, false] {
+        let mut x = restarted(true, dial_first);
+        assert_eq!(
+            x.d.gates().stamp(&x.r_addr),
+            None,
+            "precondition: nothing stamped D's dampener before the msg2"
+        );
+        let out = restart_msg2(&mut x);
+        assert!(
+            out.iter().any(|o| matches!(
+                o,
+                Output::Remove {
+                    why: Why::OwnRestart,
+                    ..
+                }
+            )),
+            "precondition: D's dial replaced the peering as a restart: {out:?}"
+        );
+        assert_eq!(
+            x.d.held(&x.r_addr).map(|h| (h.link, h.epoch)),
+            Some((x.d_dial, E2)),
+            "defect: D is not on its own dial at the msg2 (dial first {dial_first})"
+        );
+        assert_eq!(
+            x.d.gates().stamp(&x.r_addr),
+            None,
+            "defect: D's own dial's msg2 stamped the dampener (dial first {dial_first})"
+        );
+        assert_eq!(
+            x.r.held(&x.d_addr).map(|h| h.setup),
+            Some(Some(eph(20))),
+            "precondition: R holds D's dial"
+        );
+        let late = leg_frame(&mut x.d, x.d_leg, pair(9), 56_400);
+        assert!(
+            !late.iter().any(|o| matches!(o, Output::Remove { .. }))
+                && late
+                    .iter()
+                    .any(|o| matches!(o, Output::Retire { link, .. } if *link == x.d_leg)),
+            "defect: a frame under the crossed restart leg moved D off its dial (dial first {dial_first}): {late:?}"
+        );
+        assert_eq!(
+            (
+                x.d.held(&x.r_addr).map(|h| h.link),
+                x.d.redialing(&x.r_addr)
+            ),
+            (Some(x.d_dial), None),
+            "defect: D left its own dial for the crossed restart leg (dial first {dial_first})"
+        );
+    }
+}
+
+/// D, the larger node, holding R's previous run at epoch 1, heard 16 s
+/// before its own dial at 56 s, with a restart leg of R's at `leg_epoch`
+/// pending beside the peering, its msg2 sent when `sent`, when its own
+/// dial's msg2 at epoch 2 proves R restarted. What D holds then, its dial
+/// and the leg.
+fn dial_against_leg(leg_epoch: Epoch, sent: bool) -> (Option<(LinkNo, Epoch)>, LinkNo, LinkNo) {
+    let (d_addr, r_addr) = (large(), small());
+    let mut d = Table::new(d_addr, Params::default());
+    let first = opened(&go(&mut d, Input::Dial(dial(r_addr, 1, 9)), 0));
+    let msg2 = Input::Msg2 {
+        link: first,
+        epoch: E1,
+        from: pair(9),
+    };
+    go(&mut d, msg2, 0);
+    let heard = Input::Heard {
+        peer: r_addr,
+        from: pair(9),
+        kind: heartbeat(),
+    };
+    go(&mut d, heard, 40_000);
+    let at = 56_000;
+    let d_dial = second_dial(&mut d, r_addr, 20, at);
+    let mut read = read(r_addr, 10, 0, leg_epoch);
+    read.from = pair(9);
+    let msg1 = Input::Msg1 {
+        read,
+        reachable: true,
+    };
+    let out = greet(&mut d, msg1, 10, at);
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::Ask { leg: true, .. })),
+        "precondition: R's msg1 is held as a leg: {out:?}"
+    );
+    let leg = answered(&out);
+    if sent {
+        go(&mut d, Input::Sent { link: leg }, at);
+    }
+    assert_eq!(
+        d.redialing(&r_addr),
+        Some(leg),
+        "precondition: the leg is pending"
+    );
+    let msg2 = Input::Msg2 {
+        link: d_dial,
+        epoch: E2,
+        from: other(8),
+    };
+    let out = go(&mut d, msg2, 56_300);
+    assert!(
+        out.iter().any(|o| matches!(
+            o,
+            Output::Remove {
+                why: Why::OwnRestart | Why::Restart,
+                ..
+            }
+        )),
+        "precondition: D's msg2 replaced R's previous run: {out:?}"
+    );
+    let held = d.held(&r_addr).map(|h| (h.link, h.epoch));
+    (held, d_dial, leg)
+}
+
+/// A restart leg whose msg1 carried another epoch than the one the larger
+/// node's own dial's msg2 proves, such as a captured msg1 of an earlier run
+/// of the peer, did not cross the dial: the larger node replaces the
+/// peering by its own dial, as at any restart found at its own msg2, and
+/// does not take the leg.
+#[test]
+fn a_restart_leg_at_another_epoch_than_the_larger_nodes_dial_msg2_is_not_taken() {
+    let (held, d_dial, leg) = dial_against_leg([3; 8], true);
+    assert_eq!(
+        held,
+        Some((d_dial, E2)),
+        "defect: D took the restart leg {leg:?} at another epoch than its msg2's"
+    );
+}
+
+/// A restart leg whose msg2 was not sent, which the peer cannot hold, did
+/// not cross the larger node's own dial: the larger node replaces the
+/// peering by its own dial and does not take the leg.
+#[test]
+fn a_restart_leg_whose_msg2_was_not_sent_is_not_taken_by_the_larger_nodes_dial_msg2() {
+    let (held, d_dial, leg) = dial_against_leg(E2, false);
+    assert_eq!(
+        held,
+        Some((d_dial, E2)),
+        "defect: D took the restart leg {leg:?} whose msg2 was never sent"
+    );
+}
+
+/// A restart of the held larger node within the unheard floor of its
+/// pending redial leg is refused by the slot rule, as a second redial is;
+/// one past that floor replaces the redial leg, which is abandoned, and is
+/// held as a leg beside the peering in its place.
+#[test]
+fn a_restart_within_the_unheard_floor_of_a_pending_redial_is_refused_and_one_past_it_replaces_the_redial()
+ {
+    let mut table = held_heard();
+    let redial = redialed(&mut table, 2, 8, 55_500);
+    assert_eq!(table.redialing(&large()), Some(redial));
+    let mut early = read(large(), 3, 0, E2);
+    early.from = other(7);
+    let out = go(
+        &mut table,
+        Input::Msg1 {
+            read: early,
+            reachable: true,
+        },
+        56_000,
+    );
+    assert!(
+        out.iter().any(|o| matches!(
+            o,
+            Output::Reject {
+                why: Denial::Held,
+                ..
+            }
+        )) && asked(&out).is_none(),
+        "defect: a restart inside the unheard floor of a pending redial was not refused as held: {out:?}"
+    );
+    assert_eq!(
+        table.redialing(&large()),
+        Some(redial),
+        "the redial leg is left"
+    );
+    let mut late = read(large(), 4, 0, E2);
+    late.from = other(7);
+    let out = greet(
+        &mut table,
+        Input::Msg1 {
+            read: late,
+            reachable: true,
+        },
+        4,
+        56_600,
+    );
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::Ask { leg: true, .. }))
+            && out
+                .iter()
+                .any(|o| matches!(o, Output::Retire { link, .. } if *link == redial)),
+        "defect: a restart past the unheard floor did not replace the pending redial: {out:?}"
+    );
+    let leg = answered(&out);
+    go(&mut table, Input::Sent { link: leg }, 56_600);
+    assert_eq!(table.redialing(&large()), Some(leg));
+    assert!(
+        table.legs().get(redial).is_none(),
+        "the redial's leg is gone"
+    );
+    let out = leg_frame(&mut table, leg, other(7), 56_700);
+    assert!(
+        out.contains(&Output::Remove {
+            peer: large(),
+            why: Why::Restart,
+        }) && table
+            .held(&large())
+            .is_some_and(|h| h.link == leg && h.epoch == E2),
+        "the restart leg replaces the peering at its first frame: {out:?}"
+    );
+}
+
+/// A restart held as a leg stamps the restart dampener only when its
+/// first frame replaces the heard peering, never at its msg1 or its sent
+/// answer, so a replay, which no frame follows, cannot stamp it.
+#[test]
+fn a_restart_held_as_a_leg_stamps_the_dampener_at_its_first_frame_not_at_its_msg1() {
+    let mut table = held_heard();
+    let leg = restart_leg(&mut table, 30, other(7), 56_000);
+    assert_eq!(
+        table.gates().stamp(&large()),
+        None,
+        "defect: the restart's msg1 or sent answer stamped the dampener"
+    );
+    leg_frame(&mut table, leg, other(7), 56_100);
+    assert_eq!(
+        table.gates().stamp(&large()),
+        Some(t(56_100)),
+        "defect: the leg's first frame did not stamp the dampener"
+    );
 }

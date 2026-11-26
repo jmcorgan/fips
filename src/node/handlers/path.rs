@@ -929,9 +929,11 @@ impl Node {
 
     /// Close every connection a released path left, and on a transport
     /// that tracks peers clear the connection's verification. The close rule
-    /// is asked again first, since a link may have taken the connection up
-    /// between the release and the drain: a restart's teardown queues its
-    /// paths' closes before the new link is promoted at one of their pairs.
+    /// is asked again first, in case a link took the connection up between
+    /// the release and the drain. A restart held as a leg no longer queues a
+    /// close for a pair its new link takes, so no restart reaches the
+    /// re-check; it stays as defence in depth for any path that hands a
+    /// connection to a link between a release and its drain.
     pub(in crate::node) async fn drain_closes(&mut self) {
         #[cfg(test)]
         self.resync();

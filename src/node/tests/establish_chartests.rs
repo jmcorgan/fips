@@ -97,8 +97,10 @@ fn inject_dummy_peers(node: &mut Node, count: usize) {
 }
 
 /// Epoch-restart: an inbound msg1 from an already-active peer that carries a
-/// DIFFERENT startup epoch is treated as a peer restart. The stale peer is torn
-/// down and the fresh handshake is promoted in its place.
+/// DIFFERENT startup epoch is treated as a peer restart. It is answered into
+/// a leg beside the stale peer, and at the leg's first frame (as the node
+/// takes it once authenticated, [`prove_leg`]) the stale peer is torn down
+/// and the fresh handshake is promoted in its place.
 ///
 /// Oracle: after the push, the identity is still present but is a NEW peer —
 /// it holds a live Noise session, its stored remote epoch has advanced to the
@@ -142,6 +144,15 @@ async fn chartest_msg1_epoch_restart_replaces_active_peer() {
         timestamp_ms: timeline_ms(2000),
     };
     node.handle_msg1(packet).await;
+    assert_eq!(
+        node.get_peer(&sender_addr).map(|p| p.link_id()),
+        Some(old_link),
+        "the restart is held as a leg beside the stale peer until its first frame"
+    );
+    assert!(
+        prove_leg(&mut node, &sender_addr).await,
+        "the restart is answered into a leg"
+    );
 
     let peer = node
         .get_peer(&sender_addr)
@@ -442,8 +453,9 @@ fn seed_dial(
     (out_link, out_index)
 }
 
-/// A configured auto-connect peer that restarts: its accepted restart msg1
-/// replaces the peering, the node notes the old peering's loss for the
+/// A configured auto-connect peer that restarts: its accepted restart msg1,
+/// held as a leg, replaces the peering at the leg's first frame, the node
+/// notes the old peering's loss for the
 /// peer's retry, as for a link that died, and the promotion that follows
 /// takes the retry off the schedule, since the peer is held again. The
 /// settlement core beside the node decides the same retry at the restart,
@@ -488,11 +500,18 @@ async fn an_accepted_restart_of_an_auto_connect_peer_notes_its_retry_and_clears_
         timestamp_ms: timeline_ms(2000),
     })
     .await;
+    assert!(
+        prove_leg(&mut node, &sender_addr).await,
+        "precondition: the restart is held as a leg"
+    );
 
     let restarted = node
         .get_peer(&sender_addr)
         .is_some_and(|p| p.remote_epoch() == Some([2u8; 8]));
-    assert!(restarted, "precondition: the restart replaced the peering");
+    assert!(
+        restarted,
+        "precondition: the restart replaced the peering at its first frame"
+    );
     assert!(
         !node
             .peering

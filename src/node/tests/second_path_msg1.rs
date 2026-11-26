@@ -315,7 +315,7 @@ enum Setup {
     /// A net-new inbound promotion.
     Promote,
     /// A promotion at one epoch, then the peer's restart msg1 at another,
-    /// which replaces the peering.
+    /// held as a leg, which replaces the peering at the leg's first frame.
     Restart,
 }
 
@@ -354,13 +354,17 @@ async fn replay_setup_msg1(setup: Setup) -> Vec<String> {
             let data =
                 craft_msg1_wire(&node, &sender, restart_epoch, SessionIndex::new(0x02), 2000);
             deliver_msg1(&mut node, tid, &addr_a, data.clone(), 2000).await;
+            assert!(
+                prove_leg(&mut node, &sender_addr).await,
+                "precondition: the restart is held as a leg"
+            );
             let p = node
                 .get_peer(&sender_addr)
                 .expect("precondition: the restart re-peers");
             assert_eq!(
                 p.remote_epoch(),
                 Some(restart_epoch),
-                "precondition: the restart msg1 replaced the peering"
+                "precondition: the restart's first frame replaced the peering"
             );
             assert_ne!(
                 p.link_id(),
@@ -448,6 +452,10 @@ async fn resend_setup_msg1_12_s_after_promotion(setup: Setup) -> Vec<String> {
             let data =
                 craft_msg1_wire(&node, &sender, restart_epoch, SessionIndex::new(0x02), 2000);
             deliver_msg1(&mut node, tid, &addr_a, data.clone(), 2000).await;
+            assert!(
+                prove_leg(&mut node, &sender_addr).await,
+                "precondition: the restart is held as a leg"
+            );
             assert_ne!(
                 node.get_peer(&sender_addr)
                     .expect("precondition: the restart re-peers")

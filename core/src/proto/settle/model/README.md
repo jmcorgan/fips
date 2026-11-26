@@ -40,9 +40,11 @@ follows a named rule (`judge::LocalRule`). Each says what it decides:
   nothing. The FRC says to install once a send succeeds, and is silent on
   a peer already held by then.
 - `DampenerStamp`: which accepted restarts and replacements stamp the
-  dampener the gates' ceiling counts from. A restart or replacement found
-  at a msg1 stamps it if the old peering was heard; a restart found at
-  this node's own msg2 does not; a restart revealed in a rekey msg2 with
+  dampener the gates' ceiling counts from. A replacement found at a msg1
+  stamps it if the old peering was heard, and so does a restart, held as a
+  leg, when the first frame under the leg replaces the peering, or when
+  this node's own dial's msg2 at the leg's epoch hands the leg the
+  tie-break; a restart found at this node's own msg2 alone does not; a restart revealed in a rekey msg2 with
   the link kept does not. The FRC does not say which acceptances count.
 - `AgedLink`: this node's own dial, sent on the peer's established link
   once that link was old enough to rekey, completes while the peer is

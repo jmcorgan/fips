@@ -434,11 +434,16 @@ fn a_restart_dial_inside_the_heard_floor_is_judged_on_one_clock() {
 #[test]
 fn a_replayed_msg1_that_promoted_an_unheard_peering_stays_refused() {
     // Node 0's first msg1 promotes an unheard peering at node 1; 1.5 s
-    // later node 0 restarts and its next dial replaces it; then an attacker
+    // later node 0 restarts and its next dial is held beside it as a leg,
+    // which node 0's first frame under it swaps in; then an attacker
     // replays the first msg1. On one epoch the replaced peering's filed
     // record would refuse the replay at the rekey machine; across a restart
-    // the replay comes to the core's gates, as a restart, and only the
-    // replay memory can refuse it.
+    // the replay comes to the core's gates, as a restart, and must leave
+    // node 1 on the second session. The first frame made the second
+    // peering heard and emptied the replay memory, so the heard floor
+    // refuses the replay here, and a restart held as a leg would need a
+    // frame the replayer cannot send; the replay memory is tested in the
+    // gates' own tests.
     let mut w = super::starts::world_of(off, &[super::starts::A, super::starts::B], &[&[], &[]]);
     super::starts::dial_home(&mut w, 0, 1, super::starts::UDP);
     run(&mut w, &[Do::Get(1, Want::Msg1, Some(0))]);
@@ -447,10 +452,18 @@ fn a_replayed_msg1_that_promoted_an_unheard_peering_stays_refused() {
     run(&mut w, &[Do::Then(Act::Restart(0))]);
     super::starts::dial_home(&mut w, 0, 1, super::starts::UDP);
     run(&mut w, &[Do::Get(1, Want::Msg1, Some(0))]);
+    assert_eq!(
+        session(&w, 1, 0),
+        Some(first),
+        "precondition: the restart is held as a leg until its first frame"
+    );
+    super::starts::settle(&mut w);
+    run(&mut w, &[Do::Then(Act::Frame(0))]);
+    super::starts::settle(&mut w);
     let second = session(&w, 1, 0).expect("node 1 holds node 0");
     assert_ne!(
         first, second,
-        "precondition: the second msg1 replaced the first"
+        "precondition: the second dial's first frame replaced the first"
     );
     // Past the unheard floor of the second peering.
     w.run_until(2_700);
@@ -500,29 +513,44 @@ fn an_own_dial_answered_from_a_restarted_peer_replaces_the_stale_session() {
 #[test]
 fn a_second_restart_inside_the_dampener_interval_is_refused() {
     // Node 0 holds node 1, heard. Node 1 restarts and dials once the heard
-    // floor has passed and before node 0's liveness timer would remove it,
-    // and node 0 takes the restart, which stamps the dampener. Ten seconds
-    // later node 1 restarts and dials again,
-    // past the new peering's unheard floor and inside the dampener's
-    // interval: node 0 refuses it and keeps the first restart's session.
+    // floor has passed and before node 0's liveness timer would remove it;
+    // node 0 holds the restart as a leg, and node 1's first frame under it
+    // replaces the peering, which stamps the dampener. Ten seconds later
+    // node 1 restarts and dials again, inside the dampener's interval (and
+    // the first frame's heard floor, which ends with it): node 0 refuses it
+    // and keeps the first restart's session.
     let mut w = super::starts::world_of(off, &[super::starts::A, super::starts::B], &[&[], &[]]);
     super::starts::dial_home(&mut w, 0, 1, super::starts::UDP);
     super::starts::settle(&mut w);
     age(&mut w, 2_000);
+    let old = session(&w, 0, 1).expect("precondition: node 0 holds node 1");
     run(&mut w, &[Do::Then(Act::Restart(1))]);
     age(&mut w, 20_000);
     super::starts::dial_home(&mut w, 1, 0, super::starts::UDP);
     run(&mut w, &[Do::Get(0, Want::Msg1, Some(1))]);
+    assert_eq!(
+        session(&w, 0, 1),
+        Some(old),
+        "precondition: the restart is held as a leg until its first frame"
+    );
+    super::starts::settle(&mut w);
+    run(&mut w, &[Do::Then(Act::Frame(1))]);
+    super::starts::settle(&mut w);
     let first = session(&w, 0, 1).expect("node 0 holds node 1");
-    assert!(
-        w.parties[1].view().peers.is_empty(),
-        "precondition: node 1 has not read node 0's answer"
+    assert_ne!(
+        first, old,
+        "precondition: node 1's first frame replaced the peering"
     );
     let at = w.net.now + 10_000;
     w.run_until(at);
     run(&mut w, &[Do::Then(Act::Restart(1))]);
     super::starts::dial_home(&mut w, 1, 0, super::starts::UDP);
     run(&mut w, &[Do::Get(0, Want::Msg1, Some(1))]);
+    // Whatever node 1 can send under an answer it read, which would prove
+    // a second restart node 0 had held as a leg.
+    super::starts::settle(&mut w);
+    run(&mut w, &[Do::Then(Act::Frame(1))]);
+    super::starts::settle(&mut w);
     assert_eq!(
         session(&w, 0, 1),
         Some(first),

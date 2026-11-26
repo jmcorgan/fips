@@ -34,6 +34,7 @@ use super::super::establish_chartests::craft_msg1_wire;
 use super::super::link_setup_diag::{
     EPOCH, Established, established_from, hear_now, packet, stop_transport,
 };
+use super::super::rekey_parity::{deliver, heartbeat};
 use super::super::spanning_tree::{
     TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, make_test_node_with_config,
     restarted_node,
@@ -588,11 +589,15 @@ async fn heard_loopback_peering() -> (Vec<TestNode>, NodeAddr, LinkId, Option<Se
 }
 
 /// Node 0 restarts and sends node 1 its msg1, at a new epoch; node 1
-/// handles it. Returns node 0's peering at node 1 afterwards.
+/// handles it, and node 0 reads whatever node 1 answered. If node 0 then
+/// holds node 1, it sends its first frame under that session, which node 1
+/// handles: a restart node 1 held as a leg replaces the peering there.
+/// Returns node 0's peering at node 1 afterwards.
 async fn restart_msg1(
     nodes: &mut [TestNode],
     a: &NodeAddr,
 ) -> Option<(LinkId, Option<SessionIndex>)> {
+    let b = *nodes[1].node.node_addr();
     let restarted = restarted_node(&nodes[0], with_path(Config::new(), false));
     let mut old = std::mem::replace(&mut nodes[0], restarted);
     cleanup_nodes(std::slice::from_mut(&mut old)).await;
@@ -603,6 +608,11 @@ async fn restart_msg1(
         .expect("precondition: the restarted node's msg1 is queued at node 1");
     m.timestamp_ms = Node::now_ms();
     nodes[1].node.handle_msg1(m).await;
+    deliver(&mut nodes[0]).await;
+    if nodes[0].node.get_peer(&b).is_some() {
+        heartbeat(&mut nodes[0], &b).await;
+        deliver(&mut nodes[1]).await;
+    }
     nodes[1]
         .node
         .get_peer(a)
@@ -610,7 +620,8 @@ async fn restart_msg1(
 }
 
 /// A heard peering whose last frame is older than the restart interval, by
-/// the monotonic clock, is replaced by the peer's restart msg1. Nothing has
+/// the monotonic clock, is replaced by the peer's restart msg1, at the first
+/// frame under the leg it is held in. Nothing has
 /// stamped the restart dampener, which measures on the same monotonic clock.
 #[tokio::test]
 async fn a_heard_peering_quiet_past_the_restart_interval_is_replaced_by_a_restart_msg1() {

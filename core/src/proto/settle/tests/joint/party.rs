@@ -1558,6 +1558,13 @@ impl JointParty {
                 }
             }
         } else {
+            // A restart of a held peer is answered into a leg beside it.
+            if out
+                .iter()
+                .any(|o| matches!(o, Output::Ask { leg: true, .. }))
+            {
+                fx.class = Some(Class::Restart);
+            }
             built = self.answered(&mut out, tok.get(), hs, at);
         }
         self.effects(net, out, &mut fx);

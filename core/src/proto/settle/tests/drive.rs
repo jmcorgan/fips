@@ -573,6 +573,13 @@ impl Drive {
             }
         });
         let mut redial = None;
+        // A restart of a held peer is answered into a leg beside it.
+        if out
+            .iter()
+            .any(|o| matches!(o, Output::Ask { leg: true, .. }))
+        {
+            did.class = Some(Class::Restart);
+        }
         if let Some(arrival) = arrival {
             self.effects(out, did);
             let asked = self.rekeyed(hs, &wire, arrival, did);

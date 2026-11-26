@@ -250,3 +250,176 @@ async fn two_fresh_nodes_dialling_each_other_settle_on_one_session_in_either_mes
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// Process the handshake messages queued at `tn` (msg1 and msg2 only,
+/// reversed when `reversed`), holding every other packet back in `held`.
+/// The number of handshake messages processed.
+async fn handshakes_only(
+    tn: &mut TestNode,
+    held: &mut Vec<ReceivedPacket>,
+    reversed: bool,
+) -> usize {
+    let mut queued: Vec<ReceivedPacket> =
+        std::iter::from_fn(|| tn.packet_rx.try_recv().ok()).collect();
+    if reversed {
+        queued.reverse();
+    }
+    let mut n = 0;
+    for packet in queued {
+        match CommonPrefix::parse(&packet.data).map(|p| p.phase) {
+            Some(PHASE_MSG1) => {
+                n += 1;
+                tn.node.handle_msg1(packet).await;
+            }
+            Some(PHASE_MSG2) => {
+                n += 1;
+                tn.node.handle_msg2(packet).await;
+            }
+            _ => held.push(packet),
+        }
+    }
+    n
+}
+
+/// Whether D and R hold one session, read from the indices alone (each
+/// end's index for the other is the one the other names it by), and what
+/// each end holds: its link's direction and its pending legs.
+fn one_session(nodes: &[TestNode], d: usize, r: usize) -> (bool, String) {
+    let d_addr = *nodes[d].node.node_addr();
+    let r_addr = *nodes[r].node.node_addr();
+    let (Some(dp), Some(rp)) = (
+        nodes[d].node.get_peer(&r_addr),
+        nodes[r].node.get_peer(&d_addr),
+    ) else {
+        return (false, "an end holds no peer".into());
+    };
+    let one = dp.our_index() == rp.their_index() && dp.their_index() == rp.our_index();
+    let dir = |tn: &TestNode, link| tn.node.links.get(&link).map(|l| l.direction());
+    (
+        one,
+        format!(
+            "D on {:?} (pending legs {}), R on {:?} (pending legs {})",
+            dir(&nodes[d], dp.link_id()),
+            nodes[d].node.core.redials().count(),
+            dir(&nodes[r], rp.link_id()),
+            nodes[r].node.core.redials().count(),
+        ),
+    )
+}
+
+/// The cases of
+/// [`both_ends_dialling_after_a_peer_restart_settle_on_one_session_in_either_message_order`]
+/// with only handshake messages delivered and every frame held back both
+/// ways, read once no handshake message is left in flight: the two ends hold
+/// one session before either end's first frame, including where the larger
+/// D's own dial and R's restart leg crossed, which the dial tie-break
+/// settles at D's msg2.
+///
+/// The one exception is D2's held restart. Where D reads R's restart msg1
+/// first and R reads the answer to its own dial before D's msg1, with D's
+/// last frame from R 16 s back, R refuses D's dial (D's msg1 reaches R on
+/// the link R now holds, too young to be replaced), so D completes no
+/// handshake at R's new epoch: D keeps R's previous run with R's restart
+/// pending as a leg, and R is on its own dial. In those four placements
+/// the test asserts that held window, and that R's first frame alone
+/// closes it. Every case then has its held frames delivered and the full
+/// outcome checked.
+#[tokio::test]
+async fn both_ends_dialling_after_a_peer_restart_hold_one_session_before_either_ends_first_frame() {
+    let mut failures = Vec::new();
+    for (d_first, reversed) in [(true, false), (true, true), (false, false), (false, true)] {
+        for (d_smaller, d_dialled) in PLACEMENTS {
+            for silent in [false, true] {
+                let label = format!(
+                    "{} msg1 first, second reader {}, D smaller {d_smaller}, D dialled the original link \
+                     {d_dialled}, D's last frame from R {}",
+                    if d_first { "D's" } else { "R's" },
+                    if reversed {
+                        "answer first"
+                    } else {
+                        "in arrival order"
+                    },
+                    if silent { "16 s back" } else { "just now" }
+                );
+                let held_window = !d_first && reversed && silent;
+                let (mut nodes, d, r) = restarted_pair(d_smaller, d_dialled).await;
+                let r_addr = *nodes[r].node.node_addr();
+                let previous = nodes[d]
+                    .node
+                    .get_peer(&r_addr)
+                    .map(|p| (p.link_id(), p.remote_epoch()))
+                    .expect("D holds R's previous run");
+                if silent {
+                    let p = nodes[d]
+                        .node
+                        .get_peer_mut(&r_addr)
+                        .expect("D holds R's previous run");
+                    p.touch(Node::now_ms() - 16_000);
+                    p.test_backdate_heard(Duration::from_secs(16));
+                }
+                initiate_handshake(&mut nodes, d, r).await;
+                initiate_handshake(&mut nodes, r, d).await;
+                let (first, second) = if d_first { (r, d) } else { (d, r) };
+                let mut held: [Vec<ReceivedPacket>; 2] = [Vec::new(), Vec::new()];
+                handshakes_only(&mut nodes[first], &mut held[first], false).await;
+                handshakes_only(&mut nodes[second], &mut held[second], reversed).await;
+                for _ in 0..50 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    let mut n = 0;
+                    for (i, h) in held.iter_mut().enumerate() {
+                        n += handshakes_only(&mut nodes[i], h, false).await;
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let (one, what) = one_session(&nodes, d, r);
+                if held_window {
+                    let d_addr = *nodes[d].node.node_addr();
+                    let keeps = nodes[d]
+                        .node
+                        .get_peer(&r_addr)
+                        .map(|p| (p.link_id(), p.remote_epoch()))
+                        == Some(previous);
+                    let leg = nodes[d].node.redials.of(&r_addr).is_some();
+                    let r_own = nodes[r].node.get_peer(&d_addr).is_some_and(|p| {
+                        nodes[r]
+                            .node
+                            .links
+                            .get(&p.link_id())
+                            .is_some_and(|l| l.direction() == LinkDirection::Outbound)
+                    });
+                    if one || !keeps || !leg || !r_own {
+                        failures.push(format!(
+                            "{label}: before any frame, not the held window (one session {one}, D keeps R's \
+                             previous run {keeps}, R's restart pending {leg}, R on its own dial {r_own}): {what}"
+                        ));
+                    }
+                    // R's first frame alone, as D reads it.
+                    if let Some(frame) = (!held[d].is_empty()).then(|| held[d].remove(0)) {
+                        nodes[d].node.handle_encrypted_frame(frame).await;
+                    }
+                    let (one, what) = one_session(&nodes, d, r);
+                    if !one {
+                        failures.push(format!(
+                            "{label}: R's first frame did not close the held window: {what}"
+                        ));
+                    }
+                } else if !one {
+                    failures.push(format!("{label}: two sessions before any frame: {what}"));
+                }
+                for (i, h) in held.iter_mut().enumerate() {
+                    for packet in std::mem::take(h) {
+                        nodes[i].node.handle_encrypted_frame(packet).await;
+                    }
+                }
+                pump(&mut nodes).await;
+                for f in check_outcome(&mut nodes, d, r).await {
+                    failures.push(format!("{label}: {f}"));
+                }
+                cleanup_nodes(&mut nodes).await;
+            }
+        }
+    }
+    assert!(failures.is_empty(), "defect: {failures:#?}");
+}

@@ -225,7 +225,11 @@ EpochAtCutover	red	fips-mesh	node::tests::rekey_parity::a_dial_from_a_restarted_
 ReleaseKeepsPairOpen	red	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_another_closes_its_connection_as_the_table_says_with_multipath_on
 ReleaseKeepsPairOpen	pass	fips-mesh	node::tests::settle::table::paths::a_path_released_while_the_peer_sends_on_it_keeps_its_connection_as_the_table_says_with_multipath_on
 ReleaseKeepsPairOpen	red	fips-mesh	node::tests::settle::readings::a_close_queued_with_nothing_on_its_pair_still_closes
-DrainReadsNothing	red	fips-mesh	node::tests::settle::readings::a_close_queued_at_a_restart_teardown_spares_the_new_link_at_that_pair
+# DrainReadsNothing has no red line: no restart reaches the drain's re-check
+# of the close rule, since a restart is held as a leg and keeps its pair in
+# use through the teardown, so it queues no close for a pair the new link
+# holds. The re-check stays as defence in depth for any path that hands a
+# connection to a link between a release and its drain.
 DrainReadsNothing	pass	fips-mesh	node::tests::settle::readings::a_close_queued_with_nothing_on_its_pair_still_closes
 RenewedStateDropped	red	fips-mesh	node::tests::crossed_dial::a_crossed_dials_renewal_writes_the_old_paths_ending_and_the_new_originals_beginning	the old path's ending is written at the pair the link left
 RenewedStateDropped	pass	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first
@@ -297,6 +301,10 @@ LateLegUncrossed	red	fips-core	proto::settle::table::tests::a_redial_answered_in
 LateLegUncrossed	red	fips-mesh	node::tests::settle::rekey_cross::crossed_dials_answered_after_the_smaller_nodes_move_end_on_the_smaller_nodes_dial
 LateLegUncrossed	red	fips-mesh	node::tests::settle::rekey_cross::crossed_dials_answered_after_the_smaller_nodes_move_end_on_the_smaller_nodes_dial_with_multipath_on
 LateLegUncrossed	pass	fips-core	proto::settle::table::tests::crossed_redials_settle_both_nodes_on_the_smaller_nodes_dial_at_the_legs_first_frames
+RestartLegUncrossed	red	fips-core	proto::settle::table::tests::a_restart_leg_crossing_the_larger_nodes_own_dial_replaces_the_peering_at_the_dials_msg2
+RestartLegUncrossed	red	fips-core	proto::settle::table::tests::a_restart_leg_crossing_the_smaller_nodes_own_dial_is_given_up_and_the_dial_kept
+RestartLegUncrossed	red	fips-mesh	node::tests::restart_dial::both_ends_dialling_after_a_peer_restart_hold_one_session_before_either_ends_first_frame
+RestartLegUncrossed	red	fips-mesh	node::tests::restart_dial::both_ends_dialling_after_a_peer_restart_settle_on_one_session_in_either_message_order	src/node/tests/restart_dial.rs:208
 CrossingWindowOutlivesFrame	red	fips-core	proto::settle::table::tests::a_redial_answered_after_a_frame_on_the_moved_onto_dial_is_swapped_in_at_its_first_frame
 CrossingWindowOutlivesTimeout	red	fips-core	proto::settle::table::tests::a_redial_answered_a_handshake_timeout_after_the_move_is_swapped_in_at_its_first_frame
 AdoptedRedialCountsOwn	red	fips-core	proto::settle::table::tests::crossed_redials_where_the_larger_adopts_its_leg_before_its_msg2_end_on_one_dial
@@ -507,6 +515,11 @@ RedialTearsDownAtMsg1	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_fr
 RedialTearsDownAtMsg1	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_a_spoofed_address_leaves_the_old_session_up_and_delivering_and_its_pending_redial_expires_young_multipath_on
 RedialTearsDownAtMsg1	pass	fips-mesh	node::tests::roam_redial::a_redial_from_a_new_address_on_an_aged_link_is_answered_and_settles_before_the_responder_would_reap_multipath_off
 RedialTearsDownAtMsg1	red	fips-core	proto::settle::table::tests::a_redials_answer_leaves_the_held_peer_until_a_frame_proves_it
+RestartTearsDownAtMsg1	red	fips-mesh	node::tests::restart_replay::an_earlier_epoch_msg1_replayed_while_the_peers_heartbeats_are_lost_for_16_s_leaves_the_live_peering
+RestartTearsDownAtMsg1	pass	fips-mesh	node::tests::restart_replay::sixteen_seconds_of_lost_heartbeats_with_no_replay_leave_the_live_peering
+RestartTearsDownAtMsg1	red	fips-core	proto::settle::table::tests::a_restarts_teardown_comes_at_its_legs_first_frame_after_its_answer_is_asked_for
+RestartStampsAtOpen	red	fips-mesh	node::tests::restart_replay::a_genuine_restart_within_15_s_of_a_replayed_one_re_peers_at_its_first_frame
+RestartStampsAtOpen	red	fips-core	proto::settle::table::tests::a_restart_held_as_a_leg_stamps_the_dampener_at_its_first_frame_not_at_its_msg1
 RedialSwapsUnproven	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_a_spoofed_address_leaves_the_old_session_up_and_delivering_and_its_pending_redial_expires_aged_multipath_off
 RedialSwapsUnproven	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_a_spoofed_address_leaves_the_old_session_up_and_delivering_and_its_pending_redial_expires_aged_multipath_on
 RedialSwapsUnproven	red	fips-mesh	node::tests::roam_replay::a_replayed_msg1_from_a_spoofed_address_leaves_the_old_session_up_and_delivering_and_its_pending_redial_expires_with_decrypt_workers
@@ -525,6 +538,8 @@ RedialSlotIgnored	red	fips-core	proto::settle::table::tests::a_second_redial_wit
 RedialMemoryIgnored	red	fips-mesh	node::tests::roam_replay::nine_distinct_replayed_msg1s_within_15_s_draw_at_most_eight_msg2s
 RedialMemoryIgnored	pass	fips-mesh	node::tests::roam_replay::a_replayed_msg1_sent_again_within_15_s_draws_no_second_msg2
 RedialMemoryIgnored	red	fips-core	proto::settle::table::tests::the_redial_memory_refuses_a_seen_ephemeral
+RedialMemoryIgnored	red	fips-mesh	node::tests::restart_replay::nine_distinct_replayed_restart_msg1s_within_15_s_draw_at_most_eight_msg2s
+RedialMemoryIgnored	red	fips-mesh	node::tests::restart_replay::a_replayed_restart_msg1_sent_again_within_15_s_from_another_address_draws_no_second_msg2
 RedialSkipsDampener	red	fips-mesh	node::tests::roam_gates::a_redial_within_15_s_of_a_swap_is_refused_and_answered_at_its_first_resend_after_the_dampener_clears
 RedialSkipsDampener	red	fips-mesh	node::tests::roam_gates::a_redial_within_15_s_of_a_swap_is_refused_and_answered_at_its_first_resend_after_the_dampener_clears_with_decrypt_workers
 RedialSkipsDampener	red	fips-core	proto::settle::table::tests::a_redial_within_the_dampener_of_a_swap_is_refused
@@ -588,7 +603,7 @@ SilentReadsHeard	red	fips-mesh	node::tests::silent_backoff::an_own_dials_session
 StandbyRoamResets	red	fips-core	proto::settle::join::tests::a_standby_paths_roam_is_moved_and_not_marked_a_roam
 AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_refused_msg1_asks_for_no_answer
 AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_rekey_msg1_asks_for_no_answer
-AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_restarts_teardown_comes_before_its_answer_is_asked_for
+AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_restarts_teardown_comes_at_its_legs_first_frame_after_its_answer_is_asked_for
 AnswerBeforeAdmit	red	fips-mesh	node::tests::session::a_rekey_msg2_answers_on_the_peers_established_link_when_the_msg1_source_maps_to_it	nothing may be sent to the address the msg1 came from
 CapNotCounted	red	fips-core	proto::settle::table::tests::a_msg1_from_a_new_identity_at_the_peer_cap_is_refused_before_any_answer
 CapNotCounted	red	fips-core	proto::settle::table::tests::an_answer_sent_to_a_new_identity_once_the_peer_cap_filled_is_not_installed

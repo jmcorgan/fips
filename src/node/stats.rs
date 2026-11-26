@@ -222,6 +222,13 @@ pub struct HandshakeStats {
     /// End-to-end sessions opened again after a redial's swap closed a
     /// heard one.
     pub redial_session_reopens: u64,
+    /// Msg1s at a new epoch from a held peer answered into a pending leg
+    /// beside the peering.
+    pub restarts_held: u64,
+    /// Pending restart legs that replaced the peering once proven: by a
+    /// frame from the peer under the leg, or by this node's own dial's
+    /// msg2 at the restart's epoch when the leg won the dial tie-break.
+    pub restarts_proven: u64,
 }
 
 impl HandshakeStats {
@@ -242,6 +249,8 @@ impl HandshakeStats {
             redials_proven: self.redials_proven,
             redials_adopted: self.redials_adopted,
             redial_session_reopens: self.redial_session_reopens,
+            restarts_held: self.restarts_held,
+            restarts_proven: self.restarts_proven,
         }
     }
 
@@ -535,6 +544,8 @@ pub struct HandshakeStatsSnapshot {
     pub redials_proven: u64,
     pub redials_adopted: u64,
     pub redial_session_reopens: u64,
+    pub restarts_held: u64,
+    pub restarts_proven: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

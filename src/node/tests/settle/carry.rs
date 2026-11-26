@@ -109,8 +109,9 @@ async fn a_peer_promoted_for_an_identity_announced_to_just_now_is_sent_a_tree_an
 }
 
 /// Node 1 restarts and dials node 0, which last heard node 1 long enough
-/// ago that the msg1 is accepted as a restart, and node 0 handles the msg1.
-/// The restarted node takes the old one's place in `nodes`.
+/// ago that the msg1 is accepted as a restart, held as a leg, and the leg's
+/// first frame ([`prove_leg`]) replaces node 1's peering at node 0. The
+/// restarted node takes the old one's place in `nodes`.
 async fn restart_dial(nodes: &mut [TestNode]) {
     let a1 = *nodes[1].node.node_addr();
     let before = nodes[0]
@@ -141,13 +142,27 @@ async fn restart_dial(nodes: &mut [TestNode]) {
         nodes[0]
             .node
             .get_peer(&a1)
+            .is_some_and(|p| p.link_id() == before),
+        "precondition: node 0 holds the restart as a leg beside node 1's peering"
+    );
+    // The leg's first frame, as node 0 takes it once authenticated, with
+    // nothing of the frame's own content, so the site is the replacement
+    // alone.
+    assert!(
+        prove_leg(&mut nodes[0].node, &a1).await,
+        "precondition: node 0 holds a leg for the restart"
+    );
+    assert!(
+        nodes[0]
+            .node
+            .get_peer(&a1)
             .is_some_and(|p| p.link_id() != before),
-        "precondition: node 0 replaced node 1's peering on the restart msg1"
+        "precondition: node 0 replaced node 1's peering at the restart's first frame"
     );
 }
 
-/// A restart's msg1 replaces a peer that was sent a TreeAnnounce just now,
-/// and the new peer is sent one at once.
+/// A restart, at its leg's first frame, replaces a peer that was sent a
+/// TreeAnnounce just now, and the new peer is sent one at once.
 #[tokio::test]
 async fn a_peer_replaced_by_a_restart_after_an_announce_just_now_is_sent_a_tree_announce_at_once() {
     let mut nodes = peered().await;
@@ -261,8 +276,8 @@ async fn redial_from_the_larger_node_answered_as_a_rekey_resends_the_filter() {
     redial(false).await;
 }
 
-/// A restart's msg1 clears the end-to-end session the old peering held and
-/// releases the clamp entry that session tightened, so the new peer's path
+/// A restart, at its leg's first frame, clears the end-to-end session the
+/// old peering held and releases the clamp entry that session tightened, so the new peer's path
 /// MTU is seeded from its link again, as a first promotion over that link
 /// seeds it.
 #[tokio::test]

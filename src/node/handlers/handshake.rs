@@ -87,6 +87,8 @@ pub(in crate::node) struct Armed {
     pub(in crate::node) identity: PeerIdentity,
     pub(in crate::node) digest: Option<fips_core::proto::rekey::Digest>,
     pub(in crate::node) leg_at: LegStamp,
+    /// It answers a restart held beside the peering as a leg, not a redial.
+    pub(in crate::node) restart: bool,
 }
 
 /// The handshake reject a msg1 refusal records.
@@ -803,6 +805,7 @@ impl Node {
                             identity: peer_identity,
                             digest: Some(e),
                             leg_at,
+                            restart: false,
                         };
                         // Boxed: the redial's arming adds its own state to
                         // the msg1 handler's future, which a test's thread
@@ -813,6 +816,28 @@ impl Node {
                     }
                 }
             }
+        }
+
+        // A restart of a held peer is held beside the peering as a leg,
+        // which the peer's first frame under it swaps in: it is answered as
+        // a redial is, and a pending redial or restart it replaces is retired
+        // there.
+        if out
+            .iter()
+            .any(|o| matches!(o, Output::Ask { leg: true, .. }))
+        {
+            entry.set_conn_their_index(wire.their_index);
+            let armed = Armed {
+                entry,
+                link: link_id,
+                peer: peer_node_addr,
+                identity: peer_identity,
+                digest: None,
+                leg_at,
+                restart: true,
+            };
+            Box::pin(self.arm_redial(armed, out, &packet, &wire, seen.silent)).await;
+            return;
         }
 
         // The removal of a held peer the msg1 restarts or replaces, and the
@@ -1107,11 +1132,10 @@ impl Node {
             Refusal::Heard => "heard-within-interval",
             Refusal::Unheard => "unheard-peering-young",
             Refusal::Silent => "silent-backoff",
-            // A redial's refusal is not one a restart or a replacement is
-            // given.
-            Refusal::Dampened | Refusal::Replayed | Refusal::ReplayFull | Refusal::Redialed => {
-                "dampened"
-            }
+            // A restart held as a leg whose ephemeral armed a recent leg,
+            // or one of more such legs than the memory holds.
+            Refusal::Redialed => "remembered-ephemeral",
+            Refusal::Dampened | Refusal::Replayed | Refusal::ReplayFull => "dampened",
         };
         if replacing {
             if self.shown(peer, HsLine::Replace) {
@@ -2062,6 +2086,14 @@ impl Node {
         let silent = self.gates().silent(&peer_node_addr);
         let held_now = self.peers.get(&peer_node_addr).map(|p| p.link_id());
         let prior = self.peer_link(&peer_node_addr);
+        // The peer's pending restart leg, which this dial may have crossed,
+        // and what a swap to it would read of the held peering.
+        let leg = self
+            .core
+            .redials()
+            .find(|(p, _)| **p == peer_node_addr)
+            .map(|(_, leg)| leg);
+        let swapping = leg.map(|_| super::redial::Swapping::of(self, &peer_node_addr));
         let decided = self.decide(SettleInput::Msg2 {
             link: no,
             epoch: msg2_epoch.unwrap_or_default(),
@@ -2070,6 +2102,30 @@ impl Node {
                 addr: packet.remote_addr.clone(),
             },
         });
+        if let (Some(leg), Some(swapping)) = (leg, swapping)
+            && decided
+                .iter()
+                .any(|o| matches!(o, Output::Install(i) if i.link == leg))
+        {
+            // The msg2 proved the peer restarted, and the peer's restart leg
+            // won the dial tie-break over this dial: the dial is given up and
+            // the leg replaces the peering now, as its first frame would.
+            let mut rest = Vec::new();
+            for o in decided {
+                match o {
+                    Output::Free { lease } if rest.is_empty() => self.free_lease(lease),
+                    Output::Retire { link: l, closes } if l == no => self.close_each(closes).await,
+                    other => rest.push(other),
+                }
+            }
+            self.remove_handshake(link_id);
+            self.remove_link(&link_id);
+            if let Some(leg) = self.links.id(leg) {
+                self.swap_redial(peer_node_addr, leg, rest, swapping, packet.timestamp_ms)
+                    .await;
+            }
+            return;
+        }
         let teardown_ctx = |why| Ambient {
             verified_identity: peer_identity,
             transport_id: packet.transport_id,

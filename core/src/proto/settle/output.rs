@@ -131,6 +131,10 @@ pub enum Output<X = Infallible, D = Infallible> {
         link: LinkNo,
         /// The identity the msg1 proves.
         peer: NodeAddr,
+        /// The answer opens a leg beside the held peering, which the peer's
+        /// first frame under it replaces (a redial or a restart), rather
+        /// than installing at its send.
+        leg: bool,
     },
     /// Send this msg2 on `link`. `stored` says it is the one already
     /// built for that msg1, sent again.

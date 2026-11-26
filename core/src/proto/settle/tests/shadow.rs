@@ -552,7 +552,9 @@ mod checks {
             transport: 2,
             at: 7,
         };
-        let restart = Some(Transition::Replace);
+        // A restart is held as a leg beside the peering: its msg1 changes
+        // nothing until a frame under the leg.
+        let restart = None;
         // Each log, whether the comparison must find a difference, and
         // whether it must name the proven path.
         let cases = [

@@ -79,7 +79,9 @@ fn heard_from_starts_at_the_first_frame_for_a_peering_installed_from_a_msg1() {
 #[test]
 fn the_dampener_refuses_until_fifteen_seconds_after_the_last_accepted_restart() {
     // frc-1201:1002-1005: the ceiling counts from both the peering's last
-    // frame and the last accepted restart or replacement.
+    // frame and the last accepted restart or replacement. A restart is
+    // accepted when the first frame under its leg replaces the peering,
+    // which stamps the dampener; its msg1 alone stamps nothing.
     let mut j = unheard();
     let first = last(
         &mut j,
@@ -89,10 +91,15 @@ fn the_dampener_refuses_until_fifteen_seconds_after_the_last_accepted_restart() 
             msg1(11, 110, E2, 2, at(8), Binding::Connectionless),
         ],
     );
-    assert_eq!(first.change, Some(Transition::Replace));
-    assert_eq!(j.stamp, Some(15_000));
-    // The new peering is unheard and past its floor, but the dampener
-    // still holds.
+    assert_eq!(first.refused, None);
+    assert_eq!(first.change, None, "the restart is held as a leg");
+    assert_eq!(j.stamp, None, "the restart's msg1 stamps nothing");
+    let proven = last(&mut j, &[wait(1_000), frame(11, at(8))]);
+    assert_eq!(proven.change, Some(Transition::Replace));
+    assert_eq!(j.stamp, Some(16_000), "the leg's first frame stamps");
+    // The leg's frame also heard the new peering, so its heard floor ends
+    // with the dampener's ceiling: a restart is refused until both have
+    // passed, fifteen seconds after the accepted restart.
     let early = last(
         &mut j,
         &[
@@ -100,7 +107,7 @@ fn the_dampener_refuses_until_fifteen_seconds_after_the_last_accepted_restart() 
             msg1(12, 120, Epoch(3), 3, at(7), Binding::Connectionless),
         ],
     );
-    assert_eq!(early.refused, Some(Gate::Dampened));
+    assert!(early.refused.is_some(), "refused at 14.999 s: {early:?}");
     let late = last(
         &mut j,
         &[
@@ -109,7 +116,10 @@ fn the_dampener_refuses_until_fifteen_seconds_after_the_last_accepted_restart() 
         ],
     );
     assert_eq!(late.refused, None);
-    assert_eq!(late.change, Some(Transition::Replace));
+    assert_eq!(late.change, None, "the restart is held as a leg");
+    let proven = j.step(frame(12, at(7)));
+    assert_eq!(proven.change, Some(Transition::Replace));
+    assert_eq!(j.stamp, Some(31_000));
 }
 
 #[test]

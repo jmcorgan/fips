@@ -216,6 +216,8 @@ pub(super) fn since(
         redials_proven: now.redials_proven - was.redials_proven,
         redials_adopted: now.redials_adopted - was.redials_adopted,
         redial_session_reopens: now.redial_session_reopens - was.redial_session_reopens,
+        restarts_held: now.restarts_held - was.restarts_held,
+        restarts_proven: now.restarts_proven - was.restarts_proven,
     }
 }
 

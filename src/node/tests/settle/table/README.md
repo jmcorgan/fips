@@ -41,8 +41,10 @@ in the `node-synthetic` group with the rest of `settle`.
 - `promote.rs`, `replace.rs`, `crossing.rs`, `rekey.rs`, `paths.rs`,
   `remove.rs`: one file per column group, Promote, Replace, Move and Keep,
   Cutover and Restarted, Roam, Follow, Switch and Release, and Remove.
-  `replace.rs` also holds a replacement the ACL refuses after its removal,
-  which keeps the removal and promotes nothing.
+  `replace.rs` also holds a restart the ACL refuses, which, held as a leg
+  and so removing nothing first, leaves the peering and its link. Its
+  restart site is the first frame of the leg the restart's msg1 is held
+  in, as the node takes that frame once it has authenticated.
   `paths.rs` also holds `assert_steps`, for one step of the path machine
   that made two transitions, as a handover releases the active path and
   switches in the same step: a row may change where either cell changes it,

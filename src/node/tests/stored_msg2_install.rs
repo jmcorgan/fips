@@ -251,9 +251,10 @@ async fn a_responder_installs_the_peer_with_the_msg1_its_stored_msg2_answers_whe
 }
 
 /// The restart route: B holds a peering with A at another epoch, idle long
-/// enough to be replaced, and A dials again. B tears the old peering down and
-/// its msg2 for the fresh leg fails transiently; A's resend draws the stored
-/// msg2, and B must install A on the fresh leg.
+/// enough to be replaced, and A dials again. B holds the restart as a leg
+/// beside the old peering and its msg2 for the fresh leg fails transiently;
+/// A's resend draws the stored msg2, and at A's first frame B must replace
+/// the old peering by A on the fresh leg.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn a_responder_restarting_a_peering_installs_the_peer_when_its_stored_msg2_is_resent() {
@@ -296,9 +297,12 @@ async fn a_responder_restarting_a_peering_installs_the_peer_when_its_stored_msg2
         .get(&(tid, msg1.remote_addr.clone()))
         .copied();
     assert!(
-        nodes[1].node.get_peer(&a).is_none()
+        nodes[1]
+            .node
+            .get_peer(&a)
+            .is_some_and(|p| p.link_id() == stale_link)
             && fresh_link.is_some_and(|l| l != stale_link && nodes[1].node.has_pending_leg(&l)),
-        "precondition: B tore down the old peering and kept the fresh leg pending"
+        "precondition: B kept the old peering and the fresh leg pending beside it"
     );
     assert_eq!(
         deliver(&mut nodes[0]).await,
@@ -317,17 +321,17 @@ async fn a_responder_restarting_a_peering_installs_the_peer_when_its_stored_msg2
         "control: A completed on the stored msg2 and installed B"
     );
 
+    let heard = heard_at_b(&mut nodes).await;
     let on_fresh = nodes[1]
         .node
         .get_peer(&a)
         .is_some_and(|p| Some(p.link_id()) == fresh_link);
-    let heard = heard_at_b(&mut nodes).await;
     assert_coherent(&mut nodes, "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
     assert!(
         on_fresh,
         "B sent its stored msg2 for the restarted peering successfully but did not install A \
-         on the fresh leg"
+         on the fresh leg at A's first frame"
     );
     assert!(heard, "A's heartbeat must authenticate at B");
 }

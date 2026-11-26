@@ -2027,7 +2027,8 @@ async fn a_second_epoch_change_inside_the_dampening_interval_leaves_the_peering_
     let source_addr = TransportAddr::from_string("127.0.0.1:41002");
 
     // First epoch change: the peering is genuinely idle, so it is accepted
-    // and stamps the dampener.
+    // into a leg beside the peering, and the leg's first frame replaces the
+    // peering and stamps the dampener.
     let first_link = install_peering_at_a_different_epoch(
         &mut node,
         &initiator,
@@ -2042,13 +2043,17 @@ async fn a_second_epoch_change_inside_the_dampening_interval_leaves_the_peering_
         Node::now_ms(),
     ))
     .await;
+    assert!(
+        prove_leg(&mut node, &initiator_addr).await,
+        "precondition: the first epoch change is held as a leg"
+    );
     let promoted = node
         .get_peer(&initiator_addr)
         .expect("the first epoch change must be accepted");
     assert_ne!(
         promoted.link_id(),
         first_link,
-        "the first epoch change must have replaced the peering"
+        "the first epoch change's first frame must have replaced the peering"
     );
 
     // The peer moves epoch again straight away. Nothing about the second
@@ -2116,7 +2121,8 @@ async fn a_refused_epoch_change_does_not_slide_the_dampening_window() {
     let initiator_addr = node_addr_of(&initiator);
     let source_addr = TransportAddr::from_string("127.0.0.1:41009");
 
-    // Accepted change: stamps the dampener.
+    // Accepted change, held as a leg until its first frame, which stamps
+    // the dampener.
     install_peering_at_a_different_epoch(
         &mut node,
         &initiator,
@@ -2131,11 +2137,21 @@ async fn a_refused_epoch_change_does_not_slide_the_dampening_window() {
         Node::now_ms(),
     ))
     .await;
+    assert_eq!(
+        node.restart_dampener_stamp(&initiator_addr),
+        None,
+        "precondition: the epoch change's msg1 alone stamps nothing"
+    );
+    assert!(
+        prove_leg(&mut node, &initiator_addr).await,
+        "precondition: the epoch change is held as a leg"
+    );
     let stamped = node
         .restart_dampener_stamp(&initiator_addr)
-        .expect("an accepted epoch change must stamp the dampener");
+        .expect("an accepted epoch change's first frame must stamp the dampener");
 
-    // Sustained replay: every one of these is refused by the dampener.
+    // Sustained replay: every one of these is refused by the dampener, so
+    // none opens a leg.
     for _ in 0..5 {
         install_peering_at_a_different_epoch(
             &mut node,
@@ -2151,6 +2167,10 @@ async fn a_refused_epoch_change_does_not_slide_the_dampening_window() {
             Node::now_ms(),
         ))
         .await;
+        assert!(
+            !prove_leg(&mut node, &initiator_addr).await,
+            "precondition: a refused epoch change opens no leg"
+        );
     }
 
     assert_eq!(
@@ -2188,10 +2208,19 @@ async fn a_first_epoch_change_against_a_silent_peering_still_restarts_it() {
         Node::now_ms(),
     ))
     .await;
+    assert_eq!(
+        node.get_peer(&initiator_addr).map(|p| p.link_id()),
+        Some(stale_link),
+        "precondition: the restart is held beside the stale peering until its first frame"
+    );
+    assert!(
+        prove_leg(&mut node, &initiator_addr).await,
+        "precondition: the restart is held as a leg"
+    );
 
     let peer = node
         .get_peer(&initiator_addr)
-        .expect("a restart with no prior epoch change must be promoted");
+        .expect("a restart with no prior epoch change must be promoted at its first frame");
     assert_ne!(
         peer.link_id(),
         stale_link,
@@ -2238,6 +2267,12 @@ async fn a_second_epoch_restart_past_the_interval_on_the_node_clock_is_accepted(
             Node::now_ms(),
         ))
         .await;
+        assert!(
+            prove_leg(&mut node, &initiator_addr).await,
+            "restart {round} must be accepted into a leg; none pending means \
+             it was refused, the second one by a dampener that did not see \
+             the node's clock move past the interval"
+        );
 
         let peer = node
             .get_peer(&initiator_addr)
@@ -2251,7 +2286,7 @@ async fn a_second_epoch_restart_past_the_interval_on_the_node_clock_is_accepted(
         );
         assert!(
             node.restart_dampener_stamp(&initiator_addr).is_some(),
-            "restart {round} must stamp the dampener"
+            "restart {round}'s first frame must stamp the dampener"
         );
     }
 }
@@ -2291,10 +2326,14 @@ async fn a_second_epoch_restart_inside_the_interval_on_the_node_clock_is_refused
     ))
     .await;
     assert!(
+        prove_leg(&mut node, &initiator_addr).await,
+        "precondition: the first restart is held as a leg"
+    );
+    assert!(
         node.get_peer(&initiator_addr)
             .is_some_and(|p| p.link_id() != installed)
             && node.restart_dampener_stamp(&initiator_addr).is_some(),
-        "precondition: the first restart is accepted and stamps the dampener"
+        "precondition: the first restart's first frame replaces the peering and stamps the dampener"
     );
 
     crate::time::advance(Duration::from_secs(12));
@@ -2314,11 +2353,12 @@ async fn a_second_epoch_restart_inside_the_interval_on_the_node_clock_is_refused
     ))
     .await;
     drop(guard);
-    assert_eq!(
-        node.get_peer(&initiator_addr).map(|p| p.link_id()),
-        Some(installed),
+    assert!(
+        node.get_peer(&initiator_addr)
+            .is_some_and(|p| p.link_id() == installed)
+            && node.redials.of(&initiator_addr).is_none(),
         "defect: a restart 12 s after an accepted one, inside the dampener's \
-         interval on the node's clock, tore down the peering"
+         interval on the node's clock, was held as a leg or tore down the peering"
     );
     let line = logs.line(REFUSED);
     assert_eq!(
@@ -2344,9 +2384,13 @@ async fn a_second_epoch_restart_inside_the_interval_on_the_node_clock_is_refused
     ))
     .await;
     assert!(
+        prove_leg(&mut node, &initiator_addr).await,
+        "the third restart, 16 s after the first and past the interval, must be held as a leg"
+    );
+    assert!(
         node.get_peer(&initiator_addr)
             .is_some_and(|p| p.link_id() != installed),
-        "the third restart, 16 s after the first and past the interval, must replace the peering"
+        "the third restart, 16 s after the first and past the interval, must replace the peering at its first frame"
     );
 }
 
@@ -2436,11 +2480,12 @@ async fn a_transient_msg2_failure_keeps_the_link_for_the_retry() {
 
 /// A transient msg2 failure on the RESTART path leaves the fresh leg pending.
 ///
-/// The epoch-mismatch restart arm tears the stale peering down in Phase 1 and
-/// then sends msg2 for the fresh leg. When the interface under the transport is
-/// absent, that send is deferred rather than failed, so the promotion never
-/// runs and the handshake's entry stays registered with its handshake
-/// pending: a third outcome beside a promoted and a failed leg.
+/// The epoch-mismatch restart arm holds the restart as a leg beside the stale
+/// peering, which only a frame under the leg replaces, and sends msg2 for the
+/// leg. When the interface under the transport is absent, that send is
+/// deferred rather than failed, so the handshake's entry stays registered
+/// with its handshake pending and the stale peering stands: a third outcome
+/// beside a sent and a failed leg.
 ///
 /// It also pins the deferral's own contract on this arm: the half-built link
 /// survives for the initiator's msg1 resend, and a local interface flap is not
@@ -2508,7 +2553,7 @@ async fn a_transient_msg2_failure_on_the_restart_path_leaves_the_fresh_leg_pendi
         .expect("the fresh leg's reverse map entry must survive the deferral");
     assert_ne!(
         fresh_link, stale_link,
-        "the restart must have replaced the stale link, not kept it"
+        "the restart's leg must have its own link beside the stale one"
     );
     assert!(
         node.handshakes
@@ -2516,9 +2561,11 @@ async fn a_transient_msg2_failure_on_the_restart_path_leaves_the_fresh_leg_pendi
             .is_some_and(|e| e.leg().is_some() && e.shown_state() == "received_msg1"),
         "a deferred msg2 must leave the entry pending, not promoted and not gone"
     );
-    assert!(
-        node.get_peer(&initiator_addr).is_none(),
-        "no promotion can have happened: the promotion never ran"
+    assert_eq!(
+        node.get_peer(&initiator_addr).map(|p| p.link_id()),
+        Some(stale_link),
+        "no promotion can have happened: the restart is held as a leg beside \
+         the stale peering, which no frame under the leg has replaced"
     );
     assert_eq!(
         node.stats().handshake.snapshot().bad_state,
@@ -2967,15 +3014,22 @@ async fn promotes(
     after.is_some() && after != before
 }
 
+/// A msg1 at another epoch against a peering silent past the interval, as
+/// a replay is, is held as a leg beside the peering: the peering stays as
+/// it was, heard, and the dampener unstamped, until a frame authenticates
+/// under the leg, which no replay sends. At such a frame the leg replaces
+/// the peering, and since the peering it ends had been heard, the dampener
+/// is stamped then.
 #[tokio::test]
-async fn a_replayed_msg1_replacing_a_silent_peer_leaves_it_unheard() {
+async fn a_replayed_msg1_against_a_silent_peer_leaves_it_and_its_dampener_until_a_frame_under_its_leg()
+ {
     let transport_id = TransportId::new(1);
     let mut node = make_node();
     let initiator = make_node();
     let initiator_addr = node_addr_of(&initiator);
 
     // A peering silent past the interval, at another epoch: the replay is
-    // accepted as a restart.
+    // accepted as a restart, into a leg.
     let stale_link = install_peering_at_a_different_epoch(
         &mut node,
         &initiator,
@@ -2998,21 +3052,30 @@ async fn a_replayed_msg1_replacing_a_silent_peer_leaves_it_unheard() {
 
     let peer = node
         .get_peer(&initiator_addr)
-        .expect("the restart must have promoted a peering");
-    assert_ne!(
-        peer.link_id(),
-        stale_link,
-        "precondition: the silent peering was replaced"
+        .expect("the silent peering must stand");
+    assert!(
+        peer.link_id() == stale_link && peer.is_heard(),
+        "defect: a msg1 no frame has followed replaced the silent peering or \
+         left it unheard"
+    );
+    assert_eq!(
+        node.restart_dampener_stamp(&initiator_addr),
+        None,
+        "defect: a msg1 no frame has followed stamped the dampener"
     );
     assert!(
-        !peer.is_heard(),
-        "a peering promoted on a received msg1 must count as unheard until \
-         its first authenticated frame, whatever it replaced"
+        prove_leg(&mut node, &initiator_addr).await,
+        "precondition: the msg1 is held as a leg"
+    );
+    assert_ne!(
+        peering_link(&node, &initiator_addr),
+        Some(stale_link),
+        "the leg's first frame replaces the silent peering"
     );
     assert!(
         node.restart_dampener_stamp(&initiator_addr).is_some(),
-        "tearing down a peering that had been heard from still stamps the \
-         dampener"
+        "tearing down a peering that had been heard from at the leg's first \
+         frame stamps the dampener"
     );
 }
 
@@ -3623,11 +3686,15 @@ async fn a_restart_of_a_heard_peering_still_ends_the_end_to_end_session() {
         Node::now_ms(),
     )
     .await;
+    assert!(
+        prove_leg(&mut node, &initiator_addr).await,
+        "precondition: the restart is held as a leg"
+    );
 
     assert_ne!(
         peering_link(&node, &initiator_addr),
         Some(stale_link),
-        "precondition: the restart replaced the peering"
+        "precondition: the restart's first frame replaced the peering"
     );
     assert!(
         !end_to_end_alive(&node, &initiator_addr),

@@ -132,6 +132,17 @@ restarted (generated a new epoch), triggering full link re-establishment
 rather than treating the handshake as a simple reconnection. This prevents
 stale session state from persisting across restarts.
 
+A msg1 at a new epoch does not end the live peering by itself, since a
+captured msg1 from the peer's earlier run carries an epoch the peering does
+not hold too. The node answers it into a pending leg beside the peering,
+and the first frame that authenticates under the leg's session replaces the
+peering as a restart; the restart dampener is stamped then, never when the
+msg1 is answered, so a replay, which no frame follows, neither tears the
+peering down nor delays a genuine restart. The leg is reaped unheard after
+the handshake timeout. A copy of its msg1 draws only the stored msg2 at
+the leg's own address, and the ephemerals of recent restart legs are
+remembered, so a replayed restart msg1 from elsewhere draws no msg2 at all.
+
 A restart can also be revealed by the msg2 of this node's own link rekey:
 the restarted peer answers the rekey msg1 as a msg1 from a node it does
 not hold. The node keeps the link and cuts over to the new session as for
@@ -150,6 +161,13 @@ carries a different epoch. That is not a cross-connection, and the
 tie-breaker does not apply: the node tears the stale peer down as on any
 restart, with its sessions and the state built on them, and installs the
 peer from its own dial, which the restarted peer answered as a new link.
+The exception is a pending restart leg of the peer's at the same new
+epoch, whose msg2 this node has sent: the two dials crossed, and the
+tie-breaker decides between them at the msg2. The node with the smaller
+address keeps its own dial and drops the leg; the larger gives up its own
+dial and replaces the peering by the leg at once, without waiting for a
+frame under it. The restarted peer reaches the same session by the same
+tie-breaker at its own msg2.
 
 ### Identity Binding
 
@@ -166,7 +184,8 @@ handshake completion:
 
 When a Noise IK msg1 arrives from a peer that already has an authenticated
 link, FMP accepts the new handshake alongside the existing session. If the new
-handshake completes successfully, it replaces the old session. This handles
+handshake completes successfully and a frame authenticates under it, it
+replaces the old session. This handles
 legitimate reconnection (network change, process restart, NAT rebinding)
 without disrupting ongoing traffic until the new session is confirmed.
 

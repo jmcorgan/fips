@@ -80,6 +80,7 @@ mod rekey_cutover_index;
 mod rekey_msg2_cap;
 mod rekey_parity;
 mod restart_dial;
+mod restart_replay;
 mod roam_gates;
 mod roam_redial;
 mod roam_rekey_unseen;
@@ -118,6 +119,27 @@ mod update_peers;
 pub(super) fn refusals(node: &Node) -> u64 {
     let h = &node.stats().handshake;
     h.bad_state + h.max_peers + h.rekey_pending + h.rekey_tiebreak + h.answered_before + h.off_link
+}
+
+/// Stands in for the first frame under `peer`'s pending leg, a redial's or
+/// a restart's: the step the node takes once such a frame has
+/// authenticated under the leg's session ([`Node::settle_redial`]), from
+/// the leg's own source, at the node's clock. Whether a leg was pending.
+pub(super) async fn prove_leg(node: &mut Node, peer: &NodeAddr) -> bool {
+    let Some(redial) = node.redials.of(peer) else {
+        return false;
+    };
+    let Some(from) = node.handshakes.get(&redial.link).and_then(|e| {
+        Some(crate::proto::settle::links::Pair {
+            transport: e.conn_transport_id()?,
+            addr: e.conn_source_addr()?.clone(),
+        })
+    }) else {
+        return false;
+    };
+    node.settle_redial(*peer, redial.link, from, Node::now_ms())
+        .await;
+    true
 }
 
 pub(super) fn make_node() -> Node {

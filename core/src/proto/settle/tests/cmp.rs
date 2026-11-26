@@ -700,8 +700,11 @@ fn a_held_peers_reachability_reads_the_bundles_active_path_not_the_cores_record(
 
 /// A named difference's history, where it must be met, and what it is.
 fn named() -> Vec<(History, usize, Named)> {
+    // Each restart is held as a leg beside the unheard peering, replacing
+    // the leg before it, and its ephemeral joins the redial memory, which
+    // the ninth finds full.
     let mut restarts = alloc::vec![msg1(10, 100, E1, 1, at(9), CL)];
-    for n in 1..=8u32 {
+    for n in 1..=9u32 {
         restarts.push(wait(1_000));
         let port = u16::try_from(20 + n).expect("a small port");
         restarts.push(msg1(
@@ -732,12 +735,14 @@ fn named() -> Vec<(History, usize, Named)> {
                 "a replayed ephemeral",
                 SMALL,
                 LARGE,
+                // The restart's msg1, held as a leg, sent again from
+                // another address once the slot rule no longer holds it.
                 alloc::vec![
                     msg1(10, 100, E1, 1, at(9), CL),
                     wait(1_000),
                     msg1(11, 110, E2, 2, at(8), CL),
                     wait(1_000),
-                    msg1(10, 100, E1, 1, at(9), CL),
+                    msg1(11, 110, E2, 3, at(7), CL),
                 ],
             ),
             4,
@@ -761,7 +766,7 @@ fn named() -> Vec<(History, usize, Named)> {
         ),
         (
             ("the replay memory full", SMALL, LARGE, restarts),
-            16,
+            18,
             Named::Replay
         ),
         (("silent sessions", SMALL, LARGE, silent), 8, Named::Silent),

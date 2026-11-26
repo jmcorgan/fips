@@ -112,6 +112,7 @@ impl Node {
             identity,
             digest,
             leg_at,
+            restart,
         } = armed;
         let interval_ms = leg_at.interval_ms;
         let mut asked = None;
@@ -222,15 +223,27 @@ impl Node {
         }
         entry.set_conn_handshake_msg2(wire_msg2.clone());
         self.handshakes.add(link, entry);
-        self.stats_mut().handshake.redials += 1;
-        debug!(
-            peer = %self.peer_display_name(&peer),
-            link_id = %link,
-            our_index = %our_index,
-            transport_id = %packet.transport_id,
-            remote_addr = %packet.remote_addr,
-            "Same-epoch msg1 off the established link, answered into a pending redial"
-        );
+        if restart {
+            self.stats_mut().handshake.restarts_held += 1;
+            debug!(
+                peer = %self.peer_display_name(&peer),
+                link_id = %link,
+                our_index = %our_index,
+                transport_id = %packet.transport_id,
+                remote_addr = %packet.remote_addr,
+                "Peer restart (epoch mismatch) answered into a pending leg beside the live peering"
+            );
+        } else {
+            self.stats_mut().handshake.redials += 1;
+            debug!(
+                peer = %self.peer_display_name(&peer),
+                link_id = %link,
+                our_index = %our_index,
+                transport_id = %packet.transport_id,
+                remote_addr = %packet.remote_addr,
+                "Same-epoch msg1 off the established link, answered into a pending redial"
+            );
+        }
         let ambient = Ambient {
             verified_identity: identity,
             transport_id: packet.transport_id,
@@ -416,14 +429,17 @@ impl Node {
     /// `link`, `out`: the held peering torn down for a redial, keeping the
     /// identity's tree declaration and filter, the leg promoted with the
     /// lease the core installs it with, and the end-to-end session opened
-    /// again if the teardown closed a heard one. `swapping` is what the
-    /// node read of the held peering before the core stepped, and `now_ms`
-    /// the wall stamp of the packet that proved the redial. An install on
+    /// again if the teardown closed a heard one. A restart's leg is torn
+    /// down and promoted as a restart instead, keeping nothing. `swapping`
+    /// is what the node read of the held peering before the core stepped,
+    /// and `now_ms` the wall stamp of the packet that proved the leg: a
+    /// frame under it, or for a restart's leg this node's own dial's msg2
+    /// at the restart's epoch. An install on
     /// the held link's own number is the core keeping the peer there
     /// ([`Node::adopt_redial`]), and the leg's own link retired with no
     /// install is the core giving the leg up to this node's crossed dial
     /// ([`Node::yield_redial`]).
-    async fn swap_redial(
+    pub(in crate::node) async fn swap_redial(
         &mut self,
         peer: NodeAddr,
         link: LinkId,
@@ -483,16 +499,35 @@ impl Node {
             why,
         };
         let mut ours = None;
+        let mut removal = None;
         let mut out = out;
         let mut retired = Self::retired(&mut out);
         for o in out {
             match o {
                 Output::Remove { peer: gone, why } => {
-                    debug!(
-                        peer = %self.peer_display_name(&gone),
-                        link_id = %link,
-                        "Redial proven by the peer's frame, replacing the peering"
-                    );
+                    removal = Some(why);
+                    if why == Why::Restart {
+                        debug!(
+                            peer = %self.peer_display_name(&gone),
+                            link_id = %link,
+                            "Peer restart proven, replacing the peering by its leg"
+                        );
+                        // The mutation lane's break: the new peer is
+                        // installed as if sent the old peer's last tree
+                        // announce.
+                        if node_fault!(TreeCarryAcrossRestart) {
+                            self.tree_carry = self
+                                .peers
+                                .get(&gone)
+                                .map(|p| (gone, p.last_tree_announce_sent_ms()));
+                        }
+                    } else {
+                        debug!(
+                            peer = %self.peer_display_name(&gone),
+                            link_id = %link,
+                            "Redial proven by the peer's frame, replacing the peering"
+                        );
+                    }
                     self.log_paths_ended(&gone, &ended);
                     // The removal runs the first part of the replacement's
                     // plan, and the promotion below, told the same cause,
@@ -529,12 +564,20 @@ impl Node {
         let Some(ours) = ours else {
             return;
         };
-        let ambient = ctx(Some(ours), held.as_ref().map(|_| Why::Redial));
+        let why = removal.unwrap_or(Why::Redial);
+        let ambient = ctx(Some(ours), held.as_ref().map(|_| why));
         if !self.promote(link, &ambient).await {
             return;
         }
         if !ended.is_empty() {
             self.log_paths_begun(&peer);
+        }
+        if why == Why::Restart {
+            // A restarted peer's process declared nothing it still holds,
+            // and its end-to-end session went with that process: the
+            // promotion ran the restart's resets, as a restart at a msg1 did.
+            self.stats_mut().handshake.restarts_proven += 1;
+            return;
         }
         self.stats_mut().handshake.redials_proven += 1;
         let session_closed = had_session && !self.sessions.contains_key(&peer);
@@ -732,7 +775,7 @@ type Tree = Option<(ParentDeclaration, TreeCoordinate)>;
 /// swaps it: its tree declaration and filter, kept across the swap, whether
 /// an end-to-end session was open, the paths the teardown releases unlogged,
 /// and its silent-session count.
-struct Swapping {
+pub(in crate::node) struct Swapping {
     held: Option<(Tree, Option<(BloomFilter, u64)>)>,
     had_session: bool,
     ended: Vec<(PathRef, u32, PathState)>,
@@ -741,7 +784,7 @@ struct Swapping {
 
 impl Swapping {
     /// Read it of `peer` on `node`.
-    fn of(node: &Node, peer: &NodeAddr) -> Self {
+    pub(in crate::node) fn of(node: &Node, peer: &NodeAddr) -> Self {
         Self {
             held: node.peers.get(peer).map(|p| {
                 (

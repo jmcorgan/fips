@@ -20,7 +20,7 @@
 //! | the spin-bit role after a crossing | `chartest_after_a_crossing_both_ends_hold_the_spin_responder_role` |
 
 use super::super::crossed_dial::{Dial, cross_dials_from, hand};
-use super::super::rekey_parity::stale_session;
+use super::super::rekey_parity::{deliver, heartbeat, stale_session};
 use super::super::spanning_tree::{TestNode, cleanup_nodes, initiate_handshake, restarted_node};
 use super::super::*;
 use super::crossing::{Second, second_msg1_late};
@@ -112,7 +112,10 @@ async fn a_move_forgets_the_replayed_msg1s_it_was_promoted_by() {
 /// with no frame of the peer's yet, the larger node restarts and dials it.
 /// Two seconds is past an unheard peering's one-second floor and inside a
 /// heard one's fifteen, and the moved peering is heard, so the restart msg1
-/// is refused and the peering stays on the session it moved to.
+/// is refused where a restart is admitted as a leg: no answer goes back.
+/// The restarted node is then given whatever answer came and, if it holds
+/// the smaller node, sends its first frame, which is where an admitted leg
+/// would replace the peering; the peering stays on the session it moved to.
 #[tokio::test]
 async fn a_move_heard_at_a_restart_gate_keeps_the_fifteen_second_floor() {
     let (mut nodes, s, l, _) = crossed_and_moved(false).await;
@@ -135,6 +138,20 @@ async fn a_move_heard_at_a_restart_gate_keeps_the_fifteen_second_floor() {
         .expect("precondition: the restarted node's msg1 is queued at the smaller node");
     msg1.timestamp_ms = Node::now_ms();
     nodes[s].node.handle_msg1(msg1).await;
+    let mut answers = 0;
+    while let Ok(packet) = nodes[l].packet_rx.try_recv() {
+        if crate::proto::fmp::wire::CommonPrefix::parse(&packet.data)
+            .is_some_and(|c| c.phase == crate::proto::fmp::wire::PHASE_MSG2)
+        {
+            answers += 1;
+            nodes[l].node.handle_msg2(packet).await;
+        }
+    }
+    let s_addr = *nodes[s].node.node_addr();
+    if nodes[l].node.get_peer(&s_addr).is_some() {
+        heartbeat(&mut nodes[l], &s_addr).await;
+        deliver(&mut nodes[s]).await;
+    }
     let after = nodes[s]
         .node
         .get_peer(&l_addr)
@@ -142,7 +159,11 @@ async fn a_move_heard_at_a_restart_gate_keeps_the_fifteen_second_floor() {
     cleanup_nodes(&mut nodes).await;
     assert_eq!(
         after, moved,
-        "defect: a restart msg1 inside the heard floor replaced the peering a move made heard"
+        "defect: a restart inside the heard floor replaced, at its first frame, the peering a move made heard"
+    );
+    assert_eq!(
+        answers, 0,
+        "defect: a restart msg1 inside the heard floor was admitted as a leg and answered"
     );
 }
 

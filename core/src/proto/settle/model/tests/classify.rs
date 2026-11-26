@@ -25,7 +25,8 @@ fn rule_1_a_msg1_from_an_identity_not_held_installs_the_peer() {
 
 #[test]
 fn rule_2_a_changed_epoch_is_a_restart() {
-    // frc-1201:1111, and :960: torn down, then answered as not held.
+    // frc-1201:1111, and :960: answered into a leg beside the peering,
+    // which the peer's first frame under it replaces.
     let mut j = responder(SMALL, LARGE);
     let s = last(
         &mut j,
@@ -36,6 +37,10 @@ fn rule_2_a_changed_epoch_is_a_restart() {
     );
     assert_eq!(s.class, Some(Class::Restart));
     assert_eq!(s.reply, Some(Reply::Msg2));
+    assert_eq!(s.change, None, "the restart is held as a leg");
+    assert_eq!(j.settled(), Some((Hs(10), LinkId(1), at(9))));
+    assert_eq!(j.peering.as_ref().map(|p| p.epoch), Some(E1));
+    let s = j.step(frame(11, at(8)));
     assert_eq!(s.change, Some(Transition::Replace));
     assert_eq!(j.settled(), Some((Hs(11), LinkId(2), at(8))));
     assert_eq!(j.peering.as_ref().map(|p| p.epoch), Some(E2));

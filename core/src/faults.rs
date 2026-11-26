@@ -316,6 +316,12 @@ faults! {
     /// swapped in at its first frame by the smaller node too, and the pair
     /// splits across the two dials.
     LateLegUncrossed,
+    /// The settlement core's own dial whose msg2 proves a peer restarted
+    /// ignores the peer's restart leg it crossed: the dial replaces the
+    /// peering with no tie-break, the leg stays pending, and a smaller peer
+    /// that moved onto its own dial, the leg's session, is split from this
+    /// node until the leg's first frame.
+    RestartLegUncrossed,
     /// The settlement core's window after a move onto this node's own dial,
     /// in which a redial leg of the peer counts as crossing the dial, does
     /// not end at the peer's next frame, so a later redial of a peer that
@@ -526,6 +532,13 @@ faults! {
     /// A pending redial replaces the held peering as soon as its msg2 is
     /// sent, with no frame from the peer.
     RedialSwapsUnproven,
+    /// A msg1 at a new epoch from a held peer tears the peering down at the
+    /// msg1 and is promoted at its send, as before a restart was held
+    /// beside the peering as a leg.
+    RestartTearsDownAtMsg1,
+    /// A restart held as a leg stamps the restart dampener when it is
+    /// admitted, not at the swap its first frame proves.
+    RestartStampsAtOpen,
     /// A pending redial is never reaped at the handshake timeout.
     RedialNeverExpires,
     /// A second redial for an identity replaces its pending one however

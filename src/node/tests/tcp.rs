@@ -1157,8 +1157,9 @@ async fn a_dial_refused_at_the_peer_cap_closes_its_tcp_connection_at_once() {
 }
 
 /// A peer this node holds over TCP, quiet for a minute, restarts (a msg1 at
-/// a new epoch, on a new connection) while the ACL denies it. The restart's teardown removes the
-/// held peer before the late ACL, which refuses the msg1, and the msg1's
+/// a new epoch, on a new connection) while the ACL denies it. A restart is
+/// held as a leg beside the peering and tears nothing down before the late
+/// ACL, which refuses the msg1: the held peer stays, and the msg1's
 /// connection closes at once, as a fresh connection's does.
 #[tokio::test]
 async fn a_late_acl_refusal_of_a_restart_msg1_over_tcp_closes_its_connection_at_once() {
@@ -1185,8 +1186,8 @@ async fn a_late_acl_refusal_of_a_restart_msg1_over_tcp_closes_its_connection_at_
 
     assert!(was_held, "precondition: the responder holds the initiator");
     assert!(
-        !held,
-        "precondition: the restart's teardown removed the held peer before the ACL refused it"
+        held,
+        "precondition: the refused restart left the held peer, which no frame under a leg replaced"
     );
     assert_eq!(
         after,
@@ -1236,8 +1237,9 @@ async fn a_fresh_inbound_tcp_msg1_refused_for_want_of_a_session_index_closes_its
 }
 
 /// A held peer's restart over TCP, quiet for a minute, that the ACL admits,
-/// refused because no session index can be drawn for its answer once the
-/// teardown has run, closes the msg1's connection at once.
+/// refused because no session index can be drawn for the answer of the leg
+/// it would be held in, closes the msg1's connection at once and leaves the
+/// held peer, which a restart replaces only at a frame under its leg.
 #[tokio::test]
 async fn a_restart_msg1_over_tcp_refused_for_want_of_a_session_index_closes_its_connection_at_once()
 {
@@ -1272,8 +1274,8 @@ async fn a_restart_msg1_over_tcp_refused_for_want_of_a_session_index_closes_its_
 
     assert!(was_held, "precondition: the responder holds the initiator");
     assert!(
-        !held,
-        "precondition: the restart's teardown removed the held peer before the index draw failed"
+        held,
+        "precondition: the restart refused at the index draw left the held peer"
     );
     assert_eq!(
         after,

@@ -1,10 +1,10 @@
 //! What a move or a restart does with multipath on to state outside the
 //! peer's record, on real nodes: a connect still out when a move releases its
 //! path, closed as it opens unless another link uses the pair, with the
-//! healthy path of a connect the bundle still waits for; a close queued at a
-//! restart's teardown, which the drain spares where the new link runs and
-//! still makes where nothing does, with the control that with multipath off
-//! the teardown queues none; a no-carrier reading across a move and a
+//! healthy path of a connect the bundle still waits for; a restart's
+//! teardown, which leaves open the pair the new link runs on and still closes
+//! one nothing uses, with the control that with multipath off the teardown
+//! queues no close; a no-carrier reading across a move and a
 //! removal; and what a restart found at a rekey keeps of the bundle.
 //!
 //! The file's helpers, a second dial of a node's own and a restart's msg1,
@@ -14,7 +14,9 @@ use super::super::paths::{
     beat, disabled, enabled, loopback, phase, same_transport_with, state_at, t2, transports_with,
     two_transports,
 };
-use super::super::rekey_parity::{cutover, deliver, linked_pair, rekey_config, trigger_age};
+use super::super::rekey_parity::{
+    cutover, deliver, heartbeat, linked_pair, rekey_config, trigger_age,
+};
 use super::super::spanning_tree::{
     TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, make_test_node_with_config,
     restarted_node,
@@ -53,9 +55,10 @@ pub(in crate::node::tests) async fn own_dial(nodes: &mut [TestNode]) {
 }
 
 /// `nodes[0]` last heard its peer `nodes[1]` long ago; `nodes[1]` restarts,
-/// built from `config`, and dials from the pair `nodes[0]` holds it at, and
-/// `nodes[0]` reads the msg1, tears down the old link and promotes a new one
-/// at that pair.
+/// built from `config`, and dials from the pair `nodes[0]` holds it at;
+/// `nodes[0]` reads the msg1 and holds the restart as a leg beside the old
+/// link, and at `nodes[1]`'s first frame under the new session tears down
+/// the old link and promotes the new one at that pair.
 pub(in crate::node::tests) async fn restart_dial(nodes: &mut [TestNode], config: Config) {
     let b = *nodes[1].node.node_addr();
     let pair = nodes[1].addr.clone();
@@ -78,6 +81,21 @@ pub(in crate::node::tests) async fn restart_dial(nodes: &mut [TestNode], config:
         "precondition: the msg1 came from the pair the old link holds"
     );
     nodes[0].node.handle_msg1(msg1).await;
+    assert_eq!(
+        nodes[0].node.get_peer(&b).map(|p| p.link_id()),
+        Some(old_link),
+        "precondition: the restart is held as a leg beside the old link"
+    );
+    // The restarted node reads the answer and sends its first frame under
+    // the new session, which replaces the old link at node 0.
+    let a = *nodes[0].node.node_addr();
+    while let Ok(packet) = nodes[1].packet_rx.try_recv() {
+        if phase(&packet) == Some(PHASE_MSG2) {
+            nodes[1].node.handle_msg2(packet).await;
+        }
+    }
+    heartbeat(&mut nodes[1], &a).await;
+    deliver(&mut nodes[0]).await;
     let peer = nodes[0]
         .node
         .get_peer(&b)
@@ -367,10 +385,12 @@ async fn a_connect_at_a_pair_another_link_uses_stays_open() {
     );
 }
 
-/// A capable link with the peer active on q leaves p unkept. A restart's msg1
-/// arrives from p's pair, and the teardown queues p's close before the new
-/// link exists there. The drain asks the close rule again, so it spares the
-/// pair the new link was just promoted at.
+/// A capable link with the peer active on q leaves p unkept, and a restart's
+/// msg1 arrives from p's pair. The restart is held as a leg, which keeps p in
+/// use through the teardown, so no close is queued for the pair the new link
+/// is promoted at, and the drain leaves p open. The test passes with or
+/// without the drain's re-check of the close rule: it guards the outcome, that
+/// p stays open after the restart, not the re-check.
 #[tokio::test]
 async fn a_close_queued_at_a_restart_teardown_spares_the_new_link_at_that_pair() {
     let t1 = TransportId::new(1);
