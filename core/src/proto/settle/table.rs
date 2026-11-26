@@ -95,7 +95,6 @@ use super::legs::{Kind, Leg, LegOut, Legs, Start};
 use super::links::{Dir, Holder, LinkNo, LinkRec, Links, Pair, Proven};
 use super::output::{Build, Denial, Install, Output, Transition, Why};
 use super::params::Params;
-#[cfg(any(test, feature = "test-hooks"))]
 use super::params::deadline;
 use crate::identity::NodeAddr;
 use crate::proto::fmp::EphemeralDigest;
@@ -201,6 +200,23 @@ pub struct Table<I, F = Ik> {
     /// The pending redial of each identity: its leg's link and when it
     /// was answered.
     redials: BTreeMap<NodeAddr, (LinkNo, I)>,
+    /// The pending redial leg each identity's held peering crossed: the
+    /// leg's link, recorded when this node moved the peering onto its own
+    /// dial while the leg was pending, or when the leg was answered after
+    /// the move inside the window `moved` keeps, for [`Table::leg_heard`]'s
+    /// tie-break.
+    crossed: BTreeMap<NodeAddr, LinkNo>,
+    /// The own dial each identity's held peering was moved onto, and until
+    /// when a redial leg of the peer answered while the peering is still
+    /// there counts as crossing it: the peer's leg answering that dial
+    /// started before the move and is gone a handshake timeout after its
+    /// start. A frame of the peer, or the peering leaving the dial, ends it.
+    moved: BTreeMap<NodeAddr, (LinkNo, I)>,
+    /// The held link of each identity whose session there is a redial of
+    /// the peer's this node adopted ([`Table::hold_redial`]): the peer's
+    /// dial, whoever set up the link's connection, so a later dial of this
+    /// node is not its own dial on a link it dialed (FRC-1201 Section 5.6).
+    adopted: BTreeMap<NodeAddr, LinkNo>,
     gates: Gates<I>,
     /// The handshake flow and what it keeps.
     flow: F,
@@ -232,6 +248,9 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
             connects: BTreeMap::new(),
             asked: BTreeMap::new(),
             redials: BTreeMap::new(),
+            crossed: BTreeMap::new(),
+            moved: BTreeMap::new(),
+            adopted: BTreeMap::new(),
             gates: Gates::new(),
             flow,
             #[cfg(test)]
@@ -425,6 +444,7 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         let leg = self.legs.take(link)?;
         self.answered.remove(&link);
         self.redials.retain(|_, (on, _)| *on != link);
+        self.crossed.retain(|_, on| *on != link);
         Some(leg.lease())
     }
 
@@ -552,6 +572,7 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
                 if !fault!(RedialLegKept) {
                     self.redials.retain(|_, (l, _)| *l != link);
                 }
+                self.crossed.retain(|_, l| *l != link);
                 out.push(Output::Free { lease });
                 out.push(Output::Retire { link, closes });
             }
@@ -566,6 +587,9 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         let mut closed = self.legs.close(&mut self.links);
         self.answered.clear();
         self.redials.clear();
+        self.crossed.clear();
+        self.moved.clear();
+        self.adopted.clear();
         for link in core::mem::take(&mut self.connects).into_keys() {
             closed.closes.extend(self.links.retire(link));
         }
@@ -694,6 +718,7 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         };
         self.answered.remove(&link);
         self.redials.retain(|_, (l, _)| *l != link);
+        self.crossed.retain(|_, l| *l != link);
         out.push(Output::Free { lease: leg.lease() });
         let closes = self.links.retire(link);
         out.push(Output::Retire { link, closes });
@@ -919,6 +944,9 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         self.answered.insert(link, asked.answered);
         if redial {
             self.redials.insert(asked.peer, (link, now));
+            if self.inside(asked.peer, now) {
+                self.crossed.insert(asked.peer, link);
+            }
             // The defect's shape: the redial's leg is never reaped.
             #[cfg(any(test, feature = "test-hooks"))]
             if fault!(RedialNeverExpires) || node_fault!(RedialNeverExpires) {
@@ -1349,11 +1377,47 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         else {
             return;
         };
+        if self.crossed.get(&peer) == Some(&link)
+            && crossed_dial_wins(self.me, peer)
+            && !(fault!(CrossedLegSwaps) || node_fault!(CrossedLegSwaps))
+        {
+            self.yield_leg(peer, link, out);
+            return;
+        }
         if self.proven_off(peer, link, &from) {
             self.hold_redial(peer, link, now, out);
             return;
         }
         self.swap(peer, link, Some(from), now, out);
+    }
+
+    /// Give up `peer`'s redial leg on `link`, which crossed this node's own
+    /// dial the peering was moved onto and lost the dial tie-break to it
+    /// (FRC-1201 Section 5.6): the peer moves onto this node's dial at the
+    /// leg's own frame, as this node's dial wins at its msg2 there. The
+    /// held peer stays as it is; the leg's lease returns and its link is
+    /// retired, closing each of its pairs no remaining link uses.
+    fn yield_leg(&mut self, peer: NodeAddr, link: LinkNo, out: &mut Vec<Outs<I, F>>) {
+        self.redials.remove(&peer);
+        self.crossed.remove(&peer);
+        self.answered.remove(&link);
+        if let Some(leg) = self.legs.take(link) {
+            out.push(Output::Free { lease: leg.lease() });
+        }
+        let closes = self.links.retire(link);
+        out.push(Output::Retire { link, closes });
+    }
+
+    /// Whether a redial leg of `peer` answered at `now` crossed the own dial
+    /// the peering was moved onto: the peering is still on that dial, no
+    /// frame of the peer has authenticated since the move, and the peer's
+    /// leg answering the dial may still be pending.
+    fn inside(&self, peer: NodeAddr, now: I) -> bool {
+        let unbounded =
+            fault!(CrossingWindowOutlivesTimeout) || node_fault!(CrossingWindowOutlivesTimeout);
+        self.moved.get(&peer).is_some_and(|(on, until)| {
+            (now < *until || unbounded) && self.held.get(&peer).is_some_and(|h| h.link == *on)
+        })
     }
 
     /// Whether the frame from `from` that proved the redial leg on `link`
@@ -1397,6 +1461,8 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
             return;
         };
         self.redials.remove(&peer);
+        self.crossed.remove(&peer);
+        self.moved.remove(&peer);
         self.seat(peer, held, pair.clone(), a.epoch, a.ephemeral, now);
         if let Some(h) = self.held.get_mut(&peer) {
             h.heard = live.heard;
@@ -1405,6 +1471,13 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         }
         self.gates.swapped(peer, true, now);
         self.rehold(peer, held, pair, leg.lease(), out);
+        // The session the peer is held on now is the peer's dial: a later
+        // dial of this node is decided by the tie-break, not as a dial on a
+        // link it dialed (FRC-1201 Section 5.6). The link's direction, which
+        // says who set up its connection, stays as it is.
+        if !(fault!(AdoptedRedialCountsOwn) || node_fault!(AdoptedRedialCountsOwn)) {
+            self.adopted.insert(peer, held);
+        }
         let closes = self.links.retire(link);
         out.push(Output::Retire { link, closes });
     }
@@ -1431,6 +1504,8 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         };
         let pair = from.unwrap_or(setup);
         self.redials.remove(&peer);
+        self.crossed.remove(&peer);
+        self.moved.remove(&peer);
         let heard = self.held.get(&peer).map(|h| h.heard);
         if heard.is_some() {
             self.remove(peer, Why::Redial, now, out);
@@ -1511,6 +1586,7 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         if !(fault!(UnsendableKeepsRedial) || node_fault!(UnsendableKeepsRedial)) {
             self.redials.retain(|_, (l, _)| *l != link);
         }
+        self.crossed.retain(|_, l| *l != link);
         out.push(Output::Free { lease: leg.lease() });
         let closes = self.links.retire(link);
         let closes = if fault!(UnsendableCloses) || node_fault!(UnsendableCloses) {
@@ -1555,16 +1631,17 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
             && self
                 .links
                 .get(h.link)
-                .is_some_and(|r| r.dir == Dir::Outbound);
+                .is_some_and(|r| r.dir == Dir::Outbound)
+            && self.adopted.get(&peer) != Some(&h.link);
         // A dial made while the peer was held on the link it is held on now
         // is a later dial, which the tie-break does not decide alone.
         let later = self.legs.get(link).and_then(|l| l.held()) == Some(h.link);
         let crossed = fault!(CrossedRunsKeep) || node_fault!(CrossedRunsKeep);
-        let moves = own || (self.me < peer && (later || !crossed));
+        let moves = own || (crossed_dial_wins(self.me, peer) && (later || !crossed));
         #[cfg(test)]
         let moves = moves || self.aged(h, now);
         if moves {
-            self.moveto(peer, link, from, own, out);
+            self.moveto(peer, link, from, own, now, out);
             return;
         }
         self.keep(peer, link, out);
@@ -1636,15 +1713,21 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
     /// the link it leaves. `own` says the held link was one this node
     /// dialed. The move ends an operator's pin of the peer's path when
     /// `own`, or when the dial was made while the peer was held on the link
-    /// it leaves, as the node's `own_dial || later_dial` reads it.
+    /// it leaves, as the node's `own_dial || later_dial` reads it. A redial
+    /// leg of the peer's pending at the move crossed the dial, and is
+    /// recorded for [`Table::leg_heard`]; the move also opens the window in
+    /// which a leg answered after it counts as crossing the dial
+    /// ([`Table::hello`]), a handshake timeout from `now`.
     fn moveto(
         &mut self,
         peer: NodeAddr,
         link: LinkNo,
         from: Pair,
         own: bool,
+        now: I,
         out: &mut Vec<Outs<I, F>>,
     ) {
+        let pending = self.redials.get(&peer).map(|(leg, _)| *leg);
         let (Some(leg), Some(h)) = (self.legs.take(link), self.held.get_mut(&peer)) else {
             return;
         };
@@ -1700,6 +1783,15 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
             });
         }
         out.push(Output::Swapped { peer, own, unpin });
+        // A redial leg of the peer's still pending crossed this dial: its
+        // first frame is decided by the dial tie-break.
+        if let Some(crossing) = pending {
+            self.crossed.insert(peer, crossing);
+        }
+        if !(fault!(LateLegUncrossed) || node_fault!(LateLegUncrossed)) {
+            let until = deadline(now, self.params.handshake);
+            self.moved.insert(peer, (link, until));
+        }
         if retire {
             // The left link's connection, at its setup pair, and of its
             // paths only those its bundle does not keep as it renews onto
@@ -1828,6 +1920,9 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
     /// and the gates forget. Where the peer is moves only where its bundle
     /// moves it, at a path's move or switch, never with the frame alone.
     fn heard(&mut self, peer: NodeAddr, from: Pair, kind: u8, now: I, out: &mut Vec<Outs<I, F>>) {
+        if !(fault!(CrossingWindowOutlivesFrame) || node_fault!(CrossingWindowOutlivesFrame)) {
+            self.moved.remove(&peer);
+        }
         let Some(h) = self.held.get_mut(&peer) else {
             return;
         };
@@ -1891,6 +1986,9 @@ impl<I: Instant, F: Flow<I>> Table<I, F> {
         let Some(h) = self.held.remove(&peer) else {
             return;
         };
+        self.crossed.remove(&peer);
+        self.moved.remove(&peer);
+        self.adopted.remove(&peer);
         F::removed(&mut Ops { t: self }, peer);
         // As the node: a session that carried no frame counts, whatever
         // its role, so this node's own dial, heard from its install, counts
@@ -2213,9 +2311,10 @@ impl<I: Instant, F: Flow<I>> Ops<'_, I, F> {
         link: LinkNo,
         from: Pair,
         own: bool,
+        now: I,
         out: &mut Vec<Outs<I, F>>,
     ) {
-        self.t.moveto(peer, link, from, own, out);
+        self.t.moveto(peer, link, from, own, now, out);
     }
 
     /// Tear the held `peer` down for `why` and retire its link.
@@ -2405,6 +2504,13 @@ fn removable(r: &LinkRec) -> Vec<Pair> {
         return alloc::vec![r.setup.clone()];
     }
     r.paths.iter().map(|(p, _)| p.clone()).collect()
+}
+
+/// Whether this node's dial wins a crossing with `peer`'s dial: the
+/// smaller node's dial wins (FRC-1201 Section 5.6). It reads only what
+/// both ends hold, the two addresses, so the two ends agree on the winner.
+fn crossed_dial_wins(me: NodeAddr, peer: NodeAddr) -> bool {
+    me < peer
 }
 
 /// Whether a move keeps the link it leaves, which only a test-only switch

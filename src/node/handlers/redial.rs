@@ -420,7 +420,9 @@ impl Node {
     /// node read of the held peering before the core stepped, and `now_ms`
     /// the wall stamp of the packet that proved the redial. An install on
     /// the held link's own number is the core keeping the peer there
-    /// ([`Node::adopt_redial`]).
+    /// ([`Node::adopt_redial`]), and the leg's own link retired with no
+    /// install is the core giving the leg up to this node's crossed dial
+    /// ([`Node::yield_redial`]).
     async fn swap_redial(
         &mut self,
         peer: NodeAddr,
@@ -439,6 +441,16 @@ impl Node {
                 .any(|o| matches!(o, Output::Install(i) if i.link == held))
         {
             self.adopt_redial(peer, link, out).await;
+            return;
+        }
+        let leg = self.links.no(&link);
+        if leg.is_some()
+            && !out.iter().any(|o| matches!(o, Output::Install(_)))
+            && out
+                .iter()
+                .any(|o| matches!(o, Output::Retire { link: l, .. } if Some(*l) == leg))
+        {
+            self.yield_redial(peer, link, out).await;
             return;
         }
         let Some((identity, transport_id, remote_addr)) = self
@@ -562,6 +574,28 @@ impl Node {
 }
 
 impl Node {
+    /// Run the core's retirement of `peer`'s redial leg on `link`, `out`:
+    /// the leg crossed this node's own dial, which the peering was moved
+    /// onto and which wins the dial tie-break, so the peer moves onto that
+    /// dial and the leg goes. Its lease returns, and its handshake entry
+    /// and link go, closing the connections the core found unused.
+    async fn yield_redial(&mut self, peer: NodeAddr, link: LinkId, out: Vec<Output>) {
+        let mut closes = Vec::new();
+        for o in out {
+            match o {
+                Output::Free { lease } => self.free_lease(lease),
+                Output::Retire { closes: c, .. } => closes = c,
+                other => debug_assert!(false, "a crossed redial's retirement gave {other:?}"),
+            }
+        }
+        debug!(
+            peer = %self.peer_display_name(&peer),
+            link_id = %link,
+            "Redial crossed this node's own dial, which wins the tie-break; dropping the redial"
+        );
+        self.retired_leg(link, closes).await;
+    }
+
     /// Run the core's adoption of the redial's session on `link` by the
     /// held `peer`, `out`: the proof arrived on the held link, so the peer
     /// stays on that link and pair. The leg's session, lease and the peer's

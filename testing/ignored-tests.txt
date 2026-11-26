@@ -98,8 +98,6 @@ known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_rekey_a
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_with_multipath_on  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session  src/node/tests/settle/rekey_cross.rs
-known-defect  fips-mesh  node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_with_multipath_on  src/node/tests/settle/rekey_cross.rs
 known-defect  fips-mesh  node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first  src/node/tests/settle/rekey_cross.rs
 known-defect  fips-mesh  node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
 known-defect  fips-mesh  node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first  src/node/tests/settle/rekey_cross.rs

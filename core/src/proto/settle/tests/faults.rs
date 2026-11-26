@@ -1081,6 +1081,67 @@ pub const ROWS: &[Row] = &[
             "a_redials_swap_installs_the_peer_unheard_and_its_frames_heard_hears_it",
         )],
     ),
+    (
+        Fault::CrossedLegSwaps,
+        &[
+            (
+                TABLE,
+                "crossed_redials_settle_both_nodes_on_the_smaller_nodes_dial_at_the_legs_first_frames",
+            ),
+            (
+                TABLE,
+                "a_late_frame_under_a_crossed_leg_the_tie_break_retired_changes_nothing",
+            ),
+            (
+                TABLE,
+                "a_redial_answered_after_the_smaller_node_moved_onto_its_dial_leaves_the_pair_on_one_dial",
+            ),
+            (
+                TABLE,
+                "a_redial_answered_inside_the_crossing_window_is_retired_at_its_first_frame",
+            ),
+        ],
+    ),
+    (
+        Fault::CrossingWindowOutlivesFrame,
+        &[(
+            TABLE,
+            "a_redial_answered_after_a_frame_on_the_moved_onto_dial_is_swapped_in_at_its_first_frame",
+        )],
+    ),
+    (
+        Fault::CrossingWindowOutlivesTimeout,
+        &[(
+            TABLE,
+            "a_redial_answered_a_handshake_timeout_after_the_move_is_swapped_in_at_its_first_frame",
+        )],
+    ),
+    (
+        Fault::AdoptedRedialCountsOwn,
+        &[
+            (
+                TABLE,
+                "crossed_redials_where_the_larger_adopts_its_leg_before_its_msg2_end_on_one_dial",
+            ),
+            (
+                TABLE,
+                "a_redial_answered_after_the_smaller_moved_where_the_larger_adopts_its_leg_before_its_msg2_ends_on_one_dial",
+            ),
+        ],
+    ),
+    (
+        Fault::LateLegUncrossed,
+        &[
+            (
+                TABLE,
+                "a_redial_answered_after_the_smaller_node_moved_onto_its_dial_leaves_the_pair_on_one_dial",
+            ),
+            (
+                TABLE,
+                "a_redial_answered_inside_the_crossing_window_is_retired_at_its_first_frame",
+            ),
+        ],
+    ),
     // In the joint world only against the model of the deployed release:
     // a joint node of this tree moves onto its own second dial at its msg2,
     // so its first frame under the redial's session reaches the responder

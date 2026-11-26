@@ -303,6 +303,33 @@ faults! {
     /// ephemeral, and hears it at the proving frame's own entry, a later
     /// one under decrypt workers.
     RedialSwapHeard,
+    /// The settlement core swaps in a redial leg that crossed this node's
+    /// own dial the peering was moved onto, a leg pending at the move or
+    /// answered after it inside the crossing window, at the leg's first
+    /// frame, even where this node's dial wins the dial tie-break, so each
+    /// end of crossed redials ends on the other's dial session and the pair
+    /// is split until both drop it.
+    CrossedLegSwaps,
+    /// The settlement core records a crossing only for a redial leg
+    /// already pending when this node moved the peering onto its own dial,
+    /// so a leg of the peer's crossed dial answered after the move is
+    /// swapped in at its first frame by the smaller node too, and the pair
+    /// splits across the two dials.
+    LateLegUncrossed,
+    /// The settlement core's window after a move onto this node's own dial,
+    /// in which a redial leg of the peer counts as crossing the dial, does
+    /// not end at the peer's next frame, so a later redial of a peer that
+    /// took the dial is given up.
+    CrossingWindowOutlivesFrame,
+    /// The settlement core's window after a move onto this node's own dial,
+    /// in which a redial leg of the peer counts as crossing the dial, does
+    /// not end a handshake timeout after the move, so a later redial of a
+    /// peer whose crossing leg is long gone is given up.
+    CrossingWindowOutlivesTimeout,
+    /// The settlement core's adoption of a redial's session on the held
+    /// link still counts the session as this node's own dial, so a later
+    /// dial of this node moves the peer off the peer's dial it adopted.
+    AdoptedRedialCountsOwn,
     /// The settlement core's removal of an orphaned or disconnected peer
     /// closes every pair of its link no other link uses, a setup pair the
     /// bundle released to keep included, and leaves the pair a

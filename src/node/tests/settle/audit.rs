@@ -399,7 +399,11 @@ fn right_link(nodes: &[TestNode], i: usize, breaches: &mut Vec<Breach>) {
 /// at its own pair or at a path its peer's bundle holds. The first two are
 /// the node's `link-named` and `dial-link` clauses; the index checks are
 /// stricter than the node's live ones on purpose, since a quiet node's
-/// index has no handshake in flight to shadow an entry.
+/// index has no handshake in flight to shadow an entry. The one shadow
+/// allowed is a pending redial leg of a held peer set up at the held
+/// link's own pair: the leg's newer link names the pair until it is swapped
+/// in or reaped, and a msg1 from the pair is still judged on the held link,
+/// by the path the held link holds there, not by the index.
 fn maps_agree(nodes: &[TestNode], i: usize, breaches: &mut Vec<Breach>) {
     let node = &nodes[i].node;
     for link in settle::link_named(node) {
@@ -441,7 +445,13 @@ fn maps_agree(nodes: &[TestNode], i: usize, breaches: &mut Vec<Breach>) {
             .no(link)
             .and_then(|no| node.core.links().get(no))
             .is_some_and(|r| r.released);
-        if node.links.index().get(&key) != Some(link) && !released {
+        let named = node.links.index().get(&key);
+        let shadowed = named.is_some_and(|leg| {
+            node.peers.iter().any(|(peer, p)| {
+                p.link_id() == *link && node.redials.of(peer).is_some_and(|r| r.link == *leg)
+            })
+        });
+        if named != Some(link) && !released && !shadowed {
             breaches.push(Breach::MapsAgree {
                 node: i,
                 link: *link,
@@ -671,6 +681,62 @@ async fn the_audit_flags_a_link_map_entry_no_peer_or_leg_uses() {
 #[tokio::test]
 async fn the_audit_flags_a_link_map_entry_no_peer_or_leg_uses_with_multipath_on() {
     stale_flagged(true).await;
+}
+
+/// A held link whose pair the index names for a newer link that is not a
+/// pending redial leg of the held peer, the shape of a link that took the
+/// pair's entry from the link a peer is held on, is flagged: the shadow
+/// `maps_agree` allows is a pending redial leg's alone.
+async fn shadow_flagged(on: bool) {
+    let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    pump(&mut nodes).await;
+    let peer = *nodes[1].node.node_addr();
+    let held = nodes[0]
+        .node
+        .get_peer(&peer)
+        .map(|p| p.link_id())
+        .expect("precondition: node 0 holds node 1");
+    assert!(
+        nodes[0].node.redials.of(&peer).is_none(),
+        "precondition: node 0 has no pending redial of node 1"
+    );
+    let newer = nodes[0].node.allocate_link_id();
+    let remote = nodes[1].addr.clone();
+    let tid = nodes[0].transport_id;
+    nodes[0].node.links.raw().insert(
+        newer,
+        Link::connectionless(
+            newer,
+            tid,
+            remote.clone(),
+            LinkDirection::Inbound,
+            Duration::from_millis(100),
+        ),
+    );
+    nodes[0].node.links.plant_entry((tid, remote), newer);
+    let breaches = audit(&mut nodes).await;
+    assert!(
+        breaches.iter().any(|b| matches!(
+            b,
+            Breach::MapsAgree { node: 0, link, what } if *link == held && what.starts_with("a live link with no index entry")
+        )),
+        "defect: the held link whose pair the index gives to another link is not flagged: {breaches:#?}"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// [`shadow_flagged`] with multipath off.
+#[tokio::test]
+async fn the_audit_flags_a_held_link_whose_pair_the_index_gives_to_a_link_that_is_no_redial_leg() {
+    shadow_flagged(false).await;
+}
+
+/// [`shadow_flagged`] with multipath on.
+#[tokio::test]
+async fn the_audit_flags_a_held_link_whose_pair_the_index_gives_to_a_link_that_is_no_redial_leg_with_multipath_on()
+ {
+    shadow_flagged(true).await;
 }
 
 /// An index-map entry for an index no link machine binds panics inside the

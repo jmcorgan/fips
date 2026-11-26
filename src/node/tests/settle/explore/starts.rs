@@ -401,23 +401,22 @@ pub(super) fn starts() -> Vec<Start> {
         // Eleven paths: at step 3 node 0 holds two msg2s, its rekey's answer
         // and node 1's answer to its transport 1 dial, which node 1 answers
         // as a redial of the peering it holds, so a swap applies there too.
-        // Three known defects of the node break it, each pinned where the
-        // explorer finds it (`PINS`, `../rekey_cross.rs`): in the smaller
-        // order, on every path, node 0's pending redial leg takes its held
-        // link's index entry (`MapsAgree`); in the larger order, on every
-        // path, the crossed redials split the pair until link-dead (`Split`,
-        // `Settled`, `Quiet`); and in the larger order with node 0's dial
-        // msg1 lost at step 1, the resent msg1 is answered as a rekey the
-        // peer cannot adopt (`Unadoptable`).
+        // In the larger order the crossed redials are settled by the dial
+        // tie-break at each leg's first frame: node 0, the smaller, retires
+        // node 1's leg and stays on its own dial, and node 1 swaps onto that
+        // dial. One known defect of the node is left, pinned where the
+        // explorer finds it (`PINS`, `../rekey_cross.rs`): in the larger
+        // order, on every path, node 0 holds a responder pending of node 1's
+        // rekey that node 1 never adopts (`Unadoptable`), which refuses node
+        // 1's next rekey for up to the pending's 120 s hold; with node 0's
+        // dial msg1 lost at step 1, the resent msg1 is answered as a rekey
+        // into such a pending. In the smaller order node 0's pending redial
+        // leg at its held link's pair names that pair in the index until it
+        // is reaped; the audit allows that, since a msg1 from the pair is
+        // still judged on the held link.
         Start {
             transports: 2,
-            pinned: &[
-                (Order::Smaller, None, Clause::MapsAgree),
-                (Order::Larger, None, Clause::Split),
-                (Order::Larger, None, Clause::Settled),
-                (Order::Larger, None, Clause::Quiet),
-                (Order::Larger, Some((1, Vary::Drop)), Clause::Unadoptable),
-            ],
+            pinned: &[(Order::Larger, None, Clause::Unadoptable)],
             ..s(
                 9,
                 "crossing during a rekey",
@@ -574,35 +573,13 @@ pub(super) const PINS: &[(&str, bool, Reach)] = &[
     // Added with their scripted node tests, which reproduce each defect on
     // real nodes outside the explorer's world.
     (
-        "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session",
-        false,
-        Reach::Start {
-            name: REKEY_CROSS,
-            order: Order::Smaller,
-            path: None,
-            clause: Clause::MapsAgree,
-            node: None,
-        },
-    ),
-    (
-        "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_with_multipath_on",
-        true,
-        Reach::Start {
-            name: REKEY_CROSS,
-            order: Order::Smaller,
-            path: None,
-            clause: Clause::MapsAgree,
-            node: None,
-        },
-    ),
-    (
         "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first",
         false,
         Reach::Start {
             name: REKEY_CROSS,
             order: Order::Larger,
             path: None,
-            clause: Clause::Split,
+            clause: Clause::Unadoptable,
             node: None,
         },
     ),
@@ -613,7 +590,7 @@ pub(super) const PINS: &[(&str, bool, Reach)] = &[
             name: REKEY_CROSS,
             order: Order::Larger,
             path: None,
-            clause: Clause::Split,
+            clause: Clause::Unadoptable,
             node: None,
         },
     ),

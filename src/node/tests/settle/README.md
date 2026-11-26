@@ -169,12 +169,19 @@ files run off, which is what they test.
   packets sent, the peer changes and their causes, and each node's peer,
   pending rekey session and live links with their index entries at each
   checkpoint; each test judges the pair at the explorer's leaf, at 31 s
-  and at 60 s, and asserts it coherent at all three. Every test here is a
-  known defect, ignored and run by the known-defect lane: a pending redial
-  leg taking the held link's index entry (smaller order), the crossed
-  redials splitting the pair until link-dead (larger order), and a resent
-  dial msg1 answered as a rekey the peer cannot adopt (larger order, the
-  msg1 lost). The explorer's start 9 pins each where it finds it.
+  and at 60 s, and asserts it coherent at all three. The smaller order
+  passes. The larger-order tests are known defects, ignored and run by the
+  known-defect lane: the smaller node is left holding a responder pending
+  of the larger's rekey that the larger never adopts, and with the dial
+  msg1 lost a resent dial msg1 is answered as a rekey into such a pending.
+  The explorer's start 9 pins it where it finds it. Beside them, tests
+  that pass: the larger order judged for a split alone (the crossed
+  redials are settled by the dial tie-break at each leg's first frame); a
+  rekey msg1 at the pair the smaller order's pending redial leg shares
+  with the held link, judged on the held link; and the other arrival order
+  of crossed dials, the larger dialing from a second address of its own,
+  whose dial msg1 the smaller node answers after it has moved onto its own
+  dial, ending on the smaller node's dial.
 - `restart.rs`: a restarted node that reads a late rekey msg1 of its
   peer's previous run, past the unheard floor, after the peer has moved
   onto its new run: a split accepted as behaviour in every placement of the

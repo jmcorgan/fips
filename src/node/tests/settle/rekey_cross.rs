@@ -26,15 +26,28 @@
 //! change of a node's peer with the packet or tick that made it, and at each
 //! checkpoint each node's peer, pending rekey session and live links.
 //!
-//! Each test here fails today and is ignored as a known defect
-//! (`testing/ignored-tests.txt`), which `testing/known-defect-lane.sh` runs
-//! and expects to fail: in the smaller order a pending redial leg takes the
-//! held link's index entry until it is reaped; in the larger order the
-//! crossed redials split the pair until both drop the peer; and in the
-//! larger order with the dial's msg1 lost, the resent msg1 is answered as a
-//! rekey the peer cannot adopt. The explorer's start 9 pins each where it
-//! finds it (`explore/starts.rs`).
+//! In the smaller order the pair is coherent at every checkpoint. The
+//! smaller node's pending redial leg at its held link's pair names that
+//! pair in the index until the leg is reaped, which the audit allows,
+//! since a msg1 from the pair is still judged on the held link (the
+//! `..._answered_on_the_held_link` tests show that).
+//!
+//! In the larger order the crossed redials are settled by the dial
+//! tie-break at each leg's first frame, and the `..._without_a_split_...`
+//! tests show the pair is not split. The smaller node is still left
+//! holding a responder pending of the larger's rekey that the larger never
+//! adopts, so the larger-order tests that judge the whole pair fail today
+//! and are ignored as known defects (`testing/ignored-tests.txt`), which
+//! `testing/known-defect-lane.sh` runs and expects to fail; with the dial's
+//! msg1 lost, the resent msg1 is answered as a rekey into such a pending.
+//! The explorer's start 9 pins it where it finds it (`explore/starts.rs`).
+//!
+//! The last tests script the other arrival order of crossed dials on
+//! transport 1: the larger node dials from a second address of its own, so
+//! the smaller reads that dial's msg1 at a pair off its own dial, after it
+//! has moved onto its own dial.
 
+use super::super::roam_redial::since;
 use super::super::spanning_tree::{LOOPBACK_REGISTRY, TestNode, cleanup_nodes};
 use super::super::*;
 use super::audit::audit;
@@ -107,6 +120,9 @@ struct Rig {
     name: String,
     /// Where the run is: the build, the script, or a second of the leaf.
     at: String,
+    /// Each node whose established frames `flow` keeps held, until a
+    /// `heal` hands them over.
+    hold: [bool; 2],
 }
 
 impl Rig {
@@ -136,6 +152,7 @@ impl Rig {
             held: vec![VecDeque::new(), VecDeque::new()],
             name,
             at: "build".to_string(),
+            hold: [false; 2],
         }
     }
 
@@ -254,7 +271,7 @@ impl Rig {
                     if kind_of(&p).is_some() {
                         blocked.push(source);
                         kept.push_back(p);
-                    } else if blocked.contains(&source) {
+                    } else if blocked.contains(&source) || self.hold[i] {
                         kept.push_back(p);
                     } else {
                         free.push(p);
@@ -640,14 +657,10 @@ fn redial(node: &Node, peer: &NodeAddr) -> Option<(LinkId, SessionIndex)> {
     node.redials.of(peer).map(|r| (r.link, r.index))
 }
 
-/// Run start 9 in `order` with multipath set as `on`, losing `a`'s dial
-/// msg1 to `b` when `lose`, and judge it where `judge` says. Returns what
-/// the judgement found.
-async fn run(order: Order, on: bool, lose: bool, judge: Judge) -> Vec<String> {
-    let name = format!(
-        "{order:?}, multipath {on}{}, judged at {judge:?}",
-        if lose { ", dial msg1 lost" } else { "" }
-    );
+/// Build start 9 in `order` with multipath set as `on` and run its
+/// script, losing `a`'s dial msg1 to `b` when `lose`, on a rig named
+/// `name`. Returns the rig and the nodes `a` and `b`.
+async fn scripted(order: Order, on: bool, lose: bool, name: String) -> (Rig, usize, usize) {
     let mut rig = Rig::new(on, name).await;
     let (a, b) = match order {
         Order::Smaller => (0, 1),
@@ -697,6 +710,18 @@ async fn run(order: Order, on: bool, lose: bool, judge: Judge) -> Vec<String> {
     rig.note("step 3: a reads its first msg2");
     rig.deliver(a, Kind::Msg2, 0).await;
     rig.snapshot("script done");
+    (rig, a, b)
+}
+
+/// Run start 9 in `order` with multipath set as `on`, losing `a`'s dial
+/// msg1 to `b` when `lose`, and judge it where `judge` says. Returns what
+/// the judgement found.
+async fn run(order: Order, on: bool, lose: bool, judge: Judge) -> Vec<String> {
+    let name = format!(
+        "{order:?}, multipath {on}{}, judged at {judge:?}",
+        if lose { ", dial msg1 lost" } else { "" }
+    );
+    let (mut rig, a, b) = scripted(order, on, lose, name).await;
     // The leaf: the explorer's heal, then on to the end.
     let dialers = [(a, b, 0), (b, a, 1)];
     let mut agreed: Option<u64> = None;
@@ -776,33 +801,31 @@ async fn three(order: Order, on: bool, lose: bool) {
     );
 }
 
-/// The smaller node rekeys and dials first. Fails today at the explorer's
-/// leaf: the smaller node moves onto its own dial on the second transport
-/// while it holds a pending redial leg on an inbound link at the same pair,
-/// and the leg's newer link takes the pair's index entry, so the held link
-/// has none until the leg is gone (`MapsAgree` at node 0).
+/// The smaller node rekeys and dials first. The smaller node moves onto
+/// its own dial on the second transport while it holds a pending redial
+/// leg on an inbound link at the same pair, whose newer link names the
+/// pair in the index until the leg is gone; a msg1 from the pair is still
+/// judged on the held link, so the audit allows it.
 #[tokio::test]
-#[ignore = "known defect: a pending redial leg at the held link's own pair takes its index entry, so the held link has none until the leg is reaped"]
 async fn a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session() {
     three(Order::Smaller, false, false).await;
 }
 
 /// [`a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: a pending redial leg at the held link's own pair takes its index entry, so the held link has none until the leg is reaped"]
 async fn a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_with_multipath_on() {
     three(Order::Smaller, true, false).await;
 }
 
-/// The larger node rekeys and dials first. Fails today at the explorer's
-/// leaf and at 31 s: each node answers the other's dial on the second
-/// transport as a redial, moves onto its own dial at the msg2 the peer's leg
-/// sent, then promotes its own leg at the peer's first frame, so each ends
-/// on the other's dial session, heartbeats fail both ways, and both drop
-/// the peer at 30 s before the redials settle the pair (`Split`, `Settled`
-/// and `Quiet`).
+/// The larger node rekeys and dials first. Each node answers the other's
+/// dial on the second transport as a redial and moves onto its own dial at
+/// its msg2; at each leg's first frame the dial tie-break decides, so the
+/// smaller node retires the larger's leg and the larger swaps onto the
+/// smaller's dial. Fails today at the explorer's leaf, at 31 s and at 60 s:
+/// the smaller node holds a responder pending of the larger's rekey that
+/// the larger never adopts (`Unadoptable` at node 0).
 #[tokio::test]
-#[ignore = "known defect: crossed dials on a second transport during a rekey each end on the other's dial session, split until both drop the peer about 30 s later"]
+#[ignore = "known defect: crossed dials on a second transport during a rekey leave the smaller node holding a responder pending of the larger's rekey that the larger never adopts"]
 async fn a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first() {
     three(Order::Larger, false, false).await;
 }
@@ -810,7 +833,7 @@ async fn a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larg
 /// [`a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first`] with
 /// multipath on.
 #[tokio::test]
-#[ignore = "known defect: crossed dials on a second transport during a rekey each end on the other's dial session, split until both drop the peer about 30 s later"]
+#[ignore = "known defect: crossed dials on a second transport during a rekey leave the smaller node holding a responder pending of the larger's rekey that the larger never adopts"]
 async fn a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first_with_multipath_on()
  {
     three(Order::Larger, true, false).await;
@@ -836,4 +859,289 @@ async fn a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadopt
 async fn a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first_with_multipath_on()
  {
     three(Order::Larger, true, true).await;
+}
+
+/// What a judgement in `found` shows of a split: a `Split`, or the two
+/// findings a split leaves, the heal ending with the pair off one session
+/// (`Quiet`) and the pair not settled (`Settled`).
+fn split_of(found: &[String]) -> Vec<&String> {
+    found
+        .iter()
+        .filter(|f| {
+            ["Split", "Quiet", "Settled"]
+                .iter()
+                .any(|k| f.starts_with(k))
+        })
+        .collect()
+}
+
+/// Run start 9 in `order` at `on` as [`three`] does, judged at the
+/// explorer's leaf, at 31 s and at 60 s, and assert, marked `defect:`,
+/// that no judgement shows the pair split ([`split_of`]).
+async fn unsplit(order: Order, on: bool) {
+    let leaf = run(order, on, false, Judge::Leaf).await;
+    let past = run(order, on, false, Judge::At(DIAL_SECS)).await;
+    let end = run(order, on, false, Judge::At(LEAF_END)).await;
+    println!(
+        "SUMMARY {order:?} multipath {on}: at the explorer's leaf {leaf:?}; at +31s {past:?}; at +60s {end:?}"
+    );
+    let (leaf, past, end) = (split_of(&leaf), split_of(&past), split_of(&end));
+    assert!(
+        leaf.is_empty() && past.is_empty() && end.is_empty(),
+        "defect: a rekey crossed by dials on a second transport leaves the pair split ({order:?}, multipath {on}): at the explorer's leaf {leaf:#?}; at +31 s {past:#?}; at +60 s {end:#?}"
+    );
+}
+
+/// The larger node rekeys and dials first: each node answers the other's
+/// dial on the second transport as a redial, then moves onto its own dial
+/// at its msg2, and at each leg's first frame the dial tie-break decides
+/// again, so the smaller node retires the larger's leg and the larger
+/// swaps onto the smaller's dial. The pair is not split at any checkpoint.
+/// The other half of [`a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first`],
+/// the responder pending the smaller node is left holding, is not judged
+/// here.
+#[tokio::test]
+async fn a_rekey_crossed_by_dials_on_a_second_transport_ends_without_a_split_larger_first() {
+    unsplit(Order::Larger, false).await;
+}
+
+/// [`a_rekey_crossed_by_dials_on_a_second_transport_ends_without_a_split_larger_first`] with
+/// multipath on.
+#[tokio::test]
+async fn a_rekey_crossed_by_dials_on_a_second_transport_ends_without_a_split_larger_first_with_multipath_on()
+ {
+    unsplit(Order::Larger, true).await;
+}
+
+/// The pair `node`'s link `id` is set up at, if `node` has the link.
+fn pair_of(node: &Node, id: LinkId) -> Option<(TransportId, TransportAddr)> {
+    node.links
+        .iter()
+        .find(|(l, _)| **l == id)
+        .map(|(_, link)| (link.transport_id(), link.remote_addr().clone()))
+}
+
+/// The smaller order's window, at the explorer's leaf at +1 s: node 0
+/// holds node 1 on its own dial on the second transport, beside a pending
+/// redial leg at the same pair. Node 1 starts a rekey, and its msg1
+/// reaches node 0 at that pair. Asserts, marked `defect:`, that node 0
+/// judges it on the held link and answers it as a rekey, a responder
+/// pending for node 1, leaving the redial leg as it was.
+async fn rekey_in_window(on: bool) {
+    let name = format!("Smaller, multipath {on}, node 1's rekey in the window");
+    let (mut rig, _, _) = scripted(Order::Smaller, on, false, name).await;
+    rig.at = "+0s".to_string();
+    assert!(
+        rig.heal().await,
+        "precondition: the script's heal goes quiet"
+    );
+    rig.advance().await;
+    rig.at = "+1s".to_string();
+    assert!(
+        rig.heal().await,
+        "precondition: the window's heal goes quiet"
+    );
+    rig.snapshot("the window");
+    let one = *rig.nodes[1].node.node_addr();
+    let node = &rig.nodes[0].node;
+    let (Some((leg, _)), Some(held)) =
+        (redial(node, &one), node.get_peer(&one).map(|p| p.link_id()))
+    else {
+        panic!("precondition: node 0 holds node 1 beside a pending redial leg");
+    };
+    let shared = pair_of(node, held);
+    assert!(
+        shared.is_some() && shared == pair_of(node, leg),
+        "precondition: the leg is at the held link's pair"
+    );
+    rig.rekey(1).await;
+    let i = rig
+        .find(0, Kind::Msg1, 0)
+        .expect("precondition: node 1's rekey msg1 is held for node 0");
+    let source = (
+        rig.held[0][i].transport_id,
+        rig.held[0][i].remote_addr.clone(),
+    );
+    assert_eq!(
+        Some(source),
+        shared,
+        "precondition: node 1's rekey msg1 comes from the shared pair"
+    );
+    let was = rig.nodes[0].node.stats().handshake.snapshot();
+    assert!(rig.deliver(0, Kind::Msg1, 0).await);
+    rig.snapshot("node 1's rekey msg1 handed to node 0");
+    let node = &rig.nodes[0].node;
+    let d = since(&node.stats().handshake.snapshot(), &was);
+    let pending = node.get_peer(&one).and_then(|p| p.pending_role());
+    let after = redial(node, &one).map(|(l, _)| l);
+    rig.note(format!(
+        "node 0's handshake counters moved by {d:?}; pending {pending:?}"
+    ));
+    cleanup_nodes(&mut rig.nodes).await;
+    // Off the held link, the msg1 is a redial, held back by the pending
+    // leg's slot, or refused as off the link; on it, the rekey machine
+    // answers it, or refuses it for its own rekey in flight.
+    let off = d.redial_held + d.redial_seen + d.redial_dampened + d.redials + d.off_link;
+    let rekeyed = pending == Some(fips_core::proto::rekey::Role::Responder)
+        || d.rekey_tiebreak + d.rekey_pending > 0;
+    assert!(
+        off == 0 && rekeyed,
+        "defect: node 1's rekey msg1 at the pair a pending redial leg shares with the held link was not judged on the held link (multipath {on}): counters moved by {d:?}, pending {pending:?}"
+    );
+    assert_eq!(after, Some(leg), "the redial leg is left as it was");
+}
+
+/// [`rekey_in_window`] with multipath off.
+#[tokio::test]
+async fn a_rekey_msg1_at_the_pair_a_redial_leg_shares_with_the_held_link_is_answered_on_the_held_link()
+ {
+    rekey_in_window(false).await;
+}
+
+/// [`rekey_in_window`] with multipath on.
+#[tokio::test]
+async fn a_rekey_msg1_at_the_pair_a_redial_leg_shares_with_the_held_link_is_answered_on_the_held_link_with_multipath_on()
+ {
+    rekey_in_window(true).await;
+}
+
+/// The larger node, node 1, dials the smaller on transport 1 from an
+/// address of its own beside its transport-1 address, as a peer with a
+/// second source address does, so the smaller reads the larger's dial msg1
+/// at a pair off the smaller's own transport-1 dial. Returns the dial's
+/// link at node 1.
+async fn dial_from_second_address(rig: &mut Rig) -> LinkId {
+    let tid = TransportId::new(3);
+    let addr = alias(&rig.ends[1][0].1, tid);
+    let lo = LoopbackTransport::with_mtu(tid, addr.clone(), 1280, LOOPBACK_REGISTRY.clone());
+    rig.nodes[1]
+        .node
+        .transports
+        .insert(tid, TransportHandle::Loopback(lo));
+    let id = PeerIdentity::from_pubkey_full(rig.nodes[0].node.identity().pubkey_full());
+    let to = rig.ends[0][1].1.clone();
+    rig.note("node 1 dials node 0 on t1 from its second address");
+    let was = dials(&rig.nodes[1].node);
+    rig.nodes[1]
+        .node
+        .initiate_connection(tid, to, id)
+        .await
+        .expect("precondition: the dial starts");
+    rig.flow().await;
+    dials(&rig.nodes[1].node)
+        .into_iter()
+        .find(|l| !was.contains(l))
+        .expect("precondition: node 1's second dial is pending")
+}
+
+/// The other arrival order of crossed dials, on real nodes, with
+/// multipath set as `on`. The larger node dialed the pair on transport 0.
+/// Both dial again on transport 1, the larger from a second address. The
+/// larger answers the smaller's dial as a redial; the smaller reads its
+/// msg2 and moves onto its own dial; only then does it read the larger's
+/// dial msg1, from the second address, off that dial, and answer it as a
+/// redial; then the larger reads its msg2 and moves onto its own dial.
+/// The smaller's frames are held from the larger until that move. Then
+/// everything is handed over, and the pair is judged at each of the next
+/// five seconds, from the first tick on: it must hold one session, the
+/// smaller node's dial. Asserts, marked `defect:`, that the pair is not split.
+async fn answered_after_the_move(on: bool) {
+    let name = format!("redial answered after the move, multipath {on}");
+    let mut rig = Rig::new(on, name).await;
+    let small = *rig.nodes[0].node.node_addr();
+    let large = *rig.nodes[1].node.node_addr();
+    rig.dial(1, 0, 0).await;
+    assert!(
+        rig.deliver(0, Kind::Msg1, 0).await,
+        "precondition: node 0 reads node 1's dial"
+    );
+    assert!(
+        rig.deliver(1, Kind::Msg2, 0).await,
+        "precondition: node 1 reads the answer"
+    );
+    assert!(
+        rig.heal().await,
+        "precondition: the settled pair goes quiet"
+    );
+    assert!(rig.agree(), "precondition: the pair settled on transport 0");
+    rig.dial(0, 1, 1).await;
+    let s_dial = dials(&rig.nodes[0].node)
+        .into_iter()
+        .next()
+        .expect("precondition: node 0's dial is pending");
+    let l_dial = dial_from_second_address(&mut rig).await;
+    rig.snapshot("built");
+    rig.at = "script".to_string();
+    rig.note("step 0: node 1 reads node 0's dial msg1");
+    assert!(rig.deliver(1, Kind::Msg1, 0).await, "precondition: step 0");
+    assert!(
+        redial(&rig.nodes[1].node, &small).is_some(),
+        "precondition: node 1 answered node 0's dial as a redial"
+    );
+    rig.hold[1] = true;
+    rig.note("step 1: node 0 reads its msg2");
+    assert!(rig.deliver(0, Kind::Msg2, 0).await, "precondition: step 1");
+    assert_eq!(
+        rig.nodes[0].node.get_peer(&large).map(|p| p.link_id()),
+        Some(s_dial),
+        "precondition: node 0 moved onto its own dial"
+    );
+    rig.note("step 2: node 0 reads node 1's dial msg1, from the second address");
+    assert!(rig.deliver(0, Kind::Msg1, 0).await, "precondition: step 2");
+    let Some((s_leg, _)) = redial(&rig.nodes[0].node, &large) else {
+        panic!("precondition: node 0 answered node 1's dial as a redial after its move");
+    };
+    assert_ne!(
+        pair_of(&rig.nodes[0].node, s_leg),
+        pair_of(&rig.nodes[0].node, s_dial),
+        "precondition: the redial is off node 0's moved-onto dial"
+    );
+    rig.note("step 3: node 1 reads its msg2");
+    assert!(rig.deliver(1, Kind::Msg2, 0).await, "precondition: step 3");
+    assert_eq!(
+        rig.nodes[1].node.get_peer(&small).map(|p| p.link_id()),
+        Some(l_dial),
+        "precondition: node 1 moved onto its own dial"
+    );
+    rig.hold[1] = false;
+    rig.snapshot("script done");
+    // The larger swaps onto the smaller's dial at the first frame its
+    // leg reads, which the smaller sends at its first tick: judged from
+    // the first second on.
+    assert!(
+        rig.heal().await,
+        "precondition: the script's heal goes quiet"
+    );
+    let mut found = Vec::new();
+    for second in 1..=5 {
+        rig.advance().await;
+        rig.at = format!("+{second}s");
+        assert!(rig.heal().await, "precondition: the heal goes quiet");
+        let on_small = rig.nodes[0].node.get_peer(&large).map(|p| p.link_id()) == Some(s_dial);
+        if !(rig.agree() && on_small) {
+            found.push(format!(
+                "+{second}s: {}",
+                rig.views().map(|v| show_view(&v)).join(" / ")
+            ));
+        }
+    }
+    rig.snapshot("judged");
+    cleanup_nodes(&mut rig.nodes).await;
+    assert!(
+        found.is_empty(),
+        "defect: crossed dials whose redial was answered after the smaller node's move leave the pair split (multipath {on}): {found:#?}"
+    );
+}
+
+/// [`answered_after_the_move`] with multipath off.
+#[tokio::test]
+async fn crossed_dials_answered_after_the_smaller_nodes_move_end_on_the_smaller_nodes_dial() {
+    answered_after_the_move(false).await;
+}
+
+/// [`answered_after_the_move`] with multipath on.
+#[tokio::test]
+async fn crossed_dials_answered_after_the_smaller_nodes_move_end_on_the_smaller_nodes_dial_with_multipath_on()
+ {
+    answered_after_the_move(true).await;
 }
