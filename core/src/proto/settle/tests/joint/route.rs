@@ -427,6 +427,7 @@ fn rekeyed(o: Output<Ik>, ctx: &mut Ctx<'_>, r: &mut Routed) {
             | Abandon::RevertUnconfirmed
             | Abandon::Reverted
             | Abandon::Superseded
+            | Abandon::Displaced
             | Abandon::Closed(_) => {}
         },
         Output::PeerRestarted { .. }

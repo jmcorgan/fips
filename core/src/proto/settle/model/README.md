@@ -76,6 +76,13 @@ follows a named rule (`judge::LocalRule`). Each says what it decides:
   peering not heard from is never redialed and keeps rules 3.3 and 4.1.
   A redial's msg1 joins the record when it is answered, not when it is
   refused, and a redial no frame proves is dropped at its timeout.
+- `FreshDisplaces` (the operator's decision, 2026-11-25): a fresh
+  eligible msg1 on the link, which no record holds, while this node holds
+  a responder pending the peer has not adopted, is answered as the peer's
+  rekey (rule 4.5), and its pending displaces the one held, whose msg1
+  stays in the record. Rule 4.2 discards any msg1 but the arming one's
+  resend while a pending is held; it still does so for copies, and for
+  every msg1 under this node's own completed rekey.
 
 ## Where the peer is
 

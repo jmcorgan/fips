@@ -1,9 +1,10 @@
 //! Scripted schedules of the settlement core in the world, on joint nodes
-//! with multipath off: the two late-dial cases, one an accepted behaviour
-//! tested as such and one a known defect left pinned, each beside a
-//! control; and one schedule per earlier settlement defect the core can
-//! see, each reaching the state the defect broke and asserting it holds
-//! (the defect's shape is a switch that turns the schedule red).
+//! with multipath off: the late second dial answered in the other order and
+//! the dial on the peer's aged link, each tested as the accepted behaviour
+//! it is and each beside a control; and one schedule per earlier
+//! settlement defect the core can see, each reaching the state the defect
+//! broke and asserting it holds (the defect's shape is a switch that turns
+//! the schedule red).
 //!
 //! - A late second dial answered in the other order: the dialer reads its
 //!   second dial's msg2 first and then moves onto the first, which the
@@ -16,13 +17,13 @@
 //! - A dial on the peer's aged link: the larger node dials again while the
 //!   smaller node holds it on a link old enough to rekey, so the smaller
 //!   node takes the dial for a rekey and arms a pending, which the larger
-//!   node never adopts, keeping its inbound session by the tie-break; the
-//!   smaller node then leaves the larger node's own rekey unanswered while
-//!   the pending is held. The two ends keep one session and no timer ends
-//!   anything: the smaller node refuses the larger node's rekeys until its
-//!   own rekey clears the pending. A known defect, left for a later fix, so
-//!   its pin fails at its defect. Its control dials on a link too young to
-//!   rekey, and the larger node's later rekey is answered.
+//!   node never adopts, keeping its inbound session by the tie-break. The
+//!   two ends keep one session and no timer ends anything. The pending
+//!   blocks nothing: the larger node's own rekey, a fresh msg1, is answered
+//!   and displaces it, which its test asserts (`UnadoptedRefuses`, the
+//!   pending refusing the rekey as before, turns it red). Its control dials
+//!   on a link too young to rekey, and the larger node's later rekey is
+//!   answered.
 
 use alloc::vec::Vec;
 
@@ -186,6 +187,44 @@ pub(super) fn aged_rekey_answered(frame_first: bool) -> bool {
     aged_answered(off, frame_first)
 }
 
+/// Whether node 0, after node 1's dial on the aged link and node 1's frames
+/// sent once it read the dial's answer, no longer holds the responder
+/// pending the dial left: node 1 moved onto its dial and node 0 adopted the
+/// pending at the frame. Joint nodes at multipath off at both ends, for the
+/// candidate rules, which a joint node runs as the test chooses.
+#[cfg(feature = "slow-tests")]
+pub(super) fn aged_pending_adopted() -> bool {
+    let mut w = built(off, 7, "aged link");
+    run(&mut w, &[Do::Get(0, Want::Msg1, Some(1))]);
+    let held = |w: &World| {
+        w.parties[0]
+            .view()
+            .peers
+            .first()
+            .is_some_and(|p| p.pending.is_some_and(|(_, mine)| !mine))
+    };
+    assert!(
+        held(&w),
+        "precondition: node 0 took the dial on the aged link for a rekey and holds its pending"
+    );
+    run(&mut w, &[Do::Get(1, Want::Msg2, Some(0))]);
+    let frames: Vec<u64> = w
+        .net
+        .flight
+        .iter()
+        .filter(|f| f.to == 0 && matches!(f.pkt, Pkt::Frame { .. }))
+        .map(|f| f.id)
+        .collect();
+    assert!(
+        !frames.is_empty(),
+        "precondition: node 1 sent a frame once it read the answer"
+    );
+    for id in frames {
+        run(&mut w, &[Do::Then(Act::Deliver(id))]);
+    }
+    !held(&w)
+}
+
 /// Whether node 0 answers node 1's rekey after node 1's dial on the aged
 /// link, with nodes made by `mk`; `frame_first` as above.
 fn aged_answered(mk: Maker, frame_first: bool) -> bool {
@@ -253,7 +292,6 @@ fn rekey_answered_after(w: &mut World, aged: bool, frame_first: bool) -> bool {
 }
 
 #[test]
-#[ignore = "known defect: the smaller node takes the larger node's dial on its aged link for a rekey and holds a pending the larger node never adopts, so it leaves the larger node's own rekey unanswered"]
 fn after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey() {
     let t = std::time::Instant::now();
     let answered = aged_answered(off, false);

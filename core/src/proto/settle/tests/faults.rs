@@ -115,10 +115,11 @@ const YOUNG_LINK: Test = (
     REGRESS,
     "after_a_dial_on_the_peers_young_link_the_peer_answers_the_larger_nodes_rekey",
 );
-/// The aged-link defect of the model of `master`.
+/// The stray pending a dial on the aged link leaves in the model of
+/// `master`, which the peer's next rekey displaces.
 const AGED: Test = (
     FINDINGS,
-    "against_a_model_of_master_a_dial_on_the_peers_aged_link_leaves_a_pending_the_peer_cannot_adopt",
+    "against_a_model_of_master_a_dial_on_the_peers_aged_link_leaves_a_pending_the_peers_rekey_displaces",
 );
 
 /// The right-link property on a crossing both ends settled on the larger
@@ -183,10 +184,10 @@ const JOINT_ORPHANED: Test = (
     "the_only_paths_transport_removed_orphans_the_peer_and_a_redial_settles",
 );
 
-/// The two pinned defects shown by joint nodes.
+/// Start 6's split and start 7's stray pending, shown by joint nodes.
 const JOINT_DEFECTS: Test = (
     JOINT_PARTY,
-    "starts_6_and_7_show_their_two_defects_on_real_machines",
+    "start_6_shows_its_split_and_start_7_a_stray_pending_its_rekey_displaces_on_real_machines",
 );
 
 /// The shared schedules on the model of the node, against the trace.
@@ -1332,7 +1333,7 @@ pub const ROWS: &[Row] = &[
             ),
             (
                 SHAPES,
-                "the_two_defects_left_for_later_show_their_shapes_in_the_current_and_deployed_node",
+                "the_late_second_dial_and_the_dial_on_the_aged_link_show_their_shapes_in_the_current_and_deployed_node",
             ),
         ],
     ),
@@ -1437,7 +1438,7 @@ pub const ROWS: &[Row] = &[
         Fault::AgedTieBreak,
         &[(
             CANDIDATES,
-            "the_aged_move_candidate_answers_the_rekey_after_a_dial_on_the_aged_link_once_its_frame_arrives_first",
+            "the_aged_move_candidate_has_the_pending_a_dial_on_the_aged_link_leaves_adopted_and_every_rule_answers_the_rekey",
         )],
     ),
     (
@@ -1887,7 +1888,7 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     ),
     (
         "after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey",
-        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
+        "its guard sits in the rekey machine, where no settlement switch reaches: `UnadoptedRefuses`, the pending the dial left refusing the peer's rekey as before, turns it red, and the mutation lane runs it so (testing/mutations/manifest.txt)",
     ),
     (
         "a_proven_path_whose_connection_failed_is_not_counted_in_use_without_a_connection",

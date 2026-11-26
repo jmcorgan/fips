@@ -126,7 +126,7 @@ helper that seeds a handshake machine by hand.
 - `oracle.rs`: what is checked at each leaf (`judge`), and the explorer's
   tests over the starts: every path of every start keeps its properties,
   per medium (loopback, TCP, mixed, BLE) and setting; each pinned defect
-  the map gives a start is found there (start 9's). And the crossing
+  the map gives a start is found there (none today). And the crossing
   with a decrypt-worker pool (`pooled`): every path heals to one session
   per pair with every node's current session held by its workers, the
   session a crossing moves its peer onto among them; and the same on each
@@ -303,19 +303,21 @@ accepted behaviour with no pin, and the node tests in `../crossing.rs` named
 `..._with_its_msg2_first_..._after_link_dead_and_a_redial_...` assert it
 and its end at link-dead and a redial.
 
-Start 9 carries one known defect of the node, reproduced by scripted node
-tests in `../rekey_cross.rs` that are ignored as known defects and mapped
-in `PINS`: in the larger order, on every path, node 0 holds a responder
-pending of node 1's rekey that node 1 never adopts (`Unadoptable`), and on
-the path that drops step 1's msg1, node 0's dial msg1, the resent msg1 is
-answered as a rekey into such a pending. The crossed redials of the larger
-order no longer split the pair: the dial tie-break decides at each leg's
-first frame, and the start's larger order checks `Split`, `Settled` and
-`Quiet` on every path. In the smaller order node 0's pending redial leg
-names its held link's pair in the index until it is reaped, which the
-audit allows (`MapsAgree` is checked there too). The pin is in the larger
-order only, and the finder walks the scripted path for two of its tests and
-the drop at step 1 for the other two.
+Start 9 pins one accepted behaviour of the node, which the scripted node
+tests in `../rekey_cross.rs` show: in the larger order, on every path, node
+0 holds a responder pending of node 1's rekey that node 1 never adopts
+(`Unadoptable`), and on the path that drops step 1's msg1, node 0's dial
+msg1, the resent msg1 is answered as a rekey into such a pending. It blocks
+nothing: node 1's next fresh rekey displaces it, and with no rekey its 120
+s hold retires it. The pin stays in start 9 alone, and the oracle's
+`Unadoptable` clause is unchanged, so such a pending in any other start is
+still reported. The crossed redials of the larger order no longer split the
+pair: the dial tie-break decides at each leg's first frame, and the start's
+larger order checks `Split`, `Settled` and `Quiet` on every path. In the
+smaller order node 0's pending redial leg names its held link's pair in the
+index until it is reaped, which the audit allows (`MapsAgree` is checked
+there too). No known defect of the node is mapped to a start in `PINS`
+today, so the finder walks nothing until one is.
 
 Nothing here holds the node against the settlement core's reference model
 (`fips-core`, `proto::settle::model`): the test that held each peer change

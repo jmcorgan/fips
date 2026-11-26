@@ -374,8 +374,9 @@ pub fn heal(w: &mut World) {
 }
 
 /// The exemption of the model's convergence with itself: a breach of
-/// convergence that a known shape other than the two defects left for
-/// later left ([`left`]). Nothing else is exempt.
+/// convergence that a known shape other than the two pinned shapes, the
+/// late second dial and the dial on the aged link ([`Shape::pinned`]),
+/// left ([`left`]). Nothing else is exempt.
 pub fn by_shape(w: &World, b: &Breach) -> bool {
     left(w, b, |s| !s.pinned())
 }
@@ -683,8 +684,8 @@ mod checks {
     }
 
     /// The breaches of convergence a healed `w` shows, each with whether
-    /// the shape exemption spares it; where no shape seen is a defect left
-    /// for later, the runs against the deployed models spare the same.
+    /// the shape exemption spares it; where no shape seen is a pinned one,
+    /// the runs against the deployed models spare the same.
     fn spared(w: &World) -> Vec<(Breach, bool)> {
         healed(w)
             .into_iter()
@@ -811,7 +812,7 @@ mod checks {
             let all = spared(w);
             assert!(
                 !all.is_empty() && all.iter().all(|(_, s)| !s),
-                "the dial's is a defect left for later: {all:?}"
+                "the dial's shape is pinned, so no exemption spares it: {all:?}"
             );
         }
     }

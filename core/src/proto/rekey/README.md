@@ -229,7 +229,9 @@ at `next_wake` produces.
   the shell records its ephemeral with `note_redial` once it arms the
   redial, and a copy off the link is still refused. A resend of the
   msg1 that armed the held pending draws its msg2 again, on the route
-  the first answer took; any other msg1 meets
+  the first answer took; a fresh msg1 under a responder pending is
+  answered into a new pending that displaces it (`Abandon::Displaced`),
+  the old pending's msg1 recorded; any other msg1 meets
   a pending in either role and is refused; a copy is refused while idle
   or attempting; a fresh msg1 is answered into a pending when idle, and
   while attempting the tie-break keeps the smaller node's attempt (the

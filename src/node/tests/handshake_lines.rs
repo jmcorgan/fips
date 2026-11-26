@@ -12,8 +12,8 @@ use super::establish_chartests::{
 };
 use super::heartbeat::set_link_dead_timeout;
 use super::link_setup_diag::{
-    EPOCH, Established, arm_pending, arm_pending_with_peer, drain, established, expect_line, field,
-    hear_now, packet, sender_frame, stop_transport,
+    EPOCH, Established, arm_pending, arm_pending_with_peer, copy_of, drain, established,
+    expect_line, field, hear_now, packet, sender_frame, stop_transport,
 };
 use super::*;
 use crate::testutil::{LogCapture, capture_logs_scoped};
@@ -191,11 +191,18 @@ async fn repeated_msg1s_from_a_peer_heard_within_the_interval_log_three_lines_th
     stop_transport(&mut e.node, TransportId::new(1)).await;
 }
 
+/// Copies of the msg1 `x` under `count` other headers, with sender indices
+/// from `first`: each is refused while the pending `x` armed is held (a
+/// fresh msg1 would displace it).
+fn copies(x: &[u8], first: u32, count: u32) -> Vec<Vec<u8>> {
+    (first..first + count).map(|i| copy_of(x, i)).collect()
+}
+
 /// `e` with a pending armed and five more rekey msg1s refused against it,
 /// the first of which is returned.
 async fn five_refused_while_pending(e: &mut Established) -> Vec<u8> {
-    arm_pending(e, 0x0D01).await;
-    let msg1s = fresh_msg1s(e, 0x0D10, 5);
+    let x = arm_pending(e, 0x0D01).await;
+    let msg1s = copies(&x, 0x0D10, 5);
     let first = msg1s[0].clone();
     deliver_logged(&mut e.node, TransportId::new(1), &e.addr, msg1s).await;
     first
@@ -204,8 +211,8 @@ async fn five_refused_while_pending(e: &mut Established) -> Vec<u8> {
 #[tokio::test]
 async fn a_rekey_cutover_restarts_the_count_and_reports_the_previous_sessions_suppressed_lines() {
     let mut e = established(31).await;
-    let (mut session, index) = arm_pending_with_peer(&mut e, 0x0D01).await;
-    let msg1s = fresh_msg1s(&e, 0x0D10, 5);
+    let (mut session, index, x) = arm_pending_with_peer(&mut e, 0x0D01).await;
+    let msg1s = copies(&x, 0x0D10, 5);
     let logs = deliver_logged(&mut e.node, TransportId::new(1), &e.addr, msg1s).await;
     assert_eq!(logs.lines_with(PENDING).len(), 3, "{:#?}", logs.lines());
     assert_eq!(logs.lines_with(NOTICE).len(), 1, "{:#?}", logs.lines());
@@ -217,9 +224,9 @@ async fn a_rekey_cutover_restarts_the_count_and_reports_the_previous_sessions_su
     let peer = e.node.get_peer_mut(&e.peer).unwrap();
     assert_eq!(peer.our_index(), Some(index), "the pending was adopted");
     peer.test_backdate_session_established(Duration::from_secs(31));
-    arm_pending(&mut e, 0x0D20).await;
+    let x = arm_pending(&mut e, 0x0D20).await;
 
-    let msg1s = fresh_msg1s(&e, 0x0D30, 1);
+    let msg1s = copies(&x, 0x0D30, 1);
     let logs = deliver_logged(&mut e.node, TransportId::new(1), &e.addr, msg1s).await;
     let lines = logs.lines();
     let summary = lines

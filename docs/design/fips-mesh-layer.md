@@ -479,9 +479,16 @@ responder follows on the first frame that authenticates against its new
 session, which the frame's receiver index names, and sends one heartbeat
 back under it. A responder drops a pending session the initiator never
 adopts after a hold (the drain ceiling, 120 s at stock settings), so the
-next rekey can proceed. A new pair of session indices is allocated as part
-of the new session, replacing the old indices on subsequent frames (see
-[Index Properties](#index-properties)).
+next rekey can proceed. A fresh rekey msg1 from the peer that arrives
+while such a pending is held does not wait for the hold: it is answered,
+and its pending replaces the old one, whose msg1 is recorded so that a
+copy of it is refused. So a pending armed by a msg1 the peer never meant
+as a rekey, such as its dial sent on this node's aged link, never holds
+up the peer's next rekey. A copy of a msg1 already seen is still refused
+while a pending is held, and so is every msg1 while this node's own
+completed rekey waits to cut over. A new pair of session indices is
+allocated as part of the new session, replacing the old indices on
+subsequent frames (see [Index Properties](#index-properties)).
 
 Cutover is also visible in-band in the **K-bit** of the FMP flags byte,
 which each session fixes when it is created. The initiator's new session

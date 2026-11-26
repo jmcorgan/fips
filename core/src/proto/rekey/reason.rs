@@ -31,7 +31,8 @@ pub enum Reason {
     /// An eligible msg1 arrived off the established link while the link
     /// was reachable.
     OffLink,
-    /// A msg1 met a pending epoch in either role.
+    /// A msg1 met a pending epoch: under a responder pending, a msg1 that
+    /// is not fresh; under this node's own completed attempt, any msg1.
     PendingHeld,
     /// A fresh msg1 lost the crossing to this node's unanswered attempt.
     DualInitWon,
@@ -167,6 +168,9 @@ pub enum Abandon {
     Reverted,
     /// A responder pending was replaced by a newer completion of the peer.
     Superseded,
+    /// A responder pending the peer never adopted was given up for the
+    /// peer's next fresh rekey msg1, which was answered in its place.
+    Displaced,
     /// The machine was closed.
     Closed(Close),
 }

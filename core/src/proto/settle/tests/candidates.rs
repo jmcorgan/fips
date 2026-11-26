@@ -1,5 +1,9 @@
-//! Candidate rules for the two settlement cases left for later, run in the
-//! world on the scripted pins of those cases.
+//! Candidate rules for two settlement cases, the late second dial and the
+//! dial on the peer's aged link, run in the world on the scripted pins of
+//! those cases. The rekey machine now answers the rekey after a dial on
+//! the aged link under the core's own rules, since the peer's fresh rekey
+//! displaces the pending the dial left; the aged move is kept as a
+//! candidate, and its test shows what it still changes.
 //!
 //! The candidates are built into the core behind a test-only choice
 //! (`Candidate` in `faults.rs`), each changing one decision:
@@ -34,7 +38,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::super::faults::{Candidate, under_candidate};
-use super::regress::{aged_rekey_answered, late_dial_splits};
+use super::regress::{aged_pending_adopted, aged_rekey_answered, late_dial_splits};
 
 /// The splits after each late second dial pin's schedule, with the core
 /// at both ends running `c`.
@@ -68,25 +72,37 @@ fn both_late_dial_candidates_settle_a_late_second_dial_answered_in_the_other_ord
 }
 
 #[test]
-fn the_aged_move_candidate_answers_the_rekey_after_a_dial_on_the_aged_link_once_its_frame_arrives_first()
+fn the_aged_move_candidate_has_the_pending_a_dial_on_the_aged_link_leaves_adopted_and_every_rule_answers_the_rekey()
  {
-    let answered = |c, frame_first| under_candidate(c, || aged_rekey_answered(frame_first));
+    let adopted = |c| under_candidate(c, aged_pending_adopted);
     assert!(
-        !answered(None, true) && !answered(None, false),
-        "precondition: under the core's own rules the rekey is left unanswered in either order"
+        !adopted(None),
+        "precondition: under the core's own rules node 1 keeps its session, so node 0's pending is not adopted"
     );
     assert!(
-        answered(Some(Candidate::AgedMove), true),
-        "under the aged move the rekey is answered once the moved session's frame arrived"
-    );
-    assert!(
-        !answered(Some(Candidate::AgedMove), false),
-        "under the aged move a rekey that overtakes that frame is still refused"
+        adopted(Some(Candidate::AgedMove)),
+        "under the aged move node 1 moves onto its dial and node 0 adopts the pending at its frame"
     );
     for c in [Candidate::DialerSettle, Candidate::ResponderHold] {
         assert!(
-            !answered(Some(c), true),
+            !adopted(Some(c)),
             "{c:?} leaves the dial on the aged link as it was"
         );
+    }
+    // Node 1's next rekey displaces a pending left unadopted, so it is
+    // answered under every rule, whether or not the frame arrived first.
+    let answered = |c, frame_first| under_candidate(c, || aged_rekey_answered(frame_first));
+    for c in [
+        None,
+        Some(Candidate::AgedMove),
+        Some(Candidate::DialerSettle),
+        Some(Candidate::ResponderHold),
+    ] {
+        for frame_first in [true, false] {
+            assert!(
+                answered(c, frame_first),
+                "{c:?}, frame first {frame_first}: node 1's rekey was left unanswered"
+            );
+        }
     }
 }

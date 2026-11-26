@@ -104,8 +104,11 @@ files run off, which is what they test.
   pin a second dial ends after a crossing; a TCP crossing whose one msg1
   arrives inside the other's connect window, which reaches the larger node
   off its link as a redial and settles both ends on the smaller node's dial
-  at its first frame; a larger node's dial on a quiet peer's aged link (two known
-  defects); a crossed msg1 the smaller node reads after installing from its
+  at its first frame; a larger node's dial on a quiet peer's aged link, which
+  leaves the peer holding a responder pending the larger node cannot adopt
+  and that blocks nothing (the larger node's next rekey is answered,
+  displaces it and cuts over to one session; with no rekey its hold retires
+  it); a crossed msg1 the smaller node reads after installing from its
   own dial and hearing nothing for longer than the heard floor, from another
   transport (one session) and on the same one (a split accepted as
   behaviour, ended by link-dead and the smaller node's redial), with a
@@ -169,19 +172,22 @@ files run off, which is what they test.
   packets sent, the peer changes and their causes, and each node's peer,
   pending rekey session and live links with their index entries at each
   checkpoint; each test judges the pair at the explorer's leaf, at 31 s
-  and at 60 s, and asserts it coherent at all three. The smaller order
-  passes. The larger-order tests are known defects, ignored and run by the
-  known-defect lane: the smaller node is left holding a responder pending
-  of the larger's rekey that the larger never adopts, and with the dial
-  msg1 lost a resent dial msg1 is answered as a rekey into such a pending.
-  The explorer's start 9 pins it where it finds it. Beside them, tests
-  that pass: the larger order judged for a split alone (the crossed
-  redials are settled by the dial tie-break at each leg's first frame); a
-  rekey msg1 at the pair the smaller order's pending redial leg shares
-  with the held link, judged on the held link; and the other arrival order
-  of crossed dials, the larger dialing from a second address of its own,
-  whose dial msg1 the smaller node answers after it has moved onto its own
-  dial, ending on the smaller node's dial.
+  and at 60 s, and asserts it coherent at all three. In the larger order
+  the smaller node is left holding a responder pending of the larger's
+  rekey that the larger never adopts, and with the dial msg1 lost a resent
+  dial msg1 is answered as a rekey into such a pending: accepted
+  behaviour, since it blocks nothing. The larger-order tests leave it out
+  of the judgement and probe at each checkpoint that the larger node's
+  next rekey is answered; with the dial msg1 lost, they show the pending,
+  then that the larger node's next rekey displaces it, with the control
+  that its hold retires it by 125 s. The explorer's start 9 pins it where
+  it finds it. Beside them: the larger order judged for a split alone (the
+  crossed redials are settled by the dial tie-break at each leg's first
+  frame); a rekey msg1 at the pair the smaller order's pending redial leg
+  shares with the held link, judged on the held link; and the other
+  arrival order of crossed dials, the larger dialing from a second address
+  of its own, whose dial msg1 the smaller node answers after it has moved
+  onto its own dial, ending on the smaller node's dial.
 - `restart.rs`: a restarted node that reads a late rekey msg1 of its
   peer's previous run, past the unheard floor, after the peer has moved
   onto its new run: a split accepted as behaviour in every placement of the

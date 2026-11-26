@@ -1702,11 +1702,12 @@ async fn forged_rekey_msg2_does_not_split_the_link() {
 /// node 1's msg2 never arrives, so node 0 never shows it holds the new keys,
 /// and node 1's own rekey tick must not cut over to them. node 0 walks its
 /// whole msg1 resend ladder, each resend's msg2 lost too, and re-fires after
-/// the abandon; node 1 answers each resend with the msg2 it already sent and
-/// refuses the re-fired msg1 while it holds the pending. Data must flow both
-/// ways on the original sessions throughout. The assertion that tells the outcomes
-/// apart is node 1 to node 0: a node 1 that cut over would seal to the rekey
-/// index node 0 abandoned.
+/// the abandon; node 1 answers each resend with the msg2 it already sent,
+/// and answers the re-fired msg1 in place of the pending it never saw
+/// adopted. Data must flow both ways throughout, and the link ends on one
+/// session. The assertion that tells the outcomes apart is node 1 to node
+/// 0: a node 1 that cut over would seal to the rekey index node 0
+/// abandoned.
 ///
 /// What this does not model: the tick loop and the link-dead reap are not
 /// driven, only the rekey tick and the resend function, each called by hand.
@@ -1743,10 +1744,9 @@ async fn dropped_rekey_msg2_does_not_split_the_link() {
         node1_idx_before,
         "node 1 must not cut over to a session node 0 has not adopted"
     );
-    assert!(
-        node1_peer.pending_new_session().is_some(),
-        "node 1 must still hold the session it answered with"
-    );
+    let first_pending = node1_peer
+        .pending_our_index()
+        .expect("node 1 must still hold the session it answered with");
     let node1_rejects_before = nodes[1].node.stats().handshake.rekey_pending;
 
     assert_eq!(
@@ -1792,8 +1792,12 @@ async fn dropped_rekey_msg2_does_not_split_the_link() {
     pump_until_quiet(&mut nodes).await;
     assert_eq!(
         nodes[1].node.stats().handshake.rekey_pending - node1_rejects_before,
-        1,
-        "node 1 must refuse node 0's re-fired msg1 while it holds the pending"
+        0,
+        "node 1 must answer node 0's re-fired msg1 in place of the pending it held"
+    );
+    assert!(
+        !nodes[1].node.index_allocator.is_allocated(first_pending),
+        "node 1 must have freed the index of the pending node 0 never adopted"
     );
 
     let post_fwd = build_ipv6_packet(&fips0, &fips1, b"post-loss 0 to 1");
@@ -1809,10 +1813,11 @@ async fn dropped_rekey_msg2_does_not_split_the_link() {
         "node 0 to node 1 must decode after the lost msg2"
     );
 
-    // The discriminating assertion. node 1 still seals on its original session,
-    // to node 0's original index, which stays registered because node 0 never
-    // cut over. It decodes only because node 1 held back: had node 1 cut over
-    // on its own tick, it would seal to the rekey index node 0 abandoned.
+    // The discriminating assertion. node 1 seals on a session node 0 holds:
+    // its original one, or the re-fired rekey's once node 0's first frame
+    // under that has reached it. It decodes only because node 1 held back:
+    // had node 1 cut over on its own tick, it would seal to the rekey index
+    // node 0 abandoned.
     let handshake = &nodes[0].node.stats().handshake;
     let (bad_state, unknown) = (handshake.bad_state, handshake.unknown_connection);
     let got: Vec<Vec<u8>> = std::iter::from_fn(|| tun0_rx.try_recv().ok()).collect();
@@ -1899,10 +1904,11 @@ async fn a_lost_rekey_msg2_is_not_followed_by_a_cutover_or_the_startup_msg2() {
 /// A rekey responder whose msg2 was lost holds the pending session it
 /// answered with until the hold passes, then retires it: the pending slot and
 /// its role are emptied, its index is unregistered and freed, and the current
-/// session is untouched. The msg1 it refused while holding the pending stays
-/// refused; the initiator's next attempt is then answered and the rekey
-/// completes, with node 1 promoted by node 0's first new-epoch frame and data
-/// flowing both ways.
+/// session is untouched. The initiator, which gave its attempt up at its
+/// deadline, sends its next attempt only once the hold has passed (an
+/// earlier one would displace the pending); that attempt is answered and the
+/// rekey completes, with node 1 promoted by node 0's first new-epoch frame
+/// and data flowing both ways.
 #[tokio::test]
 async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
     use crate::node::handlers::rekey::link_params;
@@ -1935,21 +1941,18 @@ async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
         .expect("node 1 must still hold the session it answered with");
 
     // 2. node 0 walks its ladder to the abandon, losing node 1's answer to
-    // every resend, and re-fires; node 1 refuses the re-fired msg1 while it
-    // holds the pending.
+    // every resend, and gives the attempt up at its deadline.
     walk_ladder_losing_msg2s(&mut nodes).await;
     crate::time::advance(Duration::from_secs(15));
     nodes[0].node.poll_link_rekeys().await;
-    crate::time::advance(Duration::from_secs(16));
-    nodes[0].node.poll_link_rekeys().await;
     pump_until_quiet(&mut nodes).await;
     assert!(
-        nodes[0]
+        !nodes[0]
             .node
             .get_peer(&node1_addr)
             .unwrap()
             .rekey_in_progress(),
-        "node 0 must have re-fired its rekey after the abandon"
+        "node 0 must have abandoned its rekey at its deadline"
     );
     assert!(
         nodes[1]
@@ -1958,7 +1961,7 @@ async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
             .unwrap()
             .pending_new_session()
             .is_some(),
-        "node 1 must still hold its pending after refusing the re-fired msg1"
+        "node 1 must still hold its pending"
     );
 
     // 3. The hold passes.
@@ -1994,14 +1997,8 @@ async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
         "the retired pending index must be freed"
     );
 
-    // 5. node 1 recorded the re-fired msg1 it refused, so node 0's next
-    // resend of it is refused as answered before. The attempt ends at its
-    // deadline, and the next one, after the back-off, carries a fresh msg1
+    // 5. node 0's next attempt, after the back-off, carries a fresh msg1
     // that node 1 answers; node 0 reads the msg2.
-    let answered_before = nodes[1].node.stats().handshake.answered_before;
-    crate::time::advance(Duration::from_secs(1));
-    nodes[0].node.poll_link_rekeys().await;
-    pump_until_quiet(&mut nodes).await;
     let pending0 = |nodes: &[TestNode]| {
         nodes[0]
             .node
@@ -2010,10 +2007,6 @@ async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
             .pending_new_session()
             .is_some()
     };
-    assert!(
-        !pending0(&nodes) && nodes[1].node.stats().handshake.answered_before > answered_before,
-        "a resend of the msg1 node 1 refused must be refused again, as answered before"
-    );
     let mut completed = false;
     for _ in 0..60 {
         crate::time::advance(Duration::from_secs(1));

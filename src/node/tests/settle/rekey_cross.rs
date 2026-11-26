@@ -36,11 +36,15 @@
 //! tie-break at each leg's first frame, and the `..._without_a_split_...`
 //! tests show the pair is not split. The smaller node is still left
 //! holding a responder pending of the larger's rekey that the larger never
-//! adopts, so the larger-order tests that judge the whole pair fail today
-//! and are ignored as known defects (`testing/ignored-tests.txt`), which
-//! `testing/known-defect-lane.sh` runs and expects to fail; with the dial's
-//! msg1 lost, the resent msg1 is answered as a rekey into such a pending.
-//! The explorer's start 9 pins it where it finds it (`explore/starts.rs`).
+//! adopts; with the dial's msg1 lost, the resent msg1 is answered as a
+//! rekey into such a pending. That pending blocks nothing, since the
+//! larger node's next fresh rekey displaces it, so the larger-order tests
+//! that judge the whole pair leave it out and probe at each checkpoint that
+//! the larger node's next rekey is answered; the `..._blocks_nothing_...`
+//! tests show the pending and its displacement, and the
+//! `..._its_hold_retires_...` controls that with no rekey its hold retires
+//! it. The explorer's start 9 pins it where it finds it
+//! (`explore/starts.rs`).
 //!
 //! The last tests script the other arrival order of crossed dials on
 //! transport 1: the larger node dials from a second address of its own, so
@@ -57,6 +61,7 @@ use crate::proto::fmp::wire::{
 };
 use crate::transport::loopback::LoopbackTransport;
 use crate::transport::{TransportHandle, TransportId};
+use fips_core::proto::rekey::Role;
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -714,9 +719,10 @@ async fn scripted(order: Order, on: bool, lose: bool, name: String) -> (Rig, usi
 }
 
 /// Run start 9 in `order` with multipath set as `on`, losing `a`'s dial
-/// msg1 to `b` when `lose`, and judge it where `judge` says. Returns what
-/// the judgement found.
-async fn run(order: Order, on: bool, lose: bool, judge: Judge) -> Vec<String> {
+/// msg1 to `b` when `lose`, up to where `judge` says. Returns the rig there
+/// and whether the pair went quiet on one session (at the leaf, whether
+/// the heal ended healed).
+async fn reach(order: Order, on: bool, lose: bool, judge: Judge) -> (Rig, bool) {
     let name = format!(
         "{order:?}, multipath {on}{}, judged at {judge:?}",
         if lose { ", dial msg1 lost" } else { "" }
@@ -726,8 +732,11 @@ async fn run(order: Order, on: bool, lose: bool, judge: Judge) -> Vec<String> {
     let dialers = [(a, b, 0), (b, a, 1)];
     let mut agreed: Option<u64> = None;
     let mut leaf: Option<u64> = None;
-    let mut found = Vec::new();
-    for second in 0..=LEAF_END {
+    let end = match judge {
+        Judge::At(second) => second.max(LEAF_END),
+        Judge::Leaf => LEAF_END,
+    };
+    for second in 0..=end {
         rig.at = format!("+{second}s");
         let quiet = rig.heal().await;
         let all = rig.agree();
@@ -756,16 +765,14 @@ async fn run(order: Order, on: bool, lose: bool, judge: Judge) -> Vec<String> {
                 leaf = Some(second);
                 rig.snapshot(&format!("explorer's leaf at +{second}s (healed {healed})"));
                 if judge == Judge::Leaf {
-                    found = rig.judge("the explorer's leaf", healed).await;
-                    break;
+                    return (rig, healed);
                 }
             }
         }
-        if [LEAF_SECS, DIAL_SECS, LEAF_END].contains(&second) {
+        if [LEAF_SECS, DIAL_SECS, LEAF_END].contains(&second) || judge == Judge::At(second) {
             rig.snapshot(&format!("+{second}s"));
             if judge == Judge::At(second) {
-                found = rig.judge(&format!("+{second}s"), all).await;
-                break;
+                return (rig, all);
             }
         }
         // Redials: before the leaf, as the explorer's heal makes them, only
@@ -781,6 +788,23 @@ async fn run(order: Order, on: bool, lose: bool, judge: Judge) -> Vec<String> {
         }
         rig.advance().await;
     }
+    unreachable!("the loop returns at the point `judge` names");
+}
+
+/// Where a judgement is labelled in the record.
+fn label(judge: Judge) -> String {
+    match judge {
+        Judge::Leaf => "the explorer's leaf".to_string(),
+        Judge::At(second) => format!("+{second}s"),
+    }
+}
+
+/// Run start 9 in `order` with multipath set as `on`, losing `a`'s dial
+/// msg1 to `b` when `lose`, and judge it where `judge` says. Returns what
+/// the judgement found.
+async fn run(order: Order, on: bool, lose: bool, judge: Judge) -> Vec<String> {
+    let (mut rig, healed) = reach(order, on, lose, judge).await;
+    let found = rig.judge(&label(judge), healed).await;
     cleanup_nodes(&mut rig.nodes).await;
     found
 }
@@ -817,48 +841,149 @@ async fn a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_with
     three(Order::Smaller, true, false).await;
 }
 
+/// Whether `finding` is the smaller node's responder pending of the
+/// larger's rekey that the larger cannot adopt: accepted behaviour in the
+/// larger order, since the larger node's next fresh rekey displaces it.
+fn stray(finding: &str) -> bool {
+    finding.starts_with("Unadoptable { node: 0, peer: 1, role: Responder")
+}
+
+/// Node 1, the larger node, starts its next rekey, and its msg1 reaches
+/// node 0 and node 0's answer reaches node 1. Returns whether node 1 then
+/// holds a completed attempt, so node 0 answered it, and node 0's pending
+/// index before and after.
+async fn probe(rig: &mut Rig) -> (bool, Option<SessionIndex>, Option<SessionIndex>) {
+    let larger = *rig.nodes[1].node.node_addr();
+    let smaller = *rig.nodes[0].node.node_addr();
+    let pending = |rig: &Rig| {
+        rig.nodes[0]
+            .node
+            .get_peer(&larger)
+            .and_then(|p| p.pending_our_index())
+    };
+    let before = pending(rig);
+    rig.rekey(1).await;
+    rig.note("probe: node 0 reads node 1's rekey msg1");
+    rig.deliver(0, Kind::Msg1, 0).await;
+    rig.note("probe: node 1 reads node 0's answer");
+    rig.deliver(1, Kind::Msg2, 0).await;
+    let answered = rig.nodes[1]
+        .node
+        .get_peer(&smaller)
+        .is_some_and(|p| p.pending_role() == Some(Role::Initiator));
+    (answered, before, pending(rig))
+}
+
+/// Run start 9 in the larger order at `on` as [`three`] does, judged at the
+/// explorer's leaf, at 31 s and at 60 s, leaving out the smaller node's
+/// stray responder pending ([`stray`]). At each checkpoint, after the
+/// judgement, the larger node's next rekey is probed ([`probe`]). Asserts,
+/// marked `defect:`, that the pair is coherent at each and that each probe
+/// is answered.
+async fn three_blocking_nothing(on: bool) {
+    let mut seen = Vec::new();
+    for judge in [Judge::Leaf, Judge::At(DIAL_SECS), Judge::At(LEAF_END)] {
+        let (mut rig, healed) = reach(Order::Larger, on, false, judge).await;
+        let found: Vec<String> = rig
+            .judge(&label(judge), healed)
+            .await
+            .into_iter()
+            .filter(|f| !stray(f))
+            .collect();
+        let (answered, _, _) = probe(&mut rig).await;
+        cleanup_nodes(&mut rig.nodes).await;
+        seen.push((label(judge), found, answered));
+    }
+    println!("SUMMARY Larger multipath {on}: {seen:?}");
+    assert!(
+        seen.iter()
+            .all(|(_, found, answered)| found.is_empty() && *answered),
+        "defect: a rekey crossed by dials on a second transport is not one coherent session whose next rekey is answered at each checkpoint (Larger, multipath {on}): {seen:#?}"
+    );
+}
+
 /// The larger node rekeys and dials first. Each node answers the other's
 /// dial on the second transport as a redial and moves onto its own dial at
 /// its msg2; at each leg's first frame the dial tie-break decides, so the
 /// smaller node retires the larger's leg and the larger swaps onto the
-/// smaller's dial. Fails today at the explorer's leaf, at 31 s and at 60 s:
-/// the smaller node holds a responder pending of the larger's rekey that
-/// the larger never adopts (`Unadoptable` at node 0).
+/// smaller's dial. The smaller node is left holding a responder pending of
+/// the larger's rekey that the larger never adopts; it blocks nothing, so
+/// it is left out of the judgement, and at each checkpoint the larger
+/// node's next rekey is answered.
 #[tokio::test]
-#[ignore = "known defect: crossed dials on a second transport during a rekey leave the smaller node holding a responder pending of the larger's rekey that the larger never adopts"]
 async fn a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first() {
-    three(Order::Larger, false, false).await;
+    three_blocking_nothing(false).await;
 }
 
 /// [`a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first`] with
 /// multipath on.
 #[tokio::test]
-#[ignore = "known defect: crossed dials on a second transport during a rekey leave the smaller node holding a responder pending of the larger's rekey that the larger never adopts"]
 async fn a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first_with_multipath_on()
  {
-    three(Order::Larger, true, false).await;
+    three_blocking_nothing(true).await;
 }
 
 /// The larger node rekeys and dials first, and its dial's msg1 on the
-/// second transport is lost. Fails today at the explorer's leaf, at 31 s
-/// and at 60 s: once the larger node has promoted its redial leg and no
-/// longer holds its own dial, the smaller node reads that dial's resent
-/// msg1 at its held link's pair and answers it as a rekey, into a pending
-/// responder session the larger node cannot adopt (`Unadoptable` at node 0).
-#[tokio::test]
-#[ignore = "known defect: after a redial swap during a rekey, a resent dial msg1 is answered as a rekey into a pending the peer cannot adopt"]
-async fn a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first()
-{
-    three(Order::Larger, false, true).await;
+/// second transport is lost. Once the larger node has promoted its redial
+/// leg and no longer holds its own dial, the smaller node reads that dial's
+/// resent msg1 at its held link's pair and answers it as a rekey, into a
+/// responder pending the larger node cannot adopt: at the explorer's leaf
+/// the smaller node holds it (shown first, as a precondition). It blocks
+/// nothing: asserts, marked `defect:`, that the larger node's next fresh
+/// rekey is answered and displaces it.
+async fn lost_blocks_nothing(on: bool) {
+    let (mut rig, healed) = reach(Order::Larger, on, true, Judge::Leaf).await;
+    let found = rig.judge("the explorer's leaf", healed).await;
+    assert!(
+        found.iter().any(|f| stray(f)),
+        "precondition: the smaller node holds a stray responder pending: {found:#?}"
+    );
+    let (answered, before, after) = probe(&mut rig).await;
+    cleanup_nodes(&mut rig.nodes).await;
+    assert!(
+        answered && before.is_some() && after.is_some() && after != before,
+        "defect: the stray pending blocked the larger node's next rekey (multipath {on}): answered {answered}, node 0's pending before {before:?}, after {after:?}"
+    );
 }
 
-/// [`a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first`]
+#[tokio::test]
+async fn a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_a_pending_that_blocks_nothing_larger_first()
+ {
+    lost_blocks_nothing(false).await;
+}
+
+/// [`a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_a_pending_that_blocks_nothing_larger_first`]
 /// with multipath on.
 #[tokio::test]
-#[ignore = "known defect: after a redial swap during a rekey, a resent dial msg1 is answered as a rekey into a pending the peer cannot adopt"]
-async fn a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first_with_multipath_on()
+async fn a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_a_pending_that_blocks_nothing_larger_first_with_multipath_on()
  {
-    three(Order::Larger, true, true).await;
+    lost_blocks_nothing(true).await;
+}
+
+/// The control of [`lost_blocks_nothing`]: with no rekey probed, the stray
+/// pending is retired by its 120 s hold. Judged at 125 s into the leaf,
+/// no pending is left that the other node cannot adopt.
+async fn lost_retired_by_hold(on: bool) {
+    let found = run(Order::Larger, on, true, Judge::At(125)).await;
+    let left: Vec<&String> = found
+        .iter()
+        .filter(|f| f.starts_with("Unadoptable"))
+        .collect();
+    assert!(left.is_empty(), "defect: (multipath {on}) {left:#?}");
+}
+
+#[tokio::test]
+async fn a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_a_pending_its_hold_retires_larger_first()
+ {
+    lost_retired_by_hold(false).await;
+}
+
+/// [`a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_a_pending_its_hold_retires_larger_first`]
+/// with multipath on.
+#[tokio::test]
+async fn a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_a_pending_its_hold_retires_larger_first_with_multipath_on()
+ {
+    lost_retired_by_hold(true).await;
 }
 
 /// What a judgement in `found` shows of a split: a `Split`, or the two
@@ -982,8 +1107,7 @@ async fn rekey_in_window(on: bool) {
     // leg's slot, or refused as off the link; on it, the rekey machine
     // answers it, or refuses it for its own rekey in flight.
     let off = d.redial_held + d.redial_seen + d.redial_dampened + d.redials + d.off_link;
-    let rekeyed = pending == Some(fips_core::proto::rekey::Role::Responder)
-        || d.rekey_tiebreak + d.rekey_pending > 0;
+    let rekeyed = pending == Some(Role::Responder) || d.rekey_tiebreak + d.rekey_pending > 0;
     assert!(
         off == 0 && rekeyed,
         "defect: node 1's rekey msg1 at the pair a pending redial leg shares with the held link was not judged on the held link (multipath {on}): counters moved by {d:?}, pending {pending:?}"

@@ -262,16 +262,18 @@ release build, nor the root crate's `test-hooks` build.
   crates' sources.
 - `faults.rs`: the test-only switches that turn each guard of the core
   and of its tests off (`FIPS_SETTLE_FAULTS`), read through the `fault!` macro in
-  `mod.rs`, and the choice of a candidate rule for the two settlement
-  cases left for later (`Candidate`; `FIPS_SETTLE_CANDIDATE` for a
-  process, or a test's choice for one thread's nodes).
+  `mod.rs`, and the choice of a candidate rule for the late second dial
+  and the dial on the peer's aged link (`Candidate`;
+  `FIPS_SETTLE_CANDIDATE` for a process, or a test's choice for one
+  thread's nodes).
 - `tests/`: the deterministic world, the model and the core as nodes of
   it, the named starts, the bounded search the replay and digest checks
   use, the settlement properties, the rekey machine's decisions, a model
-  of the current node, the late-dial cases (the accepted split's recovery
-  tested, the aged-link defect pinned), the scripted regressions, the
-  seeded long runs, the candidate rules' scripted tests, the meta-test of
-  the switches and the scans of this directory. See its README.
+  of the current node, the late second dial and the dial on the aged link
+  (the accepted split's recovery tested, the aged-link pending shown
+  displaced), the scripted regressions, the seeded long runs, the
+  candidate rules' scripted tests, the meta-test of the switches and the
+  scans of this directory. See its README.
 
 The core grows here beside the model, and its tests compare it with the
 model. No core file (anything here outside `model/` and `tests/`) refers

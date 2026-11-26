@@ -10,7 +10,7 @@
 //! [`Order::Larger`] runs it with nodes 0 and 1 exchanged, so the larger
 //! node does what the script gives node 0, as the core's `flipped` does.
 
-use super::explore::{Path, Vary};
+use super::explore::Path;
 use super::script::{Kind, Step};
 use super::world::Medium;
 #[cfg(unix)]
@@ -404,16 +404,17 @@ pub(super) fn starts() -> Vec<Start> {
         // In the larger order the crossed redials are settled by the dial
         // tie-break at each leg's first frame: node 0, the smaller, retires
         // node 1's leg and stays on its own dial, and node 1 swaps onto that
-        // dial. One known defect of the node is left, pinned where the
-        // explorer finds it (`PINS`, `../rekey_cross.rs`): in the larger
-        // order, on every path, node 0 holds a responder pending of node 1's
-        // rekey that node 1 never adopts (`Unadoptable`), which refuses node
-        // 1's next rekey for up to the pending's 120 s hold; with node 0's
-        // dial msg1 lost at step 1, the resent msg1 is answered as a rekey
-        // into such a pending. In the smaller order node 0's pending redial
-        // leg at its held link's pair names that pair in the index until it
-        // is reaped; the audit allows that, since a msg1 from the pair is
-        // still judged on the held link.
+        // dial. In the larger order, on every path, node 0 is left holding a
+        // responder pending of node 1's rekey that node 1 never adopts
+        // (`Unadoptable`); with node 0's dial msg1 lost at step 1, the
+        // resent msg1 is answered as a rekey into such a pending. That is
+        // accepted behaviour, pinned here so the oracle's clause still
+        // reports such a pending in any other start: the pending blocks
+        // nothing, since node 1's next fresh rekey displaces it, and with no
+        // rekey its 120 s hold retires it (`../rekey_cross.rs`). In the
+        // smaller order node 0's pending redial leg at its held link's pair
+        // names that pair in the index until it is reaped; the audit allows
+        // that, since a msg1 from the pair is still judged on the held link.
         Start {
             transports: 2,
             pinned: &[(Order::Larger, None, Clause::Unadoptable)],
@@ -522,7 +523,9 @@ pub(super) const NOT_RUN: &[(u8, &str)] = &[
 pub(super) enum Reach {
     /// On the path given of the start named (`None` for its scripted
     /// path), in the order given: the clause given breaks, at the node given
-    /// (in the world's indices) or at any node.
+    /// (in the world's indices) or at any node. No known defect is reached
+    /// by a start today; the map and its tests keep the form for the next.
+    #[allow(dead_code)]
     Start {
         name: &'static str,
         order: Order,
@@ -534,89 +537,15 @@ pub(super) enum Reach {
     None(&'static str),
 }
 
-/// The reason the aged-link pins reach no start.
-const AGED: &str = "the dial is to a second address of the peer on the link's own transport, after both ends aged past the rekey trigger with no rekey started; the world dials a second address only as a second transport, and ages a session only by starting a rekey (start 7 is not run)";
-
 /// Every `fips-mesh` known-defect line of `testing/ignored-tests.txt`, by
 /// the test's path and its multipath setting, and where the explorer finds
 /// its defect. The first entries were written before the explorer's first
 /// run, so a miss cannot be reclassified afterwards; later ones name where
 /// the explorer found the defect their test reproduces.
-pub(super) const PINS: &[(&str, bool, Reach)] = &[
-    (
-        "transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full",
-        false,
-        Reach::None(
-            "a defect of the Ethernet transport's blocking send, not of settlement: no start runs that transport",
-        ),
+pub(super) const PINS: &[(&str, bool, Reach)] = &[(
+    "transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full",
+    false,
+    Reach::None(
+        "a defect of the Ethernet transport's blocking send, not of settlement: no start runs that transport",
     ),
-    (
-        "node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered",
-        false,
-        Reach::None(AGED),
-    ),
-    (
-        "node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_with_multipath_on",
-        true,
-        Reach::None(AGED),
-    ),
-    (
-        "node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt",
-        false,
-        Reach::None(AGED),
-    ),
-    (
-        "node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt_with_multipath_on",
-        true,
-        Reach::None(AGED),
-    ),
-    // Added with their scripted node tests, which reproduce each defect on
-    // real nodes outside the explorer's world.
-    (
-        "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first",
-        false,
-        Reach::Start {
-            name: REKEY_CROSS,
-            order: Order::Larger,
-            path: None,
-            clause: Clause::Unadoptable,
-            node: None,
-        },
-    ),
-    (
-        "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first_with_multipath_on",
-        true,
-        Reach::Start {
-            name: REKEY_CROSS,
-            order: Order::Larger,
-            path: None,
-            clause: Clause::Unadoptable,
-            node: None,
-        },
-    ),
-    (
-        "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first",
-        false,
-        Reach::Start {
-            name: REKEY_CROSS,
-            order: Order::Larger,
-            path: Some((1, Vary::Drop)),
-            clause: Clause::Unadoptable,
-            node: None,
-        },
-    ),
-    (
-        "node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first_with_multipath_on",
-        true,
-        Reach::Start {
-            name: REKEY_CROSS,
-            order: Order::Larger,
-            path: Some((1, Vary::Drop)),
-            clause: Clause::Unadoptable,
-            node: None,
-        },
-    ),
-];
-
-/// Start 9's name, as the map names it.
-const REKEY_CROSS: &str = "crossing during a rekey";
+)];

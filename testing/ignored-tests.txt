@@ -18,7 +18,6 @@
 
 # fips-core
 benchmark     fips-core  proto::link::tests::bench_session_datagram_decode_owned_vs_ref  core/src/proto/tests/link.rs
-known-defect  fips-core  proto::settle::tests::regress::after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey  core/src/proto/settle/tests/regress.rs
 known-defect  fips-core  proto::settle::tests::joint::pins::a_proven_path_whose_connection_failed_is_not_counted_in_use_without_a_connection  core/src/proto/settle/tests/joint/pins.rs
 
 # fips-mesh
@@ -94,11 +93,3 @@ helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_its_def
 helper        fips-mesh  node::tests::settle::lane::a_planted_test_that_passes  src/node/tests/settle/lane.rs
 helper        fips-mesh  node::tests::settle::lane::a_planted_switch_reds_at_its_defect_assertion  src/node/tests/settle/lane.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first  src/node/tests/settle/rekey_cross.rs
-known-defect  fips-mesh  node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
-known-defect  fips-mesh  node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first  src/node/tests/settle/rekey_cross.rs
-known-defect  fips-mesh  node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs

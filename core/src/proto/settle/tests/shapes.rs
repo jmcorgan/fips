@@ -9,8 +9,9 @@
 //! rules and the current node differ. A further test shows that each
 //! start's own script shows only the shape that start carries by design,
 //! with the model and with joint nodes, so an exemption is spent on its
-//! shape alone, and another that the two defects left for later show their
-//! shapes in the models of the current and the deployed node.
+//! shape alone, and another that the two pinned shapes, the late second
+//! dial and the dial on the aged link, show in the models of the current
+//! and the deployed node.
 //!
 //! - [`Shape::StaleFrame`]: a counterexample to the operator's late-dial
 //!   rule, as the model encodes it. The responder replaces the first
@@ -28,8 +29,9 @@
 //!   the peer's late crossing dial.
 //! - [`Shape::LaterDialFirst`] and [`Shape::DialAsRekey`]: the late second
 //!   dial answered in the other order and the dial on the peer's aged
-//!   link, the two defects left for later, which no exemption spares
-//!   ([`Shape::pinned`]).
+//!   link, two accepted behaviours (a split the link-dead timer and the
+//!   redial end, and a pending the peer's next rekey displaces), which no
+//!   exemption spares ([`Shape::pinned`]).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -180,7 +182,8 @@ fn each_starts_own_script_shows_only_the_shape_it_carries() {
 }
 
 #[test]
-fn the_two_defects_left_for_later_show_their_shapes_in_the_current_and_deployed_node() {
+fn the_late_second_dial_and_the_dial_on_the_aged_link_show_their_shapes_in_the_current_and_deployed_node()
+ {
     // The late second dial (both dialer orders) and the dial on the aged
     // link, each on its start's own script with the model of `master` at
     // both ends; the late dial also with the model of `maint`, whose

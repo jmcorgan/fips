@@ -185,11 +185,11 @@ pub(super) async fn arm_pending(e: &mut Established, sender_index: u32) -> Vec<u
 /// from a handshake the test completes as the sender: the node's msg2 is
 /// read off the sender's socket and finishes it. Returns the sender's half
 /// of the pending session and the node's index for it, with which a frame
-/// the node adopts the pending on can be sealed.
+/// the node adopts the pending on can be sealed, and the msg1's wire bytes.
 pub(super) async fn arm_pending_with_peer(
     e: &mut Established,
     sender_index: u32,
-) -> (NoiseSession, SessionIndex) {
+) -> (NoiseSession, SessionIndex, Vec<u8>) {
     use crate::proto::fmp::wire::Msg2Header;
     let tid = TransportId::new(1);
     let me = PeerIdentity::from_pubkey_full(e.node.identity().pubkey_full());
@@ -199,7 +199,9 @@ pub(super) async fn arm_pending_with_peer(
         .expect("the sender's msg1");
     let x = build_msg1(SessionIndex::new(sender_index), &noise_msg1);
     drain(&e.sock).await;
-    e.node.handle_msg1(packet(tid, &e.addr, x, 2000)).await;
+    e.node
+        .handle_msg1(packet(tid, &e.addr, x.clone(), 2000))
+        .await;
     let mut buf = [0u8; 2048];
     let (n, _) = timeout(Duration::from_millis(500), e.sock.recv_from(&mut buf))
         .await
@@ -209,7 +211,19 @@ pub(super) async fn arm_pending_with_peer(
     conn.complete_handshake(&buf[header.noise_msg2_offset..n], LegStamp::at(2000))
         .expect("the node's msg2 completes the sender's handshake");
     let session = conn.take_session().expect("the sender's session");
-    (session, header.sender_idx)
+    (session, header.sender_idx, x)
+}
+
+/// A copy of the msg1 `x` under another header, carrying `sender_index`:
+/// the same handshake and ephemeral, other bytes. While the pending `x`
+/// armed is held it is refused as a copy, never answered.
+pub(super) fn copy_of(x: &[u8], sender_index: u32) -> Vec<u8> {
+    use crate::proto::fmp::wire::Msg1Header;
+    let header = Msg1Header::parse(x).expect("a msg1");
+    build_msg1(
+        SessionIndex::new(sender_index),
+        &x[header.noise_msg1_offset..],
+    )
 }
 
 /// Deliver to `e`'s node a heartbeat the sender seals under `session`, its
@@ -377,8 +391,9 @@ async fn a_failed_rekey_answer_logs_the_msg1_path() {
     assert_eq!(field(&line, "msg1_dg"), msg1_tag(&rekey), "{line}");
 }
 
-/// A second rekey msg1 refused while a pending is held names both msg1s and
-/// how long the pending has been held.
+/// A second rekey msg1 refused while a pending is held, here a copy of the
+/// arming msg1 under another header, names both msg1s and how long the
+/// pending has been held. (A fresh msg1 would displace the pending.)
 #[tokio::test]
 async fn a_second_rekey_msg1_while_a_pending_is_held_logs_the_held_digest() {
     let mut e = established(31).await;
@@ -388,7 +403,7 @@ async fn a_second_rekey_msg1_while_a_pending_is_held_logs_the_held_digest() {
         .get_peer_mut(&e.peer)
         .unwrap()
         .backdate_pending(Duration::from_secs(40));
-    let y = craft_msg1_wire(&e.node, &e.sender, EPOCH, SessionIndex::new(0x0D02), 3000);
+    let y = copy_of(&x, 0x0D02);
     let logs = msg1_logged(&mut e.node, packet(tid, &e.addr, y.clone(), 3000)).await;
 
     let line = expect_line(

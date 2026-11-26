@@ -3548,22 +3548,41 @@ fn an_on_link_replacement_in_a_rekeys_drain_is_held_by_the_heard_floor_off_with_
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// The steps of start 7's script up to its own rekey: node 1's dial on the
+/// aged link read by node 0, and node 0's answer read by node 1.
+const AGED_DIAL: &[super::super::starts::Do] = &[
+    super::super::starts::Do::Get(0, super::super::starts::Want::Msg1, Some(1)),
+    super::super::starts::Do::Get(1, super::super::starts::Want::Msg2, Some(0)),
+];
+
 #[test]
-fn starts_6_and_7_show_their_two_defects_on_real_machines() {
+fn start_6_shows_its_split_and_start_7_a_stray_pending_its_rekey_displaces_on_real_machines() {
     for mut st in starts().into_iter().filter(|s| matches!(s.number, 6 | 7)) {
         st.maker = super::off;
-        let found = scripted(&st);
         // Start 6's two ends hold each other on different sessions, so
         // each hears nothing the other sends, and one end's liveness timer
         // ends the split by removing its peer within the heal: the
         // accepted behaviour, whose recovery `../regress.rs` tests. Start
-        // 7's pending is the aged-link defect, left for a later fix.
+        // 7's dial on the aged link alone leaves node 0 a responder pending
+        // node 1 cannot adopt, accepted behaviour that blocks nothing: its
+        // whole script, where node 1's own rekey follows, shows nothing.
+        let found = if st.number == 6 {
+            scripted(&st)
+        } else {
+            let whole = scripted(&st);
+            assert!(
+                whole.is_empty(),
+                "{}: node 1's rekey displaced the stray pending: {whole:?}",
+                st.name
+            );
+            super::super::oracle::follow(&mut (st.build)(st.maker), AGED_DIAL)
+        };
         let clause = if st.number == 6 { "split:" } else { "pending:" };
         assert!(
             found
                 .iter()
                 .any(|b| b.oracle == Oracle::OneSession && b.what.starts_with(clause)),
-            "{} shows its defect at the {clause} clause: {found:?}",
+            "{} shows its finding at the {clause} clause: {found:?}",
             st.name
         );
         // The machines of the split pair have not converged either, which

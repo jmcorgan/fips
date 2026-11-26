@@ -185,6 +185,15 @@ pub enum LocalRule {
     /// peering not heard from keeps rules 3.3 and 4.1. FRC-1201 Section
     /// 5.7 discards (rule 4.1) or replaces (rule 3.3) such a msg1.
     DeferredRedial,
+    /// A fresh eligible msg1 on the link, which no record holds, while this
+    /// node holds a responder pending the peer has not adopted, is answered
+    /// as the peer's rekey (rule 4.5): the new pending displaces the old,
+    /// whose msg1 stays in the record (the operator's decision,
+    /// 2026-11-25). The peer that sends it has given up the cycle the
+    /// pending holds, or never started it. FRC-1201 Section 5.7 rule 4.2
+    /// discards any msg1 but the arming one's resend while a pending is
+    /// held; it still does so under this node's own completed rekey.
+    FreshDisplaces,
 }
 
 /// What one event did.
@@ -522,6 +531,12 @@ impl Judge {
         }
         if let Some(pd) = p.pending {
             let resend = !pd.initiator && pd.armed == Some(leg.bytes);
+            if !pd.initiator && !resend && !p.record.contains(&leg.hs) {
+                let mut step = self.arm(leg); // FreshDisplaces, for rule 4.2
+                step.class = Some(Class::Rekey);
+                step.rule = Some(LocalRule::FreshDisplaces);
+                return step;
+            }
             let answer = if resend { Reply::Stored } else { Reply::Silent };
             return reply(Some(Class::Pending), answer); // rule 4.2 (:1144)
         }

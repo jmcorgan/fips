@@ -22,9 +22,11 @@
 //!   window: no move runs, and both ends keep the handshake that completed
 //!   first.
 //! - A larger node's dial on a quiet peer's aged link, which the peer set
-//!   up: its next rekey is answered, and no pending is left that it cannot
-//!   adopt (known defects; the pair keeps one session, so no split forms for
-//!   link-dead to end).
+//!   up: the peer is left holding a responder pending the larger node
+//!   cannot adopt, which blocks nothing: the larger node's next rekey is
+//!   answered, displaces it and cuts over to one session, and with no rekey
+//!   the pending's hold retires it (the pair keeps one session, so no split
+//!   forms for link-dead to end).
 //! - A crossed msg1 read past the heard floor on the same transport, and a
 //!   larger node's dial on the aged link after the smaller node's rekey:
 //!   each splits the pair until link-dead drops both ends, and a redial
@@ -1109,28 +1111,44 @@ async fn aged_link_dial(on: bool) -> AgedDial {
     AgedDial { nodes, d, p }
 }
 
-/// After its dial on the peer's aged link, the larger node's own genuine
-/// rekey, started inside the pending's hold, is answered by the peer.
-async fn rekey_answered(on: bool) {
-    let AgedDial { mut nodes, d, p } = aged_link_dial(on).await;
-    let peer_addr = *nodes[p].node.node_addr();
-    nodes[d].node.poll_link_rekeys().await;
+/// The larger node starts its own rekey inside the stray pending's hold,
+/// and its msg1 is delivered to the peer and the peer's answer back. Returns
+/// the stray pending's index at the peer, read before the rekey.
+async fn rekey_after_dial(a: &mut AgedDial) -> SessionIndex {
+    let (d, p) = (a.d, a.p);
+    let dialer_addr = *a.nodes[d].node.node_addr();
+    let peer_addr = *a.nodes[p].node.node_addr();
+    let stray = a.nodes[p]
+        .node
+        .get_peer(&dialer_addr)
+        .and_then(|peer| peer.pending_our_index())
+        .expect("precondition: the peer holds the stray pending's index");
+    a.nodes[d].node.poll_link_rekeys().await;
     assert!(
-        nodes[d]
+        a.nodes[d]
             .node
             .get_peer(&peer_addr)
             .expect("precondition: the dialer holds the peer")
             .rekey_in_progress(),
         "precondition: the dialer started its own rekey"
     );
-    deliver(&mut nodes[p]).await;
-    deliver(&mut nodes[d]).await;
-    let dialer_pending = nodes[d]
+    deliver(&mut a.nodes[p]).await;
+    deliver(&mut a.nodes[d]).await;
+    stray
+}
+
+/// After its dial on the peer's aged link, the larger node's own genuine
+/// rekey, started inside the pending's hold, is answered by the peer.
+async fn rekey_answered(on: bool) {
+    let mut a = aged_link_dial(on).await;
+    rekey_after_dial(&mut a).await;
+    let peer_addr = *a.nodes[a.p].node.node_addr();
+    let dialer_pending = a.nodes[a.d]
         .node
         .get_peer(&peer_addr)
         .expect("precondition: the dialer holds the peer")
         .pending_role();
-    cleanup_nodes(&mut nodes).await;
+    cleanup_nodes(&mut a.nodes).await;
     assert_eq!(
         dialer_pending,
         Some(Role::Initiator),
@@ -1139,46 +1157,151 @@ async fn rekey_answered(on: bool) {
 }
 
 #[tokio::test]
-#[ignore = "known defect: after a larger node's dial on a quiet peer's aged link, the peer discards that node's next rekey while it holds the pending the dial left"]
 async fn a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered() {
     rekey_answered(false).await;
 }
 
 /// [`a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered`] with multipath on.
 #[tokio::test]
-#[ignore = "known defect: after a larger node's dial on a quiet peer's aged link, the peer discards that node's next rekey while it holds the pending the dial left"]
 async fn a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_with_multipath_on()
  {
     rekey_answered(true).await;
 }
 
-/// After its dial on the peer's aged link, with both ends quiet, neither
-/// end holds a pending the other has no handshake able to adopt: no breach
-/// of `OneSession`'s second clause. Other breaches are not this pin's
-/// reason and are ignored.
-async fn none_unadoptable(on: bool) {
-    let AgedDial { mut nodes, .. } = aged_link_dial(on).await;
-    let breaches = audit(&mut nodes).await;
-    cleanup_nodes(&mut nodes).await;
+/// The answered rekey of [`rekey_answered`], carried on: the larger node
+/// cuts over at its next poll and its first frames under the new session
+/// reach the peer, which adopts it. Both ends are then on one session, and
+/// neither holds a pending the other cannot adopt.
+async fn rekey_cuts_over(on: bool) {
+    let mut a = aged_link_dial(on).await;
+    let before = link_view(&a.nodes[a.d], a.nodes[a.p].node.node_addr()).our_index;
+    rekey_after_dial(&mut a).await;
+    let (d, p) = (a.d, a.p);
+    a.nodes[d].node.poll_link_rekeys().await;
+    for _ in 0..20 {
+        if process_available_packets(&mut a.nodes).await == 0 {
+            break;
+        }
+    }
+    let after = link_view(&a.nodes[d], a.nodes[p].node.node_addr()).our_index;
+    let one = one_session(&a.nodes, d, p);
+    let breaches = audit(&mut a.nodes).await;
+    cleanup_nodes(&mut a.nodes).await;
     let unadoptable: Vec<&Breach> = breaches
         .iter()
         .filter(|b| matches!(b, Breach::Unadoptable { .. }))
         .collect();
-    assert!(unadoptable.is_empty(), "defect: {unadoptable:#?}");
+    assert!(
+        after != before && one && unadoptable.is_empty(),
+        "defect: the larger node's rekey after its dial on the peer's aged link did not cut over to one session: cut over {}, one session {one}, {unadoptable:#?}",
+        after != before
+    );
 }
 
 #[tokio::test]
-#[ignore = "known defect: after a larger node's dial on a quiet peer's aged link, the peer holds a responder pending the larger node never adopts"]
-async fn a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt() {
-    none_unadoptable(false).await;
-}
-
-/// [`a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt`] with multipath on.
-#[tokio::test]
-#[ignore = "known defect: after a larger node's dial on a quiet peer's aged link, the peer holds a responder pending the larger node never adopts"]
-async fn a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt_with_multipath_on()
+async fn a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_and_cuts_over_to_one_session()
  {
-    none_unadoptable(true).await;
+    rekey_cuts_over(false).await;
+}
+
+/// [`a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_and_cuts_over_to_one_session`]
+/// with multipath on.
+#[tokio::test]
+async fn a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_and_cuts_over_to_one_session_with_multipath_on()
+ {
+    rekey_cuts_over(true).await;
+}
+
+/// The peer's responder pendings for the larger node that the audit finds
+/// the larger node cannot adopt.
+fn stray_of(breaches: &[Breach], p: usize) -> Vec<&Breach> {
+    breaches
+        .iter()
+        .filter(
+            |b| matches!(b, Breach::Unadoptable { node, role: Role::Responder, .. } if *node == p),
+        )
+        .collect()
+}
+
+/// After its dial on the peer's aged link, the peer holds a responder
+/// pending the larger node cannot adopt (shown first, as a precondition).
+/// It blocks nothing: the larger node's next fresh rekey is answered, and
+/// its answer displaces the stray pending, whose index is unbound and
+/// freed.
+async fn blocks_nothing(on: bool) {
+    let mut a = aged_link_dial(on).await;
+    let p = a.p;
+    let breaches = audit(&mut a.nodes).await;
+    assert_eq!(
+        stray_of(&breaches, p).len(),
+        1,
+        "precondition: the peer holds a stray responder pending: {breaches:#?}"
+    );
+    let stray = rekey_after_dial(&mut a).await;
+    let dialer_addr = *a.nodes[a.d].node.node_addr();
+    let peer_addr = *a.nodes[p].node.node_addr();
+    let answered = a.nodes[a.d]
+        .node
+        .get_peer(&peer_addr)
+        .is_some_and(|peer| peer.pending_role() == Some(Role::Initiator));
+    let now = a.nodes[p]
+        .node
+        .get_peer(&dialer_addr)
+        .and_then(|peer| peer.pending_our_index());
+    let bound = a.nodes[p].node.peers_by_index.contains_key(&stray.as_u32());
+    let allocated = a.nodes[p].node.index_allocator.is_allocated(stray);
+    cleanup_nodes(&mut a.nodes).await;
+    assert!(
+        answered && now.is_some() && now != Some(stray) && !bound && !allocated,
+        "defect: the stray pending blocked the larger node's rekey: answered {answered}, the peer's pending {now:?} (stray {stray:?}), stray index bound {bound}, allocated {allocated}"
+    );
+}
+
+#[tokio::test]
+async fn a_larger_dialers_dial_on_the_peers_aged_link_leaves_a_pending_that_blocks_nothing() {
+    blocks_nothing(false).await;
+}
+
+/// [`a_larger_dialers_dial_on_the_peers_aged_link_leaves_a_pending_that_blocks_nothing`] with
+/// multipath on.
+#[tokio::test]
+async fn a_larger_dialers_dial_on_the_peers_aged_link_leaves_a_pending_that_blocks_nothing_with_multipath_on()
+ {
+    blocks_nothing(true).await;
+}
+
+/// The control of [`blocks_nothing`]: with no rekey started, the stray
+/// pending is retired by its 120 s hold. The clock runs to 125 s past the
+/// dial and the peer polls its rekeys; then no pending is left that the
+/// larger node cannot adopt.
+async fn retired_by_hold(on: bool) {
+    let mut a = aged_link_dial(on).await;
+    let p = a.p;
+    let breaches = audit(&mut a.nodes).await;
+    assert_eq!(
+        stray_of(&breaches, p).len(),
+        1,
+        "precondition: the peer holds a stray responder pending: {breaches:#?}"
+    );
+    crate::time::advance(Duration::from_secs(125));
+    a.nodes[p].node.poll_link_rekeys().await;
+    let breaches = audit(&mut a.nodes).await;
+    cleanup_nodes(&mut a.nodes).await;
+    let left = stray_of(&breaches, p);
+    assert!(left.is_empty(), "defect: {left:#?}");
+}
+
+#[tokio::test]
+async fn a_larger_dialers_dial_on_the_peers_aged_link_leaves_a_pending_its_hold_retires() {
+    retired_by_hold(false).await;
+}
+
+/// [`a_larger_dialers_dial_on_the_peers_aged_link_leaves_a_pending_its_hold_retires`] with
+/// multipath on.
+#[tokio::test]
+async fn a_larger_dialers_dial_on_the_peers_aged_link_leaves_a_pending_its_hold_retires_with_multipath_on()
+ {
+    retired_by_hold(true).await;
 }
 
 // ---------------------------------------------------------------------------

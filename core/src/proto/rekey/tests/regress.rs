@@ -111,13 +111,30 @@ fn schedules() -> Vec<Schedule> {
             "an assumed cutover was reverted",
         ),
         (
-            "every msg2 lost leaves the responder's pending unadopted and loses no frame",
+            "every msg2 lost and every later msg1 lost through the hold leaves the responder's pending unadopted and loses no frame",
             || {
-                let rules = vec![drop(1, Class::Hs(MsgKind::Msg2), T, T + 40_000)];
+                // No later msg1 of node 0 reaches node 1 while it holds the
+                // pending, so nothing displaces it and its hold retires it.
+                let rules = vec![
+                    drop(1, Class::Hs(MsgKind::Msg2), T, T + 40_000),
+                    drop(0, Class::Hs(MsgKind::Msg1), T + 1_000, T + 125_000),
+                ];
                 scripted(pair::<Ik>(), [500, 500], rules, END, 0)
             },
             |r| shows(r, "Unadopted"),
             "the responder's pending went unadopted",
+        ),
+        (
+            "every msg2 lost leaves the responder's pending to be displaced by the next attempt and loses no frame",
+            || {
+                // Node 0's attempt is never answered, so it gives the
+                // attempt up and starts another, whose fresh msg1 displaces
+                // the pending node 1 holds for the first.
+                let rules = vec![drop(1, Class::Hs(MsgKind::Msg2), T, T + 40_000)];
+                scripted(pair::<Ik>(), [500, 500], rules, END, 0)
+            },
+            |r| shows(r, "Displaced"),
+            "the responder's unadopted pending was displaced",
         ),
         (
             "a peer's rekey over an unevidenced drain retires the drain and leaks no index",

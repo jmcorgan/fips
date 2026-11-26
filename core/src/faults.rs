@@ -511,6 +511,11 @@ faults! {
     /// for a replacement on a link too young to rekey, as before redials
     /// were answered.
     OffLinkFreshRefused,
+    /// A fresh eligible rekey msg1 on the link is refused while the link
+    /// machine holds a responder pending the peer never adopted, as before
+    /// the peer's next rekey displaced it, so the pending a stray msg1 left
+    /// refuses the peer's genuine rekeys for up to its 120 s hold.
+    UnadoptedRefuses,
     /// The link machine records a redial msg1's ephemeral when it judges
     /// the msg1, so a redial the node then refuses has its resends refused
     /// as copies for as long as the link lives.

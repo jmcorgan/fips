@@ -1153,14 +1153,22 @@ fn link_traces_hold_against_every_deployed_release() {
         ));
         // Every msg2 lost: the deployed initiator abandons, the new node
         // holds its pending for the hold and never cuts over on a timer;
-        // nothing is lost, and the next rekey completes.
+        // nothing is lost, and the next rekey completes. The initiator's
+        // later msg1s are lost too until the hold has passed, since a fresh
+        // one would displace the pending instead.
         cases.push(trace(
             "every msg2 lost against a deployed initiator",
             rel,
             |t| {
                 t.setup.new_jitter = LATE;
                 t.setup.old_jitter = -15;
-                t.rules = alloc::vec![Rule::drop(0, Class::Msg2, 100_000, 140_000)];
+                t.rules = alloc::vec![
+                    Rule::drop(0, Class::Msg2, 100_000, 140_000),
+                    Rule {
+                        skip: 1,
+                        ..Rule::drop(1, Class::Msg1, 100_000, 230_000)
+                    },
+                ];
                 t.run = 400_000;
                 t.expect = Expect::lossless()
                     .must(1, "abandoned attempt")
