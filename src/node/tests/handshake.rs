@@ -1766,13 +1766,44 @@ async fn make_hs_node(config: Config) -> HsNode {
 /// msg3 (the same-side rule), so a test that drives a second exchange
 /// between the two pins this order.
 async fn make_hs_pair_initiator_smaller() -> (HsNode, HsNode) {
-    let initiator = make_hs_node(Config::new()).await;
-    loop {
-        let responder = make_hs_node(Config::new()).await;
-        if responder.node.node_addr() > initiator.node.node_addr() {
-            return (initiator, responder);
-        }
+    ordered_pair(Config::new(), Config::new()).await
+}
+
+/// Give `smaller` and `larger` two freshly drawn identities, the smaller node
+/// address to `smaller`. Each config's own identity is replaced.
+///
+/// Both identities are drawn before any socket is bound. Retrying one side
+/// against a fixed other until it compares larger takes a heavy-tailed number
+/// of tries, and each try binds a UDP socket that stays open until the loop
+/// ends, enough to run a test process out of descriptors.
+fn order_identities(mut smaller: Config, mut larger: Config) -> (Config, Config) {
+    let mut low = Identity::generate();
+    let mut high = Identity::generate();
+    assert_ne!(
+        low.node_addr(),
+        high.node_addr(),
+        "two drawn identities share a node address"
+    );
+    if high.node_addr() < low.node_addr() {
+        std::mem::swap(&mut low, &mut high);
     }
+    smaller.node.identity.nsec = Some(hex::encode(low.keypair().secret_bytes()));
+    larger.node.identity.nsec = Some(hex::encode(high.keypair().secret_bytes()));
+    (smaller, larger)
+}
+
+/// An initiator built from `smaller` and a responder built from `larger`,
+/// with the responder's node address the larger, binding one UDP transport
+/// each. See `make_hs_pair_initiator_smaller` for why tests pin this order.
+async fn ordered_pair(smaller: Config, larger: Config) -> (HsNode, HsNode) {
+    let (smaller, larger) = order_identities(smaller, larger);
+    let initiator = make_hs_node(smaller).await;
+    let responder = make_hs_node(larger).await;
+    assert!(
+        initiator.node.node_addr() < responder.node.node_addr(),
+        "precondition: the responder's node address is the larger"
+    );
+    (initiator, responder)
 }
 
 async fn stop_hs(n: &mut HsNode) {
@@ -2115,17 +2146,11 @@ async fn test_fresh_dial_crossing_our_rekey_converges() {
         c
     };
 
-    let mut initiator = make_hs_node(make_config()).await;
     // Pin the responder as the LARGER node addr: that is the ordering in which
     // its inbound wins the tie-break and it performs the swap, which is the side
     // that has to clean up the rekey it is abandoning. With a smaller responder
     // it keeps its outbound and the interesting path is never taken.
-    let mut responder = loop {
-        let cand = make_hs_node(make_config()).await;
-        if cand.node.node_addr() > initiator.node.node_addr() {
-            break cand;
-        }
-    };
+    let (mut initiator, mut responder) = ordered_pair(make_config(), make_config()).await;
 
     let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
     responder.node.handle_msg3(msg3).await;
@@ -2202,14 +2227,8 @@ async fn test_fresh_dial_crossing_our_rekey_converges() {
 /// failures carries over, as the resolution at msg2 does.
 #[tokio::test]
 async fn a_crossed_handshake_resolved_at_msg3_starts_the_link_with_a_new_bundle() {
-    let mut initiator = make_hs_node(Config::new()).await;
     // The larger responder's inbound wins the tie-break, so it moves at msg3.
-    let mut responder = loop {
-        let cand = make_hs_node(Config::new()).await;
-        if cand.node.node_addr() > initiator.node.node_addr() {
-            break cand;
-        }
-    };
+    let (mut initiator, mut responder) = make_hs_pair_initiator_smaller().await;
     let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
     responder.node.handle_msg3(msg3).await;
     let a = *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
@@ -2256,16 +2275,10 @@ async fn a_crossed_handshake_resolved_at_msg3_starts_the_link_with_a_new_bundle(
 async fn a_crossed_handshake_resolved_at_msg3_offers_the_configured_addresses_again() {
     use fips_core::proto::path::Source;
 
-    let mut initiator = make_hs_node(Config::new()).await;
     let mut enabled = Config::new();
     enabled.node.path.enabled = true;
     // The larger responder's inbound wins the tie-break, so it moves at msg3.
-    let mut responder = loop {
-        let cand = make_hs_node(enabled.clone()).await;
-        if cand.node.node_addr() > initiator.node.node_addr() {
-            break cand;
-        }
-    };
+    let (mut initiator, mut responder) = ordered_pair(Config::new(), enabled).await;
     // A second address of the initiator's, never dialled: the offer is
     // what is checked, not a probe's answer.
     let second = TransportAddr::from_string("127.0.0.1:9");
