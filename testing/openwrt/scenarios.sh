@@ -7,6 +7,12 @@
 # PKG_UPGRADE environment are taken from opkg-lede's own sources, so what is
 # exercised is the scripts' behaviour given that contract, not opkg itself.
 # A real `opkg upgrade` on a router image stays uncovered.
+# So does a prerm blocked by a FIFO planted at the old /tmp marker path on an
+# OpenWrt kernel, which leaves protected_fifos at 0: every container here
+# inherits the host kernel's setting, and the hosts this has run on set 1,
+# where the open is refused instead. What apk-tools does with a pre-upgrade
+# script that fails is not established either; the fixed scripts do not fail
+# there.
 #
 # PREINST, POSTINST, PRERM and INIT_GATEWAY may be pointed at other files. That is the
 # seam used to see a scenario red against the previously released scripts, and
@@ -26,6 +32,10 @@ POSTINST="${POSTINST:-$REPO/packaging/openwrt-ipk/scripts/postinst}"
 PREINST="${PREINST:-$REPO/packaging/openwrt-ipk/scripts/preinst}"
 PRERM="${PRERM:-$REPO/packaging/openwrt-ipk/scripts/prerm}"
 RELEASED_PRERM="$REPO/testing/openwrt/fixtures/released-prerm"
+# The prerm and postinst v0.5.3 shipped, byte for byte, which wrote and read
+# the upgrade marker in /tmp.
+RELEASED_PRERM_053="$REPO/testing/openwrt/fixtures/released-prerm-0.5.3"
+RELEASED_POSTINST_053="$REPO/testing/openwrt/fixtures/released-postinst-0.5.3"
 INIT_GATEWAY="${INIT_GATEWAY:-$REPO/packaging/openwrt-ipk/files/etc/init.d/fips-gateway}"
 APK_SCRIPTS="${APK_SCRIPTS:-}"
 SHIPPED_YAML="$REPO/packaging/openwrt-ipk/files/etc/fips/fips.yaml"
@@ -40,7 +50,10 @@ SHIPPED_LISTEN='    # listen: "[::1]:5365"   # the default; the init script poin
 MIGRATED_MSG='fips: moved gateway.dns.listen off the mDNS port 5353 to the default [::1]:5365'
 
 WORK=/tmp/fips-openwrt-scenarios
-UPGRADE_MARKER=/tmp/fips-prerm-upgrade
+UPGRADE_MARKER=/var/run/fips-prerm-upgrade
+# Where the 0.5.2 and 0.5.3 prerm wrote the marker, and where an unprivileged
+# account can plant an entry first, since /tmp is world-writable.
+LEGACY_MARKER=/tmp/fips-prerm-upgrade
 # The uci stub's state and the directory holding the executable stubs. Fixed
 # paths, because the .apk scripts run with only PATH in their environment.
 UCI_DIR=/tmp/fips-openwrt-uci
@@ -110,6 +123,7 @@ reset_state() {
     echo 0 > "$GW_STATE"
     echo 0 > "$FIPS_STATE"
     rm -f "$UPGRADE_MARKER"
+    rm -rf "$LEGACY_MARKER"
     unset PKG_UPGRADE
     install_stubs
     return 0
@@ -195,6 +209,41 @@ assert_present() {
         ok "$2"
     else
         bad "$2 — $1 does not exist"
+    fi
+    return 0
+}
+
+assert_no_entry() {
+    # assert_no_entry <path> <what it means>: nothing at all, not even a
+    # dangling link, which assert_absent's -e cannot see.
+    if [ -e "$1" ] || [ -L "$1" ]; then
+        bad "$2 — $(ls -ld "$1" 2>&1)"
+    else
+        ok "$2"
+    fi
+    return 0
+}
+
+plant_legacy() {
+    # plant_legacy dir|fifo|link <target>: an entry at the legacy marker path
+    # owned by nobody, as an unprivileged account would leave it. The kernel's
+    # protected_* rules look at the owner, not at who made it. Fails the case
+    # if the entry could not be made, since the case would then prove nothing.
+    rm -rf "$LEGACY_MARKER"
+    case "$1" in
+    dir) mkdir "$LEGACY_MARKER" && chown nobody "$LEGACY_MARKER" ;;
+    fifo) mkfifo "$LEGACY_MARKER" && chown nobody "$LEGACY_MARKER" ;;
+    link) ln -s "$2" "$LEGACY_MARKER" && chown -h nobody "$LEGACY_MARKER" ;;
+    esac
+    planted=0
+    case "$1" in
+    dir) [ -d "$LEGACY_MARKER" ] && [ ! -L "$LEGACY_MARKER" ] && planted=1 ;;
+    fifo) [ -p "$LEGACY_MARKER" ] && planted=1 ;;
+    link) [ -L "$LEGACY_MARKER" ] && planted=1 ;;
+    esac
+    if [ "$planted" -ne 1 ] || [ "$(stat -c %U "$LEGACY_MARKER" 2>/dev/null)" != "nobody" ]; then
+        bad "could not plant a nobody-owned $1 at $LEGACY_MARKER: $(ls -ld "$LEGACY_MARKER" 2>&1)"
+        return 1
     fi
     return 0
 }
@@ -293,9 +342,12 @@ run_apk_script() {
     # Runs one captured .apk script the way apk-tools v3 does: executed
     # directly, with only PATH in the environment. The stubs' own state
     # variables are passed through so they can record the calls.
+    # Returns non-zero only when the script is not available, which is
+    # already reported; the script's own exit status is left in APK_RC.
     phase="$1"
     shift
     script="$APK_SCRIPTS/$phase"
+    APK_RC=""
     if [ -z "$APK_SCRIPTS" ] || [ ! -x "$script" ]; then
         bad "the .apk $phase script is not available at '$script'"
         return 1
@@ -303,6 +355,7 @@ run_apk_script() {
     env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
         CALLS="$CALLS" GW_STATE="$GW_STATE" FIPS_STATE="$FIPS_STATE" \
         "$script" "$@" >/dev/null 2>&1
+    APK_RC=$?
     return 0
 }
 
@@ -355,6 +408,8 @@ scenario_upgrade_enabled() {
     echo 1 > "$FIPS_STATE"
 
     sh "$PRERM" upgrade 0.5.2 >/dev/null 2>&1
+    assert_equals "$?" "0" "the outgoing prerm exits 0 on an upgrade"
+    assert_no_entry "$LEGACY_MARKER" "the outgoing prerm leaves the old /tmp marker path alone"
     assert_file_is "$GW_STATE" "1" "the outgoing prerm does not disable the gateway on an upgrade"
     assert_not_called "fips-gateway disable" "the outgoing prerm does not call disable on an upgrade"
     assert_called "fips-gateway stop" "the outgoing prerm still stops the gateway"
@@ -374,6 +429,8 @@ scenario_upgrade_disabled() {
     echo 1 > "$FIPS_STATE"
 
     sh "$PRERM" upgrade 0.5.2 >/dev/null 2>&1
+    assert_equals "$?" "0" "the outgoing prerm exits 0 on an upgrade"
+    assert_no_entry "$LEGACY_MARKER" "the outgoing prerm leaves the old /tmp marker path alone"
     PKG_UPGRADE=1 sh "$POSTINST" configure >/dev/null 2>&1
 
     assert_file_is "$GW_STATE" "0" "a disabled gateway stays disabled across the upgrade"
@@ -391,6 +448,7 @@ scenario_removal() {
     echo 1 > "$FIPS_STATE"
 
     sh "$PRERM" remove >/dev/null 2>&1
+    assert_equals "$?" "0" "the prerm exits 0 on a removal"
 
     assert_called "fips-gateway stop" "removal stops the gateway"
     assert_called "fips-gateway disable" "removal disables the gateway"
@@ -398,6 +456,21 @@ scenario_removal() {
     assert_called "fips disable" "removal disables the daemon"
     assert_file_is "$GW_STATE" "0" "the gateway ends up disabled"
     assert_absent "$UPGRADE_MARKER" "removal leaves no upgrade marker"
+
+    # A removal writes no marker, so an entry planted at the old /tmp path
+    # changes nothing about it.
+    note "scenario 5: removal, a directory planted at the old marker path"
+    reset_state
+    echo 1 > "$GW_STATE"
+    echo 1 > "$FIPS_STATE"
+    plant_legacy dir || return 0
+    sh "$PRERM" remove >/dev/null 2>&1
+    assert_equals "$?" "0" "removal with a planted directory: the prerm exits 0"
+    assert_called "fips-gateway stop" "removal with a planted directory: the gateway is stopped"
+    assert_called "fips-gateway disable" "removal with a planted directory: the gateway is disabled"
+    assert_called "fips stop" "removal with a planted directory: the daemon is stopped"
+    assert_called "fips disable" "removal with a planted directory: the daemon is disabled"
+    assert_absent "$UPGRADE_MARKER" "removal with a planted directory: no upgrade marker is left"
     return 0
 }
 
@@ -537,6 +610,8 @@ scenario_apk_upgrade_enabled() {
     echo 1 > "$FIPS_STATE"
 
     run_apk_script pre-upgrade 0.6.0-r1 0.5.2-r1 || return 0
+    assert_equals "$APK_RC" "0" "pre-upgrade exits 0"
+    assert_no_entry "$LEGACY_MARKER" "pre-upgrade leaves the old /tmp marker path alone"
     assert_called "fips-gateway stop" "pre-upgrade stops the gateway"
     assert_called "fips stop" "pre-upgrade stops the daemon"
     assert_not_called "fips-gateway disable" "pre-upgrade does not disable the gateway"
@@ -782,6 +857,7 @@ scenario_listen_migration() {
     reset_state
     install_setup_stubs
     install_config "$RELEASED_YAML"
+    mkdir -p "${UPGRADE_MARKER%/*}"
     touch "$UPGRADE_MARKER"
     PKG_UPGRADE=1 sh "$POSTINST" configure > "$WORK/postinst.out" 2>&1
     assert_migrated "ipk upgrade"
@@ -796,6 +872,7 @@ scenario_listen_migration() {
     reset_state
     install_setup_stubs
     install_config "$RELEASED_YAML"
+    mkdir -p "${UPGRADE_MARKER%/*}"
     touch "$UPGRADE_MARKER"
     if run_apk_script post-upgrade 0.6.0-r1 0.5.2-r1; then
         assert_migrated "apk upgrade"
@@ -1282,7 +1359,10 @@ sdk_postinst() {
 
 sdk_prerm_upgrade_ipk() {
     # default_prerm for the outgoing SDK-built package on an opkg upgrade.
+    # The body's status, which default_prerm returns to opkg, is left in
+    # SDK_PRERM_RC.
     ( set -- /usr/lib/opkg/info/fips.prerm upgrade 2.0-r1; . "$PRERM" ) >/dev/null 2>&1
+    SDK_PRERM_RC=$?
     for i in /etc/init.d/fips /etc/init.d/fips-gateway; do
         "$i" stop >/dev/null 2>&1
     done
@@ -1290,12 +1370,15 @@ sdk_prerm_upgrade_ipk() {
 }
 
 sdk_preinst() {
-    # sdk_preinst <args...>, run as a script, as opkg and apk run it.
+    # sdk_preinst <args...>, run as a script, as opkg and apk run it. Its
+    # exit status is left in SDK_PREINST_RC.
+    SDK_PREINST_RC=""
     if [ ! -f "$PREINST" ]; then
         bad "there is no preinst at $PREINST"
         return 0
     fi
     sh "$PREINST" "$@" >/dev/null 2>&1
+    SDK_PREINST_RC=$?
     return 0
 }
 
@@ -1338,12 +1421,14 @@ scenario_sdk_package() {
             : > "$CALLS"
             if [ "$fmt" = "ipk" ]; then
                 PKG_UPGRADE=1 sdk_prerm_upgrade_ipk
+                assert_equals "$SDK_PRERM_RC" "0" "$fmt upgrade, gateway $gw: the prerm body returns 0 to default_prerm"
                 PKG_UPGRADE=1 sdk_preinst upgrade 1.0-r1
-                PKG_UPGRADE=1 sdk_postinst ipk
             else
                 PKG_UPGRADE=1 sdk_preinst 2.0-r1 1.0-r1
-                PKG_UPGRADE=1 sdk_postinst apk
             fi
+            assert_equals "$SDK_PREINST_RC" "0" "$fmt upgrade, gateway $gw: the preinst exits 0"
+            assert_no_entry "$LEGACY_MARKER" "$fmt upgrade, gateway $gw: the old /tmp marker path is left alone"
+            PKG_UPGRADE=1 sdk_postinst "$fmt"
             if [ "$gw" = "enabled" ]; then
                 assert_gateway enabled started "$fmt upgrade, gateway enabled"
             else
@@ -1372,6 +1457,7 @@ scenario_sdk_package() {
     # naming the image root: they must not touch the host at all.
     reset_state
     rm -f /var/run/fips-gateway-install-hold "$UPGRADE_MARKER"
+    rm -rf "$LEGACY_MARKER"
     for pkg_upgrade in 0 1; do
         IPKG_INSTROOT=/tmp/fips-image-root PKG_UPGRADE=$pkg_upgrade sh "$PREINST" install >/dev/null 2>&1
         IPKG_INSTROOT=/tmp/fips-image-root PKG_UPGRADE=$pkg_upgrade sh "$POSTINST" configure >/dev/null 2>&1
@@ -1381,8 +1467,244 @@ scenario_sdk_package() {
     assert_equals "$(calls_oneline)" "" "image build: no script touches the build host's services"
     assert_absent /var/run/fips-gateway-install-hold "image build: the preinst leaves no hold on the build host"
     assert_absent "$UPGRADE_MARKER" "image build: the prerm leaves no marker on the build host"
+    assert_no_entry "$LEGACY_MARKER" "image build: nothing is left at the old /tmp marker path"
 
     PATH="$saved_path"
+    return 0
+}
+
+# ── 17 to 25. The upgrade marker and the old /tmp path ─────────────────────
+# Up to 0.5.3 the prerm wrote its upgrade marker to /tmp/fips-prerm-upgrade
+# with a bare ":" redirection. Any local account can occupy that name first,
+# and a failed redirection on the special builtin ":" exits the shell, so the
+# prerm exited 1 before stopping anything and opkg refused the upgrade. Each
+# entry below is planted owned by nobody; the container runs as root.
+
+upgrade_prerm_checks() {
+    # upgrade_prerm_checks <rc> <case>: what every outgoing prerm on an
+    # upgrade must do, whatever sits at the old path.
+    assert_equals "$1" "0" "$2: the prerm exits 0"
+    assert_called "fips-gateway stop" "$2: the prerm stops the gateway"
+    assert_called "fips stop" "$2: the prerm stops the daemon"
+    assert_not_called "fips-gateway disable" "$2: the prerm does not disable the gateway"
+    return 0
+}
+
+# ── 17. A directory planted at the old marker path ─────────────────────────
+scenario_planted_directory() {
+    for gw in enabled disabled; do
+        note "scenario 17: a directory planted at the old marker path, gateway $gw"
+        reset_state
+        echo 1 > "$FIPS_STATE"
+        [ "$gw" = "enabled" ] && echo 1 > "$GW_STATE"
+        plant_legacy dir || continue
+
+        sh "$PRERM" upgrade 0.5.5 >/dev/null 2>&1
+        upgrade_prerm_checks "$?" "planted directory, gateway $gw"
+        assert_present "$UPGRADE_MARKER" "planted directory, gateway $gw: the prerm leaves the upgrade marker"
+
+        PKG_UPGRADE=1 sh "$POSTINST" configure >/dev/null 2>&1
+        assert_not_called "fips-gateway enable" "planted directory, gateway $gw: the postinst does not enable the gateway"
+        if [ "$gw" = "enabled" ]; then
+            assert_file_is "$GW_STATE" "1" "planted directory: an enabled gateway stays enabled"
+            assert_called "fips-gateway start" "planted directory: an enabled gateway is started again"
+        else
+            assert_file_is "$GW_STATE" "0" "planted directory: a disabled gateway stays disabled"
+            assert_not_called "fips-gateway start" "planted directory: a disabled gateway is not started"
+        fi
+        assert_absent "$UPGRADE_MARKER" "planted directory, gateway $gw: the postinst removes the upgrade marker"
+    done
+    return 0
+}
+
+# ── 18. A link planted at the old marker path ──────────────────────────────
+# With protected_symlinks=1 root's open of the link is refused; with 0 it
+# follows the link and truncates the target. Neither may happen now.
+scenario_planted_link() {
+    note "scenario 18: a link planted at the old marker path"
+    reset_state
+    echo 1 > "$GW_STATE"
+    echo 1 > "$FIPS_STATE"
+    victim="$WORK/victim"
+    echo "root's own file" > "$victim"
+    plant_legacy link "$victim" || return 0
+
+    sh "$PRERM" upgrade 0.5.5 >/dev/null 2>&1
+    upgrade_prerm_checks "$?" "planted link"
+    assert_file_is "$victim" "root's own file" "planted link: the link's target is left unchanged"
+    return 0
+}
+
+# ── 19. A FIFO planted at the old marker path ──────────────────────────────
+# With protected_fifos=1 root's open of the FIFO is refused; with 0 it blocks
+# until a reader appears. timeout turns a block into a failure here.
+scenario_planted_fifo() {
+    note "scenario 19: a FIFO planted at the old marker path"
+    reset_state
+    echo 1 > "$GW_STATE"
+    echo 1 > "$FIPS_STATE"
+    plant_legacy fifo || return 0
+
+    timeout 10 sh "$PRERM" upgrade 0.5.5 >/dev/null 2>&1
+    upgrade_prerm_checks "$?" "planted FIFO"
+
+    PKG_UPGRADE=1 timeout 10 sh "$POSTINST" configure >/dev/null 2>&1
+    assert_equals "$?" "0" "planted FIFO: the postinst exits 0 without blocking"
+    assert_no_entry "$LEGACY_MARKER" "planted FIFO: the postinst removes the FIFO"
+    assert_file_is "$GW_STATE" "1" "planted FIFO: an enabled gateway stays enabled"
+    return 0
+}
+
+# ── 20. A planted link does not switch a disabled gateway on ──────────────
+# A dangling link at the old path is not seen by [ -e ]. A prerm that only
+# survived the failed write, paired with a postinst that tested only -e,
+# would read that as a 0.5.1 prerm having disabled the gateway, and enable it.
+scenario_gateway_not_forced_on() {
+    note "scenario 20: a dangling link at the old marker path, gateway disabled"
+    reset_state
+    echo 1 > "$FIPS_STATE"
+    plant_legacy link /nonexistent/fips-target || return 0
+
+    sh "$PRERM" upgrade 0.5.5 >/dev/null 2>&1
+    upgrade_prerm_checks "$?" "dangling link"
+    PKG_UPGRADE=1 sh "$POSTINST" configure >/dev/null 2>&1
+    assert_file_is "$GW_STATE" "0" "dangling link: a disabled gateway stays disabled"
+    assert_not_called "fips-gateway enable" "dangling link: the gateway is not enabled"
+    assert_not_called "fips-gateway start" "dangling link: the gateway is not started"
+
+    # The postinst on its own, with no marker in /var/run, as after an
+    # outgoing prerm that survived a failed write at the old path. The fixed
+    # prerm writes /var/run, which hides the postinst's link test above; here
+    # only that test keeps the gateway disabled.
+    note "scenario 20: a dangling link at the old marker path, no marker in /var/run, postinst alone"
+    reset_state
+    echo 1 > "$FIPS_STATE"
+    plant_legacy link /nonexistent/fips-target || return 0
+
+    PKG_UPGRADE=1 sh "$POSTINST" configure >/dev/null 2>&1
+    assert_file_is "$GW_STATE" "0" "dangling link, postinst alone: a disabled gateway stays disabled"
+    assert_not_called "fips-gateway enable" "dangling link, postinst alone: the gateway is not enabled"
+    assert_no_entry "$LEGACY_MARKER" "dangling link, postinst alone: the postinst removes the link"
+    return 0
+}
+
+# ── 21. Upgrade from 0.5.3, whose prerm writes the marker in /tmp ──────────
+scenario_upgrade_from_053() {
+    for gw in disabled enabled; do
+        note "scenario 21: upgrade from 0.5.3, gateway $gw"
+        reset_state
+        echo 1 > "$FIPS_STATE"
+        [ "$gw" = "enabled" ] && echo 1 > "$GW_STATE"
+
+        sh "$RELEASED_PRERM_053" upgrade 0.5.4 >/dev/null 2>&1
+        assert_present "$LEGACY_MARKER" "upgrade from 0.5.3, gateway $gw: the 0.5.3 prerm leaves its marker in /tmp"
+        PKG_UPGRADE=1 sh "$POSTINST" configure >/dev/null 2>&1
+
+        assert_not_called "fips-gateway enable" "upgrade from 0.5.3, gateway $gw: the gateway is not re-enabled"
+        if [ "$gw" = "enabled" ]; then
+            assert_file_is "$GW_STATE" "1" "upgrade from 0.5.3: an enabled gateway stays enabled"
+            assert_called "fips-gateway start" "upgrade from 0.5.3: an enabled gateway is started again"
+        else
+            assert_file_is "$GW_STATE" "0" "upgrade from 0.5.3: a disabled gateway stays disabled"
+            assert_not_called "fips-gateway start" "upgrade from 0.5.3: a disabled gateway is not started"
+        fi
+        assert_no_entry "$LEGACY_MARKER" "upgrade from 0.5.3, gateway $gw: the postinst removes the /tmp marker"
+    done
+    return 0
+}
+
+# ── 22. apk pre-upgrade with a directory planted at the old marker path ────
+scenario_apk_planted_directory() {
+    note "scenario 22: apk upgrade, a directory planted at the old marker path"
+    reset_state
+    echo 1 > "$GW_STATE"
+    echo 1 > "$FIPS_STATE"
+    plant_legacy dir || return 0
+
+    run_apk_script pre-upgrade 0.6.0-r1 0.5.4-r1 || return 0
+    assert_equals "$APK_RC" "0" "apk, planted directory: pre-upgrade exits 0"
+    assert_called "fips-gateway stop" "apk, planted directory: pre-upgrade stops the gateway"
+    assert_called "fips stop" "apk, planted directory: pre-upgrade stops the daemon"
+    assert_present "$UPGRADE_MARKER" "apk, planted directory: pre-upgrade leaves the upgrade marker"
+
+    run_apk_script post-upgrade 0.6.0-r1 0.5.4-r1 || return 0
+    assert_file_is "$GW_STATE" "1" "apk, planted directory: an enabled gateway stays enabled"
+    assert_called "fips-gateway start" "apk, planted directory: an enabled gateway is started again"
+    return 0
+}
+
+# ── 23. SDK prerm body with a directory planted at the old marker path ─────
+# default_prerm stops every init script after the body whatever it returns,
+# but returns the body's status to opkg, which refuses the upgrade on non-zero.
+scenario_sdk_planted_directory() {
+    note "scenario 23: SDK prerm body, a directory planted at the old marker path"
+    reset_state
+    echo 1 > "$GW_STATE"
+    echo 1 > "$FIPS_STATE"
+    plant_legacy dir || return 0
+
+    # shellcheck source=/dev/null
+    ( PKG_UPGRADE=1; export PKG_UPGRADE; set -- /usr/lib/opkg/info/fips.prerm upgrade 2.0-r1; . "$PRERM" ) >/dev/null 2>&1
+    assert_equals "$?" "0" "SDK, planted directory: the prerm body returns 0 to default_prerm"
+    assert_called "fips-gateway stop" "SDK, planted directory: the body stops the gateway"
+    assert_called "fips stop" "SDK, planted directory: the body stops the daemon"
+    return 0
+}
+
+# ── 24. Downgrade to 0.5.3 ─────────────────────────────────────────────────
+# The 0.5.3 postinst looks for the marker only in /tmp, which this prerm no
+# longer writes, so it takes the outgoing prerm for a 0.5.1 one and re-enables
+# the gateway. That is the accepted cost of keeping the marker out of /tmp.
+scenario_downgrade_to_053() {
+    note "scenario 24: downgrade to 0.5.3, gateway disabled"
+    reset_state
+    echo 1 > "$FIPS_STATE"
+
+    sh "$PRERM" upgrade 0.5.3 >/dev/null 2>&1
+    PKG_UPGRADE=1 sh "$RELEASED_POSTINST_053" configure >/dev/null 2>&1
+    assert_file_is "$GW_STATE" "1" \
+        "accepted downgrade behaviour: a downgrade to 0.5.3 re-enables a disabled gateway"
+    return 0
+}
+
+# ── 25. The services are stopped before the marker is written ──────────────
+# Stubs that record, with each call, whether the marker exists yet. Nothing
+# about the marker may come between an upgrade and the stops, so the prerm,
+# and the preinst on an apk upgrade, write it only after both have stopped.
+# "enabled" fails, so the preinst also reaches its install hold.
+install_order_stubs() {
+    for svc in fips-gateway fips; do
+        cat > "/etc/init.d/$svc" <<STUB
+#!/bin/sh
+if [ -e "$UPGRADE_MARKER" ]; then m=present; else m=absent; fi
+echo "$svc \$1 marker=\$m" >> "\$CALLS"
+[ "\$1" != enabled ]
+STUB
+        chmod 0755 "/etc/init.d/$svc"
+    done
+    return 0
+}
+
+scenario_stops_before_marker() {
+    note "scenario 25: the services are stopped before the upgrade marker is written"
+    reset_state
+    install_order_stubs
+    sh "$PRERM" upgrade 0.5.5 >/dev/null 2>&1
+    assert_equals "$?" "0" "prerm upgrade: the prerm exits 0"
+    assert_called "fips-gateway stop marker=absent" "prerm upgrade: the gateway is stopped before the marker is written"
+    assert_called "fips stop marker=absent" "prerm upgrade: the daemon is stopped before the marker is written"
+    assert_present "$UPGRADE_MARKER" "prerm upgrade: the marker is written after the stops"
+
+    reset_state
+    install_order_stubs
+    rm -f /var/run/fips-gateway-install-hold
+    PKG_UPGRADE=1 sh "$PREINST" 2.0-r1 1.0-r1 >/dev/null 2>&1
+    assert_equals "$?" "0" "apk preinst upgrade: the preinst exits 0"
+    assert_called "fips-gateway stop marker=absent" "apk preinst upgrade: the gateway is stopped before the marker is written"
+    assert_called "fips stop marker=absent" "apk preinst upgrade: the daemon is stopped before the marker is written"
+    assert_present "$UPGRADE_MARKER" "apk preinst upgrade: the marker is written after the stops"
+    assert_present /var/run/fips-gateway-install-hold "apk preinst upgrade: the install hold is written for a gateway that is not enabled"
+    rm -f /var/run/fips-gateway-install-hold
     return 0
 }
 
@@ -1408,6 +1730,15 @@ scenario_swap_cleanup
 scenario_listen_migration
 scenario_supervise
 scenario_sdk_package
+scenario_planted_directory
+scenario_planted_link
+scenario_planted_fifo
+scenario_gateway_not_forced_on
+scenario_upgrade_from_053
+scenario_apk_planted_directory
+scenario_sdk_planted_directory
+scenario_downgrade_to_053
+scenario_stops_before_marker
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

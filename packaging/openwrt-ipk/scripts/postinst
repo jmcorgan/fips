@@ -30,8 +30,15 @@
 # loop. When this body decides the gateway is to be enabled, it removes the
 # hold first. See scripts/preinst.
 #
-# The upgrade marker stays in /tmp: an installed 0.5.2 package's prerm writes
-# it there, and this script must find it to leave a disabled gateway disabled.
+# The upgrade marker is written to /var/run by this package's prerm, and by
+# its preinst on an SDK package's apk upgrade. An installed 0.5.2 or 0.5.3
+# prerm writes it to /tmp instead, and this script must find it there to leave
+# a disabled gateway disabled. Any entry at the /tmp path counts, a link
+# included. Honouring only a root-owned file there would not do: any local
+# account could plant a regular file, the old prerm's write into it would
+# succeed and leave it owned by that account, and this script would then
+# re-enable an operator-disabled gateway. As it is, an entry planted there can
+# only keep a gateway disabled.
 
 # An image build (OpenWrt's image builder or buildroot) runs this on the build
 # host with IPKG_INSTROOT naming the image's root. Nothing here may touch the
@@ -39,7 +46,8 @@
 
 [ -n "${IPKG_INSTROOT:-}" ] && exit 0
 
-UPGRADE_MARKER=/tmp/fips-prerm-upgrade
+UPGRADE_MARKER=/var/run/fips-prerm-upgrade
+LEGACY_MARKER=/tmp/fips-prerm-upgrade
 INSTALL_HOLD=/var/run/fips-gateway-install-hold
 
 # Run first-boot UCI setup (the script deletes itself when done).
@@ -51,8 +59,10 @@ fi
 /etc/init.d/fips start
 
 if [ "${PKG_UPGRADE:-0}" = "1" ]; then
-    if [ -e "$UPGRADE_MARKER" ]; then
-        rm -f "$UPGRADE_MARKER"
+    if [ -e "$UPGRADE_MARKER" ] || [ -e "$LEGACY_MARKER" ] || [ -L "$LEGACY_MARKER" ]; then
+        # A directory planted at the /tmp path stays; rm's complaint is not
+        # worth putting in the packager's output.
+        rm -f "$UPGRADE_MARKER" "$LEGACY_MARKER" 2>/dev/null
     else
         rm -f "$INSTALL_HOLD"
         /etc/init.d/fips-gateway enable

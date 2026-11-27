@@ -1869,6 +1869,19 @@ with v0.5.x or earlier peers.
   deleting it. The pool route and its router advertisement follow
   `gateway.lan_interface`, including a VLAN device such as `br-lan.3`,
   instead of always using `br-lan` and `lan`.
+- An opkg upgrade from this release no longer fails when
+  `/tmp/fips-prerm-upgrade` cannot be written. The package's pre-removal
+  script kept its upgrade marker there, where any local account could occupy
+  the name, and when the write failed the script exited before stopping the
+  services, so opkg refused the upgrade. The marker now lives in `/var/run`,
+  and a failed write no longer ends the script. For the `.apk` package the
+  fix covers upgrades to this release and later, because apk runs the
+  incoming package's pre-upgrade script. An opkg upgrade from 0.5.2 or 0.5.3
+  still runs the old script: if it fails with
+  `prerm script for package "fips" failed`, run
+  `rm -rf /tmp/fips-prerm-upgrade && touch /tmp/fips-prerm-upgrade` as root
+  and try again. A downgrade from this release to 0.5.3 or earlier
+  re-enables the gateway service.
 
 #### Gateway
 
