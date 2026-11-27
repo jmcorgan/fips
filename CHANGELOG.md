@@ -1834,6 +1834,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session spin bit already does, instead of freezing until the new
   session's frame counter passed the old one. No message format changes,
   and peers take no measurement from it.
+- Two nodes that already hold each other and both dial again, on a second
+  transport or from a second address, now finish on one session. Before,
+  each could move onto its own dial at its msg2 and then take the other's
+  dial at that dial's first frame, so the two ends held different sessions
+  and stayed split until the link-dead timeout. At the first frame the node
+  address ordering now decides between the two dials as it does for
+  crossed dials, and both ends keep the smaller node's dial. Nothing on the
+  wire changes.
+- A peer's fresh link rekey msg1 now replaces a rekey this node answered
+  but the peer never adopted, such as one armed by the peer's dial sent on
+  this node's aged link or by a dial msg1 resent after crossed dials.
+  Before, that pending rekey refused every rekey msg1 from the peer for up
+  to its 120 s hold, so the peer's rekeys went unanswered until the hold
+  ran out. A copy of the msg1 that armed the replaced rekey is still
+  refused, and every msg1 is still refused while this node's own completed
+  rekey waits to cut over. Nothing on the wire changes.
 
 #### Sessions and rekey
 
@@ -1991,6 +2007,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is removed. A node with no other candidate keeps its parent, and a peer
   kept out is still taken when no other candidate reaches the smallest
   root the node sees, so no node becomes root because of it.
+- With Nostr rendezvous enabled, a NAT traversal that succeeds with this
+  node as the responder now clears the peer's failure streak and cooldown,
+  and publishes the status change. Before, only a traversal this node began
+  cleared them, so a peer that had failed earlier stayed in cooldown, and
+  was shown so in the status, although a traversal between the two had
+  just worked.
+- A step of the system clock no longer moves the one-shot startup advert
+  sweep of Nostr open discovery. The sweep waits
+  `node.rendezvous.nostr.startup_sweep_delay_secs` after Nostr discovery
+  starts, and that delay was measured on the wall clock, so a forward step
+  (an NTP correction after boot) ran the sweep before its delay and a
+  backward step held it for as long as the step. The delay is now measured
+  on the monotonic clock. The advert-age filter the sweep applies stays on
+  the wall clock, since advert timestamps are wall time.
 
 #### Transports
 
@@ -2343,6 +2373,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was refused. A monitoring connection that fails part-way through a reply
   is dropped, and the next monitoring round connects and authenticates
   again.
+- A captured msg1 from a peer's earlier run no longer tears down a live
+  peering when it is replayed. A handshake from a held peer at a new
+  startup epoch is now answered into a pending restart held beside the
+  peering, and replaces the peering, with the restart's resets of the
+  tree, the filter and the end-to-end session, only once a frame under its
+  session authenticates; the restart dampener is stamped then, not at the
+  msg1. Before, once the peer had been silent for 15 s, as when one or two
+  heartbeats are lost, anyone holding such a msg1 could replay it from any
+  address: the node tore the peering down, and the dampener it stamped
+  refused the genuine peer's restart for the next 15 s. A copy of a
+  restart msg1 from the pending restart's own address draws the stored
+  msg2, a copy from another address draws nothing, at most eight distinct
+  restart msg1s from one peer are answered within 15 s, and a pending
+  restart that no frame proves is dropped at the handshake timeout.
+  Nothing on the wire changes.
 
 #### Sessions
 
