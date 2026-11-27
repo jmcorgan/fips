@@ -1,0 +1,38 @@
+#!/bin/sh
+# Maintainer script run before the FIPS package is removed or replaced.
+#
+# Installed as the .ipk CONTROL/prerm and registered as the .apk pre-deinstall
+# script, and as the .apk pre-upgrade script with its arguments rewritten to
+# "upgrade <new-version>", so one body serves both packagers.
+#
+# opkg calls this with "upgrade <new-version>" when the package is being
+# replaced. Disabling the services there would erase the operator's choice,
+# because nothing records it anywhere else, so an upgrade only stops them and
+# leaves a marker telling the incoming postinst that enablement survived.
+# A real removal stops and disables both, as before.
+#
+# A package built from the SDK feed Makefile runs this body from OpenWrt's
+# generated prerm, which passes the script's own path first, so "upgrade" is
+# then the second argument. opkg exports PKG_UPGRADE=1 for an upgrade either
+# way, and apk runs this only on a removal.
+
+# An image build (OpenWrt's image builder or buildroot) runs this on the build
+# host with IPKG_INSTROOT naming the image's root. Nothing here may touch the
+# host, so it does nothing there; see the README for the gateway in images.
+
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+
+UPGRADE_MARKER=/tmp/fips-prerm-upgrade
+
+if [ "${1:-}" = "upgrade" ] || [ "${PKG_UPGRADE:-0}" = "1" ]; then
+    : > "$UPGRADE_MARKER" 2>/dev/null || true
+    /etc/init.d/fips-gateway stop 2>/dev/null || true
+    /etc/init.d/fips stop         2>/dev/null || true
+    exit 0
+fi
+
+/etc/init.d/fips-gateway stop    2>/dev/null || true
+/etc/init.d/fips-gateway disable 2>/dev/null || true
+/etc/init.d/fips stop            2>/dev/null || true
+/etc/init.d/fips disable         2>/dev/null || true
+exit 0

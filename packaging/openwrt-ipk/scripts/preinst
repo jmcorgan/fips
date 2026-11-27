@@ -25,19 +25,23 @@
 
 [ -n "${IPKG_INSTROOT:-}" ] && exit 0
 
+# The marker and the hold live in /var/run for the reasons scripts/prerm gives:
+# only root can write there, and "command :" keeps a failed write from exiting
+# the script.
 INSTALL_HOLD=/var/run/fips-gateway-install-hold
-UPGRADE_MARKER=/tmp/fips-prerm-upgrade
+UPGRADE_MARKER=/var/run/fips-prerm-upgrade
 
 # opkg passes "install" or "upgrade <old-version>"; apk passes versions only.
 if [ "${PKG_UPGRADE:-0}" = "1" ] && [ "${1:-}" != "upgrade" ]; then
-    : > "$UPGRADE_MARKER" 2>/dev/null || true
     /etc/init.d/fips-gateway stop 2>/dev/null || true
     /etc/init.d/fips stop         2>/dev/null || true
+    mkdir -p "${UPGRADE_MARKER%/*}" 2>/dev/null
+    command : 2>/dev/null > "$UPGRADE_MARKER" || true
 fi
 
 if ! /etc/init.d/fips-gateway enabled 2>/dev/null; then
     mkdir -p "${INSTALL_HOLD%/*}" 2>/dev/null
-    : > "$INSTALL_HOLD" 2>/dev/null || true
+    command : 2>/dev/null > "$INSTALL_HOLD" || true
 fi
 
 exit 0

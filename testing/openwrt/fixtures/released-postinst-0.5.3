@@ -1,0 +1,66 @@
+#!/bin/sh
+# Maintainer script run after the FIPS package is unpacked.
+#
+# Installed as the .ipk CONTROL/postinst and registered as the .apk
+# post-install script, and as the .apk post-upgrade script with PKG_UPGRADE=1
+# exported ahead of this body, so one body serves both packagers.
+#
+# The fips daemon is enabled and started on every install. The gateway is not:
+# the package ships that service disabled, and the README and the deployment
+# tutorial tell the operator to enable it deliberately.
+#
+# Upgrades are the awkward case, because opkg runs the OLD package's prerm
+# before any script from the new one:
+#
+#   marker present  the old package was one of these, its prerm left
+#                   enablement alone, and the gateway only needs starting
+#                   again if it was enabled;
+#   no marker       the old package's prerm disabled the gateway on its way
+#                   out, so its former state is unrecoverable; the gateway is
+#                   re-enabled, which also re-enables one an operator had
+#                   disabled by hand.
+#
+# Under apk, a fresh install runs this as post-install and the gateway stays
+# off. An upgrade runs it as post-upgrade, after the .apk pre-upgrade script
+# (the prerm body) has stopped the services and left the marker.
+#
+# A package built from the SDK feed Makefile runs this body from OpenWrt's
+# generated postinst, beside a generic loop that enables and starts every init
+# script; the preinst there leaves a hold that keeps the gateway out of that
+# loop. When this body decides the gateway is to be enabled, it removes the
+# hold first. See scripts/preinst.
+#
+# The upgrade marker stays in /tmp: an installed 0.5.2 package's prerm writes
+# it there, and this script must find it to leave a disabled gateway disabled.
+
+# An image build (OpenWrt's image builder or buildroot) runs this on the build
+# host with IPKG_INSTROOT naming the image's root. Nothing here may touch the
+# host, so it does nothing there; see the README for the gateway in images.
+
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+
+UPGRADE_MARKER=/tmp/fips-prerm-upgrade
+INSTALL_HOLD=/var/run/fips-gateway-install-hold
+
+# Run first-boot UCI setup (the script deletes itself when done).
+if [ -x /etc/uci-defaults/90-fips-setup ]; then
+    /etc/uci-defaults/90-fips-setup && rm -f /etc/uci-defaults/90-fips-setup
+fi
+
+/etc/init.d/fips enable
+/etc/init.d/fips start
+
+if [ "${PKG_UPGRADE:-0}" = "1" ]; then
+    if [ -e "$UPGRADE_MARKER" ]; then
+        rm -f "$UPGRADE_MARKER"
+    else
+        rm -f "$INSTALL_HOLD"
+        /etc/init.d/fips-gateway enable
+    fi
+
+    if /etc/init.d/fips-gateway enabled 2>/dev/null; then
+        /etc/init.d/fips-gateway start
+    fi
+fi
+
+exit 0

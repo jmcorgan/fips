@@ -14,7 +14,8 @@
 # A package built from the SDK feed Makefile runs this body from OpenWrt's
 # generated prerm, which passes the script's own path first, so "upgrade" is
 # then the second argument. opkg exports PKG_UPGRADE=1 for an upgrade either
-# way, and apk runs this only on a removal.
+# way. apk runs this body unwrapped only as pre-deinstall, on a removal; its
+# pre-upgrade copy sets "upgrade" as the first argument.
 
 # An image build (OpenWrt's image builder or buildroot) runs this on the build
 # host with IPKG_INSTROOT naming the image's root. Nothing here may touch the
@@ -22,12 +23,27 @@
 
 [ -n "${IPKG_INSTROOT:-}" ] && exit 0
 
-UPGRADE_MARKER=/tmp/fips-prerm-upgrade
+# The marker lives in /var/run, which only root can write, and not in /tmp,
+# where any local account could occupy the name first with a directory, a
+# link or a FIFO, making the write fail, follow the link, or block.
+#
+# The services are stopped before the marker is written, so nothing about the
+# marker can keep them running. The write uses "command :" because a failed
+# redirection on the special builtin ":" exits a non-interactive shell before
+# "|| true" runs, and opkg refuses an upgrade whose prerm exits non-zero. If
+# the write still fails (a read-only root, no free inode), the incoming
+# postinst finds no marker and re-enables the gateway, as after a 0.5.1 prerm.
+#
+# A downgrade to 0.5.3 or earlier re-enables the gateway: that postinst looks
+# for the marker only in /tmp, finds none, and takes the old package's prerm
+# to have disabled it.
+UPGRADE_MARKER=/var/run/fips-prerm-upgrade
 
 if [ "${1:-}" = "upgrade" ] || [ "${PKG_UPGRADE:-0}" = "1" ]; then
-    : > "$UPGRADE_MARKER" 2>/dev/null || true
     /etc/init.d/fips-gateway stop 2>/dev/null || true
     /etc/init.d/fips stop         2>/dev/null || true
+    mkdir -p "${UPGRADE_MARKER%/*}" 2>/dev/null
+    command : 2>/dev/null > "$UPGRADE_MARKER" || true
     exit 0
 fi
 

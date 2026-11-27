@@ -6,6 +6,11 @@
 # under ash there; a construct bash accepts and ash does not would otherwise
 # surface on a router.
 #
+# Then runs the prerm's upgrade path, and the preinst's apk upgrade path, in a
+# second busybox container with a read-only root, where no path either could
+# write the upgrade marker or the install hold to is writable: each must still
+# exit 0 having stopped both services.
+#
 # Then runs testing/openwrt/firewall-scenarios.sh in four pinned OpenWrt
 # rootfs images, which carry the real uci, fw4 and nft, so 90-fips-setup's
 # firewall zone and upgrade migration, and fips-mesh-setup's mesh zone, run
@@ -98,7 +103,12 @@ APK_DIR="$(shared_tmpdir --sweep "$PROJECT_ROOT/target" openwrt-apk)" || {
     echo "openwrt-scripts: could not create a temporary directory under $PROJECT_ROOT/target" >&2
     exit 2
 }
-trap 'rm -rf "$APK_DIR"' EXIT
+RO_DIR="$(shared_tmpdir --sweep "$PROJECT_ROOT/target" openwrt-ro)" || {
+    echo "openwrt-scripts: could not create a temporary directory under $PROJECT_ROOT/target" >&2
+    rm -rf "$APK_DIR"
+    exit 2
+}
+trap 'rm -rf "$APK_DIR" "$RO_DIR"' EXIT
 bash "$SCRIPT_DIR/package-test.sh" --keep "$APK_DIR"
 rc=$?
 if [[ $rc -ne 0 ]]; then
@@ -123,6 +133,54 @@ if [[ $rc -ne 0 && $rc -ne 1 ]]; then
     rc=2
 fi
 worst=$rc
+
+# The read-only run. Stub init scripts, bind-mounted at /etc/init.d, record
+# each call in a tmpfs at /state, the one writable place in the container.
+# The gateway stub reports the service not enabled, so the preinst goes on to
+# write its install hold as well as the marker. PRERM and PREINST pass through
+# from the caller when set, naming paths under /src or /apk.
+echo "==> prerm and preinst upgrade on a read-only root"
+for svc in fips fips-gateway; do
+    # shellcheck disable=SC2016  # $1 is the stub's own argument
+    printf '#!/bin/sh\necho "%s $1" >> /state/calls\n[ "$1" != enabled ]\n' "$svc" > "$RO_DIR/$svc"
+    chmod 0755 "$RO_DIR/$svc"
+done
+# shellcheck disable=SC2016  # expanded by the container's shell
+ro_check='
+fail=0
+ro_run() {
+    # ro_run <name> <calls expected...>: the script has just run; $? is its status
+    rc=$1; name=$2; shift 2
+    calls="$(tr "\n" ";" < /state/calls)"
+    if [ "$rc" -eq 0 ]; then echo "  ok   read-only root: the $name exits 0"
+    else echo "  FAIL read-only root: the $name exits $rc"; fail=1; fi
+    for c in "$@"; do
+        if grep -qxF "$c" /state/calls; then echo "  ok   read-only root: the $name calls $c"
+        else echo "  FAIL read-only root: the $name does not call $c, only: $calls"; fail=1; fi
+    done
+}
+: > /state/calls
+sh "$PRERM" upgrade 0.5.5 >/dev/null 2>&1
+ro_run $? prerm "fips-gateway stop" "fips stop"
+: > /state/calls
+PKG_UPGRADE=1 sh "$PREINST" 2.0-r1 1.0-r1 >/dev/null 2>&1
+ro_run $? preinst "fips-gateway stop" "fips stop" "fips-gateway enabled"
+exit $fail
+'
+docker run --rm --network none "${CI_LABELS[@]}" \
+    --read-only --tmpfs /state \
+    -v "$PROJECT_ROOT:/src:ro" \
+    -v "$APK_DIR:/apk:ro" \
+    -v "$RO_DIR:/etc/init.d:ro" \
+    -e "PRERM=${PRERM:-/src/packaging/openwrt-ipk/scripts/prerm}" \
+    -e "PREINST=${PREINST:-/src/packaging/openwrt-ipk/scripts/preinst}" \
+    "$IMAGE" sh -c "$ro_check"
+rc=$?
+if [[ $rc -ne 0 && $rc -ne 1 ]]; then
+    echo "openwrt-scripts: the read-only container exited $rc, so its check did not report" >&2
+    rc=2
+fi
+[[ $rc -gt $worst ]] && worst=$rc
 
 # FW_SETUP, FW_MESH_SETUP and FW_SNIPPETS pass through from the caller when
 # set, to run the firewall scenarios against another setup script or mesh
