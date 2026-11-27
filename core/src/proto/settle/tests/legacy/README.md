@@ -22,10 +22,11 @@ properties can be checked on it.
   rekey machine. It has no path bundle either, so it tells the model of
   each frame on no paths, and the model moves the peer to every frame's
   source, as that node does.
-- `findings.rs`: the two defects of the current node the properties must
+- `findings.rs`: the two shapes of the current node the properties must
   find in `MasterParty`, each test at both multipath settings (a late
   second dial answered in the other order splits the session; a dial on the
-  peer's aged link leaves a pending the peer cannot adopt), tests that
+  peer's aged link leaves a pending the peer cannot adopt, which the peer's
+  next rekey displaces), tests that
   crossed dials now leave the smaller node on the link it dialed, on a
   connectionless and on a connection-oriented transport, and that a
   forward wall step no longer lets a msg1 replace a peering heard just now,

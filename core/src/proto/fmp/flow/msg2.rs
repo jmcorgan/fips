@@ -245,7 +245,7 @@ fn run<I: Instant>(
             }
             ops.dialed(p.peer, link, p.epoch, p.from, Transition::Replace, now, out);
         }
-        How::Swap { own } => swap(ops, p.peer, link, p.from, own, out),
+        How::Swap { own } => swap(ops, p.peer, link, p.from, own, now, out),
         How::Keep => ops.keep(p.peer, link, out),
     }
 }
@@ -264,6 +264,7 @@ fn swap<I: Instant>(
     link: LinkNo,
     from: Pair,
     own: bool,
+    now: I,
     out: &mut Vec<Outs<I, Xx>>,
 ) {
     let left = ops.held(&peer).map(|h| h.link);
@@ -276,7 +277,7 @@ fn swap<I: Instant>(
         .filter(|p| !chosen(p, ops))
         .filter(|_| !(xx_fault!(MoveClosesDial) || node_fault!(MoveClosesDial)));
     let start = out.len();
-    ops.moveto(peer, link, from, own, out);
+    ops.moveto(peer, link, from, own, now, out);
     let Some(dialed) = strip else {
         return;
     };

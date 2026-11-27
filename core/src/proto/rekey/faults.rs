@@ -50,6 +50,9 @@ pub(crate) enum Fault {
     NoOpeningTeardown,
     /// A refused IK msg1 is not recorded.
     RefusalUnrecorded,
+    /// A fresh eligible IK msg1 under a responder pending is refused
+    /// instead of displacing it.
+    UnadoptedRefuses,
     /// An own attempt reads every reply, however many it has refused, as
     /// before the link's msg2s were capped.
     CapIgnored,
@@ -209,6 +212,7 @@ impl Fault {
         Self::RevertRetires,
         Self::NoOpeningTeardown,
         Self::RefusalUnrecorded,
+        Self::UnadoptedRefuses,
         Self::LargerKeepsOwn,
         Self::KeepCandidatesAtCutover,
         Self::AcceptDropsNewer,

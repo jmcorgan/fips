@@ -64,4 +64,6 @@ the actions the machine queues.
   (with a stale answer that must not be taken for the one routed by the
   offer's nonce), through a symmetric NAT (adopted as a remapped port), and
   a dual initiation that ends in B's one session, with B's one re-send and
-  A's own traversal timing out.
+  A's own traversal timing out; and a punch that succeeds clears the
+  failure cooldown for the peer, and publishes the status, on the
+  initiator's end and on the responder's.

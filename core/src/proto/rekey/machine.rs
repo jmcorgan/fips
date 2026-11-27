@@ -983,6 +983,20 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 },
                 None => Change::Reject(Reason::AnsweredBefore),
             },
+            // A fresh msg1 under a responder pending the peer never adopted
+            // displaces it (operator decision, 2026-11-25): a peer that
+            // starts a new rekey has given up the cycle the pending holds,
+            // or never started it, as when the pending was armed by a
+            // stray msg1 the peer meant as a dial.
+            (Cycle::PendR(_), Copied::Fresh)
+                if !fault!(UnadoptedRefuses) && !node_fault!(UnadoptedRefuses) =>
+            {
+                Change::Respond {
+                    tok,
+                    yield_own: false,
+                    on_link: arrival.on_link,
+                }
+            }
             (Cycle::PendR(_) | Cycle::PendI(_), Copied::Setup | Copied::Seen | Copied::Fresh)
             | (Cycle::PendI(_), Copied::Armed) => Change::Refuse {
                 reason: Reason::PendingHeld,
@@ -1403,10 +1417,11 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         self.mem.due = false;
     }
 
-    /// Answer a fresh eligible IK msg1 into a responder pending. The msg2
-    /// goes on the msg1's arrival path when arrival replies are on and the
-    /// msg1 arrived on the established link (`on_link`); otherwise, as for
-    /// a msg1 accepted off a link that cannot be reached, on the
+    /// Answer a fresh eligible IK msg1 into a responder pending, in place
+    /// of any responder pending held, which the peer never adopted. The
+    /// msg2 goes on the msg1's arrival path when arrival replies are on and
+    /// the msg1 arrived on the established link (`on_link`); otherwise, as
+    /// for a msg1 accepted off a link that cannot be reached, on the
     /// established link with its fallback.
     fn respond(
         &mut self,
@@ -1450,6 +1465,16 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         }
         if yield_own && let Cycle::Init(a) = core::mem::replace(&mut self.cycle, Cycle::Idle) {
             abandon(a, Abandon::Yielded, out);
+        }
+        // The answer was written, so the responder pending it displaces
+        // ends here: its msg1 enters the record, so a copy is refused, and
+        // its epoch is retired. A failed answer above leaves it in place.
+        if matches!(self.cycle, Cycle::PendR(_))
+            && let Cycle::PendR(p) = core::mem::replace(&mut self.cycle, Cycle::Idle)
+        {
+            let (ep, _) = p.end(&mut self.record);
+            retire(ep, out);
+            out.push(Output::Abandoned(Abandon::Displaced));
         }
         let tag = env.tags.draw();
         let ids = Ids {

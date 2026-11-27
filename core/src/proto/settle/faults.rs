@@ -170,6 +170,11 @@ pub(crate) enum Fault {
     /// A redial passes no slot, memory or dampener, and its answer
     /// replaces the held peer at once.
     RedialTearsDownAtMsg1,
+    /// A restart of a held peer tears it down at the msg1, as before a
+    /// restart was held as a leg.
+    RestartTearsDownAtMsg1,
+    /// A restart held as a leg stamps the dampener at its admission.
+    RestartStampsAtOpen,
     /// A redial's leg is never reaped.
     RedialNeverExpires,
     /// A redial the ACL passed and no session index could be drawn for
@@ -183,6 +188,26 @@ pub(crate) enum Fault {
     /// memory and silent sessions at the swap, rather than unheard until
     /// the frame's own `Heard`.
     RedialSwapHeard,
+    /// A redial leg that crossed this node's own dial the peering was
+    /// moved onto, pending at the move or answered inside the window after
+    /// it, is swapped in at its first frame even where this node's dial
+    /// wins the tie-break, so each end of a crossing ends on the other's
+    /// dial.
+    CrossedLegSwaps,
+    /// A redial leg answered after the move onto this node's own dial is
+    /// never recorded as crossing it.
+    LateLegUncrossed,
+    /// An own dial's msg2 that proves a restart ignores the restart leg it
+    /// crossed.
+    RestartLegUncrossed,
+    /// The crossing window after a move onto an own dial outlives a frame
+    /// of the peer.
+    CrossingWindowOutlivesFrame,
+    /// The crossing window after a move onto an own dial outlives the
+    /// handshake timeout.
+    CrossingWindowOutlivesTimeout,
+    /// An adopted redial's session still counts as this node's own dial.
+    AdoptedRedialCountsOwn,
     /// An operator disconnect of a held peer leaves its pending redial.
     RedialKeptAtDisconnect,
     /// A redial proven by a frame from another transport than the
@@ -483,10 +508,18 @@ impl Fault {
         Self::RedialMemoryIgnored,
         Self::RedialSkipsDampener,
         Self::RedialTearsDownAtMsg1,
+        Self::RestartTearsDownAtMsg1,
+        Self::RestartStampsAtOpen,
         Self::RedialNeverExpires,
         Self::AuthorizedRedialUnnoted,
         Self::RedialMemoryLapses,
         Self::RedialSwapHeard,
+        Self::CrossedLegSwaps,
+        Self::LateLegUncrossed,
+        Self::RestartLegUncrossed,
+        Self::CrossingWindowOutlivesFrame,
+        Self::CrossingWindowOutlivesTimeout,
+        Self::AdoptedRedialCountsOwn,
         Self::RedialKeptAtDisconnect,
         Self::RedialProofLeavesHeldLink,
         Self::RedialProofAnyTransport,

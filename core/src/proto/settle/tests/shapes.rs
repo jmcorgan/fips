@@ -9,8 +9,9 @@
 //! rules and the current node differ. A further test shows that each
 //! start's own script shows only the shape that start carries by design,
 //! with the model and with joint nodes, so an exemption is spent on its
-//! shape alone, and another that the two defects left for later show their
-//! shapes in the models of the current and the deployed node.
+//! shape alone, and another that the two pinned shapes, the late second
+//! dial and the dial on the aged link, show in the models of the current
+//! and the deployed node.
 //!
 //! - [`Shape::StaleFrame`]: a counterexample to the operator's late-dial
 //!   rule, as the model encodes it. The responder replaces the first
@@ -19,17 +20,21 @@
 //!   the responder's earlier frame then moves the dialer back to the
 //!   session the responder dropped. The comparison of the two candidate
 //!   late-dial rules decides whether the rule is built.
-//! - [`Shape::OldLife`]: an observation against FRC-1201, a msg1 from the
-//!   peer's previous life accepted as a restart past the unheard floor,
-//!   reached by a delay longer than the world allows (shown here with the
-//!   bound lifted for one world) and by replay.
+//! - [`Shape::OldLife`]: once an observation against FRC-1201, a msg1 from
+//!   the peer's previous life accepted as a restart past the unheard floor,
+//!   reached by a delay longer than the world allows (with the bound lifted
+//!   for one world) and by replay. The model now holds a restart as a leg
+//!   beside the peering until a frame under it, which a previous life never
+//!   sends, so the two schedules that showed it show neither the shape nor
+//!   a split: those two tests assert its absence.
 //! - [`Shape::RekeyInstall`]: an observation against FRC-1201, a restarted
 //!   node installed from the peer's rekey msg1 and then parted from it by
 //!   the peer's late crossing dial.
 //! - [`Shape::LaterDialFirst`] and [`Shape::DialAsRekey`]: the late second
 //!   dial answered in the other order and the dial on the peer's aged
-//!   link, the two defects left for later, which no exemption spares
-//!   ([`Shape::pinned`]).
+//!   link, two accepted behaviours (a split the link-dead timer and the
+//!   redial end, and a pending the peer's next rekey displaces), which no
+//!   exemption spares ([`Shape::pinned`]).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -97,8 +102,24 @@ fn a_stale_frame_moves_a_late_dialer_back_onto_the_session_its_peer_dropped() {
     }
 }
 
+/// Asserts that `path` shows neither `shape` nor a split with the model at
+/// both ends.
+fn unobserved(number: u8, name: &str, path: &[Act], unbounded: bool, shape: Shape) {
+    let w = after(number, name, model, path, unbounded);
+    assert!(
+        !w.kinds().contains(&shape),
+        "defect: start {number} {name}: the model still shows {shape:?}: {:?}",
+        w.kinds()
+    );
+    assert!(
+        splits(&w).is_empty(),
+        "defect: start {number} {name}: the model splits: {:?}",
+        splits(&w)
+    );
+}
+
 #[test]
-fn observed_a_late_msg1_from_the_peers_previous_life_is_accepted_as_a_restart() {
+fn a_late_msg1_from_the_peers_previous_life_is_held_as_a_leg_and_parts_nothing() {
     let path = [
         Act::Deliver(0),
         Act::Advance,
@@ -106,11 +127,11 @@ fn observed_a_late_msg1_from_the_peers_previous_life_is_accepted_as_a_restart() 
         Act::Deliver(4),
         Act::Advance,
     ];
-    observe(8, "restart", &path, true, Shape::OldLife);
+    unobserved(8, "restart", &path, true, Shape::OldLife);
 }
 
 #[test]
-fn observed_a_replayed_msg1_from_the_peers_previous_life_is_accepted_as_a_restart() {
+fn a_replayed_msg1_from_the_peers_previous_life_is_held_as_a_leg_and_parts_nothing() {
     let path = [
         Act::Deliver(0),
         Act::Advance,
@@ -119,7 +140,7 @@ fn observed_a_replayed_msg1_from_the_peers_previous_life_is_accepted_as_a_restar
         Act::Advance,
         Act::Replay(0),
     ];
-    observe(13, "spray", &path, false, Shape::OldLife);
+    unobserved(13, "spray", &path, false, Shape::OldLife);
 }
 
 #[test]
@@ -180,7 +201,8 @@ fn each_starts_own_script_shows_only_the_shape_it_carries() {
 }
 
 #[test]
-fn the_two_defects_left_for_later_show_their_shapes_in_the_current_and_deployed_node() {
+fn the_late_second_dial_and_the_dial_on_the_aged_link_show_their_shapes_in_the_current_and_deployed_node()
+ {
     // The late second dial (both dialer orders) and the dial on the aged
     // link, each on its start's own script with the model of `master` at
     // both ends; the late dial also with the model of `maint`, whose

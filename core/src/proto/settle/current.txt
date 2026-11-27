@@ -14,6 +14,8 @@ fips-core  proto::settle::model::tests::crossing::a_stored_msg2_sent_after_the_p
 fips-core  proto::settle::gates::tests::an_own_msg2_restart_does_not_stamp_the_dampener  S-05
 fips-core  proto::settle::gates::tests::an_own_msg2_restart_does_not_stamp_the_dampener  S-25
 fips-core  proto::settle::gates::tests::an_own_msg2_restart_does_not_stamp_the_dampener  S-32
+fips-core  proto::settle::table::tests::a_restart_leg_crossing_the_smaller_nodes_own_dial_is_given_up_and_the_dial_kept  S-05
+fips-core  proto::settle::table::tests::a_restart_leg_crossing_the_smaller_nodes_own_dial_is_given_up_and_the_dial_kept  S-25
 fips-core  proto::settle::gates::tests::silent_sessions_start_a_refusal_at_the_third_in_a_row  S-06
 fips-core  proto::settle::gates::tests::each_further_silent_session_doubles_the_refusal_up_to_its_cap  S-06
 fips-mesh  node::tests::silent_backoff::three_silent_sessions_ended_by_link_dead_refuse_the_next_same_epoch_msg1_with_its_own_counter  S-06

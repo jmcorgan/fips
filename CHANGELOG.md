@@ -2247,6 +2247,20 @@ with v0.5.x or earlier peers.
   is removed. A node with no other candidate keeps its parent, and a peer
   kept out is still taken when no other candidate reaches the smallest
   root the node sees, so no node becomes root because of it.
+- With Nostr rendezvous enabled, a NAT traversal that succeeds with this
+  node as the responder now clears the peer's failure streak and cooldown,
+  and publishes the status change. Before, only a traversal this node began
+  cleared them, so a peer that had failed earlier stayed in cooldown, and
+  was shown so in the status, although a traversal between the two had
+  just worked.
+- A step of the system clock no longer moves the one-shot startup advert
+  sweep of Nostr open discovery. The sweep waits
+  `node.rendezvous.nostr.startup_sweep_delay_secs` after Nostr discovery
+  starts, and that delay was measured on the wall clock, so a forward step
+  (an NTP correction after boot) ran the sweep before its delay and a
+  backward step held it for as long as the step. The delay is now measured
+  on the monotonic clock. The advert-age filter the sweep applies stays on
+  the wall clock, since advert timestamps are wall time.
 
 #### Transports
 

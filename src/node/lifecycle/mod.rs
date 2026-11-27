@@ -855,12 +855,6 @@ impl Node {
             "Connection initiated"
         );
 
-        // The dial's leg in the settlement core's legs, started below with
-        // the wire and the lease, times the msg1 resends. The deadline
-        // computed here is handed to the carrier, which does not use it.
-        let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
-        let first_resend_at_ms = at.interval_ms + resend_interval;
-
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
             .note((transport_id, our_index.as_u32()), link_id);
@@ -900,7 +894,7 @@ impl Node {
         // Store the msg1 wire on the surviving carrier (the connection does not
         // hold the resend source), for the reads that digest it; the dial's
         // leg holds its own copy as its resend source.
-        machine.set_conn_handshake_msg1(wire_msg1, first_resend_at_ms);
+        machine.set_conn_handshake_msg1(wire_msg1);
 
         Ok(())
     }
@@ -997,9 +991,7 @@ impl Node {
 
         // Store msg1 on the carrier, which the dial's leg copies below. No
         // resend is scheduled: the leg is quiet.
-        let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
-        let first_resend_at_ms = at.interval_ms + resend_interval;
-        machine.set_conn_handshake_msg1(wire_msg1.clone(), first_resend_at_ms);
+        machine.set_conn_handshake_msg1(wire_msg1.clone());
 
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
@@ -2371,9 +2363,7 @@ impl Node {
                                 warn!(error = %err, "Failed to publish initial Nostr overlay advert");
                             }
                             self.supervisor.nostr_rendezvous.set_engine(runtime);
-                            self.supervisor
-                                .nostr_rendezvous
-                                .set_started_at_ms(Self::now_ms());
+                            self.supervisor.nostr_rendezvous.mark_started();
                             info!("Nostr overlay discovery enabled");
                             Event::SubstrateUp { child }
                         }
@@ -3380,7 +3370,7 @@ impl Node {
     ///
     /// Gated identically to [`run_open_discovery_sweep`]: requires
     /// `node.rendezvous.nostr.enabled` and `policy == open`.
-    async fn maybe_run_startup_open_discovery_sweep(
+    pub(in crate::node) async fn maybe_run_startup_open_discovery_sweep(
         &mut self,
         bootstrap: &std::sync::Arc<NostrRendezvous>,
     ) {
@@ -3398,7 +3388,10 @@ impl Node {
         let Some(started_at_ms) = self.supervisor.nostr_rendezvous.started_at_ms() else {
             return;
         };
-        let now_ms = Self::now_ms();
+        // The delay is measured on the monotonic clock the start was
+        // stamped on; the advert-age filter in the sweep stays on the wall
+        // clock, because advert timestamps are wall time.
+        let now_ms = crate::time::mono_ms();
         let delay_ms = self
             .config()
             .node

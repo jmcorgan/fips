@@ -1,9 +1,10 @@
-//! The two defects of the current node the settlement properties must find
+//! The two shapes of the current node the settlement properties must find
 //! in the model of `master`, each on its named start and at each multipath
 //! setting: a late second dial answered in the other order splits the
 //! session, and a dial on the peer's aged link leaves a pending the peer
-//! cannot adopt. If one of them is not found at its property, the world is
-//! weaker than the reproductions it stands for. Two that were defects are
+//! cannot adopt, which the peer's next rekey displaces. If one of them is
+//! not found at its property, the world is weaker than the reproductions it
+//! stands for. Two that were defects are
 //! gone from the node, and their tests say so: crossed dials no longer
 //! leave the smaller node on the wrong link, since a move holds the link
 //! the node dialed (FRC-1201 Section 5.6), and a forward wall step no
@@ -176,17 +177,32 @@ fn against_a_model_of_master_a_late_second_dial_answered_in_the_other_order_spli
     late_split("smaller dialer");
 }
 
+/// The steps of start 7's script up to node 1's own rekey: node 1's dial
+/// on the aged link read by node 0, and node 0's answer read by node 1.
+const AGED_DIAL: &[Do] = &[
+    Do::Get(0, Want::Msg1, Some(1)),
+    Do::Get(1, Want::Msg2, Some(0)),
+];
+
 #[test]
-fn against_a_model_of_master_a_dial_on_the_peers_aged_link_leaves_a_pending_the_peer_cannot_adopt()
-{
+fn against_a_model_of_master_a_dial_on_the_peers_aged_link_leaves_a_pending_the_peers_rekey_displaces()
+ {
     for (setting, mk) in SETTINGS {
-        let found = found(mk, 7, "aged link", None);
+        let dialed = found(mk, 7, "aged link", Some(AGED_DIAL));
         assert!(
-            found
+            dialed
                 .iter()
                 .any(|b| b.oracle == Oracle::OneSession && b.what.starts_with("pending:")),
-            "multipath {setting}: a pending is left that the peer cannot adopt:\n{}",
-            listed(&found)
+            "multipath {setting}: the dial leaves a pending the peer cannot adopt:\n{}",
+            listed(&dialed)
+        );
+        let whole = found(mk, 7, "aged link", None);
+        assert!(
+            !whole
+                .iter()
+                .any(|b| b.oracle == Oracle::OneSession && b.what.starts_with("pending:")),
+            "multipath {setting}: node 1's rekey did not displace the pending:\n{}",
+            listed(&whole)
         );
     }
 }

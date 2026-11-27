@@ -134,6 +134,13 @@ const ROWS: &[Row] = &[
         ],
     ),
     (
+        &[Fault::UnadoptedRefuses],
+        &[(
+            FMP,
+            "a_fresh_eligible_msg1_displaces_an_unadopted_responder_pending",
+        )],
+    ),
+    (
         &[Fault::LargerKeepsOwn],
         &[(
             FMP,

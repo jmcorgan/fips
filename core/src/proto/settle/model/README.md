@@ -40,9 +40,11 @@ follows a named rule (`judge::LocalRule`). Each says what it decides:
   nothing. The FRC says to install once a send succeeds, and is silent on
   a peer already held by then.
 - `DampenerStamp`: which accepted restarts and replacements stamp the
-  dampener the gates' ceiling counts from. A restart or replacement found
-  at a msg1 stamps it if the old peering was heard; a restart found at
-  this node's own msg2 does not; a restart revealed in a rekey msg2 with
+  dampener the gates' ceiling counts from. A replacement found at a msg1
+  stamps it if the old peering was heard, and so does a restart, held as a
+  leg, when the first frame under the leg replaces the peering, or when
+  this node's own dial's msg2 at the leg's epoch hands the leg the
+  tie-break; a restart found at this node's own msg2 alone does not; a restart revealed in a rekey msg2 with
   the link kept does not. The FRC does not say which acceptances count.
 - `AgedLink`: this node's own dial, sent on the peer's established link
   once that link was old enough to rekey, completes while the peer is
@@ -76,6 +78,13 @@ follows a named rule (`judge::LocalRule`). Each says what it decides:
   peering not heard from is never redialed and keeps rules 3.3 and 4.1.
   A redial's msg1 joins the record when it is answered, not when it is
   refused, and a redial no frame proves is dropped at its timeout.
+- `FreshDisplaces` (the operator's decision, 2026-11-25): a fresh
+  eligible msg1 on the link, which no record holds, while this node holds
+  a responder pending the peer has not adopted, is answered as the peer's
+  rekey (rule 4.5), and its pending displaces the one held, whose msg1
+  stays in the record. Rule 4.2 discards any msg1 but the arming one's
+  resend while a pending is held; it still does so for copies, and for
+  every msg1 under this node's own completed rekey.
 
 ## Where the peer is
 

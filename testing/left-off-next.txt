@@ -216,7 +216,7 @@ test          next-rule  a_msg1_from_a_link_whose_dial_expects_this_identity_is_
 test          next-rule  a_msg1_spoofed_from_an_established_peers_address_is_dropped_after_the_dh_reveals_a_different_identity  src/node/tests/handshake.rs
 test          next-rule  a_replay_replacing_an_unheard_phantom_leaves_the_end_to_end_session_alone  src/node/tests/handshake.rs
 test          next-rule  a_replay_with_a_changed_sender_idx_is_dropped_before_teardown  src/node/tests/handshake.rs
-test          next-rule  a_replayed_msg1_replacing_a_silent_peer_leaves_it_unheard  src/node/tests/handshake.rs
+test          next-rule  a_replayed_msg1_against_a_silent_peer_leaves_it_and_its_dampener_until_a_frame_under_its_leg  src/node/tests/handshake.rs
 test          next-rule  a_responder_peering_that_has_decrypted_a_frame_still_refuses_a_replay_inside_the_interval  src/node/tests/handshake.rs
 test          next-rule  a_restart_of_a_heard_peering_still_ends_the_end_to_end_session  src/node/tests/handshake.rs
 test          next-rule  a_second_msg1_after_the_replaceable_age_from_the_larger_address_leaves_a_working_peering  src/node/tests/handshake.rs
@@ -293,10 +293,14 @@ test          next-rule  a_crossed_msg1_from_another_transport_read_inside_the_h
 test          next-rule  a_crossed_msg1_from_another_transport_read_inside_the_heard_floor_leaves_one_session_with_multipath_on  src/node/tests/settle/crossing.rs
 test          next-rule  a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session  src/node/tests/settle/crossing.rs
 test          next-rule  a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session_with_multipath_on  src/node/tests/settle/crossing.rs
-test          next-rule  a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt  src/node/tests/settle/crossing.rs
-test          next-rule  a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt_with_multipath_on  src/node/tests/settle/crossing.rs
+test          next-rule  a_larger_dialers_dial_on_the_peers_aged_link_leaves_a_pending_its_hold_retires  src/node/tests/settle/crossing.rs
+test          next-rule  a_larger_dialers_dial_on_the_peers_aged_link_leaves_a_pending_its_hold_retires_with_multipath_on  src/node/tests/settle/crossing.rs
+test          next-rule  a_larger_dialers_dial_on_the_peers_aged_link_leaves_a_pending_that_blocks_nothing  src/node/tests/settle/crossing.rs
+test          next-rule  a_larger_dialers_dial_on_the_peers_aged_link_leaves_a_pending_that_blocks_nothing_with_multipath_on  src/node/tests/settle/crossing.rs
 test          next-rule  a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered  src/node/tests/settle/crossing.rs
 test          next-rule  a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_with_multipath_on  src/node/tests/settle/crossing.rs
+test          next-rule  a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_and_cuts_over_to_one_session  src/node/tests/settle/crossing.rs
+test          next-rule  a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_and_cuts_over_to_one_session_with_multipath_on  src/node/tests/settle/crossing.rs
 test          next-rule  a_second_dial_answered_after_a_crossing_ends_the_pin  src/node/tests/settle/crossing.rs
 test          next-rule  a_second_dial_answered_after_a_crossing_ends_the_pin_with_multipath_on  src/node/tests/settle/crossing.rs
 test          next-rule  a_second_msg1_more_than_1s_later_leaves_a_working_peering_larger_dialer  src/node/tests/settle/crossing.rs
@@ -327,8 +331,8 @@ test          next-rule  a_second_dial_answered_does_what_the_move_cells_say_lar
 test          next-rule  a_second_dial_answered_does_what_the_move_cells_say_larger_dialer_with_multipath_on  src/node/tests/settle/table/crossing.rs
 test          next-rule  a_second_dial_answered_does_what_the_move_cells_say_smaller_dialer  src/node/tests/settle/table/crossing.rs
 test          next-rule  a_second_dial_answered_does_what_the_move_cells_say_smaller_dialer_with_multipath_on  src/node/tests/settle/table/crossing.rs
-test          next-rule  a_replacement_refused_by_the_acl_after_its_removal_keeps_the_removal  src/node/tests/settle/table/replace.rs
-test          next-rule  a_replacement_refused_by_the_acl_after_its_removal_keeps_the_removal_with_multipath_on  src/node/tests/settle/table/replace.rs
+test          next-rule  a_restart_refused_by_the_acl_leaves_the_peering_and_its_link  src/node/tests/settle/table/replace.rs
+test          next-rule  a_restart_refused_by_the_acl_leaves_the_peering_and_its_link_with_multipath_on  src/node/tests/settle/table/replace.rs
 test          next-rule  a_same_epoch_msg1_replaces_a_silent_peer_as_the_table_says  src/node/tests/settle/table/replace.rs
 test          next-rule  a_same_epoch_msg1_replaces_a_silent_peer_as_the_table_says_with_multipath_on  src/node/tests/settle/table/replace.rs
 test          next-rule  three_silent_sessions_ended_by_replacement_refuse_the_next_same_epoch_msg1  src/node/tests/silent_backoff.rs
@@ -711,25 +715,47 @@ test          no-site    an_adopted_redials_msg1_sent_again_is_refused_and_opens
 test          no-site    a_redial_proven_on_the_held_link_runs_the_moves_effects_that_keep_the_link_in_their_order  src/node/settle/tests/plan.rs
 
 # Master's start 9 scripted by hand on real nodes: a rekey crossed by dials on a second
-# transport, and its three known defects, each of master's pending redial leg (the leg's link
-# taking the held link's index entry, crossed legs each promoted into a split, and a resent dial
-# msg1 answered as a rekey the dialer cannot adopt). The file reads the leg and the redial
-# memory, which next does not have, so src/node/tests/settle/rekey_cross.rs is not on next and
-# its known-defect entries are not in next's testing/ignored-tests.txt. It is removed rather
-# than kept under `#[cfg(any())]` as explore/ is, because check-ignored-tests.py reads every
-# source file whatever its cfg, and its six ignored tests would need entries here.
+# transport, with master's pending redial leg (the leg's link naming the held link's pair in
+# the index, crossed legs settled by the dial tie-break at each leg's first frame, and a resent
+# dial msg1 answered as a rekey into a responder pending the dialer never adopts, which blocks
+# nothing), the other arrival order of crossed dials, and a rekey msg1 at the pair a redial leg
+# shares with the held link. The file reads the leg and the redial memory, which next does not
+# have, so src/node/tests/settle/rekey_cross.rs is not on next. It was removed rather than kept
+# under `#[cfg(any())]` as explore/ is, when its tests were ignored known defects, because
+# check-ignored-tests.py reads every source file whatever its cfg.
 test          no-site    a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session  src/node/tests/settle/rekey_cross.rs
 test          no-site    a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_with_multipath_on  src/node/tests/settle/rekey_cross.rs
 test          no-site    a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first  src/node/tests/settle/rekey_cross.rs
 test          no-site    a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
-test          no-site    a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first  src/node/tests/settle/rekey_cross.rs
-test          no-site    a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
-known-defect  no-site    node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session  src/node/tests/settle/rekey_cross.rs
-known-defect  no-site    node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_with_multipath_on  src/node/tests/settle/rekey_cross.rs
-known-defect  no-site    node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first  src/node/tests/settle/rekey_cross.rs
-known-defect  no-site    node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_on_a_second_transport_ends_on_one_session_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
-known-defect  no-site    node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first  src/node/tests/settle/rekey_cross.rs
-known-defect  no-site    node::tests::settle::rekey_cross::a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_nothing_unadoptable_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_crossed_by_dials_on_a_second_transport_ends_without_a_split_larger_first  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_crossed_by_dials_on_a_second_transport_ends_without_a_split_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_a_pending_that_blocks_nothing_larger_first  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_a_pending_that_blocks_nothing_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_a_pending_its_hold_retires_larger_first  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_crossed_by_dials_whose_dial_msg1_is_lost_leaves_a_pending_its_hold_retires_larger_first_with_multipath_on  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_msg1_at_the_pair_a_redial_leg_shares_with_the_held_link_is_answered_on_the_held_link  src/node/tests/settle/rekey_cross.rs
+test          no-site    a_rekey_msg1_at_the_pair_a_redial_leg_shares_with_the_held_link_is_answered_on_the_held_link_with_multipath_on  src/node/tests/settle/rekey_cross.rs
+test          no-site    crossed_dials_answered_after_the_smaller_nodes_move_end_on_the_smaller_nodes_dial  src/node/tests/settle/rekey_cross.rs
+test          no-site    crossed_dials_answered_after_the_smaller_nodes_move_end_on_the_smaller_nodes_dial_with_multipath_on  src/node/tests/settle/rekey_cross.rs
+
+# Master's restart held as a leg beside the live peering until a frame under it authenticates
+# (src/node/tests/restart_replay.rs, under `#[cfg(any())]` in src/node/tests/mod.rs so later
+# merges take master's edits). Its captures are master's two-message IK msg1, and next decides
+# a restart at the msg3 through its own restart gate (core/src/proto/fmp/flow/msg3.rs), which
+# a replayed msg1 cannot reach, so next holds no restart leg and no memory of restart legs.
+test          next-rule  an_earlier_epoch_msg1_replayed_at_every_phase_of_a_heartbeating_link_leaves_the_peering  src/node/tests/restart_replay.rs
+test          next-rule  an_earlier_epoch_msg1_replayed_while_the_peers_heartbeats_are_lost_for_16_s_leaves_the_live_peering  src/node/tests/restart_replay.rs
+test          next-rule  sixteen_seconds_of_lost_heartbeats_with_no_replay_leave_the_live_peering  src/node/tests/restart_replay.rs
+test          next-rule  a_genuine_restart_within_15_s_of_a_replayed_one_re_peers_at_its_first_frame  src/node/tests/restart_replay.rs
+test          next-rule  a_replayed_restart_msg1_sent_again_within_15_s_from_another_address_draws_no_second_msg2  src/node/tests/restart_replay.rs
+test          next-rule  a_replayed_restart_msg1_sent_again_from_its_own_address_draws_only_the_stored_msg2  src/node/tests/restart_replay.rs
+test          next-rule  nine_distinct_replayed_restart_msg1s_within_15_s_draw_at_most_eight_msg2s  src/node/tests/restart_replay.rs
+test          next-rule  a_genuine_restart_replaces_the_peering_at_its_first_frame  src/node/tests/restart_replay.rs
+test          next-rule  a_rekey_msg1_at_the_pair_a_restart_leg_shares_with_the_held_link_is_answered_on_the_held_link  src/node/tests/restart_replay.rs
+# The same restart leg crossing this node's own dial, which master settles by the dial
+# tie-break at this node's msg2 before either end's first frame. next completes a handshake at
+# the msg3 and holds no restart leg; its own restart_dial.rs tests of both ends dialling stay.
+test          next-rule  both_ends_dialling_after_a_peer_restart_hold_one_session_before_either_ends_first_frame  src/node/tests/restart_dial.rs
 
 # The stream reader's handshake sizes. next's reader states its own XX set (an exact msg1,
 # minimum msg2 and msg3) rather than master's two exact IK sizes from the FMP wire module.
@@ -771,13 +797,6 @@ test          no-site    ik_replay_record_tells_setup_copies_rewritten_copies_an
 # the two steps, so no test can red under the switch: with it set, every BLE, crossing and
 # cells test on next passed (518 tests, run at the merge that took the switch off next).
 switch        next-rule  RelinkClearsFirst  core/src/faults.rs
-
-# Known defects of a larger dialer's dial on the peer's aged link. Their tests are not on next
-# (above), and the defects are of master's msg1 handling.
-known-defect  next-rule  node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt  src/node/tests/settle/crossing.rs
-known-defect  next-rule  node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt_with_multipath_on  src/node/tests/settle/crossing.rs
-known-defect  next-rule  node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered  src/node/tests/settle/crossing.rs
-known-defect  next-rule  node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_with_multipath_on  src/node/tests/settle/crossing.rs
 
 # The scan that confines the settlement core's steps to decide.rs. Master's has two path feeds
 # outside it; next's path input and its dial's msg2 quiet step the core from decide.rs, so next's

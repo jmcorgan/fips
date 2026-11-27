@@ -461,6 +461,7 @@ impl Beside {
         let p = Params::default();
         let interval = u64::try_from(p.interval.as_millis()).expect("the interval fits");
         for (i, ev) in history.iter().enumerate() {
+            let stamp_before = self.judge.stamp;
             let step = self.judge.step(*ev);
             let now = t(self.judge.now);
             let asked = match *ev {
@@ -479,6 +480,17 @@ impl Beside {
                             epoch: Some(epoch_of(epoch)),
                             memory: None,
                         };
+                        // A restart of a held peering is held beside it as
+                        // a leg: judged without a stamp, its ephemeral
+                        // remembered, and the peering left until the leg's
+                        // first frame swaps it in.
+                        if source == Source::Restart && self.held.is_some() {
+                            let r = self.gates.admit_leg(peer(), ask, now, &p);
+                            if r.is_none() {
+                                self.gates.redialed(peer(), eph(hs.0), now, &p);
+                            }
+                            return r;
+                        }
                         let r = self.gates.gate(peer(), ask, now, &p);
                         if r.is_none() {
                             self.held = Some(unheard(now.0));
@@ -500,6 +512,13 @@ impl Beside {
                         };
                         let r = self.gates.gate(peer(), ask, now, &p);
                         if r.is_none() {
+                            // A restart leg that won the dial tie-break over
+                            // this dial replaces the peering at the msg2, and
+                            // stamps as at its first frame; a restart found
+                            // at this node's own msg2 alone stamps nothing.
+                            if self.judge.stamp != stamp_before {
+                                self.gates.swapped(peer(), held.heard, now);
+                            }
                             self.held = Some(heard(now.0, None));
                         }
                         Some(r)
@@ -512,6 +531,14 @@ impl Beside {
                         self.gates
                             .gate(peer(), msg2(Source::RekeyMsg2, held), now, &p),
                     )
+                }
+                Event::Frame { .. } if step.rule == Some(m::LocalRule::DampenerStamp) => {
+                    // A restart leg's first frame replaces the peering.
+                    let heard_before = self.held.is_some_and(|h| h.heard);
+                    self.gates.swapped(peer(), heard_before, now);
+                    self.held = Some(heard(now.0, Some(now.0)));
+                    self.gates.heard(&peer());
+                    None
                 }
                 Event::Frame { .. } => {
                     if let Some(h) = self.held.as_mut() {
@@ -680,16 +707,19 @@ fn the_gates_agree_with_the_model_on_every_gate_history() {
             alloc::vec![first, wait(1_000), frame(10), wait(500), repl(11)],
         ),
         (
+            // Each restart is held as a leg, and stamps at its first frame.
             "dampener",
             alloc::vec![
                 first,
                 frame(10),
                 wait(15_000),
                 ev_msg1(11, 110, 2, 2, 8),
+                frame(11),
                 wait(14_999),
                 ev_msg1(12, 120, 3, 3, 7),
                 wait(1),
                 ev_msg1(12, 120, 3, 3, 7),
+                frame(12),
             ],
         ),
         (

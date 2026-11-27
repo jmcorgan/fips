@@ -636,6 +636,10 @@ impl Node {
                 peer = %peer,
                 "Rekey pending session retired: the initiator never adopted it"
             ),
+            Abandon::Displaced => debug!(
+                peer = %peer,
+                "Rekey pending session retired: the peer's next rekey msg1 was answered in its place"
+            ),
             other => debug!(peer = %peer, cause = ?other, "Link rekey abandoned"),
         }
     }

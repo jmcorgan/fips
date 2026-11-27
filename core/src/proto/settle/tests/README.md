@@ -139,7 +139,9 @@ can rebuild any state by replaying the path that reached it.
 - `shapes.rs`: the shapes the model's convergence with itself exempts,
   each shown once on the schedule that found it, with the model of
   `master` converging on the same schedule, which stay on those models,
-  since the shape is the model's; a control that each start's own script
+  since the shape is the model's; the previous-life shape, which the
+  model's restart held as a leg no longer reaches, is asserted absent on
+  the two schedules that showed it; a control that each start's own script
   shows only the shape it carries by design, with the model and with joint
   nodes (none, except the late second dial answered in the other order and
   the dial on the peer's aged link); and a test that those two show their shapes with the
@@ -166,19 +168,18 @@ can rebuild any state by replaying the path that reached it.
   differences applied; a second test asserts each named difference is
   still met where it should be. An own rekey in a history starts past the
   machine's start floors, one check beyond the ages a msg1 is judged by.
-- `regress.rs`: the two late-dial cases, with joint nodes at both ends,
-  multipath off, each with a control that passes. A late second dial
+- `regress.rs`: the late second dial and the dial on the peer's aged
+  link, with joint nodes at both ends, multipath off, each with a control
+  that passes. A late second dial
   whose msg2s are read in the other order, both dialers, splits the pair,
   an accepted behaviour: its tests show that within one heal one end's
   link-dead timer removes the peer and the redial settles both ends on a
   handshake of its own (`TimerNever`, the timer that never fires, reds
   them); its control is the same dials answered in order. The larger
-  node's dial on the smaller node's aged link, then its own rekey, is a
-  known defect left for a later fix, pinned and run by
-  `testing/known-defect-lane.sh`: the pair keeps one session and no timer
-  fires, while the smaller node refuses the larger node's rekeys until its
-  own rekey clears the pending; its control dials on a link too young to
-  rekey. Beside them,
+  node's dial on the smaller node's aged link, then its own rekey: the
+  pair keeps one session and no timer fires, and the smaller node answers
+  the larger node's rekey, which displaces the pending the dial left; its
+  control dials on a link too young to rekey. Beside them,
   one schedule per earlier settlement defect the core can see, each
   reaching the state that defect broke and asserting it holds: a removed
   link's index entries, a crossing over two transports, a crossing's move
@@ -292,8 +293,9 @@ can rebuild any state by replaying the path that reached it.
 - `joint/`: the joint world, whose nodes run the core, a real rekey
   machine and a real path bundle per held peer on the stub IK profile.
   See its README.
-- `candidates.rs` (under `slow-tests`): the candidate rules for the two
-  cases left for later, run on joint nodes at multipath off, which keep a
+- `candidates.rs` (under `slow-tests`): the candidate rules for the late
+  second dial and the dial on the peer's aged link (whose rekey the core's
+  own rules now answer), run on joint nodes at multipath off, which keep a
   session the core holds as the peer's machines left receive-only beside
   the ones built for its next session. Two scripted tests run the pins'
   schedules under each candidate. Comparing a candidate with the core's
@@ -355,15 +357,15 @@ can rebuild any state by replaying the path that reached it.
   and a frame that would not open or a pair's machines not converged only
   beside such a split of the same sessions; nothing else on the path is
   exempt: a split of other sessions, a pending, a configured peer not
-  held. The two late-dial shapes, `LaterDialFirst` (the accepted split
+  held. The two pinned shapes, `LaterDialFirst` (the accepted split
   that the link-dead timer and the redial end) and `DialAsRekey` (the
-  aged-link defect left for a later fix) (`Shape::pinned`), no exemption
-  spares: the tests that reach one (`shapes.rs`, `joint/party.rs`) assert
-  the breach it leaves instead. Switch
-  `ExemptByPath` puts back the old rule, any breach of convergence on a
-  shaped path. Every shape and what it left is part of the world's
-  digest, so a shaped path is never folded into an unshaped one, nor two
-  that left different sessions.
+  pending the dial on the aged link leaves, which the peer's next rekey
+  displaces) (`Shape::pinned`), no exemption spares: the tests that reach
+  one (`shapes.rs`, `joint/party.rs`) assert the breach it leaves
+  instead. Switch `ExemptByPath` puts back the old rule, any breach of
+  convergence on a shaped path. Every shape and what it left is part of
+  the world's digest, so a shaped path is never folded into an unshaped
+  one, nor two that left different sessions.
 - The world's delivery delay is bounded: what is in flight is lost when the
   clock moves and when a node restarts (switch `DelayUnbounded`), and a
   restart drops what is addressed to the restarting node.

@@ -872,11 +872,11 @@ impl Handshake {
         self.conn.handshake_msg2()
     }
 
-    /// Store the wire-format msg1 for resend on the surviving carrier and record
-    /// the first resend deadline, mirroring the leg's start-of-handshake write.
-    /// An inbound leg stores the msg1 it answered here; it never resends it.
-    pub(crate) fn set_conn_handshake_msg1(&mut self, msg1: Vec<u8>, first_resend_at_ms: u64) {
-        self.conn.set_handshake_msg1(msg1, first_resend_at_ms);
+    /// Store the wire-format msg1 on the surviving carrier, mirroring the
+    /// leg's start-of-handshake write. The carrier schedules no resend. An
+    /// inbound leg stores the msg1 it answered here; it never resends it.
+    pub(crate) fn set_conn_handshake_msg1(&mut self, msg1: Vec<u8>) {
+        self.conn.set_handshake_msg1(msg1);
     }
 
     /// Store the wire-format msg2 for duplicate-msg1 resend on the surviving

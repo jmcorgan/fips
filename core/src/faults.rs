@@ -254,6 +254,39 @@ faults! {
     /// ephemeral, and hears it at the proving frame's own entry, a later
     /// one under decrypt workers.
     RedialSwapHeard,
+    /// The settlement core swaps in a redial leg that crossed this node's
+    /// own dial the peering was moved onto, a leg pending at the move or
+    /// answered after it inside the crossing window, at the leg's first
+    /// frame, even where this node's dial wins the dial tie-break, so each
+    /// end of crossed redials ends on the other's dial session and the pair
+    /// is split until both drop it.
+    CrossedLegSwaps,
+    /// The settlement core records a crossing only for a redial leg
+    /// already pending when this node moved the peering onto its own dial,
+    /// so a leg of the peer's crossed dial answered after the move is
+    /// swapped in at its first frame by the smaller node too, and the pair
+    /// splits across the two dials.
+    LateLegUncrossed,
+    /// The settlement core's own dial whose msg2 proves a peer restarted
+    /// ignores the peer's restart leg it crossed: the dial replaces the
+    /// peering with no tie-break, the leg stays pending, and a smaller peer
+    /// that moved onto its own dial, the leg's session, is split from this
+    /// node until the leg's first frame.
+    RestartLegUncrossed,
+    /// The settlement core's window after a move onto this node's own dial,
+    /// in which a redial leg of the peer counts as crossing the dial, does
+    /// not end at the peer's next frame, so a later redial of a peer that
+    /// took the dial is given up.
+    CrossingWindowOutlivesFrame,
+    /// The settlement core's window after a move onto this node's own dial,
+    /// in which a redial leg of the peer counts as crossing the dial, does
+    /// not end a handshake timeout after the move, so a later redial of a
+    /// peer whose crossing leg is long gone is given up.
+    CrossingWindowOutlivesTimeout,
+    /// The settlement core's adoption of a redial's session on the held
+    /// link still counts the session as this node's own dial, so a later
+    /// dial of this node moves the peer off the peer's dial it adopted.
+    AdoptedRedialCountsOwn,
     /// The settlement core's removal of an orphaned or disconnected peer
     /// closes every pair of its link no other link uses, a setup pair the
     /// bundle released to keep included, and leaves the pair a
@@ -441,6 +474,11 @@ faults! {
     /// for a replacement on a link too young to rekey, as before redials
     /// were answered.
     OffLinkFreshRefused,
+    /// A fresh eligible rekey msg1 on the link is refused while the link
+    /// machine holds a responder pending the peer never adopted, as before
+    /// the peer's next rekey displaced it, so the pending a stray msg1 left
+    /// refuses the peer's genuine rekeys for up to its 120 s hold.
+    UnadoptedRefuses,
     /// The link machine records a redial msg1's ephemeral when it judges
     /// the msg1, so a redial the node then refuses has its resends refused
     /// as copies for as long as the link lives.
@@ -448,6 +486,13 @@ faults! {
     /// A redial is answered by tearing the held peering down at the msg1,
     /// and promoting the msg1 at once, as a replacement is.
     RedialTearsDownAtMsg1,
+    /// A msg1 at a new epoch from a held peer tears the peering down at the
+    /// msg1 and is promoted at its send, as before a restart was held
+    /// beside the peering as a leg.
+    RestartTearsDownAtMsg1,
+    /// A restart held as a leg stamps the restart dampener when it is
+    /// admitted, not at the swap its first frame proves.
+    RestartStampsAtOpen,
     /// A pending redial is never reaped at the handshake timeout.
     RedialNeverExpires,
     /// A second redial for an identity replaces its pending one however

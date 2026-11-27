@@ -581,7 +581,7 @@ fn dial_leg(
         .insert((tcp_id, our_index.as_u32()), link_id);
     let mut machine = Handshake::new_outbound(link_id, Some(target), LegStamp::at(now_ms));
     let _ = machine.sending_msg1(false);
-    machine.set_conn_handshake_msg1(wire.clone(), due_ms);
+    machine.set_conn_handshake_msg1(wire.clone());
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(tcp_id);
     machine.set_conn_source_addr(addr.clone());

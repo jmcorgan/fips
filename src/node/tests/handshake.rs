@@ -932,8 +932,7 @@ async fn test_msg1_stored_for_resend() {
 
     // Build wire msg1 and store it (as initiate_peer_connection does)
     let wire_msg1 = build_msg1(our_index, &noise_msg1);
-    let resend_interval = node.config().node.rate_limit.handshake_resend_interval_ms;
-    conn.set_conn_handshake_msg1(wire_msg1.clone(), now_ms + resend_interval);
+    conn.set_conn_handshake_msg1(wire_msg1.clone());
 
     // Verify stored msg1 matches what was built
     assert_eq!(conn.conn_handshake_msg1().unwrap(), &wire_msg1);
@@ -990,7 +989,7 @@ async fn test_resend_scheduling() {
     let _ = machine.sending_msg1(false);
     // The msg1 wire lives on the machine's carrier (the retransmit driver's
     // resend source), mirroring `prepare_outbound_msg1`.
-    machine.set_conn_handshake_msg1(wire_msg1, now_ms + 1000);
+    machine.set_conn_handshake_msg1(wire_msg1);
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());

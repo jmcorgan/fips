@@ -149,6 +149,10 @@ other. `FIPS_MUTATION_ONLY=<break>` runs one break.
   change that lands the fix, and replaced in that change by the inverse
   break, which takes the fix out again and is `red` for the tests the probe
   passed.
+- A switch whose site no known path reaches any more, so no test can turn
+  it red, keeps its `pass` lines (the preflight still needs a line per
+  switch) under a `#` comment naming the switch, why nothing reds it, and
+  why the site stays. That records a coverage gap; it is not coverage.
 - A new test line needs the break's red (or pass) shown in that change's
   record. Write a `red` anchor before the break is first run, from the
   test's own assertion, so the run checks the anchor rather than supplying

@@ -472,14 +472,16 @@ pub enum Shape {
     /// A peer's own dial, arriving while the receiver held it on a link
     /// old enough to rekey, armed a responder pending there, which the
     /// dialer settles as a crossing and may never adopt. The dial on the
-    /// peer's aged link, a defect left for a later fix.
+    /// peer's aged link, accepted behaviour: the pending blocks nothing,
+    /// since the peer's next fresh rekey displaces it and its hold retires
+    /// it.
     DialAsRekey,
 }
 
 impl Shape {
-    /// Whether this shape is one of the two late-dial shapes, which no
-    /// exemption spares: the tests that reach one (`shapes.rs`,
-    /// `joint/party.rs`) assert the breach it leaves instead.
+    /// Whether this shape is the late second dial or the dial on the aged
+    /// link, which no exemption spares: the tests that reach one
+    /// (`shapes.rs`, `joint/party.rs`) assert the breach it leaves instead.
     pub fn pinned(self) -> bool {
         match self {
             Self::LaterDialFirst | Self::DialAsRekey => true,

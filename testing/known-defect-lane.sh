@@ -97,11 +97,7 @@ while read -r name pin; do
     [[ -z "$name" || "$name" == \#* ]] && continue
     PIN[$name]=$pin
 done <<'PINNED'
-# Its expect message has no marker, and the test sits in a production
-# source file (inline tests). It fails in 5 s at the expect when
-# blocking_send does not return; it does not hang. Removed when that
-# message starts `defect:`.
-transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full src/transport/ethernet/io.rs:662
+# No entry is pinned today.
 PINNED
 for name in "${!PIN[@]}"; do
     if ! awk -v t="$name" '!/^[[:space:]]*#/ && $1 == "known-defect" && $3 == t { found = 1 } END { exit !found }' \
@@ -149,9 +145,9 @@ while read -r want pin; do
         self_misses=$((self_misses + 1))
     fi
 done <<'PINCHECK'
-still-fails src/node/tests/settle/lane.rs:18
-problem     src/node/tests/settle/lane.rs:17
-problem     src/node/tests/settle/lane.rs:46
+still-fails src/node/tests/settle/lane.rs:22
+problem     src/node/tests/settle/lane.rs:21
+problem     src/node/tests/settle/lane.rs:50
 PINCHECK
 if [[ $self_misses -gt 0 ]]; then
     echo "known-defect-lane: lane self-check: $self_misses miss(es); the lane cannot tell a defect from a setup failure"

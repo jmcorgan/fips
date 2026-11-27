@@ -286,6 +286,9 @@ MediumMoveUnheld	red	fips-core	proto::path::select::tests::a_move_to_a_cable_for
 MediumMoveUnheld	pass	fips-core	proto::path::tests::choice::a_cable_within_the_margin_of_a_better_scoring_wifi_takes_the_link_one_dwell_after_its_second_sample
 MediumMoveUnheld	pass	fips-core	proto::path::tests::choice::load_that_follows_the_link_does_not_flap_it_between_a_cable_and_a_wifi_slightly_faster_at_its_best
 OffLinkFreshRefused	red	fips-core	proto::rekey::tests::fmp::a_fresh_msg1_off_an_aged_reachable_link_asks_for_a_redial_and_records_nothing_until_noted
+UnadoptedRefuses	red	fips-core	proto::settle::tests::regress::after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey
+UnadoptedRefuses	red	fips-core	proto::rekey::tests::fmp::a_fresh_eligible_msg1_displaces_an_unadopted_responder_pending
+UnadoptedRefuses	pass	fips-core	proto::rekey::tests::fmp::refused_msg1_copy_never_arms_a_pending
 RedialCoversUnheard	red	fips-core	proto::rekey::tests::fmp::a_fresh_msg1_off_the_link_of_an_unheard_peering_keeps_the_replacement_or_the_off_link_refusal
 RedialRecordsAtJudge	red	fips-core	proto::rekey::tests::fmp::a_fresh_msg1_off_an_aged_reachable_link_asks_for_a_redial_and_records_nothing_until_noted
 IgnoreOwnDial	red	fips-core	proto::settle::table::tests::a_second_dial_to_a_peer_held_on_this_nodes_own_dial_moves_the_peer_onto_it
@@ -297,6 +300,18 @@ OrphanedNoRetry	red	fips-core	proto::settle::table::tests::an_orphaned_bundles_p
 RestartNoRetry	red	fips-core	proto::settle::table::tests::a_restarted_or_replaced_peer_is_retried_in_each_of_the_three_ways
 RedialNoRetry	red	fips-core	proto::settle::table::tests::a_peer_a_redials_swap_replaces_is_retried
 RedialSwapHeard	red	fips-core	proto::settle::table::tests::a_redials_swap_installs_the_peer_unheard_and_its_frames_heard_hears_it
+CrossedLegSwaps	red	fips-core	proto::settle::table::tests::crossed_redials_settle_both_nodes_on_the_smaller_nodes_dial_at_the_legs_first_frames
+CrossedLegSwaps	red	fips-core	proto::settle::table::tests::a_redial_answered_after_the_smaller_node_moved_onto_its_dial_leaves_the_pair_on_one_dial
+CrossedLegSwaps	pass	fips-mesh	node::tests::roam_redial::a_redial_from_a_new_address_settles_before_the_responder_reaps_the_old_peering
+LateLegUncrossed	red	fips-core	proto::settle::table::tests::a_redial_answered_after_the_smaller_node_moved_onto_its_dial_leaves_the_pair_on_one_dial
+LateLegUncrossed	red	fips-core	proto::settle::table::tests::a_redial_answered_inside_the_crossing_window_is_retired_at_its_first_frame
+LateLegUncrossed	pass	fips-core	proto::settle::table::tests::crossed_redials_settle_both_nodes_on_the_smaller_nodes_dial_at_the_legs_first_frames
+RestartLegUncrossed	red	fips-core	proto::settle::table::tests::a_restart_leg_crossing_the_larger_nodes_own_dial_replaces_the_peering_at_the_dials_msg2
+RestartLegUncrossed	red	fips-core	proto::settle::table::tests::a_restart_leg_crossing_the_smaller_nodes_own_dial_is_given_up_and_the_dial_kept
+CrossingWindowOutlivesFrame	red	fips-core	proto::settle::table::tests::a_redial_answered_after_a_frame_on_the_moved_onto_dial_is_swapped_in_at_its_first_frame
+CrossingWindowOutlivesTimeout	red	fips-core	proto::settle::table::tests::a_redial_answered_a_handshake_timeout_after_the_move_is_swapped_in_at_its_first_frame
+AdoptedRedialCountsOwn	red	fips-core	proto::settle::table::tests::crossed_redials_where_the_larger_adopts_its_leg_before_its_msg2_end_on_one_dial
+AdoptedRedialCountsOwn	red	fips-core	proto::settle::table::tests::a_redial_answered_after_the_smaller_moved_where_the_larger_adopts_its_leg_before_its_msg2_ends_on_one_dial
 RedialProofLeavesHeldLink	red	fips-core	proto::settle::table::tests::a_redial_proven_at_the_held_pair_from_another_transport_moves_the_held_link_onto_its_session
 RedialProofLeavesHeldLink	red	fips-core	proto::settle::table::tests::a_redial_proven_at_the_held_pair_from_another_transport_rebuilds_from_the_carry_with_the_legs_lease
 RedialProofLeavesHeldLink	red	fips-core	proto::settle::tests::regress::a_deployed_releases_late_second_dial_on_another_transport_leaves_one_session_smaller_dialer	node 1 left the link it held
@@ -319,6 +334,8 @@ MoveLeavesDialOpen	red	fips-core	proto::settle::table::tests::a_move_onto_a_dial
 AdoptedKeepsDir	red	fips-core	proto::settle::table::tests::an_adopted_answer_on_the_msg1s_connection_turns_a_dialed_link_inbound
 StoredAnswersAny	red	fips-core	proto::settle::table::tests::a_msg1_from_the_address_of_a_sent_answer_is_read_unless_it_is_the_msg1_answered
 RedialTearsDownAtMsg1	red	fips-core	proto::settle::table::tests::a_redials_answer_leaves_the_held_peer_until_a_frame_proves_it
+RestartTearsDownAtMsg1	red	fips-core	proto::settle::table::tests::a_restarts_teardown_comes_at_its_legs_first_frame_after_its_answer_is_asked_for
+RestartStampsAtOpen	red	fips-core	proto::settle::table::tests::a_restart_held_as_a_leg_stamps_the_dampener_at_its_first_frame_not_at_its_msg1
 RedialNeverExpires	red	fips-core	proto::settle::table::tests::a_pending_redials_leg_is_reaped_at_its_deadline
 RedialSlotIgnored	red	fips-core	proto::settle::table::tests::a_second_redial_within_the_unheard_floor_of_the_first_is_held_back
 RedialMemoryIgnored	red	fips-core	proto::settle::table::tests::the_redial_memory_refuses_a_seen_ephemeral
@@ -352,7 +369,7 @@ SilentReadsHeard	red	fips-core	proto::settle::table::tests::an_own_dials_session
 StandbyRoamResets	red	fips-core	proto::settle::join::tests::a_standby_paths_roam_is_moved_and_not_marked_a_roam
 AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_refused_msg1_asks_for_no_answer
 AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_rekey_msg1_asks_for_no_answer
-AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_restarts_teardown_comes_before_its_answer_is_asked_for
+AnswerBeforeAdmit	red	fips-core	proto::settle::table::tests::a_restarts_teardown_comes_at_its_legs_first_frame_after_its_answer_is_asked_for
 CapNotCounted	red	fips-core	proto::settle::table::tests::a_msg1_from_a_new_identity_at_the_peer_cap_is_refused_before_any_answer
 CapNotCounted	red	fips-core	proto::settle::table::tests::an_answer_sent_to_a_new_identity_once_the_peer_cap_filled_is_not_installed
 CapNotCounted	red	fips-core	proto::settle::table::tests::a_dial_completing_to_a_new_identity_at_the_peer_cap_is_not_installed

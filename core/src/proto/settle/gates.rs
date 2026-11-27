@@ -292,6 +292,39 @@ impl<I: Instant> Gates<I> {
         refusal
     }
 
+    /// Judge `ask`, a restart of a held peering that is held beside it as a
+    /// leg, for `peer` at `now`: the floors, the replay memory and the
+    /// dampener as [`Gates::gate`] judges a restart, then the redial
+    /// memory, which the leg's ephemeral joins when it is answered. An
+    /// acceptance stamps nothing; the swap at the leg's first frame does
+    /// ([`Gates::swapped`]), so a replayer, which sends no frame, cannot.
+    pub fn admit_leg(
+        &mut self,
+        peer: NodeAddr,
+        ask: Ask<I>,
+        now: I,
+        params: &Params,
+    ) -> Option<Refusal> {
+        let memory = ask.memory.unwrap_or(now);
+        self.lapse(now, memory, params);
+        if kept() {
+            self.peers.entry(peer).or_default();
+        }
+        let none = Memory::default();
+        let mem = self.peers.get(&peer).unwrap_or(&none);
+        let held = ask.held?;
+        let refusal = mem
+            .judge(&ask, held, now, memory, params)
+            .or_else(|| mem.remembered(&ask, now, params));
+        let opened = refusal.is_none()
+            && held.heard
+            && (fault!(RestartStampsAtOpen) || node_fault!(RestartStampsAtOpen));
+        if opened || (refusal.is_some() && fault!(DampenerFromRefusal)) {
+            self.peers.entry(peer).or_default().stamp = Some(now);
+        }
+        refusal
+    }
+
     /// Drop every identity whose stamp, replays, silence and redial memory
     /// have all lapsed at `now`, the replays and the redial memory read at
     /// `memory`, and the lapsed replays of the rest.
@@ -632,17 +665,8 @@ impl<I: Instant> Memory<I> {
         if fault!(RedialUngated) {
             return None;
         }
-        if let Some(e) = ask.ephemeral {
-            let memory = ask.memory.unwrap_or(now);
-            let live: Vec<&EphemeralDigest> = self
-                .redials
-                .iter()
-                .filter(|(_, at)| recent(*at, memory, params))
-                .map(|(e, _)| e)
-                .collect();
-            if live.contains(&&e) || live.len() >= params.replays {
-                return Some(Refusal::Redialed);
-            }
+        if let Some(r) = self.remembered(ask, now, params) {
+            return Some(r);
         }
         if fault!(RedialHeardFloored)
             && held.heard
@@ -654,6 +678,21 @@ impl<I: Instant> Memory<I> {
             return Some(Refusal::Dampened);
         }
         None
+    }
+
+    /// The redial memory's refusal of `ask`'s ephemeral: it armed a leg of
+    /// the identity within [`Params::interval`], or [`Params::replays`]
+    /// ephemerals did.
+    fn remembered(&self, ask: &Ask<I>, now: I, params: &Params) -> Option<Refusal> {
+        let e = ask.ephemeral?;
+        let memory = ask.memory.unwrap_or(now);
+        let live: Vec<&EphemeralDigest> = self
+            .redials
+            .iter()
+            .filter(|(_, at)| recent(*at, memory, params))
+            .map(|(e, _)| e)
+            .collect();
+        (live.contains(&&e) || live.len() >= params.replays).then_some(Refusal::Redialed)
     }
 
     /// Whether the silent-session back-off refuses a msg1 at `epoch` now.

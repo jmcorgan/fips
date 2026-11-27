@@ -659,6 +659,6 @@ mod tests {
 
         done_rx
             .recv_timeout(Duration::from_secs(5))
-            .expect("blocking_send returned, so the send site was already cancellable");
+            .expect("defect: blocking_send returned, so the send site was already cancellable");
     }
 }

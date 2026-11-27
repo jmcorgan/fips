@@ -185,6 +185,15 @@ pub enum LocalRule {
     /// peering not heard from keeps rules 3.3 and 4.1. FRC-1201 Section
     /// 5.7 discards (rule 4.1) or replaces (rule 3.3) such a msg1.
     DeferredRedial,
+    /// A fresh eligible msg1 on the link, which no record holds, while this
+    /// node holds a responder pending the peer has not adopted, is answered
+    /// as the peer's rekey (rule 4.5): the new pending displaces the old,
+    /// whose msg1 stays in the record (the operator's decision,
+    /// 2026-11-25). The peer that sends it has given up the cycle the
+    /// pending holds, or never started it. FRC-1201 Section 5.7 rule 4.2
+    /// discards any msg1 but the arming one's resend while a pending is
+    /// held; it still does so under this node's own completed rekey.
+    FreshDisplaces,
 }
 
 /// What one event did.
@@ -319,6 +328,12 @@ pub struct Redial {
     pub at: Ms,
     /// Its msg2 was sent: from then on only its own msg1 draws it again.
     pub sent: bool,
+    /// It answers a restart (rule 2), held beside the peering until the
+    /// peer's first frame under it ([`LocalRule::DampenerStamp`]).
+    pub restart: bool,
+    /// A restart leg this node's own dial crossed and won the tie-break
+    /// over at its msg2: its first frame retires it and changes nothing.
+    pub yields: bool,
 }
 
 /// One node's view of one peer identity.
@@ -500,7 +515,7 @@ impl Judge {
             return self.install(Class::NotHeld, leg, sent); // rule 1 (frc-1201:1107)
         };
         if leg.epoch != p.epoch {
-            return self.replace(Class::Restart, leg, sent); // rule 2 (:1111)
+            return self.restarted(leg, sent); // rule 2 (:1111)
         }
         if !self.eligible(p) {
             if p.msg1 == Some(leg.bytes) {
@@ -522,6 +537,12 @@ impl Judge {
         }
         if let Some(pd) = p.pending {
             let resend = !pd.initiator && pd.armed == Some(leg.bytes);
+            if !pd.initiator && !resend && !p.record.contains(&leg.hs) {
+                let mut step = self.arm(leg); // FreshDisplaces, for rule 4.2
+                step.class = Some(Class::Rekey);
+                step.rule = Some(LocalRule::FreshDisplaces);
+                return step;
+            }
             let answer = if resend { Reply::Stored } else { Reply::Silent };
             return reply(Some(Class::Pending), answer); // rule 4.2 (:1144)
         }
@@ -587,6 +608,50 @@ impl Judge {
             leg,
             at: self.now,
             sent,
+            restart: false,
+            yields: false,
+        });
+        step
+    }
+
+    /// A restart (rule 2) of a held peering, through the gates and the
+    /// slot rule, none of which stamps: answered into a leg beside the
+    /// peering, which the peer's first frame under it replaces, stamping
+    /// the dampener then ([`LocalRule::DampenerStamp`]). It replaces any
+    /// older pending redial as a redial does.
+    fn restarted(&mut self, leg: Leg, sent: bool) -> Step {
+        let p = self.peering.as_ref().expect("a restart meets a held peer");
+        let slot = self
+            .redial
+            .is_some_and(|r| self.now - r.at < self.params.unheard);
+        let refused = if slot {
+            Some(Gate::Slot)
+        } else {
+            gated(p, self.stamp, self.now, &self.params)
+        };
+        if let Some(gate) = refused {
+            return Step {
+                class: Some(Class::Restart),
+                refused: Some(gate),
+                reply: Some(Reply::Silent),
+                ..Step::default()
+            };
+        }
+        let mut step = Step {
+            class: Some(Class::Restart),
+            reply: Some(if sent { Reply::Msg2 } else { Reply::Deferred }),
+            rule: Some(LocalRule::DampenerStamp),
+            ..Step::default()
+        };
+        if let Some(old) = self.redial.take() {
+            step.closes = self.close(old.leg.link, old.leg.from, old.leg.binding);
+        }
+        self.redial = Some(Redial {
+            leg,
+            at: self.now,
+            sent,
+            restart: true,
+            yields: false,
         });
         step
     }
@@ -597,10 +662,23 @@ impl Judge {
     /// transport than the redial's, at an address of the held link, moves
     /// the held link onto the redial's session instead ([`Judge::adopted`]).
     fn swapped(&mut self, from: Addr) -> Step {
-        let Some(Redial { leg, .. }) = self.redial.take() else {
+        let Some(Redial {
+            leg,
+            restart,
+            yields,
+            ..
+        }) = self.redial.take()
+        else {
             return Step::default();
         };
-        if from.transport != leg.from.transport
+        if yields {
+            return Step {
+                closes: self.close(leg.link, leg.from, leg.binding),
+                ..Step::default()
+            };
+        }
+        if !restart
+            && from.transport != leg.from.transport
             && self.peering.as_ref().is_some_and(|p| self.onlink(p, from))
         {
             return self.adopted(leg);
@@ -619,7 +697,11 @@ impl Judge {
         } else {
             Transition::Promote
         });
-        step.rule = Some(LocalRule::DeferredRedial);
+        step.rule = Some(if restart {
+            LocalRule::DampenerStamp
+        } else {
+            LocalRule::DeferredRedial
+        });
         step
     }
 
@@ -791,6 +873,28 @@ impl Judge {
             return change(Transition::Promote);
         };
         if epoch != p.epoch {
+            // A restart leg of the peer's at this epoch crossed the dial:
+            // the tie-break (:1048) decides between them. The peer's leg
+            // wins against a larger node: the dial is given up and the leg
+            // replaces the peering now, stamping as at its first frame.
+            let crossing = self
+                .redial
+                .filter(|r| r.restart && r.sent && r.leg.epoch == epoch);
+            if crossing.is_some() && self.me > self.peer {
+                let heard = p.heard;
+                let r = self.redial.take().expect("the crossing leg is pending");
+                if heard {
+                    self.stamp = Some(self.now);
+                }
+                let mut step = change(Transition::Replace);
+                step.closes = self.close(dialed.link, dialed.setup, dialed.binding);
+                self.peering = Some(self.answered(r.leg));
+                step.rule = Some(LocalRule::DampenerStamp);
+                return step;
+            }
+            if let Some(r) = self.redial.as_mut().filter(|_| crossing.is_some()) {
+                r.yields = true;
+            }
             // A restart at this node's own msg2: no tie-break (:979), and
             // no dampener stamp.
             self.peering = Some(dialed);

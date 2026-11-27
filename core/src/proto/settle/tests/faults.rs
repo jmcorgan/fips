@@ -115,10 +115,11 @@ const YOUNG_LINK: Test = (
     REGRESS,
     "after_a_dial_on_the_peers_young_link_the_peer_answers_the_larger_nodes_rekey",
 );
-/// The aged-link defect of the model of `master`.
+/// The stray pending a dial on the aged link leaves in the model of
+/// `master`, which the peer's next rekey displaces.
 const AGED: Test = (
     FINDINGS,
-    "against_a_model_of_master_a_dial_on_the_peers_aged_link_leaves_a_pending_the_peer_cannot_adopt",
+    "against_a_model_of_master_a_dial_on_the_peers_aged_link_leaves_a_pending_the_peers_rekey_displaces",
 );
 
 /// The right-link property on a crossing both ends settled on the larger
@@ -183,10 +184,10 @@ const JOINT_ORPHANED: Test = (
     "the_only_paths_transport_removed_orphans_the_peer_and_a_redial_settles",
 );
 
-/// The two pinned defects shown by joint nodes.
+/// Start 6's split and start 7's stray pending, shown by joint nodes.
 const JOINT_DEFECTS: Test = (
     JOINT_PARTY,
-    "starts_6_and_7_show_their_two_defects_on_real_machines",
+    "start_6_shows_its_split_and_start_7_a_stray_pending_its_rekey_displaces_on_real_machines",
 );
 
 /// The shared schedules on the model of the node, against the trace.
@@ -349,25 +350,22 @@ pub const ROWS: &[Row] = &[
         &[
             (GATES, "an_own_msg2_restart_does_not_stamp_the_dampener"),
             GATE_HISTORIES,
+            (
+                TABLE,
+                "a_restart_leg_crossing_the_smaller_nodes_own_dial_is_given_up_and_the_dial_kept",
+            ),
         ],
     ),
     (
         Fault::ReplayUnbounded,
-        &[(GATES, "the_replay_memory_holds_at_most_eight"), NAMED],
+        &[(GATES, "the_replay_memory_holds_at_most_eight")],
     ),
     (
         Fault::ReplaySeenIgnored,
-        &[
-            (
-                GATES,
-                "the_replay_memory_refuses_an_ephemeral_that_already_promoted_an_unheard_peering",
-            ),
-            NAMED,
-            (
-                REGRESS,
-                "a_replayed_msg1_that_promoted_an_unheard_peering_stays_refused",
-            ),
-        ],
+        &[(
+            GATES,
+            "the_replay_memory_refuses_an_ephemeral_that_already_promoted_an_unheard_peering",
+        )],
     ),
     (
         Fault::HeardKeepsMemory,
@@ -785,7 +783,7 @@ pub const ROWS: &[Row] = &[
     ),
     (
         Fault::RedialMemoryIgnored,
-        &[(TABLE, "the_redial_memory_refuses_a_seen_ephemeral")],
+        &[(TABLE, "the_redial_memory_refuses_a_seen_ephemeral"), NAMED],
     ),
     (
         Fault::RedialSkipsDampener,
@@ -806,6 +804,30 @@ pub const ROWS: &[Row] = &[
         &[(
             TABLE,
             "a_redials_answer_leaves_the_held_peer_until_a_frame_proves_it",
+        )],
+    ),
+    (
+        Fault::RestartTearsDownAtMsg1,
+        &[
+            (
+                TABLE,
+                "a_restarts_teardown_comes_at_its_legs_first_frame_after_its_answer_is_asked_for",
+            ),
+            (
+                TABLE,
+                "a_restart_within_the_unheard_floor_of_a_pending_redial_is_refused_and_one_past_it_replaces_the_redial",
+            ),
+            (
+                REGRESS,
+                "a_replayed_msg1_that_promoted_an_unheard_peering_stays_refused",
+            ),
+        ],
+    ),
+    (
+        Fault::RestartStampsAtOpen,
+        &[(
+            TABLE,
+            "a_restart_held_as_a_leg_stamps_the_dampener_at_its_first_frame_not_at_its_msg1",
         )],
     ),
     (
@@ -1081,6 +1103,81 @@ pub const ROWS: &[Row] = &[
             "a_redials_swap_installs_the_peer_unheard_and_its_frames_heard_hears_it",
         )],
     ),
+    (
+        Fault::CrossedLegSwaps,
+        &[
+            (
+                TABLE,
+                "crossed_redials_settle_both_nodes_on_the_smaller_nodes_dial_at_the_legs_first_frames",
+            ),
+            (
+                TABLE,
+                "a_late_frame_under_a_crossed_leg_the_tie_break_retired_changes_nothing",
+            ),
+            (
+                TABLE,
+                "a_redial_answered_after_the_smaller_node_moved_onto_its_dial_leaves_the_pair_on_one_dial",
+            ),
+            (
+                TABLE,
+                "a_redial_answered_inside_the_crossing_window_is_retired_at_its_first_frame",
+            ),
+        ],
+    ),
+    (
+        Fault::CrossingWindowOutlivesFrame,
+        &[(
+            TABLE,
+            "a_redial_answered_after_a_frame_on_the_moved_onto_dial_is_swapped_in_at_its_first_frame",
+        )],
+    ),
+    (
+        Fault::CrossingWindowOutlivesTimeout,
+        &[(
+            TABLE,
+            "a_redial_answered_a_handshake_timeout_after_the_move_is_swapped_in_at_its_first_frame",
+        )],
+    ),
+    (
+        Fault::AdoptedRedialCountsOwn,
+        &[
+            (
+                TABLE,
+                "crossed_redials_where_the_larger_adopts_its_leg_before_its_msg2_end_on_one_dial",
+            ),
+            (
+                TABLE,
+                "a_redial_answered_after_the_smaller_moved_where_the_larger_adopts_its_leg_before_its_msg2_ends_on_one_dial",
+            ),
+        ],
+    ),
+    (
+        Fault::LateLegUncrossed,
+        &[
+            (
+                TABLE,
+                "a_redial_answered_after_the_smaller_node_moved_onto_its_dial_leaves_the_pair_on_one_dial",
+            ),
+            (
+                TABLE,
+                "a_redial_answered_inside_the_crossing_window_is_retired_at_its_first_frame",
+            ),
+        ],
+    ),
+    (
+        Fault::RestartLegUncrossed,
+        &[
+            (
+                TABLE,
+                "a_restart_leg_crossing_the_larger_nodes_own_dial_replaces_the_peering_at_the_dials_msg2",
+            ),
+            (
+                TABLE,
+                "a_restart_leg_crossing_the_smaller_nodes_own_dial_is_given_up_and_the_dial_kept",
+            ),
+            SIM_DATAGRAM,
+        ],
+    ),
     // In the joint world only against the model of the deployed release:
     // a joint node of this tree moves onto its own second dial at its msg2,
     // so its first frame under the redial's session reaches the responder
@@ -1167,7 +1264,7 @@ pub const ROWS: &[Row] = &[
             (TABLE, "a_rekey_msg1_asks_for_no_answer"),
             (
                 TABLE,
-                "a_restarts_teardown_comes_before_its_answer_is_asked_for",
+                "a_restarts_teardown_comes_at_its_legs_first_frame_after_its_answer_is_asked_for",
             ),
             SCRIPTED_OFF,
             SCRIPTED_ON,
@@ -1259,19 +1356,11 @@ pub const ROWS: &[Row] = &[
             ),
             (
                 SHAPES,
-                "observed_a_late_msg1_from_the_peers_previous_life_is_accepted_as_a_restart",
-            ),
-            (
-                SHAPES,
-                "observed_a_replayed_msg1_from_the_peers_previous_life_is_accepted_as_a_restart",
-            ),
-            (
-                SHAPES,
                 "observed_a_restarted_node_installed_from_the_peers_rekey_is_parted_by_its_late_crossing_dial",
             ),
             (
                 SHAPES,
-                "the_two_defects_left_for_later_show_their_shapes_in_the_current_and_deployed_node",
+                "the_late_second_dial_and_the_dial_on_the_aged_link_show_their_shapes_in_the_current_and_deployed_node",
             ),
         ],
     ),
@@ -1376,7 +1465,7 @@ pub const ROWS: &[Row] = &[
         Fault::AgedTieBreak,
         &[(
             CANDIDATES,
-            "the_aged_move_candidate_answers_the_rekey_after_a_dial_on_the_aged_link_once_its_frame_arrives_first",
+            "the_aged_move_candidate_has_the_pending_a_dial_on_the_aged_link_leaves_adopted_and_every_rule_answers_the_rekey",
         )],
     ),
     (
@@ -1674,8 +1763,44 @@ const MOVE_HAND: &str = "a test of `Ops::move_answer`, which only a flow outside
 /// characterisation.
 const MOVE_LIVE_HAND: &str = "a test of `Ops::move_answer`, which only a flow outside settle calls; its break, the peer seated as a fresh install with no liveness carried, is the scratch revert of the carry, run by hand and logged with the commit";
 
+/// Why a test that a restart leg is never taken as a crossing of a move
+/// onto this node's own dial is characterisation.
+const RESTART_UNCROSSED_HAND: &str = "a guard of the restart leg's exclusion from the crossing record at the move and inside the window; its breaks, the exclusion deleted in `moveto` and in `hello`, are scratch edits run by hand and logged with the commit";
+
+/// Why a guard of a term of the restart leg's crossing at this node's
+/// own msg2 is characterisation.
+const RESTART_CROSSING_HAND: &str = "a guard of one term of `restart_crossing`, the leg's epoch matching the msg2's or the leg's msg2 sent, where no switch sits; its break, that term deleted, is a scratch edit run by hand and logged with the commit";
+
+/// Why the absence of the previous-life shape on the model is
+/// characterisation.
+const OLD_LIFE_HAND: &str = "the model's rule 2 holding a restart as a leg, which no switch reaches in the model; its break, rule 2 replacing the peering at the msg1 again, is a scratch edit run by hand and logged with the commit";
+
 /// The tests that characterise behaviour no switch breaks, each with why.
 pub const CHARACTERISATION: &[(&str, &str)] = &[
+    (
+        "a_restart_leg_answered_inside_the_crossing_window_is_installed_at_its_first_frame",
+        RESTART_UNCROSSED_HAND,
+    ),
+    (
+        "a_restart_leg_pending_at_the_move_is_installed_at_its_first_frame",
+        RESTART_UNCROSSED_HAND,
+    ),
+    (
+        "a_restart_leg_at_another_epoch_than_the_larger_nodes_dial_msg2_is_not_taken",
+        RESTART_CROSSING_HAND,
+    ),
+    (
+        "a_restart_leg_whose_msg2_was_not_sent_is_not_taken_by_the_larger_nodes_dial_msg2",
+        RESTART_CROSSING_HAND,
+    ),
+    (
+        "a_late_msg1_from_the_peers_previous_life_is_held_as_a_leg_and_parts_nothing",
+        OLD_LIFE_HAND,
+    ),
+    (
+        "a_replayed_msg1_from_the_peers_previous_life_is_held_as_a_leg_and_parts_nothing",
+        OLD_LIFE_HAND,
+    ),
     (
         "moving_a_peer_onto_an_answers_link_keeps_whether_it_was_heard_its_install_instant_and_its_last_frame",
         MOVE_LIVE_HAND,
@@ -1826,7 +1951,7 @@ pub const CHARACTERISATION: &[(&str, &str)] = &[
     ),
     (
         "after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey",
-        "a known defect, red today and ignored; the known-defect lane checks that it still fails at its defect line",
+        "its guard sits in the rekey machine, where no settlement switch reaches: `UnadoptedRefuses`, the pending the dial left refusing the peer's rekey as before, turns it red, and the mutation lane runs it so (testing/mutations/manifest.txt)",
     ),
     (
         "a_proven_path_whose_connection_failed_is_not_counted_in_use_without_a_connection",

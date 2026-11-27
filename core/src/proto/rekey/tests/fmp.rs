@@ -382,13 +382,30 @@ fn every_ik_msg1_cell_takes_its_rows_action() {
         assert_eq!(b.recv(42_000, copy), vec![Ev::Reject(Reason::PendingHeld)]);
     }
     assert_eq!(b.digest(), before);
+    // A fresh msg1 under the responder pending displaces it: the pending
+    // is ended and retired, and the msg1 is answered into a new one.
     let another = fresh(&a.local, &b.local);
-    let before = view(&b);
+    let evs = b.recv(42_000, &another);
+    let m2b = bytes(&last(&mut b.wire, MsgKind::Msg2));
     assert_eq!(
-        b.recv(42_000, &another),
-        vec![Ev::Reject(Reason::PendingHeld)]
+        evs,
+        vec![
+            Ev::Unbind(1, 101),
+            Ev::Release(101),
+            Ev::Retired(tag(1)),
+            Ev::Abandoned(Abandon::Displaced),
+            Ev::Bind(1, 102, Some(tag(2)), Purpose::Pending),
+            Ev::Send(MsgKind::Msg2, m2b, ANSWER),
+        ],
+        "rule 4.2: a fresh msg1 displaces the responder pending"
     );
-    assert_eq!(view(&b), before, "only the record changed");
+    let before = b.digest();
+    assert_eq!(
+        b.recv(42_000, &m1),
+        vec![Ev::Reject(Reason::PendingHeld)],
+        "the displaced pending's msg1 is a copy the record holds"
+    );
+    assert_eq!(b.digest(), before);
 
     // A completed own attempt holds back every msg1 too.
     let (mut c, mut d) = link();
@@ -404,6 +421,56 @@ fn every_ik_msg1_cell_takes_its_rows_action() {
     );
     conserved(&b);
     conserved(&d);
+}
+
+/// Under a responder pending the peer never adopted, a fresh eligible msg1
+/// on the link is answered: the old pending is ended (its msg1 recorded)
+/// and retired, then the msg1 is answered into a new pending. A copy of
+/// the old pending's msg1 is refused, and once the new pending is gone it
+/// is refused as answered before.
+#[test]
+fn a_fresh_eligible_msg1_displaces_an_unadopted_responder_pending() {
+    let (mut a, mut b) = link();
+    a.poll(T);
+    let m1 = last(&mut a.wire, MsgKind::Msg1);
+    b.recv(T + 10, &m1);
+    let _lost = last(&mut b.wire, MsgKind::Msg2);
+    assert!(matches!(b.m().view().cycle, CycleView::PendR));
+    let next = fresh(&a.local, &b.local);
+    let evs = b.recv(T + 20, &next);
+    let m2 = b
+        .wire
+        .iter()
+        .rposition(|m| matches!(m, Msg::Hs(MsgKind::Msg2, _)))
+        .map(|i| bytes(&b.wire.remove(i)))
+        .unwrap_or_default();
+    assert_eq!(
+        evs,
+        vec![
+            Ev::Unbind(1, 101),
+            Ev::Release(101),
+            Ev::Retired(tag(1)),
+            Ev::Abandoned(Abandon::Displaced),
+            Ev::Bind(1, 102, Some(tag(2)), Purpose::Pending),
+            Ev::Send(MsgKind::Msg2, m2, ANSWER),
+        ],
+        "defect: a fresh eligible msg1 under an unadopted responder pending was not answered"
+    );
+    let before = b.digest();
+    assert_eq!(
+        b.recv(T + 21, &m1),
+        vec![Ev::Reject(Reason::PendingHeld)],
+        "a copy of the displaced pending's msg1 never draws a msg2"
+    );
+    assert_eq!(b.digest(), before);
+    let evs = b.poll(T + 20 + 120_000);
+    assert!(evs.contains(&Ev::Abandoned(Abandon::Unadopted)), "{evs:?}");
+    assert_eq!(
+        b.recv(T + 20 + 120_001, &m1),
+        vec![Ev::Reject(Reason::AnsweredBefore)],
+        "the displaced pending's msg1 was recorded"
+    );
+    conserved(&b);
 }
 
 #[test]
@@ -441,13 +508,31 @@ fn larger_node_with_an_attempt_abandons_it_and_answers_a_fresh_eligible_msg1() {
     conserved(&b);
 }
 
+/// Poll `a` once a second from `from` until it sends a msg1 other than a
+/// copy of `m1`, its next attempt, and return that msg1 and its time.
+fn refire(a: &mut Node<Ik>, from: u64, m1: &[u8]) -> (Msg, u64) {
+    for t in (from..from + 120_000).step_by(1_000) {
+        a.poll(t);
+        let next = a
+            .wire
+            .iter()
+            .find(|m| matches!(m, Msg::Hs(MsgKind::Msg1, b) if b.as_slice() != m1))
+            .cloned();
+        a.wire.clear();
+        if let Some(next) = next {
+            return (next, t);
+        }
+    }
+    panic!("precondition: the attempt was abandoned and another started");
+}
+
 #[test]
 fn replay_with_a_rewritten_sender_idx_is_refused() {
     let (mut a, mut b) = link();
     a.poll(T);
     let m1 = bytes(&last(&mut a.wire, MsgKind::Msg1));
     b.recv(T + 10, &Msg::Hs(MsgKind::Msg1, m1.clone()));
-    let m2 = last(&mut b.wire, MsgKind::Msg2);
+    let held = bytes(&last(&mut b.wire, MsgKind::Msg2));
     let mut rewritten = m1.clone();
     rewritten[1] ^= 0xff;
     let rewritten = Msg::Hs(MsgKind::Msg1, rewritten);
@@ -459,20 +544,32 @@ fn replay_with_a_rewritten_sender_idx_is_refused() {
         vec![Ev::Reject(Reason::PendingHeld)]
     );
     assert_eq!(b.digest(), before);
-    // A different msg1 never draws the held msg2 either.
-    assert_eq!(
-        b.recv(T + 12, &fresh(&a.local, &b.local)),
-        vec![Ev::Reject(Reason::PendingHeld)]
+    // The held msg2 is lost, and `a` gives its attempt up. A different
+    // msg1, its next attempt, displaces the pending and never draws the
+    // held msg2: it draws a msg2 of its own.
+    let (next, at) = refire(&mut a, T + 1_000, &m1);
+    let evs = b.recv(at + 10, &next);
+    assert!(
+        evs.contains(&Ev::Abandoned(Abandon::Displaced)),
+        "defect: the next attempt's msg1 did not displace the unadopted pending: {evs:?}"
     );
-    // Once the pending is adopted its msg1 is recorded, so the copy is
-    // refused from any header, and an exact copy as well.
-    a.recv(T + 20, &m2);
-    a.poll(T + 21);
+    let m2 = last(&mut b.wire, MsgKind::Msg2);
+    assert_ne!(
+        bytes(&m2),
+        held,
+        "a different msg1 never draws the held msg2"
+    );
+    // Once the displacing pending is adopted, the displaced pending's msg1
+    // is recorded, so the copy is refused from any header, and an exact
+    // copy as well.
+    a.recv(at + 20, &m2);
+    a.poll(at + 21);
     for f in frames(&mut a.wire) {
-        b.recv(T + 30, &f);
+        b.recv(at + 30, &f);
     }
+    assert_eq!(b.m().view().current.expect("cur").tag, tag(2));
     let before = b.digest();
-    let late = T + 30 + 10_000;
+    let late = at + 30 + 10_000;
     assert_eq!(
         b.recv(late, &rewritten),
         vec![Ev::Reject(Reason::AnsweredBefore)]
@@ -482,6 +579,8 @@ fn replay_with_a_rewritten_sender_idx_is_refused() {
         vec![Ev::Reject(Reason::AnsweredBefore)]
     );
     assert_eq!(b.digest(), before);
+    conserved(&a);
+    conserved(&b);
 }
 
 #[test]
@@ -1483,22 +1582,31 @@ fn cross_connection_move_keeps_the_link_and_session_anchors() {
     );
 }
 
+/// A msg1 refused while this node's own completed attempt is held is
+/// recorded (rule 4.2), so once that attempt has cut over a copy of it is
+/// refused as answered before and never arms a pending.
 #[test]
 fn refused_msg1_copy_never_arms_a_pending() {
     let (mut a, mut b) = link();
-    b.poll(T);
-    a.recv(T + 10, &last(&mut b.wire, MsgKind::Msg1));
+    a.poll(T);
+    b.recv(T + 10, &last(&mut a.wire, MsgKind::Msg1));
+    a.recv(T + 20, &last(&mut b.wire, MsgKind::Msg2));
+    assert_eq!(a.m().view().cycle, CycleView::PendI(Wait::Held));
     let refused = fresh(&b.local, &a.local);
     assert_eq!(
-        a.recv(T + 11, &refused),
+        a.recv(T + 20, &refused),
         vec![Ev::Reject(Reason::PendingHeld)]
     );
-    // The pending is never adopted and ends at its hold.
-    let evs = a.poll(T + 10 + 120_000);
-    assert!(evs.contains(&Ev::Abandoned(Abandon::Unadopted)), "{evs:?}");
+    // The attempt cuts over, and the link is old enough to rekey again.
+    a.poll(T + 21);
+    for f in frames(&mut a.wire) {
+        b.recv(T + 30, &f);
+    }
+    assert_eq!(a.m().view().current.expect("cur").tag, tag(1));
+    let late = T + 21 + 60_000;
     let before = a.digest();
     assert_eq!(
-        a.recv(T + 10 + 120_001, &refused),
+        a.recv(late, &refused),
         vec![Ev::Reject(Reason::AnsweredBefore)],
         "it never arms a pending"
     );

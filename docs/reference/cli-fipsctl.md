@@ -360,7 +360,8 @@ so; `profile tick status` then reports `stopped_by_cap` until the next
 | Code | Meaning |
 | ---- | ------- |
 | `0` | Daemon returned `{"status":"ok",...}`. |
-| `1` | Argument parse failure, control-socket connection failure, daemon returned `{"status":"error",...}`, or local I/O failure (keygen). The error message is printed to stderr. |
+| `1` | An argument value `fipsctl` itself rejects (a `connect` address, an unknown host name), control-socket connection failure, daemon returned `{"status":"error",...}`, or local I/O failure (keygen). The error message is printed to stderr. |
+| `2` | A usage error the argument parser catches: an unknown command or option, or a missing or malformed argument. The usage message is printed to stderr. `--help` and `--version` exit `0`. |
 
 ## Environment
 

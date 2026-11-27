@@ -1,9 +1,10 @@
 //! Scripted schedules of the settlement core in the world, on joint nodes
-//! with multipath off: the two late-dial cases, one an accepted behaviour
-//! tested as such and one a known defect left pinned, each beside a
-//! control; and one schedule per earlier settlement defect the core can
-//! see, each reaching the state the defect broke and asserting it holds
-//! (the defect's shape is a switch that turns the schedule red).
+//! with multipath off: the late second dial answered in the other order and
+//! the dial on the peer's aged link, each tested as the accepted behaviour
+//! it is and each beside a control; and one schedule per earlier
+//! settlement defect the core can see, each reaching the state the defect
+//! broke and asserting it holds (the defect's shape is a switch that turns
+//! the schedule red).
 //!
 //! - A late second dial answered in the other order: the dialer reads its
 //!   second dial's msg2 first and then moves onto the first, which the
@@ -16,13 +17,13 @@
 //! - A dial on the peer's aged link: the larger node dials again while the
 //!   smaller node holds it on a link old enough to rekey, so the smaller
 //!   node takes the dial for a rekey and arms a pending, which the larger
-//!   node never adopts, keeping its inbound session by the tie-break; the
-//!   smaller node then leaves the larger node's own rekey unanswered while
-//!   the pending is held. The two ends keep one session and no timer ends
-//!   anything: the smaller node refuses the larger node's rekeys until its
-//!   own rekey clears the pending. A known defect, left for a later fix, so
-//!   its pin fails at its defect. Its control dials on a link too young to
-//!   rekey, and the larger node's later rekey is answered.
+//!   node never adopts, keeping its inbound session by the tie-break. The
+//!   two ends keep one session and no timer ends anything. The pending
+//!   blocks nothing: the larger node's own rekey, a fresh msg1, is answered
+//!   and displaces it, which its test asserts (`UnadoptedRefuses`, the
+//!   pending refusing the rekey as before, turns it red). Its control dials
+//!   on a link too young to rekey, and the larger node's later rekey is
+//!   answered.
 
 use alloc::vec::Vec;
 
@@ -186,6 +187,44 @@ pub(super) fn aged_rekey_answered(frame_first: bool) -> bool {
     aged_answered(off, frame_first)
 }
 
+/// Whether node 0, after node 1's dial on the aged link and node 1's frames
+/// sent once it read the dial's answer, no longer holds the responder
+/// pending the dial left: node 1 moved onto its dial and node 0 adopted the
+/// pending at the frame. Joint nodes at multipath off at both ends, for the
+/// candidate rules, which a joint node runs as the test chooses.
+#[cfg(feature = "slow-tests")]
+pub(super) fn aged_pending_adopted() -> bool {
+    let mut w = built(off, 7, "aged link");
+    run(&mut w, &[Do::Get(0, Want::Msg1, Some(1))]);
+    let held = |w: &World| {
+        w.parties[0]
+            .view()
+            .peers
+            .first()
+            .is_some_and(|p| p.pending.is_some_and(|(_, mine)| !mine))
+    };
+    assert!(
+        held(&w),
+        "precondition: node 0 took the dial on the aged link for a rekey and holds its pending"
+    );
+    run(&mut w, &[Do::Get(1, Want::Msg2, Some(0))]);
+    let frames: Vec<u64> = w
+        .net
+        .flight
+        .iter()
+        .filter(|f| f.to == 0 && matches!(f.pkt, Pkt::Frame { .. }))
+        .map(|f| f.id)
+        .collect();
+    assert!(
+        !frames.is_empty(),
+        "precondition: node 1 sent a frame once it read the answer"
+    );
+    for id in frames {
+        run(&mut w, &[Do::Then(Act::Deliver(id))]);
+    }
+    !held(&w)
+}
+
 /// Whether node 0 answers node 1's rekey after node 1's dial on the aged
 /// link, with nodes made by `mk`; `frame_first` as above.
 fn aged_answered(mk: Maker, frame_first: bool) -> bool {
@@ -253,7 +292,6 @@ fn rekey_answered_after(w: &mut World, aged: bool, frame_first: bool) -> bool {
 }
 
 #[test]
-#[ignore = "known defect: the smaller node takes the larger node's dial on its aged link for a rekey and holds a pending the larger node never adopts, so it leaves the larger node's own rekey unanswered"]
 fn after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey() {
     let t = std::time::Instant::now();
     let answered = aged_answered(off, false);
@@ -396,11 +434,16 @@ fn a_restart_dial_inside_the_heard_floor_is_judged_on_one_clock() {
 #[test]
 fn a_replayed_msg1_that_promoted_an_unheard_peering_stays_refused() {
     // Node 0's first msg1 promotes an unheard peering at node 1; 1.5 s
-    // later node 0 restarts and its next dial replaces it; then an attacker
+    // later node 0 restarts and its next dial is held beside it as a leg,
+    // which node 0's first frame under it swaps in; then an attacker
     // replays the first msg1. On one epoch the replaced peering's filed
     // record would refuse the replay at the rekey machine; across a restart
-    // the replay comes to the core's gates, as a restart, and only the
-    // replay memory can refuse it.
+    // the replay comes to the core's gates, as a restart, and must leave
+    // node 1 on the second session. The first frame made the second
+    // peering heard and emptied the replay memory, so the heard floor
+    // refuses the replay here, and a restart held as a leg would need a
+    // frame the replayer cannot send; the replay memory is tested in the
+    // gates' own tests.
     let mut w = super::starts::world_of(off, &[super::starts::A, super::starts::B], &[&[], &[]]);
     super::starts::dial_home(&mut w, 0, 1, super::starts::UDP);
     run(&mut w, &[Do::Get(1, Want::Msg1, Some(0))]);
@@ -409,10 +452,18 @@ fn a_replayed_msg1_that_promoted_an_unheard_peering_stays_refused() {
     run(&mut w, &[Do::Then(Act::Restart(0))]);
     super::starts::dial_home(&mut w, 0, 1, super::starts::UDP);
     run(&mut w, &[Do::Get(1, Want::Msg1, Some(0))]);
+    assert_eq!(
+        session(&w, 1, 0),
+        Some(first),
+        "precondition: the restart is held as a leg until its first frame"
+    );
+    super::starts::settle(&mut w);
+    run(&mut w, &[Do::Then(Act::Frame(0))]);
+    super::starts::settle(&mut w);
     let second = session(&w, 1, 0).expect("node 1 holds node 0");
     assert_ne!(
         first, second,
-        "precondition: the second msg1 replaced the first"
+        "precondition: the second dial's first frame replaced the first"
     );
     // Past the unheard floor of the second peering.
     w.run_until(2_700);
@@ -462,29 +513,44 @@ fn an_own_dial_answered_from_a_restarted_peer_replaces_the_stale_session() {
 #[test]
 fn a_second_restart_inside_the_dampener_interval_is_refused() {
     // Node 0 holds node 1, heard. Node 1 restarts and dials once the heard
-    // floor has passed and before node 0's liveness timer would remove it,
-    // and node 0 takes the restart, which stamps the dampener. Ten seconds
-    // later node 1 restarts and dials again,
-    // past the new peering's unheard floor and inside the dampener's
-    // interval: node 0 refuses it and keeps the first restart's session.
+    // floor has passed and before node 0's liveness timer would remove it;
+    // node 0 holds the restart as a leg, and node 1's first frame under it
+    // replaces the peering, which stamps the dampener. Ten seconds later
+    // node 1 restarts and dials again, inside the dampener's interval (and
+    // the first frame's heard floor, which ends with it): node 0 refuses it
+    // and keeps the first restart's session.
     let mut w = super::starts::world_of(off, &[super::starts::A, super::starts::B], &[&[], &[]]);
     super::starts::dial_home(&mut w, 0, 1, super::starts::UDP);
     super::starts::settle(&mut w);
     age(&mut w, 2_000);
+    let old = session(&w, 0, 1).expect("precondition: node 0 holds node 1");
     run(&mut w, &[Do::Then(Act::Restart(1))]);
     age(&mut w, 20_000);
     super::starts::dial_home(&mut w, 1, 0, super::starts::UDP);
     run(&mut w, &[Do::Get(0, Want::Msg1, Some(1))]);
+    assert_eq!(
+        session(&w, 0, 1),
+        Some(old),
+        "precondition: the restart is held as a leg until its first frame"
+    );
+    super::starts::settle(&mut w);
+    run(&mut w, &[Do::Then(Act::Frame(1))]);
+    super::starts::settle(&mut w);
     let first = session(&w, 0, 1).expect("node 0 holds node 1");
-    assert!(
-        w.parties[1].view().peers.is_empty(),
-        "precondition: node 1 has not read node 0's answer"
+    assert_ne!(
+        first, old,
+        "precondition: node 1's first frame replaced the peering"
     );
     let at = w.net.now + 10_000;
     w.run_until(at);
     run(&mut w, &[Do::Then(Act::Restart(1))]);
     super::starts::dial_home(&mut w, 1, 0, super::starts::UDP);
     run(&mut w, &[Do::Get(0, Want::Msg1, Some(1))]);
+    // Whatever node 1 can send under an answer it read, which would prove
+    // a second restart node 0 had held as a leg.
+    super::starts::settle(&mut w);
+    run(&mut w, &[Do::Then(Act::Frame(1))]);
+    super::starts::settle(&mut w);
     assert_eq!(
         session(&w, 0, 1),
         Some(first),

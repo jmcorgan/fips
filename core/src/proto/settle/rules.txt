@@ -18,7 +18,7 @@
 S-01  I       untested  the max-peers cap's default of 128 (Params.peers, the node's max_peers); a local choice the FRC allows; no record
 S-02  I       tested    an answer sent to an identity not held after the max-peers cap filled is refused: no install, a Cap reject, the lease back, the link retired; no record
 S-03  I-kept  tested    a responder leg whose msg2 is sent after the peer is held through another link installs nothing and answers its own msg1's resends until reaped; kept as the node had it
-S-05  I-kept  tested    neither msg2 source, an own dial's or a rekey's at a new epoch, stamps the dampener; kept as the node had it
+S-05  I-kept  tested    neither msg2 source, an own dial's or a rekey's at a new epoch, stamps the dampener, save where a restart leg that crossed the own dial wins the dial tie-break at its msg2 and the swap that installs the leg stamps it, as FRC-1201 Section 5.6 decides; kept as the node had it
 S-06  I-kept  tested    the silent-session values: a refusal from the third silent session in a row, 30 s, doubling to 600 s; kept as the node had it
 S-08  I-kept  tested    a msg1 is off the link from the pair the core holds the peer at with no path or index entry there, from a setup pair the index names a newer link at, and from a released setup pair; kept as the node had it
 S-09  I-kept  tested    a removal asks for a reconnect after Dead, Disconnect, Orphaned, Restart, Replacement, OwnRestart and a redial's swap, and not after Ended, Admin or Closed; kept as the node had it
@@ -30,7 +30,7 @@ S-18  I       untested  the admission cap refuses a replacement before the gate,
 S-22  I       untested  an answer's install is told as a Replace when its msg1 tore a held peer down, and as a Promote otherwise; no record
 S-23  I       untested  a failed msg2 send makes the later install a Promote; a code comment only
 S-24  I       untested  the max-peers cap's default of 128 for an own dial's install, as S-01; no record
-S-25  I-kept  tested    an own dial's msg2 at a new epoch passes no gate and stamps no dampener; kept as the node had it
+S-25  I-kept  tested    an own dial's msg2 at a new epoch passes no gate and stamps no dampener, save where a restart leg that crossed the dial wins the dial tie-break there and the swap that installs the leg stamps it, as FRC-1201 Section 5.6 decides; kept as the node had it
 S-27  I-kept  tested    a move that makes the peering heard keeps the silent sessions; kept as the node had it
 S-32  I-kept  tested    a rekey msg2 at a new epoch passes no gate and stamps no dampener; kept as the node had it
 S-33  I       untested  a path a bundle's move names that the record does not hold arrives Live; no record

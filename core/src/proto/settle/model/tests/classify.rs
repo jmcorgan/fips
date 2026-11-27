@@ -1,7 +1,7 @@
 //! FRC-1201 Section 5.7: one test per classification rule, in order.
 
 use super::*;
-use crate::proto::settle::model::judge::{Class, Reply, Transition};
+use crate::proto::settle::model::judge::{Class, LocalRule, Reply, Transition};
 
 /// Long enough for the link and its session to be eligible as a rekey.
 const AGED: Ms = 30_000;
@@ -25,7 +25,8 @@ fn rule_1_a_msg1_from_an_identity_not_held_installs_the_peer() {
 
 #[test]
 fn rule_2_a_changed_epoch_is_a_restart() {
-    // frc-1201:1111, and :960: torn down, then answered as not held.
+    // frc-1201:1111, and :960: answered into a leg beside the peering,
+    // which the peer's first frame under it replaces.
     let mut j = responder(SMALL, LARGE);
     let s = last(
         &mut j,
@@ -36,6 +37,10 @@ fn rule_2_a_changed_epoch_is_a_restart() {
     );
     assert_eq!(s.class, Some(Class::Restart));
     assert_eq!(s.reply, Some(Reply::Msg2));
+    assert_eq!(s.change, None, "the restart is held as a leg");
+    assert_eq!(j.settled(), Some((Hs(10), LinkId(1), at(9))));
+    assert_eq!(j.peering.as_ref().map(|p| p.epoch), Some(E1));
+    let s = j.step(frame(11, at(8)));
     assert_eq!(s.change, Some(Transition::Replace));
     assert_eq!(j.settled(), Some((Hs(11), LinkId(2), at(8))));
     assert_eq!(j.peering.as_ref().map(|p| p.epoch), Some(E2));
@@ -158,7 +163,9 @@ fn rule_4_1_an_eligible_msg1_off_an_unreachable_link_goes_on_to_the_next_rule() 
 #[test]
 fn rule_4_2_while_a_pending_session_is_held_only_its_arming_msg1_is_answered() {
     // frc-1201:1144: the arming msg1's resend draws its msg2; any other is
-    // discarded.
+    // discarded: a copy of it under another header, and, under this node's
+    // own completed rekey, any msg1. A fresh msg1 under a responder pending
+    // is the peer's rekey instead (`LocalRule::FreshDisplaces`).
     let mut j = responder(SMALL, LARGE);
     j.run(&[
         wait(AGED),
@@ -167,9 +174,43 @@ fn rule_4_2_while_a_pending_session_is_held_only_its_arming_msg1_is_answered() {
     let resend = j.step(msg1(11, 110, E1, 1, at(9), Binding::Connectionless));
     assert_eq!(resend.class, Some(Class::Pending));
     assert_eq!(resend.reply, Some(Reply::Stored));
-    let other = j.step(msg1(12, 120, E1, 1, at(9), Binding::Connectionless));
+    let copy = j.step(msg1(11, 111, E1, 1, at(9), Binding::Connectionless));
+    assert_eq!(copy.class, Some(Class::Pending));
+    assert_eq!(copy.reply, Some(Reply::Silent));
+    let mut own = responder(SMALL, LARGE);
+    own.run(&[
+        wait(AGED),
+        Event::RekeyStart { hs: Hs(20) },
+        Event::RekeyMsg2 {
+            hs: Hs(20),
+            epoch: E1,
+        },
+    ]);
+    let other = own.step(msg1(12, 120, E1, 1, at(9), Binding::Connectionless));
     assert_eq!(other.class, Some(Class::Pending));
     assert_eq!(other.reply, Some(Reply::Silent));
+}
+
+#[test]
+fn a_fresh_msg1_under_a_responder_pending_displaces_it_as_the_peers_rekey() {
+    // `LocalRule::FreshDisplaces` (the operator's decision, 2026-11-25): the
+    // fresh msg1 is answered as rule 4.5's rekey, its pending replaces the
+    // one held, and the displaced pending's msg1 stays in the record, so
+    // its resend is no longer answered.
+    let mut j = responder(SMALL, LARGE);
+    j.run(&[
+        wait(AGED),
+        msg1(11, 110, E1, 1, at(9), Binding::Connectionless),
+    ]);
+    let s = j.step(msg1(12, 120, E1, 1, at(9), Binding::Connectionless));
+    assert_eq!(s.class, Some(Class::Rekey));
+    assert_eq!(s.reply, Some(Reply::Msg2));
+    assert_eq!(s.rule, Some(LocalRule::FreshDisplaces));
+    let p = j.peering.as_ref().expect("the peer is kept");
+    assert_eq!(p.pending.map(|pd| pd.hs), Some(Hs(12)));
+    let resend = j.step(msg1(11, 110, E1, 1, at(9), Binding::Connectionless));
+    assert_eq!(resend.class, Some(Class::Pending));
+    assert_eq!(resend.reply, Some(Reply::Silent));
 }
 
 #[test]

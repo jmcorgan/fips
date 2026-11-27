@@ -13,6 +13,10 @@ use std::hint::black_box;
 /// helper's `expect` that a settlement test cannot mark (for example
 /// `spanning_tree::add_loopback_alias`).
 fn planted_setup(present: bool) -> u32 {
+    // `testing/known-defect-lane.sh`'s `PINCHECK` pins the expect below as
+    // still failing, and the line above it and the defect assertion of
+    // `a_planted_failure_at_its_defect_assertion` as problems. A moved expect
+    // reds the self-check; the problem pins are negative, and a stale one passes.
     black_box(present)
         .then_some(1)
         .expect("the planted helper's input must be present")
@@ -42,6 +46,7 @@ fn a_planted_failure_at_a_plain_expect_in_a_setup_helper() {
 fn a_planted_failure_at_its_defect_assertion() {
     let held = planted_setup(true);
     assert_eq!(held, 1, "precondition: the planted setup holds");
+    // `PINCHECK` pins the next line as a problem; a stale number passes (see `planted_setup`).
     assert_eq!(black_box(held), 2, "defect: the planted behaviour is wrong");
 }
 

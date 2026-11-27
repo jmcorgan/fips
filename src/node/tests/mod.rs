@@ -76,6 +76,12 @@ mod rekey_cutover_index;
 mod rekey_leg;
 mod rekey_parity;
 mod restart_dial;
+// Not built on next: master's replayed restart msg1, held there as a leg
+// beside the live peering until its first frame. Its captures are master's
+// two-message IK msg1, and next's restart is decided at the msg3, which a
+// replayed msg1 cannot reach. testing/left-off-next.txt lists its tests.
+#[cfg(any())]
+mod restart_replay;
 mod roam_redial;
 mod routing;
 mod rx_stall;
@@ -87,6 +93,7 @@ mod short_plaintext;
 mod silent_backoff;
 mod silent_replay;
 mod spanning_tree;
+mod startup_sweep_clock;
 #[cfg(unix)]
 mod status;
 pub(in crate::node) mod survivors;

@@ -46,7 +46,11 @@ release build, nor the root crate's `test-hooks` build.
   own msg2 or a rekey msg2. It holds the memory per identity the gates
   read (the dampener's stamp, the replay memory, the ephemerals that armed
   a redial and the silent-session record), and judges as the current node
-  does. The node holds one, in its `Table`, as its own restart gates. The
+  does. A msg1 at a new epoch from a held peer is held beside the peering
+  as a leg, and is judged by `Gates::admit_leg` instead: the same floors,
+  replay memory and dampener, then the redial memory, with no stamp, which
+  the leg's swap takes (`Gates::swapped`). The node holds one, in its
+  `Table`, as its own restart gates. The
   memory holds only identities with something live: a question about an
   identity with no memory inserts none, and an identity whose stamp,
   replays, silence and redial memory have all lapsed is dropped; a frame
@@ -262,16 +266,18 @@ release build, nor the root crate's `test-hooks` build.
   crates' sources.
 - `faults.rs`: the test-only switches that turn each guard of the core
   and of its tests off (`FIPS_SETTLE_FAULTS`), read through the `fault!` macro in
-  `mod.rs`, and the choice of a candidate rule for the two settlement
-  cases left for later (`Candidate`; `FIPS_SETTLE_CANDIDATE` for a
-  process, or a test's choice for one thread's nodes).
+  `mod.rs`, and the choice of a candidate rule for the late second dial
+  and the dial on the peer's aged link (`Candidate`;
+  `FIPS_SETTLE_CANDIDATE` for a process, or a test's choice for one
+  thread's nodes).
 - `tests/`: the deterministic world, the model and the core as nodes of
   it, the named starts, the bounded search the replay and digest checks
   use, the settlement properties, the rekey machine's decisions, a model
-  of the current node, the late-dial cases (the accepted split's recovery
-  tested, the aged-link defect pinned), the scripted regressions, the
-  seeded long runs, the candidate rules' scripted tests, the meta-test of
-  the switches and the scans of this directory. See its README.
+  of the current node, the late second dial and the dial on the aged link
+  (the accepted split's recovery tested, the aged-link pending shown
+  displaced), the scripted regressions, the seeded long runs, the
+  candidate rules' scripted tests, the meta-test of the switches and the
+  scans of this directory. See its README.
 
 The core grows here beside the model, and its tests compare it with the
 model. No core file (anything here outside `model/` and `tests/`) refers
@@ -317,9 +323,9 @@ to the model, and nothing in `model/` refers to a core item; the scans in
   it.
 - A removal asks for a reconnect (`Output::Retry`) where the node notes
   the loss for one: a dead link, a `Disconnect` and an orphaned bundle,
-  which the node removes through its link-dead path, and a restart, a
-  replacement and an own-dial restart, whose loss the node notes before
-  the new session is promoted.
+  which the node removes through its link-dead path, and a restart (at
+  the first frame of the leg it is held in), a replacement and an own-dial
+  restart, whose loss the node notes before the new session is promoted.
 - A move sets the peering heard, as FRC-1201 Section 5.5 counts a
   peering this node set up as initiator, and as the node does. A move
   that makes an unheard peering heard forgets the identity's replay
@@ -342,7 +348,12 @@ to the model, and nothing in `model/` refers to a core item; the scans in
   node-address ordering to an exempt list with reasons.
 - Only an accepted restart or replacement that tears down a heard
   peering stamps the dampener; a refusal never does, so a sustained
-  replay cannot keep a genuine restart out.
+  replay cannot keep a genuine restart out. A restart tears the peering
+  down, and stamps, only when a frame under the leg it is held in proves
+  it, or when this node's own dial's msg2 at the leg's epoch proves it and
+  the leg wins the dial tie-break over that dial (FRC-1201 Section 5.6),
+  so a replay, which no frame follows, stamps nothing and tears nothing
+  down.
 - A core file's unit tests sit in `tests/<file>.rs`, attached from the
   file with `#[path]`; a core file that holds a test fails a scan.
 - No core type has a `set_` method, and a new source file here or in

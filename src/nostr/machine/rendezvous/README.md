@@ -68,7 +68,7 @@ the node key the Nostr code signs with.
   - `RecordFailure`, `VersionMismatch` and `Capacity`: the node's failure
     record, answered with the time it used, the mismatch cooldown and its
     warning, and whether the node has room. A traversal's success is
-    recorded by the machine itself, when it adopts the initiator's socket.
+    recorded by the machine itself, when its punch succeeds, on either end.
 - `status.rs`: `Status`, what the node reads of rendezvous without waiting:
   each peer's failure record, by canonical npub, with the cooldown rule the
   open-discovery sweep checks and the rows `show peers` prints. The pump

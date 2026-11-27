@@ -8,7 +8,8 @@ operator's decision whose value it asserts.
 
 - `mod.rs`: the module list and the history builders the tests share
   (`dial`, `msg1`, `msg2`, `frame`, `wait`, `last`, `responder`).
-- `classify.rs`: Section 5.7, one test per rule, 1 to 4.5, in order.
+- `classify.rs`: Section 5.7, one test per rule, 1 to 4.5, in order, and
+  the `FreshDisplaces` local rule's value beside rule 4.2.
 - `gates.rs`: Section 5.5: each gate edge (the unheard floor, the heard
   interval, the dampener's ceiling), the definition of heard from, and
   the dampener stamping values.

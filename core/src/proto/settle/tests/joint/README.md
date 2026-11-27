@@ -221,8 +221,9 @@ builds, and changes no line of the core, the machine or the bundle.
   by its script (`MoveKeepsInboundLink`), and starts 6 and 7 showing their
   two shapes on real machines (`OneSessionNoFresh`, `OneSessionNoPending`):
   start 6's split, the accepted behaviour the link-dead timer and the
-  redial end, and start 7's pending, the aged-link defect left for a
-  later fix.
+  redial end, and start 7's pending after the dial on the aged link,
+  accepted behaviour too, which node 1's own rekey in the rest of the
+  script displaces.
 - `oracle.rs`: the joint world's own oracles over what a joint node
   gives (`Facts`, from `Party::joint`), checked at every step by the
   settlement oracles' `every_step`: one view of each peer the core holds

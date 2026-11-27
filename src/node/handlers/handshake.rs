@@ -557,9 +557,9 @@ impl Node {
         // Store the framed msg2 on the surviving carrier for duplicate-msg1
         // resend while the handshake is still pending, and the msg1 it answers,
         // which tells that resend apart from a new attempt. An inbound leg
-        // never resends msg1, so the resend deadline is moot.
+        // never resends msg1.
         machine.set_conn_handshake_msg2(wire_msg2.clone());
-        machine.set_conn_handshake_msg1(packet.data.clone(), 0);
+        machine.set_conn_handshake_msg1(packet.data.clone());
         self.handshakes.add(link_id, machine);
         // The answer's leg starts in the settlement core's legs, holding its
         // lease and the msg1 and msg2 until the core decides its msg3, and
