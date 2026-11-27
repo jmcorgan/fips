@@ -688,7 +688,7 @@ stop_with_nothing_saved_keeps_ra_default() {
 	uci set dhcp.lan.ra_default=1
 	uci commit dhcp
 	PKG_UPGRADE=1 sh "$PRERM" upgrade >/dev/null 2>&1
-	rm -f /tmp/fips-prerm-upgrade
+	rm -f /var/run/fips-prerm-upgrade
 	check "D5: an upgrade's stop of a gateway that never ran keeps ra_default 1" test "$(uci -q get dhcp.lan.ra_default)" = 1
 	init stop
 	check "D6: a stop of a gateway that never ran keeps ra_default 1" test "$(uci -q get dhcp.lan.ra_default)" = 1
